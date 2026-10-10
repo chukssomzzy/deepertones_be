@@ -12,8 +12,16 @@
     // Comma-separated list of origins allowed to call the API from a browser.
     "CORS_ORIGINS": "http://localhost:3000,http://localhost:5173",
     // "true" serves Swagger UI at /docs and the spec at /openapi.json; anything else 404s both.
-    "DOCS_ENABLED": "true"
+    "DOCS_ENABLED": "true",
+    // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
+    "WHATSAPP_PHONE_NUMBER_ID": "",
+    // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
+    "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
+    "WHATSAPP_OTP_LANGUAGE": "en"
   },
+  // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+  // have been run for this environment (add --env staging / --env production).
+  "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
 
   "observability": {
     "enabled": true
@@ -55,8 +63,16 @@
         // TODO: the staging frontend origin(s). Empty = no browser origin allowed.
         "CORS_ORIGINS": "",
         // The frontend team reads the docs here.
-        "DOCS_ENABLED": "true"
+        "DOCS_ENABLED": "true",
+        // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
+        "WHATSAPP_PHONE_NUMBER_ID": "",
+        // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
+        "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
+        "WHATSAPP_OTP_LANGUAGE": "en"
       },
+      // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+      // have been run for this environment (add --env staging / --env production).
+      "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -75,8 +91,16 @@
         // TODO: the production frontend origin(s). Empty = no browser origin allowed.
         "CORS_ORIGINS": "",
         // Production does not advertise its API surface. Flip to "true" to publish the docs.
-        "DOCS_ENABLED": "false"
+        "DOCS_ENABLED": "false",
+        // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
+        "WHATSAPP_PHONE_NUMBER_ID": "",
+        // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
+        "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
+        "WHATSAPP_OTP_LANGUAGE": "en"
       },
+      // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+      // have been run for this environment (add --env staging / --env production).
+      "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
       "d1_databases": [
         {
           "binding": "DB",
