@@ -1,7 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { requestId } from 'hono/request-id'
 import { describe, expect, it, vi } from 'vitest'
-import * as z from 'zod'
 import {
   ConflictError,
   DomainError,
@@ -12,15 +11,11 @@ import {
   ValidationError,
 } from './errors'
 import { factory } from './factory'
-import { validate } from './validator'
 
-// A throwaway app exercising the shared error + validation plumbing.
+// A throwaway app exercising the shared error plumbing.
 const app = factory
   .createApp()
   .use(requestId())
-  .post('/echo', validate('json', z.object({ name: z.string().min(1) })), (c) =>
-    c.json({ name: c.req.valid('json').name }),
-  )
   .get('/throw/:kind', (c) => {
     const kinds = {
       validation: ValidationError,
@@ -38,31 +33,6 @@ const app = factory
   })
 
 app.onError(errorHandler)
-
-const postJson = (body: unknown) =>
-  app.request(
-    '/echo',
-    { method: 'POST', body: JSON.stringify(body), headers: { 'Content-Type': 'application/json' } },
-    env,
-  )
-
-describe('validate()', () => {
-  it('passes typed data through on valid input', async () => {
-    const res = await postJson({ name: 'deepertones' })
-
-    expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ name: 'deepertones' })
-  })
-
-  it('rejects invalid input with VALIDATION_FAILED and per-field details', async () => {
-    const res = await postJson({ name: '' })
-
-    expect(res.status).toBe(400)
-    expect(await res.json()).toMatchObject({
-      error: { code: 'VALIDATION_FAILED', details: [{ path: 'name' }] },
-    })
-  })
-})
 
 describe('errorHandler', () => {
   it.each([

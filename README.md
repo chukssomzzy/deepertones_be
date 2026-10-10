@@ -12,6 +12,8 @@ Serverless API for deepertones: [Hono](https://hono.dev) on Cloudflare Workers.
 | `npm run test:integration`    | Integration tests (`test/integration`): real local D1, whole Worker   |
 | `npm run typecheck`           | `tsc` over src and tests                                              |
 | `npm run lint:arch`           | Architecture rules (dependency-cruiser); see docs/architecture.md     |
+| `npm run openapi`             | Regenerate `docs/openapi.json` from the routes (commit the result)    |
+| `npm run openapi:lint`        | Lint `docs/openapi.json` (Redocly; exceptions in `redocly.yaml`)      |
 | `npm run db:generate`         | Generate a SQL migration from changed `*.table.ts` files              |
 | `npm run db:migrate:local`    | Apply migrations to the local D1 used by `npm run dev`                |
 | `npm run cf-typegen`          | Regenerate `worker-configuration.d.ts` after editing bindings         |
@@ -24,6 +26,18 @@ Thin routes → services (business logic) → repositories (D1 via Drizzle), wit
 behind a provider interface. **Read [docs/architecture.md](docs/architecture.md) before adding a
 feature**: it has the layout, the reasons behind each rule, and the steps for a new module.
 `src/modules/health` is the reference implementation.
+
+## API docs
+
+Swagger UI is at **`/docs`** and the raw spec at **`/openapi.json`**, locally
+(http://localhost:8787/docs) and on staging. Production 404s both: set `DOCS_ENABLED` to `"true"`
+in `env.production` of `wrangler.jsonc` to publish them there.
+
+The spec is generated from the route definitions themselves (`defineRoute` in each
+`*.routes.ts`), so it cannot drift from the code. A committed copy lives in
+[`docs/openapi.json`](docs/openapi.json): read it without running the API, generate a client from
+it, or review API changes as a diff in each PR. CI fails if it is stale; after changing a route, run
+`npm run openapi` and commit the result.
 
 ## Error shape
 
@@ -64,7 +78,8 @@ There are only two long-lived branches. "production" is the name of the deploy t
 (the GitHub environment and `env.production` in `wrangler.jsonc`), never a branch.
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
-unit, integration, typecheck, architecture rules, and a dry-run build of both environments.
+unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
+and valid), and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.
 
 Production goes through a release: merging `staging` into `main` makes release-please open a
@@ -86,10 +101,9 @@ stopped using it.
 
 ### Before the first deploy
 
-1. Push this repo to GitHub and create a `staging` branch from `main`.
-2. Create two GitHub environments, `staging` and `production` (Settings → Environments).
+1. Create two GitHub environments, `staging` and `production` (Settings → Environments).
    Add a required reviewer to `production` if you want a manual gate.
-3. Add repository secrets (Settings → Secrets and variables → Actions):
+2. Add repository secrets (Settings → Secrets and variables → Actions):
 
    | Secret                  | What it is                                                                                         |
    | ----------------------- | -------------------------------------------------------------------------------------------------- |
@@ -97,7 +111,7 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-4. Create the two databases and paste each printed `database_id` over the `REPLACE_ME_*`
+3. Create the two databases and paste each printed `database_id` over the `REPLACE_ME_*`
    placeholders in `wrangler.jsonc`:
 
    ```sh
@@ -105,9 +119,9 @@ stopped using it.
    npx wrangler d1 create deepertones-production
    ```
 
-5. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
+4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
    (empty means no browser may call the API).
-6. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
+5. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
 
 ## Troubleshooting
 

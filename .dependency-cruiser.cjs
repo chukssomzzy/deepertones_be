@@ -70,6 +70,21 @@ module.exports = {
       from: { path: '\\.routes\\.ts$' },
       to: { path: ['\\.repository\\.ts$', '^src/providers/', '^src/container\\.ts$'] },
     },
+    {
+      name: 'routes-must-be-documented',
+      severity: 'error',
+      comment:
+        'Every endpoint is in the OpenAPI spec. Route modules are built with openapiApp() and defineRoute() ' +
+        'from src/lib/openapi.ts, never a plain Hono app (`hono`, `hono/tiny`, `hono/quick`, or ' +
+        'factory.createApp()), so an undocumented route cannot be written. Hono helpers (hono/cookie, ' +
+        'hono/streaming, ...) and type-only imports (e.g. AppEnv) are fine.',
+      from: { path: '\\.routes\\.ts$' },
+      to: {
+        // Only the entry points that construct an app: hono's main export and its presets.
+        path: ['^node_modules/hono/dist/(types/)?(index|preset/[^/]+)\\.(d\\.ts|js)$', '^src/lib/factory\\.ts$'],
+        dependencyTypesNot: ['type-only'],
+      },
+    },
 
     // --- Wiring --------------------------------------------------------------------------
     {
