@@ -10,11 +10,12 @@ Architecture job in CI). If a rule and this document disagree, fix one of them.
 request
   → middleware: requestId · logger · cors · secureHeaders · requestContext · container
   → route        declared with defineRoute (validates input, documents itself),
-                 calls ONE service method, presents the result
+                 calls ONE service method, returns ok(...)
   → service      business logic; reads currentActor(); throws domain errors
       → repository   all database access (Drizzle on D1)
       → provider     every third party, behind an interface
-  ← errorHandler maps domain errors to HTTP, in one table
+  ← ok() wraps data in the success envelope
+  ← errorHandler maps domain errors to HTTP, in one table, and renders the error envelope
 ```
 
 ## Layout
@@ -81,11 +82,33 @@ atomic tool is `db.batch([...])`, a fixed list of statements that all apply or n
 A service never coordinates two repositories "in a transaction"; that cannot be made atomic on D1.
 
 ### Domain errors, mapped at the edge
-Services throw `ValidationError`, `UnauthorizedError`, `ForbiddenError`, `NotFoundError` or
-`ConflictError` (all `DomainError`) with a stable `code`. They know nothing about HTTP, so the same
-service works from a queue consumer or cron trigger. `errorHandler` maps kind → status in one
-table and renders `{ error: { code, message, details?, requestId } }`. Anything that is not a
-`DomainError` is a bug: logged, and returned as a generic 500.
+Services throw `ValidationError`, `UnauthorizedError`, `ForbiddenError`, `NotFoundError`,
+`ConflictError` or `UnavailableError` (all `DomainError`) with a stable `code`. They know nothing
+about HTTP, so the same service works from a queue consumer or cron trigger. `errorHandler` maps
+kind → status in one table (`UnavailableError` → 503) and renders the error envelope below.
+Anything that is not a `DomainError` is a bug: logged, and returned as a generic 500.
+
+### One response envelope
+Every JSON response has the same outer shape, so a client branches on one field.
+
+- **Success:** `{ success: true, status, message, data }`. A route declares it with
+  `success(Schema, description)` and returns it with `ok(c, data, message, status?)`.
+- **Error:** `{ success: false, status, message, error: { code, details?, requestId } }`. Only
+  `errorHandler` and `notFoundHandler` build it; routes and services throw `DomainError`s.
+- **204** is not enveloped: `c.body(null, 204)`, no body.
+- **Lists** (not built yet): `data` is the array, pagination goes in an optional top-level `meta`.
+
+Each rule and its reason:
+
+- **`success` is true exactly when the HTTP status is 2xx.** Clients branch on one field, and
+  TypeScript narrows the typed client on it.
+- **The body's `status` always equals the HTTP status.** `ok()` takes the status as one argument
+  and sets both the header and the body from it, so they cannot disagree.
+- **503 is `success: false`.** `success` means "it worked". A degraded `/health` is a failure, even
+  though it carries the report in `error.details`.
+- **204 has no body.** By definition there is nothing to envelope.
+- **`meta` is the slot for list pagination.** `data` is the payload for single items and lists
+  alike, so a list never wraps `data` in another object, and paging info sits beside it.
 
 ### Types inferred from Drizzle
 `type Track = typeof tracks.$inferSelect` in `tracks.types.ts`. Services import the type only,
@@ -115,6 +138,9 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 - **Errors**: one `ErrorResponse` component. `defineRoute` adds 500 to every route, 400 to any
   route with `request`, and 415 to any route with a body; a route lists the rest itself with
   `...errorResponses(401, 404)`.
+- **Success** responses are declared with `success(Schema, description)` in `responses`, and the
+  handler returns `ok(c, data, message, status?)`. The handler's return type is checked against
+  that declaration, so a bare object cannot be returned.
 - **Bodies** use `jsonBody(schema)`: it sets `required: true`, without which a request sent
   without a JSON Content-Type would skip validation.
 - **Invalid input** throws `ValidationError('VALIDATION_FAILED', …)` from the app's `defaultHook`, so
@@ -164,7 +190,8 @@ fails the Architecture job if it ever reports 0 modules.
 
 1. `src/modules/<feature>/`: table → `npm run db:generate` → types → repository interface + D1
    class + fake + contract → service → schemas (request + response) → presenter → routes
-   (`defineRoute` + `openapiApp().openapi(route, handler)`).
+   (`defineRoute` with `success()` for each 2xx response, `openapiApp().openapi(route, handler)`
+   with `ok()` in the handler).
 2. Wire it in `src/container.ts` and expose a getter; mount the routes in `src/index.ts`.
 3. Unit-test the service with the fake (`runAs(...)` if it reads the actor); run the contract
    in both tiers; add a route test in `test/integration/` if the HTTP surface matters.

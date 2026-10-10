@@ -1,4 +1,5 @@
 import { createRoute, OpenAPIHono, type RouteConfig, z } from '@hono/zod-openapi'
+import type { Context } from 'hono'
 import { type ErrorBody, ValidationError } from './errors'
 import type { AppEnv } from './factory'
 
@@ -11,17 +12,19 @@ import type { AppEnv } from './factory'
  *   const getTrack = defineRoute({
  *     method: 'get', path: '/{id}', operationId: 'getTrack', tags: ['Tracks'],
  *     request: { params: TrackParams },
- *     responses: { 200: json(TrackResponse, 'The track'), ...errorResponses(404) },
+ *     responses: { 200: success(TrackResponse, 'The track'), ...errorResponses(404) },
  *   })
- *   export const trackRoutes = openapiApp().openapi(getTrack, async (c) => ...)
+ *   export const trackRoutes = openapiApp().openapi(getTrack, async (c) => ok(c, track, 'Track found'))
  */
 
 /** The body errorHandler renders for every error. Registered once as a component. */
 export const ErrorResponse = z
   .object({
+    success: z.literal(false).openapi({ description: 'Always false for an error.' }),
+    status: z.number().int().openapi({ description: 'The HTTP status code, repeated for clients that only keep the body.' }),
+    message: z.string().openapi({ description: 'Human-readable; may change. Branch on `error.code`.' }),
     error: z.object({
       code: z.string().openapi({ description: 'Stable, machine-readable code.', example: 'NOT_FOUND' }),
-      message: z.string().openapi({ description: 'Human-readable; may change. Branch on `code`.' }),
       details: z.unknown().optional().openapi({
         description: 'Extra context. For VALIDATION_FAILED: a list of `{ path, message }`, one per invalid field.',
       }),
@@ -42,15 +45,45 @@ const errorDescriptions = {
   409: 'Conflicts with the current state',
   415: 'The body is not JSON (Content-Type must be application/json)',
   500: 'Unexpected server error',
+  503: 'A dependency is down; retry later',
 } as const
 
 type ErrorStatus = keyof typeof errorDescriptions
 
-/** A JSON response: `200: json(TrackResponse, 'The track')`. */
-export const json = <Schema extends z.ZodType>(schema: Schema, description: string) => ({
+/** A JSON response for errors and other non-enveloped bodies. */
+const json = <Schema extends z.ZodType>(schema: Schema, description: string) => ({
   description,
   content: { 'application/json': { schema } },
 })
+
+/**
+ * A success response: `200: success(TrackResponse, 'The track')`. Documents the envelope around
+ * `schema`, and because the handler's return type is checked against it, a handler cannot
+ * return bare data; it has to go through ok().
+ */
+export const success = <Schema extends z.ZodType>(schema: Schema, description: string) =>
+  json(
+    z.object({
+      success: z.literal(true).openapi({ description: 'Always true for a 2xx response.' }),
+      status: z.number().int().openapi({ description: 'The HTTP status code, repeated for clients that only keep the body.' }),
+      message: z.string().openapi({ description: 'Human-readable; may change.' }),
+      data: schema,
+    }),
+    description,
+  )
+
+type OkStatus = 200 | 201 | 202
+
+/**
+ * Sends the success envelope. One argument sets both the HTTP status and the body's `status`,
+ * so they cannot disagree. 204 is not enveloped (it has no body): return `c.body(null, 204)`.
+ */
+export const ok = <Data, Status extends OkStatus = 200>(
+  c: Context<AppEnv>,
+  data: Data,
+  message: string,
+  status: Status = 200 as Status,
+) => c.json({ success: true as const, status, message, data }, status)
 
 /**
  * A required JSON request body: `request: { body: jsonBody(CreateTrackBody) }`.

@@ -39,12 +39,37 @@ The spec is generated from the route definitions themselves (`defineRoute` in ea
 it, or review API changes as a diff in each PR. CI fails if it is stale; after changing a route, run
 `npm run openapi` and commit the result.
 
-## Error shape
+## Response shape
 
-Every error response looks like this:
+Every JSON response has the same outer shape. A success:
 
 ```json
-{ "error": { "code": "VALIDATION_FAILED", "message": "Invalid json", "details": [...], "requestId": "..." } }
+{ "success": true, "status": 200, "message": "Health check complete", "data": { ... } }
+```
+
+An error (every non-2xx):
+
+```json
+{
+  "success": false,
+  "status": 400,
+  "message": "Invalid json",
+  "error": { "code": "VALIDATION_FAILED", "details": [{ "path": "name", "message": "Required" }], "requestId": "..." }
+}
+```
+
+Two rules hold for every response: `success` is `true` exactly when the HTTP status is 2xx, and the
+body's `status` always equals the HTTP status. The one exception is `204`, which has no body.
+
+Lists will return an array in `data`, with pagination in an optional top-level `meta` (e.g.
+`meta: { nextCursor }`). That is not built yet; the first list endpoint decides it.
+
+Branch on `success` and TypeScript narrows the rest:
+
+```ts
+const body = await res.json()
+if (body.success) body.data
+else body.error.code
 ```
 
 ## Typed client for the frontend
@@ -57,6 +82,10 @@ import { hc } from 'hono/client'
 
 const api = hc<AppType>('https://api.deepertones.com') // staging: https://api.staging.deepertones.com
 const res = await api.health.$get() // fully typed request + response
+
+const body = await res.json()
+if (body.success) console.log(body.data)
+else console.error(body.error.code) // see "Response shape"
 ```
 
 ## Config & secrets
