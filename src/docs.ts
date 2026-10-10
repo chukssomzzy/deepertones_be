@@ -11,8 +11,15 @@ type OpenAPIDocumentConfig = Parameters<OpenAPIHono['getOpenAPI31Document']>[0]
  * package.json's version: release-please bumps that on every release, which would make the
  * committed spec stale in the release PR itself.
  */
+/** Keep in step with `routes` in each env block of wrangler.jsonc. Production first. */
+const servers = [
+  { url: 'https://api.deepertones.com', description: 'Production' },
+  { url: 'https://api.staging.deepertones.com', description: 'Staging' },
+]
+
 export const apiDocument: OpenAPIDocumentConfig = {
   openapi: '3.1.0',
+  servers,
   info: {
     title: 'deepertones API',
     version: '1.0.0',
@@ -34,8 +41,19 @@ const docsEnabled = factory.createMiddleware(async (c, next) => {
  */
 const SWAGGER_UI_VERSION = '5.33.1'
 
+/**
+ * Swagger UI's "Try it out" calls the first server. Served live, the spec lists the origin it is
+ * served from first, so the staging docs try staging (and local docs try local), never production.
+ */
+const serversFor = (origin: string) => {
+  const self = servers.find((server) => server.url === origin) ?? { url: origin, description: 'This server' }
+  return [self, ...servers.filter((server) => server !== self)]
+}
+
 /** /openapi.json (generated from the app's routes) and Swagger UI at /docs. */
 export const mountDocs = (app: OpenAPIHono<AppEnv>) => {
-  app.get('/openapi.json', docsEnabled, (c) => c.json(app.getOpenAPI31Document(apiDocument)))
+  app.get('/openapi.json', docsEnabled, (c) =>
+    c.json(app.getOpenAPI31Document({ ...apiDocument, servers: serversFor(new URL(c.req.url).origin) })),
+  )
   app.get('/docs', docsEnabled, swaggerUI({ url: '/openapi.json', title: 'deepertones API', version: SWAGGER_UI_VERSION }))
 }

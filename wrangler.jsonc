@@ -43,6 +43,13 @@
   // env block: every one must be restated in each environment.
   "env": {
     "staging": {
+      // The API's one public address. A Custom Domain: on deploy, Cloudflare creates the DNS
+      // record and a certificate for it in the deepertones.com zone.
+      "routes": [{ "pattern": "api.staging.deepertones.com", "custom_domain": true }],
+      // No *.workers.dev or preview URLs: traffic that skips the domain also skips any zone
+      // rules (WAF, rate limiting) added to deepertones.com.
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "staging",
         // TODO: the staging frontend origin(s). Empty = no browser origin allowed.
@@ -60,6 +67,9 @@
       ]
     },
     "production": {
+      "routes": [{ "pattern": "api.deepertones.com", "custom_domain": true }],
+      "workers_dev": false,
+      "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "production",
         // TODO: the production frontend origin(s). Empty = no browser origin allowed.

@@ -4,9 +4,6 @@ extends:
   - recommended
 
 rules:
-  # The spec gets `servers` with the API's real hostnames in the custom-domain change.
-  # TODO: remove this line then.
-  no-empty-servers: off
   # There is no auth yet, so no security scheme to reference. When auth lands, define the
   # scheme in apiDocument, mark public routes `security: []`, and remove this line.
   security-defined: off
