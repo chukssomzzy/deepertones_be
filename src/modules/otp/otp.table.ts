@@ -1,0 +1,15 @@
+import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+
+export const otpChallenges = sqliteTable(
+  'otp_challenges',
+  {
+    id: text('id').primaryKey(),
+    phone: text('phone').notNull(),
+    codeHash: text('code_hash').notNull(),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
+    attempts: integer('attempts').notNull().default(0),
+    consumedAt: integer('consumed_at', { mode: 'timestamp_ms' }),
+  },
+  (t) => [index('otp_challenges_phone_created_at_idx').on(t.phone, t.createdAt)],
+)

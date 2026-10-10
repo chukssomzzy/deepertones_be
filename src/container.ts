@@ -2,6 +2,9 @@ import { createDb } from './lib/db'
 import { once } from './lib/once'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
+import { D1OtpRepository } from './modules/otp/otp.repository'
+import { OtpService } from './modules/otp/otp.service'
+import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
 
 /**
  * The composition root: the ONLY file that knows concrete repository, provider and
@@ -18,9 +21,26 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const health = once(() => new HealthService(new D1HealthRepository(db()), env.ENVIRONMENT))
 
+  const otp = once(
+    () =>
+      new OtpService({
+        repository: new D1OtpRepository(db()),
+        delivery: new MetaWhatsAppOtpDelivery({
+          accessToken: env.WHATSAPP_ACCESS_TOKEN,
+          phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
+          templateName: env.WHATSAPP_OTP_TEMPLATE,
+          languageCode: env.WHATSAPP_OTP_LANGUAGE,
+        }),
+        pepper: env.OTP_PEPPER,
+      }),
+  )
+
   return {
     get health() {
       return health()
+    },
+    get otp() {
+      return otp()
     },
   }
 }
