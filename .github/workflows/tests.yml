@@ -1,6 +1,6 @@
-# Unit tests, integration tests, typecheck and a build check, as four separate
-# jobs so a red check names what broke without anyone opening the log, and a
-# slow tier never holds up the result of a fast one. They share no state.
+# Unit tests, integration tests, typecheck, architecture rules, the API contract and a
+# build check, as separate jobs so a red check names what broke without anyone opening
+# the log, and a slow tier never holds up the result of a fast one. They share no state.
 #
 # No job here takes a secret, and none must ever need one. Both test tiers run
 # inside workerd through @cloudflare/vitest-plugin against the top level of
@@ -105,6 +105,33 @@ jobs:
             echo "::error::dependency-cruiser checked 0 modules. Is TypeScript >= 7 installed? See the comment above."
             exit 1
           fi
+
+  api-contract:
+    name: API contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # docs/openapi.json is generated from the routes and committed, so a PR that changes
+      # the API shows the change as a diff of that file. Regenerating it here catches a PR
+      # that changed a route but forgot to run `npm run openapi` (or deleted the file).
+      - name: Regenerate docs/openapi.json
+        run: npm run openapi
+      - name: Fail if the committed spec is stale
+        run: |
+          if [ -n "$(git status --porcelain -- docs/openapi.json)" ]; then
+            git diff -- docs/openapi.json
+            echo "::error file=docs/openapi.json::docs/openapi.json is out of date. Run \`npm run openapi\` and commit the result."
+            exit 1
+          fi
+      # Valid OpenAPI 3.1, plus Redocly's recommended rules (exceptions in redocly.yaml).
+      - name: Lint the spec
+        run: npm run openapi:lint
 
   build:
     name: Build

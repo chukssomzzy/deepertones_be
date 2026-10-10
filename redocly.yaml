@@ -1,0 +1,17 @@
+# Lints docs/openapi.json: `npm run openapi:lint` and the API contract job in CI.
+# Each rule switched off below says why, and when it should come back.
+extends:
+  - recommended
+
+rules:
+  # The spec gets `servers` with the API's real hostnames in the custom-domain change.
+  # TODO: remove this line then.
+  no-empty-servers: off
+  # There is no auth yet, so no security scheme to reference. When auth lands, define the
+  # scheme in apiDocument, mark public routes `security: []`, and remove this line.
+  security-defined: off
+  # A private API: there is no license to state.
+  info-license: off
+  # defineRoute adds every 4xx a route can actually produce (400 for input, 415 for a body,
+  # plus whatever the route lists). A route with neither, like /health, has no 4xx to document.
+  operation-4xx-response: off

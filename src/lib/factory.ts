@@ -15,10 +15,10 @@ export type AppEnv = {
 }
 
 /**
- * Build every sub-app and middleware from this factory so `c.env` and `c.var`
- * are typed identically everywhere:
- *   factory.createApp()          -> a route module
+ * Build middleware from this factory so `c.env` and `c.var` are typed identically everywhere:
  *   factory.createMiddleware()   -> a middleware
- *   factory.createHandlers()     -> handlers defined outside a route chain
+ *
+ * Route modules do NOT use factory.createApp(): they use openapiApp() from ./openapi, which
+ * carries the same AppEnv and puts every route in the OpenAPI spec (enforced by lint:arch).
  */
 export const factory = createFactory<AppEnv>()
