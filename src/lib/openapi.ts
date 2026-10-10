@@ -44,6 +44,7 @@ const errorDescriptions = {
   404: 'Not found',
   409: 'Conflicts with the current state',
   415: 'The body is not JSON (Content-Type must be application/json)',
+  429: 'Too many requests; wait for the Retry-After header (seconds) when present',
   500: 'Unexpected server error',
   503: 'A dependency is down; retry later',
 } as const

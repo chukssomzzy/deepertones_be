@@ -92,7 +92,52 @@ else console.error(body.error.code) // see "Response shape"
 
 - Non-secret config lives in `vars` in `wrangler.jsonc`.
 - Local secrets go in `.dev.vars` (see `.dev.vars.example`); production secrets via `npx wrangler secret put NAME`.
+- Required secrets: `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER`. Both are listed in `secrets.required`, so a deploy fails until they are set on that environment. Setup is in [WhatsApp OTP setup](#whatsapp-otp-setup).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
+
+## WhatsApp OTP setup
+
+Sign-in codes are sent over WhatsApp through the Meta WhatsApp Cloud API, using an approved
+authentication template. The code is in `src/modules/otp` and `src/providers/otp-delivery`. Local
+dev, staging and production all send real messages, so each one needs the setup below. Tests
+never call Meta and need no secrets.
+
+> Warning: add edge/per-IP rate limiting in front of the send endpoint before any route exposes OTP sending; the per-number cooldown and cap are check-then-act and can be raced.
+
+1. Create or verify a Meta Business account **registered in Nigeria**. Users are in Nigeria, and a
+   Nigerian business pays the cheaper local authentication rate.
+2. Create a Meta app with the **WhatsApp** product, and add a business phone number to it.
+3. Create an **authentication** template named `deepertones_otp`, language `en`:
+   - Use a **copy code** button and the code in the body. The adapter sends the code as both.
+   - Set **code expiration to 10 minutes**. This is fixed in the template, not in our code, so it
+     must match `OTP_POLICY.ttlMinutes` in `src/modules/otp/otp.service.ts`. If they differ, users
+     see codes that expire at the wrong time. Sends fail until Meta approves the template.
+4. Create a System User and a **permanent** access token with the `whatsapp_business_messaging`
+   permission.
+5. Put the phone number ID (Meta → WhatsApp → API setup) in `WHATSAPP_PHONE_NUMBER_ID` in
+   `wrangler.jsonc`: in the top level (local dev), in `env.staging` and in `env.production`. Env
+   blocks do not inherit `vars`, so each one needs it.
+6. Set the secrets:
+   - Locally, copy `.dev.vars.example` to `.dev.vars`. Set `WHATSAPP_ACCESS_TOKEN`, and set
+     `OTP_PEPPER` to the output of `openssl rand -hex 32`. `wrangler dev` loads the file.
+   - For each deployed environment:
+
+     ```sh
+     npx wrangler secret put WHATSAPP_ACCESS_TOKEN --env staging
+     npx wrangler secret put OTP_PEPPER --env staging
+     npx wrangler secret put WHATSAPP_ACCESS_TOKEN --env production
+     npx wrangler secret put OTP_PEPPER --env production
+     ```
+
+Notes:
+
+- Use a **different** `OTP_PEPPER` in each environment. A leak from staging must not help an
+  attacker against production codes.
+- Never change a pepper while codes are live. Changing it invalidates outstanding codes. That is
+  harmless once 10 minutes have passed, so rotate then.
+- While the Meta app is in **development mode**, only numbers added as test recipients receive
+  messages. Any other number fails with Meta error 131030, which the API reports as
+  `PHONE_NOT_REACHABLE`. Switch the app to live mode before real users sign in.
 
 ## Deploying
 
@@ -147,7 +192,8 @@ stopped using it.
 
 3. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
    (empty means no browser may call the API).
-4. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
+4. Set `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` on both environments with `wrangler secret put --env staging` and `--env production`. The deploy fails until they are set. See [WhatsApp OTP setup](#whatsapp-otp-setup).
+5. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
 
 ## Troubleshooting
 

@@ -49,6 +49,7 @@ test/integration/          tests against real local bindings
 ```
 
 `modules/health` is the reference implementation of every piece above that it needs.
+`providers/otp-delivery/` is the first real provider: the interface, the Meta WhatsApp adapter, and the memory fake.
 
 ## Decisions
 
@@ -83,9 +84,10 @@ A service never coordinates two repositories "in a transaction"; that cannot be 
 
 ### Domain errors, mapped at the edge
 Services throw `ValidationError`, `UnauthorizedError`, `ForbiddenError`, `NotFoundError`,
-`ConflictError` or `UnavailableError` (all `DomainError`) with a stable `code`. They know nothing
+`ConflictError`, `RateLimitedError` or `UnavailableError` (all `DomainError`) with a stable `code`. They know nothing
 about HTTP, so the same service works from a queue consumer or cron trigger. `errorHandler` maps
-kind → status in one table (`UnavailableError` → 503) and renders the error envelope below.
+kind → status in one table (`RateLimitedError` → 429, `UnavailableError` → 503) and renders the error envelope below.
+A `RateLimitedError` with a numeric `details.retryAfterSeconds` also sets the `Retry-After` header.
 Anything that is not a `DomainError` is a bug: logged, and returned as a generic 500.
 
 ### One response envelope
@@ -185,6 +187,55 @@ against a deliberately violating file.
 It needs **TypeScript ≤ 6**: dependency-cruiser reads TS through the compiler's JS API, which
 TypeScript 7 (the Go port) does not ship yet. On TS 7 it checks 0 modules and passes, so CI
 fails the Architecture job if it ever reports 0 modules.
+
+### OTP over WhatsApp
+Sign-in codes are sent through the Meta WhatsApp Cloud API, called directly, using an approved
+authentication template. There are no HTTP routes yet: auth will call `container.otp.send(phone)`
+and `container.otp.verify(phone, code)`.
+
+- **Meta direct, not through a WhatsApp vendor.** Vendors pay Meta's per-message rate and add a
+  margin on top. Calling the Cloud API ourselves avoids that margin.
+- **Business registered in Nigeria.** Users are in Nigeria. A Nigerian business pays the local
+  authentication rate; an overseas one pays Meta's much higher authentication-international rate.
+- **One phone format.** `parsePhoneNumber` (`lib/phone.ts`) returns a branded E.164 `PhoneNumber`.
+  A number without a country code is read as Nigerian. Every lookup, store and send uses the
+  canonical form, so `0803…` and `+234803…` are the same number.
+- **Only an HMAC of the code is stored**: `HMAC-SHA256(OTP_PEPPER, "<phone>:<code>")`. A leaked
+  table cannot be brute-forced without the pepper. The phone is part of the input, so a code sent
+  to one number never verifies for another. The comparison is constant time (`timingSafeEqual`).
+- **Codes come from the CSPRNG**, six digits, via `randomDigits`, which rejects bytes that would
+  bias the digits.
+- **One policy object, `OTP_POLICY`**: 6 digits, valid 10 minutes, 5 wrong tries, single use, a
+  60s resend cooldown, and at most 5 sends per number per rolling hour. The template's code expiry
+  is set by hand in Meta, so it must match `ttlMinutes`.
+- **A new code supersedes the old one.** Verify checks only the latest challenge.
+- **Deliver before storing.** A failed delivery leaves no challenge, so it starts no cooldown and
+  uses no quota.
+- **Failed attempts and consume are each one conditional UPDATE** (`recordFailedAttempt`,
+  `consume`). `consume` succeeds only if the code is unconsumed, under the attempt cap and
+  unexpired, so the 5-try limit and single use hold under concurrency. Storing a send is one
+  `db.batch`, per the atomic-writes rule above.
+- **The resend cooldown and hourly cap are check-then-act.** Parallel sends for one number can each
+  go out. That is accepted while there are no routes; the auth PR must put per-IP/edge rate
+  limiting in front of the send endpoint.
+- **Old rows are purged on send.** Challenges older than 24h for that number are deleted when a
+  new one is stored, so the table does not grow without bound.
+- **Error codes are the UI contract.** Send: `INVALID_PHONE` (400), `OTP_COOLDOWN` and
+  `OTP_SEND_LIMIT` (429, with `Retry-After`), `PHONE_NOT_REACHABLE` (400),
+  `OTP_DELIVERY_UNAVAILABLE` (503). Verify: `OTP_INVALID` (400, with `attemptsRemaining`),
+  `OTP_EXPIRED` (400), `OTP_TOO_MANY_ATTEMPTS` (429).
+- **The adapter classifies, the service decides.** The Meta adapter sorts Meta's error codes into
+  `unavailable` and `recipient-rejected` (`OtpDeliveryError`). The service turns those into the
+  domain errors above. Anything else, such as a bad token or missing template, is a configuration
+  bug: it is not a `DomainError`, so it becomes a 500.
+- **Real WhatsApp in every environment**, local dev included, so a bad token or template shows up
+  before production. Tests never reach Meta: the service runs on `MemoryOtpDelivery` and
+  `FakeOtpRepository`, and the adapter is tested with a stubbed `fetch`.
+- **The two secrets are required.** `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` are listed in
+  `secrets.required`, so a deploy fails until both are set on that environment's Worker.
+- **Not built yet:** a delivery-status webhook (Meta reports some undeliverable numbers only
+  later, so `PHONE_NOT_REACHABLE` covers the synchronous rejections only), an SMS fallback, and
+  auth itself.
 
 ## Adding a module
 

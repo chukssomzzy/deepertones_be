@@ -1,14 +1,14 @@
 import { createFactory } from 'hono/factory'
-import type { RequestIdVariables } from 'hono/request-id'
 import type { Container } from '../container'
+import type { BaseEnv } from './env'
 
 /**
  * The one Env contract for the whole app. Bindings come from wrangler.jsonc
  * (regenerate with `npm run cf-typegen`); Variables are what middleware puts on `c.var`.
  */
 export type AppEnv = {
-  Bindings: CloudflareBindings
-  Variables: RequestIdVariables & {
+  Bindings: BaseEnv['Bindings']
+  Variables: BaseEnv['Variables'] & {
     /** This request's services, built by the container middleware. */
     services: Container
   }
