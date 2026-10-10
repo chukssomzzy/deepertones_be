@@ -1,0 +1,14 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ESNext"],
+    "types": ["./worker-configuration.d.ts", "node", "@cloudflare/vitest-plugin/types"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["src", "test", "worker-configuration.d.ts", "vitest.config.ts", "drizzle.config.ts"]
+}

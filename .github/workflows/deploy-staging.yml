@@ -1,0 +1,61 @@
+# Staging deploys itself on every merge to `staging`, so the branch and what
+# staging serves cannot drift apart. A manual deploy that nobody ran looks
+# exactly like one that failed.
+#
+# See the "Deploying" section of README.md for the secrets and GitHub
+# environment this needs. Until they exist, a run goes red at the deploy step;
+# that is expected, not a broken workflow.
+name: Deploy staging
+
+on:
+  # A merged pull request is a push, so this covers "deploy on merge".
+  push:
+    branches: [staging]
+  # So the first deploy can be made deliberately rather than by merging.
+  workflow_dispatch:
+
+# Only the newest merge matters, and two overlapping runs would race on one Worker.
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    name: Deploy staging
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: staging
+    # Checkout is the only thing the run's own token is used for; deploying
+    # authenticates to Cloudflare instead. `{}` would remove `contents` too and
+    # fail at checkout.
+    permissions:
+      contents: read
+    # Wrangler reads both from the environment. Neither is ever printed.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+
+      # Migrations first: the schema must lead the code, so nothing is ever
+      # deployed expecting a column that is not there yet. If this fails the job
+      # stops and staging keeps serving the previous build on the previous
+      # schema, which is a state that works. Already-applied migrations are
+      # skipped; wrangler takes a backup and skips its prompt when non-interactive.
+      #
+      # Because the schema moves first, a migration that drops a column or table
+      # must ship one release AFTER the code that stopped using it.
+      #
+      # This is the first step that talks to Cloudflare, so a credential problem
+      # shows up here. A 7403 error means the API token lacks D1 Edit.
+      - name: Apply database migrations
+        run: npm run db:migrate:staging
+
+      - name: Deploy the Worker
+        run: npm run deploy:staging

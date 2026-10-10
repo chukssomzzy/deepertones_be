@@ -1,0 +1,128 @@
+# Unit tests, integration tests, typecheck and a build check, as four separate
+# jobs so a red check names what broke without anyone opening the log, and a
+# slow tier never holds up the result of a fast one. They share no state.
+#
+# No job here takes a secret, and none must ever need one. Both test tiers run
+# inside workerd through @cloudflare/vitest-plugin against the top level of
+# wrangler.jsonc, which only declares local bindings. If a future change makes a
+# job ask for a credential, a test is reaching a real service: fix the test, do
+# not add the secret.
+name: Tests
+
+on:
+  # Every PR, including ones stacked on another feature branch.
+  pull_request:
+  # Trunks only: feature-branch pushes are already covered by their PR.
+  push:
+    branches: [staging, main]
+
+# A new push to a PR makes the previous run worthless; a trunk run is kept so
+# every commit on staging and main has a result.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: Unit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - name: Unit tests
+        run: npm run test:unit
+
+  integration:
+    name: Integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # The whole Worker through its default export, in workerd, with local
+      # bindings simulated by Miniflare. No network, no credentials.
+      - name: Integration tests
+        run: npm run test:integration
+
+  typecheck:
+    name: Typecheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # worker-configuration.d.ts is generated from wrangler.jsonc. Regenerating
+      # it here means a binding added to the config but not to the types fails
+      # the build instead of typechecking against stale types.
+      - name: Generate binding types
+        run: npm run cf-typegen
+      - name: Typecheck
+        run: npm run typecheck
+
+  architecture:
+    name: Architecture
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # The layering rules in .dependency-cruiser.cjs (thin routes, services that
+      # never import packages or other modules' repositories, concrete classes
+      # only in src/container.ts, ...). See docs/architecture.md.
+      #
+      # dependency-cruiser reads TypeScript through the compiler's JS API, which
+      # TypeScript 7 does not ship yet. On TS 7 it silently cruises 0 modules and
+      # passes, so the second step fails the job if that ever happens again.
+      - name: Check architecture rules
+        # Explicit `shell: bash` is what turns on pipefail. The default shell is
+        # `bash -e` only, so without this a violation (exit 12) would be masked
+        # by tee's exit 0 and the job would pass.
+        shell: bash
+        run: npm run lint:arch -- --output-type err-long | tee depcruise.log
+      - name: Fail if nothing was checked
+        run: |
+          if grep -q "(0 modules" depcruise.log; then
+            echo "::error::dependency-cruiser checked 0 modules. Is TypeScript >= 7 installed? See the comment above."
+            exit 1
+          fi
+
+  build:
+    name: Build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        environment: [staging, production]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # Bundles the Worker and validates that environment's block of
+      # wrangler.jsonc exactly as the deploy would, without a Cloudflare
+      # account: --dry-run never uploads. Catches a broken env block on the PR
+      # rather than at the deploy after merge.
+      - name: Dry-run deploy (${{ matrix.environment }})
+        run: npx wrangler deploy --dry-run --minify --env ${{ matrix.environment }}

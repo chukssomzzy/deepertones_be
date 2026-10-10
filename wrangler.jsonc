@@ -1,0 +1,76 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "deepertones-be",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-10",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Non-secret config. Secrets go in .dev.vars locally and `wrangler secret put` in prod.
+  // After changing vars or bindings, run `npm run cf-typegen` so c.env stays typed.
+  "vars": {
+    "ENVIRONMENT": "development",
+    // Comma-separated list of origins allowed to call the API from a browser.
+    "CORS_ORIGINS": "http://localhost:3000,http://localhost:5173"
+  },
+
+  "observability": {
+    "enabled": true
+  },
+
+  // Local D1 (wrangler dev + tests). The id only names the local SQLite file; nothing remote.
+  // migrations_dir must match `out` in drizzle.config.ts: drizzle-kit writes there, wrangler applies from there.
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "deepertones-local",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  // More storage bindings, added as we need them:
+  // "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "deepertones" }],
+  // "kv_namespaces": [{ "binding": "KV", "id": "" }],
+  //
+  // The test suite boots this file's top level. Never mark a binding here "remote": true:
+  // tests would then talk to a real resource. Give tests their own config if one ever must be.
+
+  // The top level above is local development: it is what `wrangler dev` and the tests read.
+  // Deployed Workers only ever come from these blocks, via `--env staging` / `--env production`,
+  // so a deploy can never ship the localhost config. vars and bindings are NOT inherited by an
+  // env block: every one must be restated in each environment.
+  "env": {
+    "staging": {
+      "vars": {
+        "ENVIRONMENT": "staging",
+        // TODO: the staging frontend origin(s). Empty = no browser origin allowed.
+        "CORS_ORIGINS": ""
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "deepertones-staging",
+          // TODO: id printed by `npx wrangler d1 create deepertones-staging`
+          "database_id": "REPLACE_ME_STAGING_D1_ID",
+          "migrations_dir": "migrations"
+        }
+      ]
+    },
+    "production": {
+      "vars": {
+        "ENVIRONMENT": "production",
+        // TODO: the production frontend origin(s). Empty = no browser origin allowed.
+        "CORS_ORIGINS": ""
+      },
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "deepertones-production",
+          // TODO: id printed by `npx wrangler d1 create deepertones-production`
+          "database_id": "REPLACE_ME_PRODUCTION_D1_ID",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
+}

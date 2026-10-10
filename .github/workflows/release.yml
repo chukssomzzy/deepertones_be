@@ -1,0 +1,112 @@
+# Production deploys through a release, so that what is live is exactly what
+# the release describes.
+#
+# Promoting `staging` to `main` opens (or updates) a version-bump pull request.
+# Merging that pull request tags the release, deploys that tag to production,
+# and merges `main` back into `staging`.
+#
+# release-please and the deploy MUST live in the same workflow. A separate
+# workflow listening for `release: published` would never fire, because a
+# release created with GITHUB_TOKEN does not trigger other workflows. Gating
+# the deploy on this run's `release_created` output is the reliable way to get
+# "merge the release PR, deploy the tag".
+#
+# release-please reads Conventional Commits (feat:, fix:, ...) to pick the
+# version bump and write the changelog.
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+# Never cancelled: a cancelled run could leave a tag created and nothing
+# deployed, which is the one state that is awkward to reason about afterwards.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: Release please
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      # A personal access token rather than GITHUB_TOKEN, for two reasons:
+      # Actions may not open pull requests unless a repository setting allows
+      # it, and a pull request opened by GITHUB_TOKEN does not run its own
+      # checks, so the release PR would reach production untested.
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
+          release-type: node
+          target-branch: main
+
+  deploy-production:
+    name: Deploy production
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+    # Enough to check out the tag. See deploy-staging.yml for why not `{}`.
+    permissions:
+      contents: read
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      # The tag just created, not the branch head, so the code deployed is
+      # exactly what the release describes.
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+
+      # Same order as staging, for the same reasons (see deploy-staging.yml):
+      # the schema leads the code.
+      - name: Apply database migrations
+        run: npm run db:migrate:production
+
+      - name: Deploy the Worker
+        run: npm run deploy:production
+
+  back-merge:
+    # release-please commits the version bump and changelog to `main` only.
+    # Without this, the next promotion from `staging` conflicts on both files.
+    #
+    # Runs even if the deploy failed (`!cancelled()`): by then the bump and the
+    # tag are permanently on `main`, and skipping this would jam the next
+    # promotion anyway. The push uses GITHUB_TOKEN, which does not trigger
+    # another workflow, so it does not redeploy staging (nothing changed there
+    # but the version and changelog).
+    name: Back-merge
+    needs: [release-please, deploy-production]
+    if: ${{ !cancelled() && needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: staging
+          fetch-depth: 0
+      - name: Merge main back into staging
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch origin main
+          git merge --no-edit origin/main
+          git push origin staging
