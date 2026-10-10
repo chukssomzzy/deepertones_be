@@ -83,9 +83,10 @@ A service never coordinates two repositories "in a transaction"; that cannot be 
 
 ### Domain errors, mapped at the edge
 Services throw `ValidationError`, `UnauthorizedError`, `ForbiddenError`, `NotFoundError`,
-`ConflictError` or `UnavailableError` (all `DomainError`) with a stable `code`. They know nothing
+`ConflictError`, `RateLimitedError` or `UnavailableError` (all `DomainError`) with a stable `code`. They know nothing
 about HTTP, so the same service works from a queue consumer or cron trigger. `errorHandler` maps
-kind → status in one table (`UnavailableError` → 503) and renders the error envelope below.
+kind → status in one table (`RateLimitedError` → 429, `UnavailableError` → 503) and renders the error envelope below.
+A `RateLimitedError` with a numeric `details.retryAfterSeconds` also sets the `Retry-After` header.
 Anything that is not a `DomainError` is a bug: logged, and returned as a generic 500.
 
 ### One response envelope
