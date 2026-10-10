@@ -48,6 +48,6 @@ describe('API docs, where DOCS_ENABLED is not "true"', () => {
     const res = await app.request(path, {}, { ...env, DOCS_ENABLED: 'false' })
 
     expect(res.status).toBe(404)
-    expect(await res.json()).toMatchObject({ error: { code: 'NOT_FOUND' } })
+    expect(await res.json()).toMatchObject({ success: false, status: 404, error: { code: 'NOT_FOUND' } })
   })
 })

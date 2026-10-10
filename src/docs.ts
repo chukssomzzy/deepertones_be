@@ -24,8 +24,10 @@ export const apiDocument: OpenAPIDocumentConfig = {
     title: 'deepertones API',
     version: '1.0.0',
     description:
-      'Every error response has the same body: `{ error: { code, message, details?, requestId } }`. ' +
-      'Branch on `code`, not on `message`.',
+      'Every JSON response has an envelope, and `status` equals the HTTP status. ' +
+      'Success: `{ success: true, status, message, data }`. ' +
+      'Error: `{ success: false, status, message, error: { code, details?, requestId } }`. ' +
+      'Branch on `success`, then on `error.code`, not on `message`.',
   },
 }
 
