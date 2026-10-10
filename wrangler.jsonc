@@ -54,8 +54,7 @@
         {
           "binding": "DB",
           "database_name": "deepertones-staging",
-          // TODO: id printed by `npx wrangler d1 create deepertones-staging`
-          "database_id": "REPLACE_ME_STAGING_D1_ID",
+          "database_id": "558afc3f-0a25-488f-9e7c-d62675124507",
           "migrations_dir": "migrations"
         }
       ]
@@ -72,8 +71,7 @@
         {
           "binding": "DB",
           "database_name": "deepertones-production",
-          // TODO: id printed by `npx wrangler d1 create deepertones-production`
-          "database_id": "REPLACE_ME_PRODUCTION_D1_ID",
+          "database_id": "2a224d3f-1ddb-4761-a21b-5025502b2fce",
           "migrations_dir": "migrations"
         }
       ]
