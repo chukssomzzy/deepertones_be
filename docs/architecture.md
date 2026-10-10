@@ -26,7 +26,7 @@ src/
   container.ts             composition root: the ONLY file that knows concrete classes
   docs.ts                  spec header, /openapi.json and Swagger UI at /docs
   middleware/              requestContext, container, cors
-  lib/                     shared plumbing: factory, errors, openapi, context, db, once
+  lib/                     shared plumbing: factory, errors, openapi, context, db, http, once
   modules/<feature>/
     <feature>.routes.ts           thin controller
     <feature>.service.ts          business logic
@@ -66,6 +66,19 @@ service directly with fakes, so no DI framework and no module mocking is needed.
 `tracks.repository.ts` exports `interface TracksRepository` and `class D1TracksRepository`. A
 service imports only the type (`import type`). Provider interfaces get their own
 `*.provider.ts` because one interface has several vendor adapters.
+
+### Outbound HTTP
+Provider adapters call vendors through `lib/http.ts` (`requestJson$`), built on rxjs `fromFetch`.
+It returns an Observable so an adapter can compose operators; the adapter converts at its own
+boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs.
+
+- **Every call has a timeout** (`timeoutMs`); on expiry the request is aborted and the stream
+  errors with `HttpTimeoutError`. Other transport failures are `HttpNetworkError`. Any HTTP status
+  is a value, not an error: the adapter decides what a 4xx or 5xx means.
+- **No retries.** A retried OTP send could deliver, and bill, a second code. Retrying is each
+  caller's decision.
+- **Provider-only.** The `http-only-in-providers` rule lets only `src/providers/**` import
+  `lib/http.ts`, so services, repositories and routes never make HTTP calls.
 
 ### D1 + Drizzle, tables per module
 SQLite at the edge with a native binding, local simulation in dev and tests, and no connection
