@@ -49,6 +49,7 @@ test/integration/          tests against real local bindings
 ```
 
 `modules/health` is the reference implementation of every piece above that it needs.
+`providers/otp-delivery/` is the first real provider: the interface, the Meta WhatsApp adapter, and the memory fake.
 
 ## Decisions
 
