@@ -55,7 +55,7 @@ Every error response looks like this:
 ```ts
 import { hc } from 'hono/client'
 
-const api = hc<AppType>('https://api.example.com')
+const api = hc<AppType>('https://api.deepertones.com') // staging: https://api.staging.deepertones.com
 const res = await api.health.$get() // fully typed request + response
 ```
 
@@ -69,10 +69,15 @@ const res = await api.health.$get() // fully typed request + response
 
 A merge is a deploy; nobody deploys by hand.
 
-| Branch    | Deploys to                                     | Trigger                                  | Workflow                               |
-| --------- | ---------------------------------------------- | ---------------------------------------- | -------------------------------------- |
-| `staging` | staging Worker (`deepertones-be-staging`)       | push (merge) to `staging`                | `.github/workflows/deploy-staging.yml` |
-| `main`    | production Worker (`deepertones-be-production`) | merge of the release PR on `main`        | `.github/workflows/release.yml`        |
+| Branch    | Deploys to                                                                   | Trigger                           | Workflow                               |
+| --------- | ---------------------------------------------------------------------------- | --------------------------------- | -------------------------------------- |
+| `staging` | https://api.staging.deepertones.com (Worker `deepertones-be-staging`)         | push (merge) to `staging`         | `.github/workflows/deploy-staging.yml` |
+| `main`    | https://api.deepertones.com (Worker `deepertones-be-production`)              | merge of the release PR on `main` | `.github/workflows/release.yml`        |
+
+Each address is a Workers Custom Domain (`routes` in `wrangler.jsonc`): the deploy itself creates
+the DNS record and certificate in the `deepertones.com` zone, so there is no DNS to set up by hand.
+A Custom Domain cannot be created over an existing CNAME for the same hostname; delete it first.
+`*.workers.dev` and preview URLs are switched off, so each API has exactly one public address.
 
 There are only two long-lived branches. "production" is the name of the deploy target
 (the GitHub environment and `env.production` in `wrangler.jsonc`), never a branch.
@@ -111,17 +116,9 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the two databases and paste each printed `database_id` over the `REPLACE_ME_*`
-   placeholders in `wrangler.jsonc`:
-
-   ```sh
-   npx wrangler d1 create deepertones-staging
-   npx wrangler d1 create deepertones-production
-   ```
-
-4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
+3. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
    (empty means no browser may call the API).
-5. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
+4. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
 
 ## Troubleshooting
 

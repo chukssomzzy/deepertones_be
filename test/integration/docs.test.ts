@@ -15,6 +15,24 @@ describe('API docs, where DOCS_ENABLED is "true"', () => {
     expect(spec.paths).toHaveProperty('/health')
   })
 
+  it('list the origin they are served from first, so "Try it out" never targets production by accident', async () => {
+    const serversAt = async (origin: string) => {
+      const res = await exports.default.fetch(new Request(`${origin}/openapi.json`))
+      const spec = await res.json<{ servers: { url: string; description: string }[] }>()
+      return spec.servers
+    }
+
+    expect(await serversAt('https://api.staging.deepertones.com')).toEqual([
+      { url: 'https://api.staging.deepertones.com', description: 'Staging' },
+      { url: 'https://api.deepertones.com', description: 'Production' },
+    ])
+    expect((await serversAt('http://localhost:8787')).map((server) => server.url)).toEqual([
+      'http://localhost:8787',
+      'https://api.deepertones.com',
+      'https://api.staging.deepertones.com',
+    ])
+  })
+
   it('serve Swagger UI pointing at the spec', async () => {
     const res = await fetchWorker('/docs')
 
