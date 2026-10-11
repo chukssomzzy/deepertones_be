@@ -30,7 +30,7 @@ src/
   modules/<feature>/
     <feature>.routes.ts           thin controller
     <feature>.service.ts          business logic
-    <feature>.repository.ts       interface + D1 implementation
+    <feature>.repository.ts       D1 class + inferred type
     <feature>.repository.fake.ts  in-memory implementation for unit tests
     <feature>.repository.contract.ts  behaviour both implementations must pass
     <feature>.table.ts            Drizzle table(s)
@@ -63,10 +63,16 @@ request. It is lazy (`once`), so a request only builds what it touches. Services
 and providers are classes that take their dependencies in the constructor. Unit tests build a
 service directly with fakes, so no DI framework and no module mocking is needed.
 
-### Interfaces live next to their implementation
-`tracks.repository.ts` exports `interface TracksRepository` and `class D1TracksRepository`. A
-service imports only the type (`import type`). Provider interfaces get their own
-`*.provider.ts` because one interface has several vendor adapters.
+### Repository types are inferred; provider interfaces are written
+A repository has one real implementation, so `tracks.repository.ts` exports `class D1TracksRepository`
+and `export type TracksRepository = PublicOf<D1TracksRepository>`. The D1 class is the single source:
+signatures and doc comments are written once, and the fake `implements` the inferred type, so it is
+still checked by the compiler. `PublicOf` (`lib/types.ts`) drops private members, which is what lets
+a fake match. Services `import type` it, so there is no runtime coupling and the depcruise rules are
+unchanged.
+
+Providers keep a hand-written `*.provider.ts` interface: several vendors implement one port, and the
+contract must not be one vendor's shape.
 
 ### Outbound HTTP
 Provider adapters call vendors through `lib/http.ts` (`requestJson$`), built on rxjs `fromFetch`.
@@ -252,8 +258,8 @@ and `container.otp.verify(phone, code)`.
 
 ## Adding a module
 
-1. `src/modules/<feature>/`: table → `npm run db:generate` → types → repository interface + D1
-   class + fake + contract → service → schemas (request + response) → presenter → routes
+1. `src/modules/<feature>/`: table → `npm run db:generate` → types → D1 repository class
+   (+ inferred type) + fake + contract → service → schemas (request + response) → presenter → routes
    (`defineRoute` with `success()` for each 2xx response, `openapiApp().openapi(route, handler)`
    with `ok()` in the handler).
 2. Wire it in `src/container.ts` and expose a getter; mount the routes in `src/index.ts`.
