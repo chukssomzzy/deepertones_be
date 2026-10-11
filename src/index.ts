@@ -1,6 +1,8 @@
 import { logger } from 'hono/logger'
 import { requestId } from 'hono/request-id'
 import { secureHeaders } from 'hono/secure-headers'
+import { createQueueHandler } from './jobs/dispatcher'
+import { jobs } from './jobs/registry'
 import { mountDocs } from './docs'
 import { errorHandler, notFoundHandler } from './lib/errors'
 import { openapiApp } from './lib/openapi'
@@ -9,7 +11,7 @@ import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
 import { healthRoutes } from './modules/health/health.routes'
 
-const app = openapiApp()
+export const app = openapiApp()
 
 // Order matters: CORS answers preflights before any context or services are built,
 // and requestContext wraps everything that can reach a service.
@@ -24,4 +26,8 @@ app.onError(errorHandler)
 app.notFound(notFoundHandler)
 
 export type AppType = typeof routes
-export default app
+
+export default {
+  fetch: app.fetch,
+  queue: createQueueHandler(jobs),
+} satisfies ExportedHandler<CloudflareBindings>

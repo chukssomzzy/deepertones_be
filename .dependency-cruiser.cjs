@@ -116,10 +116,47 @@ module.exports = {
       severity: 'error',
       comment:
         'Only services read the request context (currentActor/requireUser). Repositories and providers get ' +
-        'what they need as arguments. The middleware that creates the context is the one exception; ' +
-        'queue/cron entrypoints that call runAs() join this allowlist when they exist.',
-      from: { pathNot: ['\\.service\\.ts$', '^src/middleware/request-context\\.ts$', '^src/lib/context\\.ts$', TEST_ONLY] },
+        'what they need as arguments. The middleware that creates the context and the queue dispatcher (which calls runAs per message) ' +
+        'are the exceptions; other queue/cron entrypoints that call runAs() join this allowlist when they exist.',
+      from: {
+        pathNot: [
+          '\\.service\\.ts$',
+          '^src/middleware/request-context\\.ts$',
+          '^src/jobs/dispatcher\\.ts$',
+          '^src/lib/context\\.ts$',
+          TEST_ONLY,
+        ],
+      },
       to: { path: '^src/lib/context\\.ts$' },
+    },
+
+    {
+      name: 'job-registry-only-in-entry',
+      severity: 'error',
+      comment:
+        'The job registry lists every job and their handlers. Only the Worker entry (src/index.ts) hands it to ' +
+        'the dispatcher; nothing else may reach it.',
+      from: { pathNot: ['^src/index\\.ts$', TEST_ONLY] },
+      to: { path: '^src/jobs/registry\\.ts$' },
+    },
+
+    {
+      name: 'job-handlers-only-in-registry',
+      severity: 'error',
+      comment:
+        'A <feature>.jobs.ts holds job handlers, which are typed with the Container. Only the registry ' +
+        'imports them; everything that enqueues imports the <feature>.job-specs.ts instead.',
+      from: { pathNot: ['^src/jobs/registry\\.ts$', TEST_ONLY] },
+      to: { path: '\\.jobs\\.ts$' },
+    },
+    {
+      name: 'job-specs-no-container',
+      severity: 'error',
+      comment:
+        'Services import job specs to enqueue. A spec that reached the container would close the cycle ' +
+        'container -> service -> spec -> container.',
+      from: { path: '\\.job-specs\\.ts$' },
+      to: { path: '^src/container\\.ts$' },
     },
 
     // --- Test code never ships -------------------------------------------------------------

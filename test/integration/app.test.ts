@@ -1,7 +1,7 @@
 import { env, exports } from 'cloudflare:workers'
 import { hc } from 'hono/client'
 import { describe, expect, it, vi } from 'vitest'
-import app, { type AppType } from '../../src/index'
+import { app, type AppType } from '../../src/index'
 
 // Integration tests go through the deployed entrypoint (the Worker's default export)
 // running in workerd with the bindings from wrangler.jsonc, exactly as a request would in production.
