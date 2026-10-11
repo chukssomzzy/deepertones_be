@@ -227,5 +227,104 @@ export const otpRepositoryContract = (name: string, make: () => OtpRepository | 
 
       expect(await repo.consume(crypto.randomUUID(), BASE, MAX)).toBe(false)
     })
+
+    it('create stores a challenge as queued, with no failure reason and no delivery time', async () => {
+      const repo = await make()
+      const c = challenge(freshPhone(), BASE)
+
+      await repo.create(c)
+
+      expect(await repo.findById(c.id)).toMatchObject({
+        id: c.id,
+        phone: c.phone,
+        deliveryStatus: 'queued',
+        failureReason: null,
+        deliveredAt: null,
+      })
+    })
+
+    it('findById returns null for an unknown id', async () => {
+      const repo = await make()
+
+      expect(await repo.findById(crypto.randomUUID())).toBeNull()
+    })
+
+    it('findById finds a challenge that is not the latest for its phone', async () => {
+      const repo = await make()
+      const phone = freshPhone()
+      const older = challenge(phone, at(0))
+      await repo.create(older)
+      await repo.create(challenge(phone, at(MINUTE)))
+
+      expect((await repo.findById(older.id))!.id).toBe(older.id)
+    })
+
+    it('markDelivered moves queued to delivered once, recording when', async () => {
+      const repo = await make()
+      const c = challenge(freshPhone(), BASE)
+      await repo.create(c)
+
+      expect(await repo.markDelivered(c.id, at(SECOND))).toBe(true)
+      expect(await repo.markDelivered(c.id, at(2 * SECOND))).toBe(false)
+
+      const found = await repo.findById(c.id)
+      expect(found).toMatchObject({ deliveryStatus: 'delivered', failureReason: null })
+      expect(found!.deliveredAt!.getTime()).toBe(at(SECOND).getTime())
+    })
+
+    it('markDelivered returns false for an unknown id and for a failed challenge', async () => {
+      const repo = await make()
+      const c = challenge(freshPhone(), BASE)
+      await repo.create(c)
+      await repo.markFailed(c.id, 'unavailable')
+
+      expect(await repo.markDelivered(c.id, at(SECOND))).toBe(false)
+      expect(await repo.markDelivered(crypto.randomUUID(), at(SECOND))).toBe(false)
+      expect((await repo.findById(c.id))!.deliveryStatus).toBe('failed')
+    })
+
+    it.each(['recipient-rejected', 'unavailable'] as const)('markFailed moves queued to failed with reason %s, once', async (reason) => {
+      const repo = await make()
+      const c = challenge(freshPhone(), BASE)
+      await repo.create(c)
+
+      expect(await repo.markFailed(c.id, reason)).toBe(true)
+      expect(await repo.markFailed(c.id, 'unavailable')).toBe(false)
+
+      expect(await repo.findById(c.id)).toMatchObject({ deliveryStatus: 'failed', failureReason: reason, deliveredAt: null })
+    })
+
+    it('markFailed never overrides a delivered challenge', async () => {
+      const repo = await make()
+      const c = challenge(freshPhone(), BASE)
+      await repo.create(c)
+      await repo.markDelivered(c.id, at(SECOND))
+
+      expect(await repo.markFailed(c.id, 'unavailable')).toBe(false)
+      expect(await repo.findById(c.id)).toMatchObject({ deliveryStatus: 'delivered', failureReason: null })
+    })
+
+    it('markFailed returns false for an unknown id', async () => {
+      const repo = await make()
+
+      expect(await repo.markFailed(crypto.randomUUID(), 'unavailable')).toBe(false)
+    })
+
+    it('sendTimes leaves out only challenges that failed as unavailable', async () => {
+      const repo = await make()
+      const phone = freshPhone()
+      const queued = challenge(phone, at(0))
+      const delivered = challenge(phone, at(MINUTE))
+      const rejected = challenge(phone, at(2 * MINUTE))
+      const unavailable = challenge(phone, at(3 * MINUTE))
+      for (const c of [queued, delivered, rejected, unavailable]) await repo.create(c)
+      await repo.markDelivered(delivered.id, at(4 * MINUTE))
+      await repo.markFailed(rejected.id, 'recipient-rejected')
+      await repo.markFailed(unavailable.id, 'unavailable')
+
+      const times = await repo.sendTimes(phone, at(-HOUR))
+
+      expect(times.map((d: Date) => d.getTime())).toEqual([at(2 * MINUTE), at(MINUTE), at(0)].map((d) => d.getTime()))
+    })
   })
 }

@@ -23,6 +23,27 @@
   // have been run for this environment (add --env staging / --env production).
   "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
 
+  // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+  // README → Before the first deploy lists the full set:
+  //   npx wrangler queues create deepertones-otp-delivery-development
+  //   npx wrangler queues create deepertones-otp-delivery-dlq-development
+  // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
+  "queues": {
+    "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" }],
+    "consumers": [
+      {
+        "queue": "deepertones-otp-delivery-development",
+        "max_batch_size": 10,
+        // A person is waiting for the code: do not hold a partial batch.
+        "max_batch_timeout": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-otp-delivery-dlq-development"
+      },
+      { "queue": "deepertones-otp-delivery-dlq-development", "max_batch_size": 10 }
+    ]
+  },
+
   "observability": {
     "enabled": true
   },
@@ -73,6 +94,26 @@
       // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
       // have been run for this environment (add --env staging / --env production).
       "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
+      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      // README → Before the first deploy lists the full set:
+      //   npx wrangler queues create deepertones-otp-delivery-staging
+      //   npx wrangler queues create deepertones-otp-delivery-dlq-staging
+      // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
+      "queues": {
+        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" }],
+        "consumers": [
+          {
+            "queue": "deepertones-otp-delivery-staging",
+            "max_batch_size": 10,
+            // A person is waiting for the code: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-otp-delivery-dlq-staging"
+          },
+          { "queue": "deepertones-otp-delivery-dlq-staging", "max_batch_size": 10 }
+        ]
+      },
       "d1_databases": [
         {
           "binding": "DB",
@@ -101,6 +142,26 @@
       // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
       // have been run for this environment (add --env staging / --env production).
       "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
+      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      // README → Before the first deploy lists the full set:
+      //   npx wrangler queues create deepertones-otp-delivery-production
+      //   npx wrangler queues create deepertones-otp-delivery-dlq-production
+      // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
+      "queues": {
+        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" }],
+        "consumers": [
+          {
+            "queue": "deepertones-otp-delivery-production",
+            "max_batch_size": 10,
+            // A person is waiting for the code: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-otp-delivery-dlq-production"
+          },
+          { "queue": "deepertones-otp-delivery-dlq-production", "max_batch_size": 10 }
+        ]
+      },
       "d1_databases": [
         {
           "binding": "DB",

@@ -14,7 +14,7 @@ export class FakeOtpRepository implements OtpRepository {
 
   async sendTimes(phone: PhoneNumber, since: Date): Promise<Date[]> {
     return this.rows
-      .filter((r) => r.phone === phone && r.createdAt >= since)
+      .filter((r) => r.phone === phone && r.createdAt >= since && !(r.deliveryStatus === 'failed' && r.failureReason === 'unavailable'))
       .map((r) => r.createdAt)
       .sort((a, b) => b.getTime() - a.getTime())
   }
@@ -22,7 +22,26 @@ export class FakeOtpRepository implements OtpRepository {
   async create(challenge: NewOtpChallenge): Promise<void> {
     const cutoff = challenge.createdAt.getTime() - PURGE_AFTER_MS
     this.rows = this.rows.filter((r) => r.phone !== challenge.phone || r.createdAt.getTime() >= cutoff)
-    this.rows.push({ ...challenge, attempts: 0, consumedAt: null })
+    this.rows.push({ ...challenge, attempts: 0, consumedAt: null, deliveryStatus: 'queued', failureReason: null, deliveredAt: null })
+  }
+
+  async findById(id: string): Promise<OtpChallenge | null> {
+    const row = this.rows.find((r) => r.id === id)
+    return row ? { ...row } : null
+  }
+
+  async markDelivered(id: string, at: Date): Promise<boolean> {
+    const row = this.rows.find((r) => r.id === id)
+    if (!row || row.deliveryStatus !== 'queued') return false
+    Object.assign(row, { deliveryStatus: 'delivered', deliveredAt: at })
+    return true
+  }
+
+  async markFailed(id: string, reason: NonNullable<OtpChallenge['failureReason']>): Promise<boolean> {
+    const row = this.rows.find((r) => r.id === id)
+    if (!row || row.deliveryStatus !== 'queued') return false
+    Object.assign(row, { deliveryStatus: 'failed', failureReason: reason })
+    return true
   }
 
   async recordFailedAttempt(id: string, maxAttempts: number): Promise<number | null> {

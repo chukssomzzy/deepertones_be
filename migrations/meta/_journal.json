@@ -15,6 +15,13 @@
       "when": 1791716757842,
       "tag": "0001_cynical_preak",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791717232588,
+      "tag": "0002_fair_whizzer",
+      "breakpoints": true
     }
   ]
 }

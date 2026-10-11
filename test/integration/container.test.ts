@@ -10,4 +10,13 @@ describe('buildContainer', () => {
 
     expect(buildContainer(env).otp).toBeInstanceOf(OtpService)
   })
+
+  it('sends a code through the real queue binding and leaves the challenge queued', async () => {
+    const otp = buildContainer(env).otp
+    const phone = `+234806${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`
+
+    const { challengeId } = await otp.send(phone)
+
+    expect(await otp.deliveryStatus(challengeId)).toEqual({ status: 'queued', failureReason: null })
+  })
 })

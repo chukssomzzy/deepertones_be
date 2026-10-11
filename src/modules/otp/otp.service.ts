@@ -1,7 +1,10 @@
-import { hmacSha256Hex, randomDigits, timingSafeEqual } from '../../lib/crypto'
-import { RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
+import { PermanentJobError } from '../../jobs/job'
+import { hmacSha256Hex, openText, randomDigits, sealText, timingSafeEqual } from '../../lib/crypto'
+import { NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { parsePhoneNumber, type PhoneNumber } from '../../lib/phone'
+import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import { type OtpDelivery, OtpDeliveryError } from '../../providers/otp-delivery/otp-delivery.provider'
+import { type DeliverOtpMessage, deliverOtpSpec } from './otp.job-specs'
 import type { OtpRepository } from './otp.repository'
 
 /** The WhatsApp template's code expiry must match ttlMinutes (set it in Meta's template editor). */
@@ -16,9 +19,13 @@ export const OTP_POLICY = {
 const SECOND = 1000
 const HOUR = 60 * 60 * SECOND
 
+// Names the sealing key. Differs from the HMAC use of the pepper, so the two keys are unrelated.
+const QUEUE_SEAL_INFO = 'deepertones/otp-queue/v1'
+
 export type OtpServiceDeps = {
   repository: OtpRepository
   delivery: OtpDelivery
+  jobs: JobQueue
   /** Server secret mixed into every code hash, so a leaked table cannot be brute-forced offline. */
   pepper: string
   now?: () => Date
@@ -29,6 +36,7 @@ export type OtpServiceDeps = {
 export class OtpService {
   private readonly repository: OtpRepository
   private readonly delivery: OtpDelivery
+  private readonly jobs: JobQueue
   private readonly pepper: string
   private readonly now: () => Date
   private readonly generateCode: () => string
@@ -37,14 +45,19 @@ export class OtpService {
   constructor(deps: OtpServiceDeps) {
     this.repository = deps.repository
     this.delivery = deps.delivery
+    this.jobs = deps.jobs
     this.pepper = deps.pepper
     this.now = deps.now ?? (() => new Date())
     this.generateCode = deps.generateCode ?? (() => randomDigits(OTP_POLICY.length))
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
 
-  /** Sends a fresh code, superseding any earlier one. Failed deliveries leave no trace and use no quota. */
-  async send(rawPhone: string): Promise<{ expiresAt: Date }> {
+  /**
+   * Issues a fresh code, superseding any earlier one, and queues its delivery. The challenge is
+   * stored first (as `queued`) and the job carries the code sealed, so the person never waits on
+   * WhatsApp and retries survive an outage. Failed challenges do not count toward the limits.
+   */
+  async send(rawPhone: string): Promise<{ challengeId: string; expiresAt: Date }> {
     const phone = parsePhoneNumber(rawPhone)
     const now = this.now()
 
@@ -67,28 +80,70 @@ export class OtpService {
     }
 
     const code = this.generateCode()
-    // Deliver before storing: a failed delivery must not start a cooldown or count toward the cap.
-    try {
-      await this.delivery.send(phone, code)
-    } catch (error) {
-      if (error instanceof OtpDeliveryError) {
-        if (error.reason === 'recipient-rejected') {
-          throw new ValidationError('PHONE_NOT_REACHABLE', 'We could not send a code to that number')
-        }
-        throw new UnavailableError('OTP_DELIVERY_UNAVAILABLE', 'Could not send the code right now; try again shortly')
-      }
-      throw error
-    }
-
+    const challengeId = this.newId()
     const expiresAt = new Date(now.getTime() + OTP_POLICY.ttlMinutes * 60 * SECOND)
     await this.repository.create({
-      id: this.newId(),
+      id: challengeId,
       phone,
       codeHash: await this.hash(phone, code),
       createdAt: now,
       expiresAt,
     })
-    return { expiresAt }
+
+    try {
+      // Bound to the challenge: a sealed code copied into another message cannot be opened.
+      const sealedCode = await sealText(this.pepper, QUEUE_SEAL_INFO, code, challengeId)
+      await this.jobs.enqueue(deliverOtpSpec, { challengeId, sealedCode })
+    } catch (error) {
+      // Never log the code or the sealed code.
+      console.error({ outcome: 'enqueue-failed', challengeId, error: String(error) })
+      await this.repository.markFailed(challengeId, 'unavailable')
+      throw new UnavailableError('OTP_DELIVERY_UNAVAILABLE', 'Could not send the code right now; try again shortly')
+    }
+    return { challengeId, expiresAt }
+  }
+
+  /**
+   * The delivery job's body. Drops messages that no longer matter (unknown, superseded, expired, used, or
+   * already settled; a dropped challenge keeps reporting `queued`). A rejected recipient fails permanently; any other error is rethrown so the
+   * queue retries, and repeating a delivery just resends the same code.
+   */
+  async deliver(message: DeliverOtpMessage): Promise<void> {
+    const challenge = await this.repository.findById(message.challengeId)
+    if (!challenge || challenge.deliveryStatus !== 'queued') return
+    if (challenge.consumedAt || challenge.expiresAt.getTime() <= this.now().getTime()) return
+    const latest = await this.repository.findLatest(challenge.phone)
+    if (latest?.id !== challenge.id) return
+
+    let code: string
+    try {
+      code = await openText(this.pepper, QUEUE_SEAL_INFO, message.sealedCode, challenge.id)
+    } catch (error) {
+      await this.repository.markFailed(challenge.id, 'unavailable')
+      throw new PermanentJobError('The sealed code could not be opened', { cause: error })
+    }
+
+    try {
+      await this.delivery.send(challenge.phone, code)
+    } catch (error) {
+      if (error instanceof OtpDeliveryError && error.reason === 'recipient-rejected') {
+        await this.repository.markFailed(challenge.id, 'recipient-rejected')
+        throw new PermanentJobError('The recipient cannot receive WhatsApp messages', { cause: error })
+      }
+      throw error
+    }
+    await this.repository.markDelivered(challenge.id, this.now())
+  }
+
+  /** The delivery job ran out of retries. Never overrides a delivered challenge. */
+  async markUndeliverable(challengeId: string): Promise<void> {
+    await this.repository.markFailed(challengeId, 'unavailable')
+  }
+
+  async deliveryStatus(challengeId: string) {
+    const challenge = await this.repository.findById(challengeId)
+    if (!challenge) throw new NotFoundError('OTP_CHALLENGE_NOT_FOUND', 'No such code request')
+    return { status: challenge.deliveryStatus, failureReason: challenge.failureReason }
   }
 
   /** Checks a code against the phone's latest challenge; a correct one is consumed. Returns the canonical phone. */
