@@ -31,7 +31,7 @@ module.exports = {
       name: 'service-repository-types-only',
       severity: 'error',
       comment:
-        'A service may import its OWN module\'s repository file for the interface type only ' +
+        'A service may import its OWN module\'s repository file for its type only ' +
         '(`import type`). The concrete class is wired in src/container.ts.',
       from: { path: '\\.service\\.ts$' },
       to: { path: '\\.repository\\.ts$', dependencyTypesNot: ['type-only'] },
@@ -92,7 +92,7 @@ module.exports = {
       severity: 'error',
       comment:
         'src/container.ts is the composition root: the only production file that imports concrete ' +
-        'repository or provider classes. Everyone else uses the interface types.',
+        'repository or provider classes. Everyone else imports types only.',
       from: { pathNot: ['^src/container\\.ts$', TEST_ONLY] },
       to: {
         path: ['\\.repository\\.ts$', '^src/providers/.+(?<!\\.provider)\\.ts$'],
