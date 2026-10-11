@@ -1,7 +1,8 @@
-import type { Context, ErrorHandler, NotFoundHandler } from 'hono'
+import type { Context } from 'hono'
+import type { HTTPResponseError } from 'hono/types'
 import { HTTPException } from 'hono/http-exception'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
-import type { AppEnv } from './factory'
+import type { BaseEnv } from './env'
 
 /**
  * Base for every error a service throws on purpose. Carries a stable `code` for
@@ -29,6 +30,8 @@ export class ForbiddenError extends DomainError {}
 export class NotFoundError extends DomainError {}
 /** The request clashes with current state (duplicate, wrong status, stale write). */
 export class ConflictError extends DomainError {}
+/** Too many attempts or sends. `details.retryAfterSeconds`, when a number, becomes the Retry-After header. */
+export class RateLimitedError extends DomainError {}
 /** A dependency is down; the same request may work later. */
 export class UnavailableError extends DomainError {}
 
@@ -39,6 +42,7 @@ const statusByKind = new Map<new (...args: never[]) => DomainError, ContentfulSt
   [ForbiddenError, 403],
   [NotFoundError, 404],
   [ConflictError, 409],
+  [RateLimitedError, 429],
   [UnavailableError, 503],
 ])
 
@@ -82,8 +86,8 @@ const forwardableHeaders = (headers: Headers) => {
 }
 
 /** The only place an ErrorBody is built, so no error path can drift from the documented shape. */
-const renderError = (
-  c: Context<AppEnv>,
+const renderError = <E extends BaseEnv>(
+  c: Context<E>,
   status: ContentfulStatusCode,
   { code, message, details }: ErrorContent,
   headers?: Record<string, string | string[]>,
@@ -94,9 +98,16 @@ const renderError = (
     headers,
   )
 
-export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
+const retryAfterHeader = (err: DomainError) => {
+  if (!(err instanceof RateLimitedError)) return undefined
+  const seconds = (err.details as { retryAfterSeconds?: unknown } | undefined)?.retryAfterSeconds
+  return typeof seconds === 'number' ? { 'Retry-After': String(seconds) } : undefined
+}
+
+// Generic because Context is invariant in its Env: AppEnv (which adds `services`) must still fit.
+export const errorHandler = <E extends BaseEnv>(err: Error | HTTPResponseError, c: Context<E>) => {
   if (err instanceof DomainError) {
-    return renderError(c, statusOf(err), err)
+    return renderError(c, statusOf(err), err, retryAfterHeader(err))
   }
 
   // Thrown by Hono's built-in middleware (bodyLimit, auth helpers, ...).
@@ -120,5 +131,5 @@ export const errorHandler: ErrorHandler<AppEnv> = (err, c) => {
   return renderError(c, 500, { code: 'INTERNAL_ERROR', message: 'Something went wrong' })
 }
 
-export const notFoundHandler: NotFoundHandler<AppEnv> = (c) =>
+export const notFoundHandler = <E extends BaseEnv>(c: Context<E>) =>
   renderError(c, 404, { code: 'NOT_FOUND', message: `${c.req.method} ${c.req.path} not found` })

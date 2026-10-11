@@ -8,6 +8,7 @@ import {
   errorHandler,
   ForbiddenError,
   NotFoundError,
+  RateLimitedError,
   UnauthorizedError,
   UnavailableError,
   ValidationError,
@@ -26,10 +27,19 @@ const app = factory
       'not-found': NotFoundError,
       conflict: ConflictError,
       unavailable: UnavailableError,
+      'rate-limited': RateLimitedError,
       bare: DomainError,
     }
     const Kind = kinds[c.req.param('kind') as keyof typeof kinds]
     throw new Kind('SOME_CODE', 'some message', { extra: true })
+  })
+  .get('/rate-limited/:seconds', (c) => {
+    const seconds = c.req.param('seconds')
+    throw new RateLimitedError(
+      'SLOW_DOWN',
+      'slow down',
+      seconds === 'none' ? { extra: true } : { retryAfterSeconds: Number(seconds) },
+    )
   })
   .get('/http-plain', () => {
     throw new HTTPException(418, { message: 'teapot' })
@@ -78,6 +88,38 @@ describe('errorHandler', () => {
       message: 'some message',
       error: { code: 'SOME_CODE', details: { extra: true }, requestId: expect.stringMatching(/.+/) },
     })
+  })
+
+  it('maps a rate-limited error to 429 in the error envelope', async () => {
+    const res = await app.request('/throw/rate-limited', {}, env)
+
+    expect(res.status).toBe(429)
+    expect(await res.json()).toEqual({
+      success: false,
+      status: 429,
+      message: 'some message',
+      error: { code: 'SOME_CODE', details: { extra: true }, requestId: expect.stringMatching(/.+/) },
+    })
+  })
+
+  it('sets Retry-After from details.retryAfterSeconds on a rate-limited error', async () => {
+    const res = await app.request('/rate-limited/45', {}, env)
+
+    expect(res.status).toBe(429)
+    expect(res.headers.get('Retry-After')).toBe('45')
+    expect(await res.json()).toEqual({
+      success: false,
+      status: 429,
+      message: 'slow down',
+      error: { code: 'SLOW_DOWN', details: { retryAfterSeconds: 45 }, requestId: expect.stringMatching(/.+/) },
+    })
+  })
+
+  it('sends no Retry-After when a rate-limited error has no retryAfterSeconds', async () => {
+    const res = await app.request('/rate-limited/none', {}, env)
+
+    expect(res.status).toBe(429)
+    expect(res.headers.has('Retry-After')).toBe(false)
   })
 
   it('treats an unmapped DomainError as a 500 but keeps its code and message', async () => {
