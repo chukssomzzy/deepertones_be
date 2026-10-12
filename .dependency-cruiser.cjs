@@ -100,6 +100,16 @@ module.exports = {
       },
     },
 
+    {
+      name: 'http-only-in-providers',
+      severity: 'error',
+      comment:
+        'Every outside call goes through a provider, so services, repositories and routes never make HTTP ' +
+        'calls. src/lib/http.ts is the HTTP client for provider adapters.',
+      from: { pathNot: ['^src/providers/', TEST_ONLY] },
+      to: { path: '^src/lib/http\\.ts$' },
+    },
+
     // --- Request context -------------------------------------------------------------------
     {
       name: 'context-only-in-services',
