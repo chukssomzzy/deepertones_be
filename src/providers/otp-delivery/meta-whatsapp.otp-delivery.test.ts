@@ -186,4 +186,23 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
       expect(calls).toEqual([])
     })
   })
+
+  describe('with an empty access token', () => {
+    it('rejects send with a plain error naming WHATSAPP_ACCESS_TOKEN, without calling Meta', async () => {
+      const { calls } = make(() => json(SUCCESS_BODY))
+      const delivery = new MetaWhatsAppOtpDelivery({
+        accessToken: '',
+        phoneNumberId: PHONE_NUMBER_ID,
+        templateName: 'otp_login',
+        languageCode: 'en_US',
+      })
+
+      const error = await caught(delivery.send(TO, '482913'))
+
+      expect(error).toBeInstanceOf(Error)
+      expect(error).not.toBeInstanceOf(OtpDeliveryError)
+      expect((error as Error).message).toContain('WHATSAPP_ACCESS_TOKEN')
+      expect(calls).toEqual([])
+    })
+  })
 })

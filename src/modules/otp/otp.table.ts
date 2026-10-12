@@ -4,7 +4,8 @@ export const otpChallenges = sqliteTable(
   'otp_challenges',
   {
     id: text('id').primaryKey(),
-    phone: text('phone').notNull(),
+    channel: text('channel', { enum: ['whatsapp', 'email'] }).notNull(),
+    address: text('address').notNull(),
     codeHash: text('code_hash').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     expiresAt: integer('expires_at', { mode: 'timestamp_ms' }).notNull(),
@@ -16,5 +17,5 @@ export const otpChallenges = sqliteTable(
     failureReason: text('failure_reason', { enum: ['recipient-rejected', 'unavailable'] }),
     deliveredAt: integer('delivered_at', { mode: 'timestamp_ms' }),
   },
-  (t) => [index('otp_challenges_phone_created_at_idx').on(t.phone, t.createdAt)],
+  (t) => [index('otp_challenges_recipient_created_at_idx').on(t.channel, t.address, t.createdAt)],
 )

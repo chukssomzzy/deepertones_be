@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 
-/** What the delivery job carries: no phone (less personal data in the queue; the DB row is authoritative) and the code only sealed (see OtpService). */
+/** What the delivery job carries: no address (less personal data in the queue; the DB row is authoritative) and the code only sealed (see OtpService). */
 export const deliverOtpSpec = jobSpec({
   name: 'deliver-otp',
   queue: 'otp-delivery',
