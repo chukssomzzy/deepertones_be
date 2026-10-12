@@ -159,6 +159,16 @@ module.exports = {
       to: { path: '^src/container\\.ts$' },
     },
 
+    {
+      name: 'emails-are-pure',
+      severity: 'error',
+      comment:
+        'Email templates are pure functions of their data: no modules, providers, jobs, middleware or wiring. ' +
+        'Callers pass in everything a template shows.',
+      from: { path: '^src/emails/' },
+      to: { path: ['^src/(modules|providers|jobs|middleware)/', '^src/(container|index|docs)\\.ts$'] },
+    },
+
     // --- Test code never ships -------------------------------------------------------------
     {
       name: 'no-test-code-in-production',
