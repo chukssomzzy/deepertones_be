@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest'
-import { RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { PermanentJobError } from '../../jobs/job'
+import { NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { parsePhoneNumber } from '../../lib/phone'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../providers/otp-delivery/memory.otp-delivery'
 import { OtpDeliveryError } from '../../providers/otp-delivery/otp-delivery.provider'
+import { deliverOtpSpec } from './otp.job-specs'
 import { FakeOtpRepository } from './otp.repository.fake'
 import { otpRepositoryContract } from './otp.repository.contract'
 import { OTP_POLICY, OtpService } from './otp.service'
@@ -42,8 +45,10 @@ describe('OtpService', () => {
   let codes: string[]
   let repository: FakeOtpRepository
   let delivery: MemoryOtpDelivery
+  let jobs: MemoryJobQueue
   let service: OtpService
 
+  const lastBody = () => jobs.enqueued.at(-1)!.body as { challengeId: string; sealedCode: string }
   const at = (msAfterT0: number) => {
     now = new Date(T0.getTime() + msAfterT0)
   }
@@ -51,6 +56,7 @@ describe('OtpService', () => {
     new OtpService({
       repository,
       delivery,
+      jobs,
       pepper,
       now: () => now,
       generateCode: () => codes.shift() ?? CODE,
@@ -62,34 +68,120 @@ describe('OtpService', () => {
     codes = []
     repository = new FakeOtpRepository()
     delivery = new MemoryOtpDelivery()
+    jobs = new MemoryJobQueue()
     service = build()
   })
 
   describe('send', () => {
-    it('delivers the generated code to the canonical phone and returns the expiry ten minutes out', async () => {
+    it('returns the challenge id and the expiry ten minutes out, and stores the challenge as queued', async () => {
       const result = await service.send(LOCAL)
 
-      expect(result).toEqual({ expiresAt: new Date(T0.getTime() + 10 * MINUTE) })
-      expect(delivery.sent).toEqual([{ to: PHONE, code: CODE }])
+      expect(result).toEqual({ challengeId: expect.any(String), expiresAt: new Date(T0.getTime() + 10 * MINUTE) })
+      expect(await repository.findById(result.challengeId)).toMatchObject({ phone: PHONE, deliveryStatus: 'queued' })
     })
 
-    it('stores a hash of the code, never the code itself', async () => {
+    it('enqueues exactly one delivery job carrying no phone number, and does not call the provider', async () => {
+      const { challengeId } = await service.send(LOCAL)
+
+      expect(jobs.enqueued).toEqual([
+        { job: deliverOtpSpec.name, body: { challengeId, sealedCode: expect.any(String) } },
+      ])
+      expect(delivery.sent).toEqual([])
+      expect(JSON.stringify(jobs.enqueued)).not.toContain('8031234567')
+    })
+
+    it('keeps the plain code out of the queued message', async () => {
       await service.send(LOCAL)
 
-      const stored = await repository.findLatest(PHONE)
-      expect(stored!.codeHash).not.toBe(CODE)
-      expect(stored!.codeHash).not.toContain(CODE)
-      expect(stored!.createdAt).toEqual(T0)
-      expect(stored!.expiresAt).toEqual(new Date(T0.getTime() + 10 * MINUTE))
-      expect(stored!.attempts).toBe(0)
-      expect(stored!.consumedAt).toBeNull()
+      expect(JSON.stringify(jobs.enqueued)).not.toContain(CODE)
+    })
+
+    it('marks the challenge failed and answers 503 when the job cannot be enqueued', async () => {
+      class DownQueue extends MemoryJobQueue {
+        override async enqueue(): Promise<void> {
+          throw new Error('queue is down')
+        }
+      }
+      jobs = new DownQueue()
+      service = build()
+
+      const error = await errorOf(service.send(LOCAL))
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error).toMatchObject({ code: 'OTP_DELIVERY_UNAVAILABLE' })
+      expect((await repository.findLatest(PHONE))).toMatchObject({ deliveryStatus: 'failed', failureReason: 'unavailable' })
+    })
+
+    it('logs an enqueue failure as enqueue-failed, without the code', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      class DownQueue extends MemoryJobQueue {
+        override async enqueue(): Promise<void> {
+          throw new Error('queue is down')
+        }
+      }
+      jobs = new DownQueue()
+      service = build()
+
+      await errorOf(service.send(LOCAL))
+
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'enqueue-failed' }))
+      expect(JSON.stringify(log.mock.calls)).not.toContain(CODE)
+      log.mockRestore()
+    })
+
+    it('does not count enqueue failures toward the cooldown or the hourly cap', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      class DownQueue extends MemoryJobQueue {
+        override async enqueue(): Promise<void> {
+          throw new Error('queue is down')
+        }
+      }
+      jobs = new DownQueue()
+      service = build()
+      for (let i = 0; i < OTP_POLICY.maxSendsPerHour + 1; i++) {
+        expect(await errorOf(service.send(LOCAL))).toMatchObject({ code: 'OTP_DELIVERY_UNAVAILABLE' })
+      }
+      jobs = new MemoryJobQueue()
+      service = build()
+
+      await expect(service.send(LOCAL)).resolves.toBeDefined()
+      vi.restoreAllMocks()
+    })
+
+    it('does not count a challenge that failed as unavailable toward the cooldown', async () => {
+      const { challengeId } = await service.send(LOCAL)
+      await service.markUndeliverable(challengeId)
+
+      await expect(service.send(LOCAL)).resolves.toBeDefined()
+    })
+
+    it('counts a challenge whose recipient was rejected toward the cooldown', async () => {
+      const { challengeId } = await service.send(LOCAL)
+      delivery.failNextWith(new OtpDeliveryError('recipient-rejected', 'no'))
+      await errorOf(service.deliver(lastBody()))
+      expect((await repository.findById(challengeId))!.failureReason).toBe('recipient-rejected')
+      at(15 * SECOND)
+
+      expect(await errorOf(service.send(LOCAL))).toMatchObject({ code: 'OTP_COOLDOWN', details: { retryAfterSeconds: 45 } })
+    })
+
+    it('counts challenges whose recipient was rejected toward the hourly cap', async () => {
+      for (let i = 0; i < OTP_POLICY.maxSendsPerHour; i++) {
+        at(i * MINUTE)
+        await service.send(LOCAL)
+        delivery.failNextWith(new OtpDeliveryError('recipient-rejected', 'no'))
+        await errorOf(service.deliver(lastBody()))
+      }
+      at(5 * MINUTE)
+
+      expect(await errorOf(service.send(LOCAL))).toMatchObject({ code: 'OTP_SEND_LIMIT' })
     })
 
     it('hashes the same code differently per phone and per pepper', async () => {
       await service.send(E164)
       await service.send(OTHER_PHONE)
       const other = new FakeOtpRepository()
-      await new OtpService({ repository: other, delivery, pepper: 'another-pepper', now: () => now, generateCode: () => CODE }).send(E164)
+      await new OtpService({ repository: other, delivery, jobs, pepper: 'another-pepper', now: () => now, generateCode: () => CODE }).send(E164)
 
       const a = (await repository.findLatest(PHONE))!.codeHash
       const b = (await repository.findLatest(parsePhoneNumber(OTHER_PHONE)))!.codeHash
@@ -98,20 +190,21 @@ describe('OtpService', () => {
     })
 
     it('uses a real random six digit code by default', async () => {
-      const real = new OtpService({ repository, delivery, pepper: PEPPER })
+      const real = new OtpService({ repository, delivery, jobs, pepper: PEPPER })
 
       const { expiresAt } = await real.send(E164)
+      await real.deliver(lastBody())
 
       expect(delivery.lastCodeFor(PHONE)).toMatch(/^\d{6}$/)
       expect(expiresAt.getTime()).toBeGreaterThan(Date.now())
     })
 
-    it('rejects an invalid phone with INVALID_PHONE and sends nothing', async () => {
+    it('rejects an invalid phone with INVALID_PHONE and enqueues nothing', async () => {
       const error = await errorOf(service.send('abc'))
 
       expect(error).toBeInstanceOf(ValidationError)
       expect(error).toMatchObject({ code: 'INVALID_PHONE' })
-      expect(delivery.sent).toEqual([])
+      expect(jobs.enqueued).toEqual([])
     })
 
     it('refuses a resend inside the cooldown and reports the seconds remaining', async () => {
@@ -122,7 +215,7 @@ describe('OtpService', () => {
 
       expect(error).toBeInstanceOf(RateLimitedError)
       expect(error).toMatchObject({ code: 'OTP_COOLDOWN', details: { retryAfterSeconds: 45 } })
-      expect(delivery.sent).toHaveLength(1)
+      expect(jobs.enqueued).toHaveLength(1)
     })
 
     it('rounds the remaining cooldown up to a whole second', async () => {
@@ -143,8 +236,11 @@ describe('OtpService', () => {
       await service.send(LOCAL)
       at(60 * SECOND)
 
-      await expect(service.send(LOCAL)).resolves.toEqual({ expiresAt: new Date(T0.getTime() + 60 * SECOND + 10 * MINUTE) })
-      expect(delivery.sent).toHaveLength(2)
+      await expect(service.send(LOCAL)).resolves.toEqual({
+        challengeId: expect.any(String),
+        expiresAt: new Date(T0.getTime() + 60 * SECOND + 10 * MINUTE),
+      })
+      expect(jobs.enqueued).toHaveLength(2)
     })
 
     it('does not apply the cooldown across different phones', async () => {
@@ -169,7 +265,7 @@ describe('OtpService', () => {
 
         expect(error).toBeInstanceOf(RateLimitedError)
         expect(error).toMatchObject({ code: 'OTP_SEND_LIMIT', details: { retryAfterSeconds: 55 * 60 } })
-        expect(delivery.sent).toHaveLength(5)
+        expect(jobs.enqueued).toHaveLength(5)
       })
 
       it('rounds the wait up to a whole second', async () => {
@@ -197,7 +293,7 @@ describe('OtpService', () => {
         at(HOUR + SECOND)
 
         await expect(service.send(LOCAL)).resolves.toBeDefined()
-        expect(delivery.sent).toHaveLength(6)
+        expect(jobs.enqueued).toHaveLength(6)
       })
 
       it('reports the cooldown, not the cap, when the last send is also recent', async () => {
@@ -217,45 +313,167 @@ describe('OtpService', () => {
         await expect(service.send(OTHER_PHONE)).resolves.toBeDefined()
       })
     })
+  })
 
-    describe('delivery failures', () => {
-      it('maps an unavailable provider to a 503 domain error and stores nothing', async () => {
-        delivery.failNextWith(new OtpDeliveryError('unavailable', 'meta is down'))
+  describe('deliver', () => {
+    it('sends the code to the phone and marks the challenge delivered', async () => {
+      const { challengeId } = await service.send(LOCAL)
 
-        const error = await errorOf(service.send(LOCAL))
+      await service.deliver(lastBody())
 
-        expect(error).toBeInstanceOf(UnavailableError)
-        expect(error).toMatchObject({ code: 'OTP_DELIVERY_UNAVAILABLE' })
-        expect(await repository.findLatest(PHONE)).toBeNull()
-      })
+      expect(delivery.sent).toEqual([{ to: PHONE, code: CODE }])
+      expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'delivered', failureReason: null })
+    })
 
-      it('maps a rejected recipient to PHONE_NOT_REACHABLE and stores nothing', async () => {
-        delivery.failNextWith(new OtpDeliveryError('recipient-rejected', 'not on whatsapp'))
+    it('delivers the very code that verify accepts', async () => {
+      codes.push('135790')
+      await service.send(LOCAL)
 
-        const error = await errorOf(service.send(LOCAL))
+      await service.deliver(lastBody())
 
-        expect(error).toBeInstanceOf(ValidationError)
-        expect(error).toMatchObject({ code: 'PHONE_NOT_REACHABLE' })
-        expect(await repository.findLatest(PHONE)).toBeNull()
-      })
+      expect(delivery.lastCodeFor(PHONE)).toBe('135790')
+      expect(await service.verify(LOCAL, delivery.lastCodeFor(PHONE)!)).toBe(PHONE)
+    })
 
-      it('lets any other error propagate unchanged and stores nothing', async () => {
-        const failure = new Error('bad token')
-        delivery.failNextWith(failure)
+    it('lets verify succeed while delivery is still queued', async () => {
+      const { challengeId } = await service.send(LOCAL)
 
-        expect(await errorOf(service.send(LOCAL))).toBe(failure)
-        expect(await repository.findLatest(PHONE)).toBeNull()
-      })
+      expect(await service.verify(LOCAL, CODE)).toBe(PHONE)
+      expect((await service.deliveryStatus(challengeId)).status).toBe('queued')
+    })
 
-      it('does not start a cooldown or count toward the cap when delivery fails', async () => {
-        for (let i = 0; i < OTP_POLICY.maxSendsPerHour + 1; i++) {
-          delivery.failNextWith(new OtpDeliveryError('unavailable', 'down'))
-          expect(await errorOf(service.send(LOCAL))).toMatchObject({ code: 'OTP_DELIVERY_UNAVAILABLE' })
-        }
+    it('drops a message whose challenge was superseded by a newer send', async () => {
+      await service.send(LOCAL)
+      const stale = lastBody()
+      at(60 * SECOND)
+      await service.send(LOCAL)
 
-        await expect(service.send(LOCAL)).resolves.toBeDefined()
-        expect(delivery.sent).toHaveLength(1)
-      })
+      await expect(service.deliver(stale)).resolves.toBeUndefined()
+
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('drops a message whose challenge has expired', async () => {
+      await service.send(LOCAL)
+      at(10 * MINUTE)
+
+      await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('drops a message whose challenge was already used', async () => {
+      await service.send(LOCAL)
+      await service.verify(LOCAL, CODE)
+
+      await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('drops a repeat of a message already delivered, without sending again', async () => {
+      await service.send(LOCAL)
+      await service.deliver(lastBody())
+
+      await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+      expect(delivery.sent).toHaveLength(1)
+    })
+
+    it('drops a message for a challenge that does not exist', async () => {
+      await service.send(LOCAL)
+      const body = lastBody()
+
+      await expect(service.deliver({ ...body, challengeId: crypto.randomUUID() })).resolves.toBeUndefined()
+
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('drops a message whose challenge already failed', async () => {
+      const { challengeId } = await service.send(LOCAL)
+      await service.markUndeliverable(challengeId)
+
+      await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('fails a rejected recipient permanently and records why', async () => {
+      const { challengeId } = await service.send(LOCAL)
+      delivery.failNextWith(new OtpDeliveryError('recipient-rejected', 'not on whatsapp'))
+
+      expect(await errorOf(service.deliver(lastBody()))).toBeInstanceOf(PermanentJobError)
+
+      expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'recipient-rejected' })
+    })
+
+    it.each([
+      ['an unavailable provider', new OtpDeliveryError('unavailable', 'meta is down')],
+      ['an unexpected error', new Error('bad token')],
+    ])('rethrows %s unchanged and leaves the challenge queued so it can be retried', async (_label, failure) => {
+      const { challengeId } = await service.send(LOCAL)
+      delivery.failNextWith(failure)
+
+      expect(await errorOf(service.deliver(lastBody()))).toBe(failure)
+      expect((await service.deliveryStatus(challengeId)).status).toBe('queued')
+
+      await service.deliver(lastBody())
+      expect((await service.deliveryStatus(challengeId)).status).toBe('delivered')
+      expect(delivery.sent).toEqual([{ to: PHONE, code: CODE }])
+    })
+
+    it('fails permanently and sends nothing when the sealed code was tampered with', async () => {
+      await service.send(LOCAL)
+      const body = lastBody()
+      const i = 10
+      const tampered = body.sealedCode.slice(0, i) + (body.sealedCode[i] === 'A' ? 'B' : 'A') + body.sealedCode.slice(i + 1)
+
+      expect(await errorOf(service.deliver({ ...body, sealedCode: tampered }))).toBeInstanceOf(PermanentJobError)
+      expect(delivery.sent).toEqual([])
+    })
+
+    it('fails permanently and sends nothing when the sealed code belongs to another challenge', async () => {
+      await service.send(E164)
+      const first = lastBody()
+      await service.send(OTHER_PHONE)
+      const second = lastBody()
+
+      expect(await errorOf(service.deliver({ ...second, sealedCode: first.sealedCode }))).toBeInstanceOf(PermanentJobError)
+      expect(delivery.sent).toEqual([])
+    })
+  })
+
+  describe('markUndeliverable', () => {
+    it('fails a queued challenge as unavailable', async () => {
+      const { challengeId } = await service.send(LOCAL)
+
+      await service.markUndeliverable(challengeId)
+
+      expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'unavailable' })
+    })
+
+    it('leaves a delivered challenge delivered', async () => {
+      const { challengeId } = await service.send(LOCAL)
+      await service.deliver(lastBody())
+
+      await service.markUndeliverable(challengeId)
+
+      expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'delivered', failureReason: null })
+    })
+  })
+
+  describe('deliveryStatus', () => {
+    it('reports queued right after send', async () => {
+      const { challengeId } = await service.send(LOCAL)
+
+      expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'queued', failureReason: null })
+    })
+
+    it('answers OTP_CHALLENGE_NOT_FOUND for an unknown challenge', async () => {
+      const error = await errorOf(service.deliveryStatus(crypto.randomUUID()))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error).toMatchObject({ code: 'OTP_CHALLENGE_NOT_FOUND' })
     })
   })
 

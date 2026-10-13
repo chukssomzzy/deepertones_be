@@ -136,8 +136,8 @@ Notes:
 - Never change a pepper while codes are live. Changing it invalidates outstanding codes. That is
   harmless once 10 minutes have passed, so rotate then.
 - While the Meta app is in **development mode**, only numbers added as test recipients receive
-  messages. Any other number fails with Meta error 131030, which the API reports as
-  `PHONE_NOT_REACHABLE`. Switch the app to live mode before real users sign in.
+  messages. Any other number fails with Meta error 131030, which shows up as a failed delivery
+  status with reason `recipient-rejected`. Switch the app to live mode before real users sign in.
 
 ## Deploying
 
@@ -190,10 +190,20 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
+3. Create the job queues (two per environment: the delivery queue and its dead-letter queue). A
+   deploy that binds a missing queue fails:
+
+   ```sh
+   npx wrangler queues create deepertones-otp-delivery-staging
+   npx wrangler queues create deepertones-otp-delivery-dlq-staging
+   npx wrangler queues create deepertones-otp-delivery-production
+   npx wrangler queues create deepertones-otp-delivery-dlq-production
+   ```
+
+4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
    (empty means no browser may call the API).
-4. Set `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` on both environments with `wrangler secret put --env staging` and `--env production`. The deploy fails until they are set. See [WhatsApp OTP setup](#whatsapp-otp-setup).
-5. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
+5. Set `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` on both environments with `wrangler secret put --env staging` and `--env production`. The deploy fails until they are set. See [WhatsApp OTP setup](#whatsapp-otp-setup).
+6. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
 
 ## Troubleshooting
 

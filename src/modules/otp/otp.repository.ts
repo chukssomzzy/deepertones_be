@@ -1,4 +1,4 @@
-import { and, desc, eq, gt, gte, isNull, lt, sql } from 'drizzle-orm'
+import { and, desc, eq, gt, gte, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
 import type { PhoneNumber } from '../../lib/phone'
 import type { PublicOf } from '../../lib/types'
@@ -23,12 +23,18 @@ export class D1OtpRepository {
     return (row as OtpChallenge | undefined) ?? null
   }
 
-  /** Creation times of the phone's challenges at or after `since`, newest first. */
+  /** The challenge with this id, whether or not it is the latest for its phone; null if none. */
+  async findById(id: string): Promise<OtpChallenge | null> {
+    const [row] = await this.db.select().from(otpChallenges).where(eq(otpChallenges.id, id))
+    return (row as OtpChallenge | undefined) ?? null
+  }
+
+  /** Creation times of the phone's challenges at or after `since`, newest first, leaving out those that failed as 'unavailable' (our outage must not use up the person's limits; a rejected recipient still counts). */
   async sendTimes(phone: PhoneNumber, since: Date): Promise<Date[]> {
     const rows = await this.db
       .select({ createdAt: otpChallenges.createdAt })
       .from(otpChallenges)
-      .where(and(eq(otpChallenges.phone, phone), gte(otpChallenges.createdAt, since)))
+      .where(and(eq(otpChallenges.phone, phone), gte(otpChallenges.createdAt, since), or(ne(otpChallenges.deliveryStatus, 'failed'), ne(otpChallenges.failureReason, 'unavailable'))))
       .orderBy(desc(otpChallenges.createdAt))
     return rows.map((r) => r.createdAt)
   }
@@ -50,6 +56,26 @@ export class D1OtpRepository {
       .where(and(eq(otpChallenges.id, id), lt(otpChallenges.attempts, maxAttempts)))
       .returning({ attempts: otpChallenges.attempts })
     return row?.attempts ?? null
+  }
+
+  /** queued -> delivered, once. False if the challenge is unknown or no longer queued. */
+  async markDelivered(id: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(otpChallenges)
+      .set({ deliveryStatus: 'delivered', deliveredAt: at })
+      .where(and(eq(otpChallenges.id, id), eq(otpChallenges.deliveryStatus, 'queued')))
+      .returning({ id: otpChallenges.id })
+    return rows.length === 1
+  }
+
+  /** queued -> failed with a reason, once. A delivered challenge is never overridden. */
+  async markFailed(id: string, reason: NonNullable<OtpChallenge['failureReason']>): Promise<boolean> {
+    const rows = await this.db
+      .update(otpChallenges)
+      .set({ deliveryStatus: 'failed', failureReason: reason })
+      .where(and(eq(otpChallenges.id, id), eq(otpChallenges.deliveryStatus, 'queued')))
+      .returning({ id: otpChallenges.id })
+    return rows.length === 1
   }
 
   /** Marks the challenge used, only if it is unconsumed, under `maxAttempts` failed tries and unexpired at `at`. False otherwise. */

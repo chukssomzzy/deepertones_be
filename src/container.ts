@@ -5,6 +5,7 @@ import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService } from './modules/otp/otp.service'
+import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
 
 /**
@@ -26,6 +27,7 @@ export const buildContainer = (env: CloudflareBindings) => {
     () =>
       new OtpService({
         repository: new D1OtpRepository(db()),
+        jobs: new CloudflareQueuesJobQueue({ 'otp-delivery': env.OTP_DELIVERY_QUEUE }),
         delivery: new MetaWhatsAppOtpDelivery({
           accessToken: env.WHATSAPP_ACCESS_TOKEN,
           phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,

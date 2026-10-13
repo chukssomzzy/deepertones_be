@@ -288,8 +288,36 @@ and `container.otp.verify(phone, code)`.
   60s resend cooldown, and at most 5 sends per number per rolling hour. The template's code expiry
   is set by hand in Meta, so it must match `ttlMinutes`.
 - **A new code supersedes the old one.** Verify checks only the latest challenge.
-- **Deliver before storing.** A failed delivery leaves no challenge, so it starts no cooldown and
-  uses no quota.
+- **`send` stores, then queues; it does not call Meta.** It stores the challenge as `queued`,
+  seals the code and enqueues the `deliver-otp` job, then returns `{ challengeId, expiresAt }`.
+  *Why:* the person no longer waits on Meta, and a Meta outage becomes retries instead of an
+  error. This deliberately reverses the earlier "deliver before storing" rule: the challenge now
+  exists before delivery, so a failed one is marked `failed` and the cooldown and hourly cap count
+  only non-failed challenges, which keeps "a failed send does not use up your limit". If the enqueue
+  itself fails, the challenge is marked failed (`unavailable`) and `send` answers 503.
+- **The code in the queue message is sealed**: AES-256-GCM (`sealText`/`openText`), key =
+  HKDF-SHA-256(`OTP_PEPPER`, info `deepertones/otp-queue/v1`), random 12-byte IV, additional
+  authenticated data = the challenge id. The queue, its dead-letter queue and dashboards never hold
+  a usable code; a sealed code copied into another challenge's message cannot be opened; and the
+  key differs from the HMAC key used for stored hashes because `info` differs. No new secret.
+- **What counts toward the cooldown and hourly cap.** Every challenge counts except those that
+  failed as `unavailable` (our outage or Meta's must not use up the person's limits). A terminal
+  `recipient-rejected` counts like a normal send, which closes a free retry loop. Per-IP/edge rate
+  limiting at the route is still required, for attackers who rotate numbers.
+- **The queue message carries no phone**, only `{ challengeId, sealedCode }`: less personal data in
+  the queue and its dead-letter queue, and the DB row is the authoritative source.
+- **Delivery status** (`queued`, `delivered`, `failed` with `recipient-rejected` or `unavailable`)
+  is read with `deliveryStatus(challengeId)`. `verify` ignores it: a fast typist is not rejected
+  because the status has not caught up. "Delivered" means Meta accepted the message. A challenge whose job was dropped
+  (superseded, expired or used) keeps reporting `queued`: the job is done and nothing was sent. A
+  failed resend replaces the earlier code, because only the latest challenge verifies.
+- **The `deliver-otp` job** (key = challenge id) drops a message whose challenge is no longer the
+  latest for its phone, is expired, used, or no longer `queued`. A rejected recipient is permanent
+  (challenge marked failed, run acked). A seal that cannot be opened is permanent too. Anything
+  else is temporary and retried with full-jitter backoff (base 5s, factor 3, cap 135s), so five
+  attempts finish well inside the 10 minute code life. When retries run out, the dead-letter hook
+  marks the challenge failed (`unavailable`) unless it was delivered. A repeat resends the same
+  code, which is harmless.
 - **Failed attempts and consume are each one conditional UPDATE** (`recordFailedAttempt`,
   `consume`). `consume` succeeds only if the code is unconsumed, under the attempt cap and
   unexpired, so the 5-try limit and single use hold under concurrency. Storing a send is one
@@ -300,12 +328,13 @@ and `container.otp.verify(phone, code)`.
 - **Old rows are purged on send.** Challenges older than 24h for that number are deleted when a
   new one is stored, so the table does not grow without bound.
 - **Error codes are the UI contract.** Send: `INVALID_PHONE` (400), `OTP_COOLDOWN` and
-  `OTP_SEND_LIMIT` (429, with `Retry-After`), `PHONE_NOT_REACHABLE` (400),
-  `OTP_DELIVERY_UNAVAILABLE` (503). Verify: `OTP_INVALID` (400, with `attemptsRemaining`),
+  `OTP_SEND_LIMIT` (429, with `Retry-After`), `OTP_DELIVERY_UNAVAILABLE` (503, only when the
+  enqueue itself fails). A rejected recipient is not a `send` error: it appears later as
+  `deliveryStatus` `failed` with reason `recipient-rejected`. Verify: `OTP_INVALID` (400, with `attemptsRemaining`),
   `OTP_EXPIRED` (400), `OTP_TOO_MANY_ATTEMPTS` (429).
 - **The adapter classifies, the service decides.** The Meta adapter sorts Meta's error codes into
-  `unavailable` and `recipient-rejected` (`OtpDeliveryError`). The service turns those into the
-  domain errors above. Anything else, such as a bad token or missing template, is a configuration
+  `unavailable` and `recipient-rejected` (`OtpDeliveryError`). The `deliver` job turns `recipient-rejected` into a
+  permanent failure recorded on the challenge, and rethrows `unavailable` so the queue retries. Anything else, such as a bad token or missing template, is a configuration
   bug: it is not a `DomainError`, so it becomes a 500.
 - **Real WhatsApp in every environment**, local dev included, so a bad token or template shows up
   before production. Tests never reach Meta: the service runs on `MemoryOtpDelivery` and
@@ -313,7 +342,7 @@ and `container.otp.verify(phone, code)`.
 - **The two secrets are required.** `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` are listed in
   `secrets.required`, so a deploy fails until both are set on that environment's Worker.
 - **Not built yet:** a delivery-status webhook (Meta reports some undeliverable numbers only
-  later, so `PHONE_NOT_REACHABLE` covers the synchronous rejections only), an SMS fallback, and
+  later, so `recipient-rejected` covers the synchronous rejections only), an SMS fallback, and
   auth itself.
 
 ## Adding a module

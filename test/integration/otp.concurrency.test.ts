@@ -4,6 +4,7 @@ import { createDb } from '../../src/lib/db'
 import { parsePhoneNumber } from '../../src/lib/phone'
 import { D1OtpRepository } from '../../src/modules/otp/otp.repository'
 import { OTP_POLICY, OtpService } from '../../src/modules/otp/otp.service'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../src/providers/otp-delivery/memory.otp-delivery'
 
 const T0 = new Date('2030-06-15T12:00:00.000Z')
@@ -16,6 +17,7 @@ describe('OtpService against D1 under concurrency', () => {
     const service = new OtpService({
       repository,
       delivery: new MemoryOtpDelivery(),
+      jobs: new MemoryJobQueue(),
       pepper: 'test-pepper',
       now: () => T0,
       generateCode: () => CODE,
