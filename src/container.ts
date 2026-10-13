@@ -1,3 +1,4 @@
+import { D1JobRunsRepository } from './jobs/job-runs.repository'
 import { createDb } from './lib/db'
 import { once } from './lib/once'
 import { D1HealthRepository } from './modules/health/health.repository'
@@ -46,3 +47,12 @@ export const buildContainer = (env: CloudflareBindings) => {
 }
 
 export type Container = ReturnType<typeof buildContainer>
+
+/**
+ * What a queue consumer needs: the services (what routes get) plus the job-run bookkeeping.
+ * jobRuns stays out of the services Container so routes can never reach a repository.
+ */
+export const buildJobRuntime = (env: CloudflareBindings) => ({
+  services: buildContainer(env),
+  jobRuns: new D1JobRunsRepository(createDb(env.DB)),
+})

@@ -1,6 +1,6 @@
 import { env, exports } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
-import app from '../../src/index'
+import { app } from '../../src/index'
 
 const fetchWorker = (path: string) => exports.default.fetch(new Request(`http://deepertones.test${path}`))
 
