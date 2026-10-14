@@ -56,6 +56,7 @@ test/integration/          tests against real local bindings
 `modules/health` is the reference implementation of every piece above that it needs.
 `providers/otp-delivery/` is the first real provider: the interface, the Meta WhatsApp adapter, and the memory fake.
 `providers/email/` follows the same shape for email.
+`modules/users` owns identity (users, guests, devices); `modules/otp` sends and checks codes.
 
 ## Decisions
 
@@ -249,8 +250,33 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
 - **Only services read it.** Repositories and providers receive values as plain arguments.
 - **Reading it outside a context throws.** Queue/cron handlers and tests wrap work in
   `runAs(actor, fn)`; a forgotten wrapper fails loudly instead of acting as "anonymous".
-- **`Actor` is a tagged union**: `anonymous | user | system`. Every request has one, and services
-  narrow on `kind`. The user variant grows once auth is chosen.
+- **`Actor` is a tagged union**: `public | user { userId, status } | system`. Every request has one, and
+  services narrow on `kind`. `public` means no usable token; a guest is a `user` with status
+  `anonymous`. `RequestContext` also carries a `tokenProblem` (`missing | expired | invalid`) for
+  `public` actors, which the guards turn into the right 401.
+
+### Users and guests
+`modules/users` owns identity. Nothing is wired to routes yet; `container.users` is there for the auth PRs.
+
+- **One `users` table** for guests and verified people. `status` is `anonymous` (a guest) or `verified`;
+  `email` and `phone` are nullable and each unique; `token_version` starts at 0.
+- **`devices` maps a hashed device id to the device's current guest.** The raw device id is never stored.
+- **A device id only ever yields a guest.** If the device's account has been verified since,
+  `guestForDevice` creates a new guest and re-points the device. Getting into a verified account always
+  takes a code, so the device id is never a password.
+- **Promotion is in place.** `promote` turns the calling guest row into a verified one (identifier set,
+  token version + 1) as ONE conditional `UPDATE ... WHERE status = 'anonymous'`, so nothing moves between
+  accounts. The unique index settles a race on the identifier (`taken`).
+- **`existing`** is the answer when the identifier already belongs to another account: that account is
+  returned and the calling guest is left untouched (its data is abandoned by decision).
+- **Actor guards** (`lib/context.ts`): `requireUser()` accepts any user, guests included, and throws
+  401 `AUTH_REQUIRED` (no token), `TOKEN_EXPIRED` or `TOKEN_INVALID`; `requireVerified()` also throws
+  403 `VERIFICATION_REQUIRED` for a guest. Feature-specific locks stay in the feature's service.
+- **Service errors:** `NOT_A_GUEST` (409, promoting an already verified user) and `USER_NOT_FOUND` (404,
+  an unknown user, or an identifier that was taken but whose owner vanished). A verified user presenting
+  their own identifier again gets `existing` back, with nothing written.
+- **Accepted:** two simultaneous first bootstraps from one device can create two guests. The last write
+  wins the device row; the loser is an unreachable guest, cleaned up later.
 
 ### Unit and integration tests
 Both run inside workerd via `@cloudflare/vitest-plugin`; they differ in scope.

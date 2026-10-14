@@ -5,6 +5,8 @@ import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
+import { D1UsersRepository } from './modules/users/users.repository'
+import { UsersService } from './modules/users/users.service'
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
@@ -52,12 +54,17 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const users = once(() => new UsersService({ repository: new D1UsersRepository(db()) }))
+
   return {
     get health() {
       return health()
     },
     get otp() {
       return otp()
+    },
+    get users() {
+      return users()
     },
   }
 }
