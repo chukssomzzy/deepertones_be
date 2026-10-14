@@ -38,6 +38,7 @@ src/
     <feature>.schemas.ts          zod schemas: request AND response (the wire contract)
     <feature>.presenter.ts        domain object → public JSON, typed by its response schema
     <feature>.service.test.ts     unit tests, next to the code
+  emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
                            handler), registry.ts (every job), job-runs.* (idempotency table)
   providers/<capability>/
@@ -266,6 +267,18 @@ against a deliberately violating file.
 It needs **TypeScript ≤ 6**: dependency-cruiser reads TS through the compiler's JS API, which
 TypeScript 7 (the Go port) does not ship yet. On TS 7 it checks 0 modules and passes, so CI
 fails the Architecture job if it ever reports 0 modules.
+
+### Email templates
+
+Everything about how an email looks lives in `src/emails/`. `html.ts` is the escaping `html` tag (every
+interpolation is escaped unless it is `SafeHtml`). `brand.ts` holds the name, colours, fonts and logo URL.
+`components/` are small functions returning `SafeHtml` (layout, header, footer, paragraph, code box).
+`templates/<name>.ts` is one file per email: `defineTemplate({ render(data) -> { subject, preheader?, body }, sample })`,
+registered in `registry.ts`. Callers use `renderEmail(name, data)`; name and data are type-checked, and the
+plain-text part is generated from the HTML (never written by hand). `npm run emails:preview` writes every
+template's sample to `.email-preview/` and opens it. The `emails-are-pure` rule keeps `src/emails/` free of
+modules, providers, jobs, middleware and wiring: templates are pure functions of their data. The logo is a
+PNG on R2 at `assets.deepertones.com` (see README, "Email assets").
 
 ### OTP over WhatsApp
 Sign-in codes are sent through the Meta WhatsApp Cloud API, called directly, using an approved

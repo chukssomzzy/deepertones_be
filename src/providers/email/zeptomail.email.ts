@@ -1,0 +1,99 @@
+import { firstValueFrom } from 'rxjs'
+import { type HttpResponse, HttpTransportError, requestJson$ } from '../../lib/http'
+import { type EmailMessage, type EmailSender, EmailDeliveryError } from './email.provider'
+
+const DEFAULT_TIMEOUT_MS = 8000
+
+/** ZeptoMail detail code for a bad address; with target 'to' it is the recipient, otherwise our own sender. */
+const INVALID_ADDRESS_CODE = 'SM_113'
+
+/*
+ * Codes meaning our own setup is wrong, so they surface as plain errors (a bug or an account task,
+ * not something the user can fix or a retry will cure):
+ *   SERR_157         invalid API key
+ *   SM_111           sender domain not verified
+ *   LE_101, LE_102   no credits left / credits expired
+ *   SM_128, SM_133   account not yet reviewed or approved to send
+ */
+
+export type ZeptoMailEmailSenderConfig = {
+  /** Full send endpoint; the host depends on the ZeptoMail data centre the account lives in. */
+  apiUrl: string
+  apiKey: string
+  fromAddress: string
+  fromName: string
+  /** Give up on ZeptoMail after this long; default 8000. */
+  timeoutMs?: number
+}
+
+/** Sends through the ZeptoMail transactional email API. */
+export class ZeptoMailEmailSender implements EmailSender {
+  constructor(private readonly config: ZeptoMailEmailSenderConfig) {}
+
+  async send(message: EmailMessage): Promise<void> {
+    const { apiUrl, apiKey, fromAddress, fromName, timeoutMs = DEFAULT_TIMEOUT_MS } = this.config
+    // Empty until someone copies them from ZeptoMail; fail here (a bug to fix) rather than send a bad request.
+    if (!apiUrl) throw new Error('ZEPTOMAIL_API_URL is not set')
+    if (!apiKey) throw new Error('ZEPTOMAIL_API_KEY is not set')
+    let response: HttpResponse
+    try {
+      response = await firstValueFrom(
+        requestJson$(apiUrl, {
+          method: 'POST',
+          timeoutMs,
+          headers: {
+            Authorization: `Zoho-enczapikey ${apiKey}`,
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            from: { address: fromAddress, name: fromName },
+            to: [{ email_address: { address: message.to } }],
+            subject: message.subject,
+            htmlbody: message.html,
+            textbody: message.text,
+            ...(message.reference !== undefined && { client_reference: message.reference }),
+            track_opens: false,
+            track_clicks: false,
+          }),
+        }),
+      )
+    } catch (error) {
+      if (error instanceof HttpTransportError) {
+        throw new EmailDeliveryError('unavailable', 'ZeptoMail request failed before a response')
+      }
+      throw error
+    }
+    if (response.ok) return
+
+    const { code, details } = zeptoErrors(response.body)
+    const codes = `code ${code ?? 'none'}, details ${details.map((d) => d.code).join(',') || 'none'}`
+    if (details.some((d) => d.code === INVALID_ADDRESS_CODE && d.target === 'to')) {
+      throw new EmailDeliveryError('recipient-rejected', `ZeptoMail rejected the recipient (HTTP ${response.status}, ${codes})`)
+    }
+    if (response.status >= 500 || response.status === 429) {
+      throw new EmailDeliveryError('unavailable', `ZeptoMail unavailable (HTTP ${response.status}, ${codes})`)
+    }
+    // Our own configuration or account is wrong (key, sender domain, credits...): a bug, not a user problem.
+    throw new Error(`ZeptoMail send failed (HTTP ${response.status}, ${codes})`)
+  }
+}
+
+// Vendor codes go into our error messages, so accept only code-shaped strings: a vendor that echoes
+// free text (an address, say) must never reach our logs.
+const CODE_SHAPE = /^[A-Z0-9_]{1,16}$/
+const safeCode = (value: unknown): string | undefined =>
+  typeof value === 'string' && CODE_SHAPE.test(value) ? value : undefined
+
+const zeptoErrors = (body: unknown): { code: string | undefined; details: { code: string; target?: string }[] } => {
+  const error = (body as { error?: { code?: unknown; details?: unknown } } | null)?.error
+  const details = Array.isArray(error?.details) ? (error.details as unknown[]) : []
+  return {
+    code: safeCode(error?.code),
+    details: details.flatMap((d) => {
+      const { code, target } = (d ?? {}) as { code?: unknown; target?: unknown }
+      const safe = safeCode(code)
+      return safe ? [{ code: safe, ...(typeof target === 'string' && { target }) }] : []
+    }),
+  }
+}

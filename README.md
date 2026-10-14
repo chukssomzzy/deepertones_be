@@ -139,6 +139,21 @@ Notes:
   messages. Any other number fails with Meta error 131030, which shows up as a failed delivery
   status with reason `recipient-rejected`. Switch the app to live mode before real users sign in.
 
+## Email assets
+
+Email images are served from the R2 bucket `deepertones-assets` on the custom domain `assets.deepertones.com`,
+shared by every environment. One-time setup:
+
+1. `npx wrangler r2 bucket create deepertones-assets`
+2. Connect the custom domain in the Cloudflare dashboard, or
+   `npx wrangler r2 bucket domain add deepertones-assets --domain assets.deepertones.com --zone-id <zone>`
+3. `npm run assets:upload` (uploads `assets/email/logo.png`; rerun whenever the file changes)
+
+Creating the bucket and domain and running `npm run assets:upload` happen once, by the account owner (or with their
+go-ahead); they are not part of normal development.
+
+Gmail and Outlook do not render SVG, so the logo is a PNG at 2x its display size.
+
 ## Deploying
 
 A merge is a deploy; nobody deploys by hand.
