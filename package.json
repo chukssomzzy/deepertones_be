@@ -20,6 +20,7 @@
     "openapi": "tsx scripts/openapi.ts",
     "emails:preview": "tsx scripts/email-preview.ts",
     "assets:sync": "tsx scripts/sync-assets.ts",
+    "secrets:push": "tsx scripts/push-secrets.ts",
     "openapi:lint": "REDOCLY_TELEMETRY=off redocly lint docs/openapi.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
