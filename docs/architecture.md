@@ -40,7 +40,7 @@ src/
     <feature>.service.test.ts     unit tests, next to the code
   emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
-                           handler), registry.ts (every job), job-runs.* (idempotency table)
+                           and scheduled handlers), registry.ts (every job), job-runs.* (idempotency table)
   providers/<capability>/
     <capability>.provider.ts      interface services depend on
     <vendor>.<capability>.ts      one adapter per vendor
@@ -136,7 +136,8 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   (`concrete-classes-only-in-container`), and `jobRuns` is kept out of the services `Container` so a
   route can never reach a repository.
 - **Rules**: `job-registry-only-in-entry` (above), and `context-only-in-services` lets
-  `src/jobs/dispatcher.ts` call `runAs`.
+  `src/jobs/dispatcher.ts` call `runAs`. That is why the Worker's `scheduled` (cron) entry also lives
+  there: it is the one runAs-allowlisted jobs entry, and a separate file would need a rule change.
 
 ### Outbound HTTP
 Provider adapters call vendors through `lib/http.ts` (`requestJson$`), built on rxjs `fromFetch`.
@@ -277,6 +278,25 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
   their own identifier again gets `existing` back, with nothing written.
 - **Accepted:** two simultaneous first bootstraps from one device can create two guests. The last write
   wins the device row; the loser is an unreachable guest, cleaned up later.
+
+### Guest cleanup
+A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each env block) runs
+`UsersService.purgeUnreachableGuests` through the Worker's `scheduled` export (`createScheduledHandler` in
+`jobs/dispatcher.ts`), as the system actor `guest-cleanup`.
+
+- **What goes:** guests (`status = 'anonymous'`) that no `devices` row points at and that were last seen more
+  than 90 days ago (strictly: exactly 90 days is kept). Their device rows go with them (cascade). Verified
+  users are never selected, and `deleteUsers` re-checks `status = 'anonymous'`, so a user row is never
+  deleted after a promotion. Cleaners run before that check, so in theory a promotion between the select and
+  the cleaners could lose that guest's data; in practice it cannot happen, because a guest idle for 90 days
+  holds no valid refresh token (60-day lifetime) and no device re-links to an old guest.
+- **How much:** batches of 500, at most 5000 per run; the next day's run takes the rest.
+- **Cleaners:** a module that stores per-user data adds a `GuestDataCleaner` (`{ name, deleteFor(userIds) }`)
+  to `guestDataCleaners` in the container. Every cleaner sees each batch BEFORE the user rows are deleted, so
+  data never outlives its owner; make them safe to repeat. A cleaner that throws aborts the run and that
+  batch's users stay for the next run.
+- **Failure:** logged as `{ job: 'guest-cleanup', outcome: 'failed', error }` and rethrown so Cloudflare
+  records the cron as failed.
 
 ### Tokens and the auth middleware
 `lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`

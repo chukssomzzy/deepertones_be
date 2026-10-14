@@ -213,3 +213,99 @@ describe('UsersService reads and housekeeping', () => {
     expect((await service.guestForDevice('dev-1', 'ios')).id).not.toBe(guest.id)
   })
 })
+
+describe('UsersService.purgeUnreachableGuests', () => {
+  const DAY = 24 * 60 * MINUTE
+  const RETENTION = 90 * DAY
+  const seen = (msBeforeNow: number) => new Date(T0.getTime() - msBeforeNow)
+
+  // A guest last seen at `seenAt`, with its device unlinked unless `linked`.
+  const seed = async (repository: FakeUsersRepository, id: string, seenAt: Date, linked = false) => {
+    await repository.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `dev-${id}`, platform: 'ios' } })
+    if (!linked) await repository.unlinkDevices(id)
+  }
+
+  it('deletes an unreachable guest last seen more than 90 days ago and reports the count', async () => {
+    const { repository, service } = setup()
+    await seed(repository, 'old', seen(RETENTION + 1))
+
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 1 })
+
+    expect(await repository.findById('old')).toBeNull()
+  })
+
+  it('keeps a guest last seen exactly 90 days ago', async () => {
+    const { repository, service } = setup()
+    await seed(repository, 'edge', seen(RETENTION))
+
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 0 })
+
+    expect(await repository.findById('edge')).not.toBeNull()
+  })
+
+  it('keeps a guest a device still points at, and a verified user', async () => {
+    const { repository, service } = setup()
+    await seed(repository, 'linked', seen(RETENTION + DAY), true)
+    await seed(repository, 'verified', seen(RETENTION + DAY))
+    await repository.promote('verified', email('v'), seen(RETENTION + DAY))
+
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 0 })
+
+    expect(await repository.findById('linked')).not.toBeNull()
+    expect(await repository.findById('verified')).not.toBeNull()
+  })
+
+  it('purges across batches of 500 until none are left, handing each batch to the cleaners first', async () => {
+    const { repository } = setup()
+    for (let i = 0; i < 1200; i++) await seed(repository, `g${i}`, seen(RETENTION + DAY + i))
+    const batches: number[] = []
+    const service = new UsersService({
+      repository,
+      now: () => T0,
+      guestDataCleaners: [{ name: 'sizes', deleteFor: async (ids) => void batches.push(ids.length) }],
+    })
+
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 1200 })
+
+    expect(batches).toEqual([500, 500, 200])
+  })
+
+  it('stops at 5000 deletions per run and finishes the rest on the next run', async () => {
+    const { repository, service } = setup()
+    for (let i = 0; i < 5100; i++) await seed(repository, `g${i}`, seen(RETENTION + DAY))
+
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 5000 })
+    expect(await service.purgeUnreachableGuests()).toEqual({ deleted: 100 })
+  })
+
+  it('runs every cleaner with the batch before the guests are deleted', async () => {
+    const repository = new FakeUsersRepository()
+    await seed(repository, 'old', seen(RETENTION + DAY))
+    const seenByCleaner: Record<string, { ids: string[]; stillThere: boolean }> = {}
+    const cleaner = (name: string) => ({
+      name,
+      deleteFor: async (ids: string[]) => {
+        seenByCleaner[name] = { ids, stillThere: (await repository.findById('old')) !== null }
+      },
+    })
+    const service = new UsersService({ repository, now: () => T0, guestDataCleaners: [cleaner('a'), cleaner('b')] })
+
+    await service.purgeUnreachableGuests()
+
+    expect(seenByCleaner).toEqual({ a: { ids: ['old'], stillThere: true }, b: { ids: ['old'], stillThere: true } })
+  })
+
+  it('aborts when a cleaner throws, leaving that batch undeleted', async () => {
+    const repository = new FakeUsersRepository()
+    await seed(repository, 'old', seen(RETENTION + DAY))
+    const service = new UsersService({
+      repository,
+      now: () => T0,
+      guestDataCleaners: [{ name: 'broken', deleteFor: async () => { throw new Error('cleaner down') } }],
+    })
+
+    await expect(service.purgeUnreachableGuests()).rejects.toThrow('cleaner down')
+
+    expect(await repository.findById('old')).not.toBeNull()
+  })
+})

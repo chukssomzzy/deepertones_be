@@ -1,5 +1,5 @@
 import type { z } from 'zod'
-import { buildJobRuntime, type Container } from '../container'
+import { buildContainer, buildJobRuntime, type Container } from '../container'
 import { runAs } from '../lib/context'
 import { type JobDefinition, PermanentJobError, queueNames } from './job'
 
@@ -112,6 +112,24 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
       await jobRuns.purgeOlderThan(new Date(now().getTime() - KEEP_RUNS_MS))
     } catch (error) {
       console.error({ job: job.name, outcome: 'purge-failed', error: String(error) })
+    }
+  }
+}
+
+/**
+ * The Worker's `scheduled` export: the daily guest cleanup. Runs as a system actor. A failure is logged and
+ * rethrown so Cloudflare records the run as failed; the next day's run picks up where this one stopped.
+ * Lives here, not in its own file, because this is the one jobs entry the context-only-in-services rule lets call runAs.
+ */
+export const createScheduledHandler = () => {
+  return async (_controller: ScheduledController, env: CloudflareBindings, _ctx?: ExecutionContext): Promise<void> => {
+    const job = 'guest-cleanup'
+    try {
+      const { deleted } = await runAs({ kind: 'system', job }, () => buildContainer(env).users.purgeUnreachableGuests())
+      console.log({ job, outcome: 'done', deleted })
+    } catch (error) {
+      console.error({ job, outcome: 'failed', error: String(error) })
+      throw error
     }
   }
 }

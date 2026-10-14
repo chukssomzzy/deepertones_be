@@ -9,7 +9,9 @@ export const users = sqliteTable('users', {
   tokenVersion: integer('token_version').notNull().default(0),
   createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   lastSeenAt: integer('last_seen_at', { mode: 'timestamp_ms' }).notNull(),
-})
+},
+(t) => [index('users_status_last_seen_at_idx').on(t.status, t.lastSeenAt)],
+)
 
 /** Maps a hashed device id to the device's current guest. The raw device id is never stored. */
 export const devices = sqliteTable(

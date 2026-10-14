@@ -1,0 +1,1 @@
+CREATE INDEX `users_status_last_seen_at_idx` ON `users` (`status`,`last_seen_at`);

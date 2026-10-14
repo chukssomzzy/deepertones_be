@@ -2,19 +2,31 @@ import { ConflictError, NotFoundError } from '../../lib/errors'
 import type { UsersRepository } from './users.repository'
 import type { Device, User, UserIdentifier } from './users.types'
 
+const DAY_MS = 24 * 60 * 60 * 1000
+const GUEST_RETENTION_DAYS = 90
+const PURGE_BATCH = 500
+const PURGE_MAX_PER_RUN = 5000
+
+/** Removes whatever a module stores per user. Must be safe to repeat: a failed run is retried from the same guests. */
+export type GuestDataCleaner = { name: string; deleteFor: (userIds: string[]) => Promise<void> }
+
 export type UsersServiceDeps = {
   repository: UsersRepository
+  /** One per module that keeps per-user data; each runs for a batch before those users are deleted. */
+  guestDataCleaners?: GuestDataCleaner[]
   now?: () => Date
   newId?: () => string
 }
 
 export class UsersService {
   private readonly repository: UsersRepository
+  private readonly guestDataCleaners: GuestDataCleaner[]
   private readonly now: () => Date
   private readonly newId: () => string
 
   constructor(deps: UsersServiceDeps) {
     this.repository = deps.repository
+    this.guestDataCleaners = deps.guestDataCleaners ?? []
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
@@ -87,5 +99,27 @@ export class UsersService {
   /** Detaches every device from the user, so each gets a fresh guest next time. Returns how many. */
   async unlinkDevices(userId: string): Promise<number> {
     return this.repository.unlinkDevices(userId)
+  }
+
+  /**
+   * Deletes guests that can no longer be reached: no device points at them and they were last seen more
+   * than 90 days ago. Verified users are never selected. Works in batches of 500 and stops after 5000 a run
+   * (the next run continues). Each batch goes to every cleaner BEFORE the user rows are deleted, so data
+   * never outlives its owner; a cleaner that throws aborts the run and that batch's users stay for the next
+   * run. Modules that store per-user data must add a cleaner in the container.
+   */
+  async purgeUnreachableGuests(): Promise<{ deleted: number }> {
+    const cutoff = new Date(this.now().getTime() - GUEST_RETENTION_DAYS * DAY_MS)
+    let deleted = 0
+    while (deleted < PURGE_MAX_PER_RUN) {
+      const ids = await this.repository.unreachableGuestIds(cutoff, Math.min(PURGE_BATCH, PURGE_MAX_PER_RUN - deleted))
+      if (ids.length === 0) break
+      for (const cleaner of this.guestDataCleaners) await cleaner.deleteFor(ids)
+      const count = await this.repository.deleteUsers(ids)
+      // Nothing deleted means the ids would be selected again forever.
+      if (count === 0) break
+      deleted += count
+    }
+    return { deleted }
   }
 }
