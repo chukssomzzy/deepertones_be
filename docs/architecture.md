@@ -8,7 +8,7 @@ Architecture job in CI). If a rule and this document disagree, fix one of them.
 
 ```
 request
-  → middleware: requestId · logger · cors · secureHeaders · requestContext · container
+  → middleware: requestId · logger · cors · secureHeaders · container · auth · requestContext
   → route        declared with defineRoute (validates input, documents itself),
                  calls ONE service method, returns ok(...)
   → service      business logic; reads currentActor(); throws domain errors
@@ -25,8 +25,8 @@ src/
   index.ts                 app assembly; exports AppType for the typed client
   container.ts             composition root: the ONLY file that knows concrete classes
   docs.ts                  spec header, /openapi.json and Swagger UI at /docs
-  middleware/              requestContext, container, cors
-  lib/                     shared plumbing: factory, errors, openapi, context, db, http, once
+  middleware/              requestContext, container, cors, auth
+  lib/                     shared plumbing: factory, errors, openapi, actor, context, jwt, db, http, once
   modules/<feature>/
     <feature>.routes.ts           thin controller
     <feature>.service.ts          business logic
@@ -277,6 +277,31 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
   their own identifier again gets `existing` back, with nothing written.
 - **Accepted:** two simultaneous first bootstraps from one device can create two guests. The last write
   wins the device row; the loser is an unreachable guest, cleaned up later.
+
+### Tokens and the auth middleware
+`lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`
+(`TokenService`) issues and verifies the two kinds. The `auth` middleware turns a bearer token into the actor.
+
+- **Two tokens**: a 15-minute access token (`sub`, `st` status, `ver` token version, `typ: access`) and a 60-day
+  refresh token (`sub`, `ver`, `typ: refresh`). `typ` keeps them apart: a refresh token as a bearer, or an access
+  token at refresh, is `invalid`.
+- **HS256 with a key id.** The header carries `kid` (first 16 hex of SHA-256 of the secret), so verification picks
+  the secret by `kid`. `JWT_SECRET` signs; `JWT_SECRET_PREVIOUS`, when set, verifies only. Rotating therefore signs
+  nobody out. The algorithm is checked strictly, the signature in constant time, and `expired` is reported only
+  after the signature is valid, so a forged expired token is `invalid`.
+- **`token_version` is checked only at refresh**, by the refresh flow (next PR), which compares the token's `ver`
+  with the user's row. `TokenService` has no database access, and the middleware does no database read.
+- **The middleware never rejects.** It runs after `container` (it needs `services.tokens`; the container is lazy, so
+  this is cheap) and before `requestContext`, so it (like any middleware before it, such as a future rate limiter)
+  runs outside the request context and must not call services that read `currentActor`/`requireUser`, and stores `c.var.auth = { actor, tokenProblem? }`. No header is
+  `missing`; a non-Bearer scheme, a bad or wrong-type token is `invalid`; a correctly signed but old one is
+  `expired`. An expired token must not block `/auth/refresh`, and public routes ignore the header. The guards turn
+  the problem into `AUTH_REQUIRED`, `TOKEN_EXPIRED` or `TOKEN_INVALID` (401), and a guest on a verified-only route
+  into `VERIFICATION_REQUIRED` (403).
+- **Secrets**: `JWT_SECRET` and `DEVICE_ID_KEY` are required (different per environment); `DEVICE_ID_KEY` must never
+  rotate.
+- **Accepted risks**: a stolen refresh token works until the user logs out (it slides for up to 60 days); a logout
+  reaches the user's other devices within 15 minutes, when their access tokens expire and their refresh fails.
 
 ### Unit and integration tests
 Both run inside workerd via `@cloudflare/vitest-plugin`; they differ in scope.

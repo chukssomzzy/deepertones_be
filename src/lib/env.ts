@@ -7,6 +7,9 @@ import type { RequestIdVariables } from 'hono/request-id'
 export type BaseEnv = { Bindings: CloudflareBindings; Variables: RequestIdVariables }
 
 /**
+ * JWT_SECRET_PREVIOUS is optional too: it is set only during a JWT_SECRET rotation, for verifying tokens
+ * signed with the old secret, so it is not in `secrets.required`.
+ *
  * WHATSAPP_ACCESS_TOKEN is a secret that is NOT in `secrets.required` (WhatsApp is off until it is
  * added to OTP_CHANNELS), so `wrangler types` no longer emits it. Declared here, optional, so the
  * container and tests can still read it; the WhatsApp adapter fails loudly if it is enabled without one.
@@ -16,10 +19,12 @@ export type BaseEnv = { Bindings: CloudflareBindings; Variables: RequestIdVariab
 declare global {
   interface CloudflareBindings {
     WHATSAPP_ACCESS_TOKEN?: string
+    JWT_SECRET_PREVIOUS?: string
   }
   namespace Cloudflare {
     interface Env {
       WHATSAPP_ACCESS_TOKEN?: string
+      JWT_SECRET_PREVIOUS?: string
     }
   }
 }

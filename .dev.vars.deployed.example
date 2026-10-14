@@ -31,3 +31,18 @@ OTP_PEPPER=
 # WhatsApp Cloud API access token (Meta → WhatsApp → API setup; a permanent system-user token).
 # Optional: only needed once whatsapp is in OTP_CHANNELS.
 WHATSAPP_ACCESS_TOKEN=
+
+# Signs and verifies access and refresh tokens. Required.
+# Generate with: openssl rand -hex 32
+# MUST differ between staging and production.
+# To rotate: copy the current value into JWT_SECRET_PREVIOUS, put the new one here, push both, and
+# clear JWT_SECRET_PREVIOUS once the refresh tokens signed with the old one (60 days) have expired.
+JWT_SECRET=
+
+# Only during a JWT_SECRET rotation: the old secret, accepted for verification only. Optional.
+JWT_SECRET_PREVIOUS=
+
+# Keys the hash of each device id. Required. Generate with: openssl rand -hex 32
+# MUST differ between staging and production.
+# NEVER ROTATE: a new key makes every device look new, orphaning every existing guest's data.
+DEVICE_ID_KEY=

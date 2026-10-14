@@ -27,6 +27,20 @@ export const SECRETS: Record<string, SecretSpec> = {
       'OtpService mixes it into stored code hashes, and the delivery queue seals the code in flight with it. Must differ between environments.',
     required: true,
   },
+  JWT_SECRET: {
+    reason:
+      'TokenService signs and verifies access and refresh tokens with it. Must differ between environments. Rotate by moving the old value to JWT_SECRET_PREVIOUS.',
+    required: true,
+  },
+  JWT_SECRET_PREVIOUS: {
+    reason: 'TokenService still accepts tokens signed with it, for verification only, during a JWT_SECRET rotation.',
+    required: false,
+  },
+  DEVICE_ID_KEY: {
+    reason:
+      'The auth flow keys the hash of each device id with it. NEVER rotate: rotating orphans every device\'s guest.',
+    required: true,
+  },
   WHATSAPP_ACCESS_TOKEN: {
     reason:
       'MetaWhatsAppOtpDelivery calls the Meta Cloud API with it. Optional until whatsapp is in OTP_CHANNELS.',

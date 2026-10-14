@@ -50,20 +50,30 @@ describe('parseEnvFile', () => {
 })
 
 describe('SECRETS', () => {
-  it('lists exactly the three known secrets, two of them required', () => {
-    expect(Object.keys(SECRETS).sort()).toEqual(['OTP_PEPPER', 'WHATSAPP_ACCESS_TOKEN', 'ZEPTOMAIL_API_KEY'])
+  it('lists exactly the known secrets, with the right ones required', () => {
+    expect(Object.keys(SECRETS).sort()).toEqual([
+      'DEVICE_ID_KEY',
+      'JWT_SECRET',
+      'JWT_SECRET_PREVIOUS',
+      'OTP_PEPPER',
+      'WHATSAPP_ACCESS_TOKEN',
+      'ZEPTOMAIL_API_KEY',
+    ])
     expect(SECRETS.ZEPTOMAIL_API_KEY!.required).toBe(true)
     expect(SECRETS.OTP_PEPPER!.required).toBe(true)
+    expect(SECRETS.JWT_SECRET!.required).toBe(true)
+    expect(SECRETS.DEVICE_ID_KEY!.required).toBe(true)
+    expect(SECRETS.JWT_SECRET_PREVIOUS!.required).toBe(false)
     expect(SECRETS.WHATSAPP_ACCESS_TOKEN!.required).toBe(false)
   })
 })
 
 describe('planSecretPush', () => {
-  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a' }
+  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk' }
 
   it('sends known secrets that have a value', () => {
     const plan = planSecretPush({ values: map({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' }) })
-    expect(plan.send).toEqual({ ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', WHATSAPP_ACCESS_TOKEN: 'wa' })
+    expect(plan.send).toEqual({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' })
     expect(plan.blank).toEqual([])
     expect(plan.unknown).toEqual([])
     expect(plan.errors).toEqual([])
@@ -99,8 +109,8 @@ describe('planSecretPush', () => {
   })
 
   it('warns, without erroring, about required secrets that are absent or blank (sorted)', () => {
-    expect(planSecretPush({ values: map({}) }).missingRequired).toEqual(['OTP_PEPPER', 'ZEPTOMAIL_API_KEY'])
-    const blankOne = planSecretPush({ values: map({ ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: '' }) })
+    expect(planSecretPush({ values: map({}) }).missingRequired).toEqual(['DEVICE_ID_KEY', 'JWT_SECRET', 'OTP_PEPPER', 'ZEPTOMAIL_API_KEY'])
+    const blankOne = planSecretPush({ values: map({ ...good, OTP_PEPPER: '' }) })
     expect(blankOne.missingRequired).toEqual(['OTP_PEPPER'])
     expect(blankOne.errors).toEqual([])
   })
