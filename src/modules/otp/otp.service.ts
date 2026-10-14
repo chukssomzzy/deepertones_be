@@ -53,7 +53,7 @@ export const parseOtpChannels = (raw: string): OtpChannel[] =>
       return name as OtpChannel
     })
 
-const parseRecipient = (channel: OtpChannel, address: string): OtpRecipient =>
+export const parseRecipient = (channel: OtpChannel, address: string): OtpRecipient =>
   channel === 'email' ? { channel, address: parseEmailAddress(address) } : { channel, address: parsePhoneNumber(address) }
 
 export class OtpService {

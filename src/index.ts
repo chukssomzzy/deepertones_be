@@ -10,6 +10,7 @@ import { auth } from './middleware/auth'
 import { container } from './middleware/container'
 import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
+import { authRoutes, meRoutes } from './modules/auth/auth.routes'
 import { healthRoutes } from './modules/health/health.routes'
 
 export const app = openapiApp()
@@ -23,7 +24,7 @@ app.use(requestId(), logger(), cors, secureHeaders(), container, auth, requestCo
 
 // Keep this a single chain: AppType is inferred from it, and the frontend's
 // typed client (hc<AppType>) only sees routes mounted inside the chain.
-const routes = app.route('/health', healthRoutes)
+const routes = app.route('/health', healthRoutes).route('/auth', authRoutes).route('/me', meRoutes)
 
 mountDocs(app)
 app.onError(errorHandler)

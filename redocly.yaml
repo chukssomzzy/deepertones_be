@@ -4,9 +4,6 @@ extends:
   - recommended
 
 rules:
-  # There is no auth yet, so no security scheme to reference. When auth lands, define the
-  # scheme in apiDocument, mark public routes `security: []`, and remove this line.
-  security-defined: off
   # A private API: there is no license to state.
   info-license: off
   # defineRoute adds every 4xx a route can actually produce (400 for input, 415 for a body,

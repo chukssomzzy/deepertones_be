@@ -10,6 +10,7 @@ const getHealth = defineRoute({
   tags: ['Health'],
   summary: 'Check the API and its dependencies',
   description: 'For uptime checks: the status code alone says whether the API can serve requests.',
+  security: [],
   responses: {
     200: success(HealthResponse, 'Everything is reachable'),
     ...errorResponses(503),
