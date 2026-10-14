@@ -18,7 +18,11 @@ node_modules/
 # env
 .env
 .env.production
+# local and per-environment secrets; only the two examples are committed
 .dev.vars
+.dev.vars.*
+!.dev.vars.example
+!.dev.vars.deployed.example
 
 # logs
 logs/

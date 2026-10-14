@@ -93,7 +93,15 @@ else console.error(body.error.code) // see "Response shape"
 ## Config & secrets
 
 - Non-secret config lives in `vars` in `wrangler.jsonc`.
-- Local secrets go in `.dev.vars` (see `.dev.vars.example`); production secrets via `npx wrangler secret put NAME`.
+- Secrets live in three gitignored files. `.dev.vars` is for `wrangler dev` (copy `.dev.vars.example`).
+  `.dev.vars.staging` and `.dev.vars.production` are for the deployed Workers (copy
+  `.dev.vars.deployed.example`). Note `wrangler dev --env staging` would load `.dev.vars.staging`, i.e. real
+  staging credentials.
+- `npm run secrets:push -- --env staging` reports what it would send to that Worker (names only, never values)
+  and sends nothing; add `--apply` to send. Blank entries are left alone, names that are `vars` in
+  `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
+  The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
+  works as a one-off alternative.
 - Required secrets: `ZEPTOMAIL_API_KEY` and `OTP_PEPPER`. Both are listed in `secrets.required`, so a deploy fails until they are set on that environment. Setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
@@ -115,14 +123,16 @@ the setup below. Tests never call ZeptoMail and need no secrets.
 5. Create the "Send Mail token" (Mail Agent → Setup Info → API) and set it as `ZEPTOMAIL_API_KEY`:
    - Locally, in `.dev.vars` (copy `.dev.vars.example`; also set `OTP_PEPPER` to the output of
      `openssl rand -hex 32`).
-   - For each deployed environment:
+   - For each deployed environment, fill in `.dev.vars.staging` / `.dev.vars.production` (copied from
+     `.dev.vars.deployed.example`), then:
 
      ```sh
-     npx wrangler secret put ZEPTOMAIL_API_KEY --env staging
-     npx wrangler secret put OTP_PEPPER --env staging
-     npx wrangler secret put ZEPTOMAIL_API_KEY --env production
-     npx wrangler secret put OTP_PEPPER --env production
+     npm run secrets:push -- --env staging            # report only
+     npm run secrets:push -- --env staging --apply
+     npm run secrets:push -- --env production --apply
      ```
+
+     One-off alternative: `npx wrangler secret put ZEPTOMAIL_API_KEY --env staging`.
 
 `OTP_CHANNELS` in `wrangler.jsonc` lists the channels people can sign in with; it is `email` today.
 Use a **different** `OTP_PEPPER` in each environment, and never change a pepper while codes are
@@ -157,12 +167,9 @@ secrets.
    blocks do not inherit `vars`, so each one needs it.
 6. Set the token (`OTP_PEPPER` is already set, see [ZeptoMail setup](#zeptomail-setup)):
    - Locally, set `WHATSAPP_ACCESS_TOKEN` in `.dev.vars`.
-   - For each deployed environment:
-
-     ```sh
-     npx wrangler secret put WHATSAPP_ACCESS_TOKEN --env staging
-     npx wrangler secret put WHATSAPP_ACCESS_TOKEN --env production
-     ```
+   - For each deployed environment, set it in `.dev.vars.staging` / `.dev.vars.production` and run
+     `npm run secrets:push -- --env staging --apply` (then `production`). Leave `OTP_PEPPER` blank there so it
+     is not overwritten. One-off alternative: `npx wrangler secret put WHATSAPP_ACCESS_TOKEN --env staging`.
 
 Notes:
 
@@ -269,7 +276,7 @@ stopped using it.
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
    (empty means no browser may call the API).
-5. Set `ZEPTOMAIL_API_KEY` and `OTP_PEPPER` on both environments with `wrangler secret put --env staging` and `--env production`. The deploy fails until they are set. See [ZeptoMail setup](#zeptomail-setup). WhatsApp is optional and off until Meta approves the template ([WhatsApp OTP setup](#whatsapp-otp-setup)).
+5. Set `ZEPTOMAIL_API_KEY` and `OTP_PEPPER` on both environments with `npm run secrets:push -- --env staging --apply` and `--env production --apply` (see [Config & secrets](#config--secrets)). The deploy fails until they are set. See [ZeptoMail setup](#zeptomail-setup). WhatsApp is optional and off until Meta approves the template ([WhatsApp OTP setup](#whatsapp-otp-setup)).
 6. Run "Deploy staging" once by hand (Actions → Deploy staging → Run workflow) to check the credentials.
 
 ## Troubleshooting

@@ -5,7 +5,7 @@
   "compatibility_date": "2026-10-10",
   "compatibility_flags": ["nodejs_compat"],
 
-  // Non-secret config. Secrets go in .dev.vars locally and `wrangler secret put` in prod.
+  // Non-secret config. Secrets go in .dev.vars locally, and in .dev.vars.<env> pushed with `npm run secrets:push` when deployed.
   // After changing vars or bindings, run `npm run cf-typegen` so c.env stays typed.
   "vars": {
     "ENVIRONMENT": "development",
@@ -26,8 +26,8 @@
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
     "WHATSAPP_OTP_LANGUAGE": "en"
   },
-  // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
-  // have been run for this environment (add --env staging / --env production).
+  // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+  // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
   "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
 
@@ -106,8 +106,8 @@
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
-      // have been run for this environment (add --env staging / --env production).
+      // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+      // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
       "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
@@ -162,8 +162,8 @@
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
-      // have been run for this environment (add --env staging / --env production).
+      // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+      // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
       "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;

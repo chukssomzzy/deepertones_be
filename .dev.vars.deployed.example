@@ -1,0 +1,33 @@
+# The secrets a *deployed* environment needs: the template for `.dev.vars.staging` and
+# `.dev.vars.production`, both gitignored and never leaving the machine they are filled in on.
+#
+# This is not `.dev.vars.example`, which is for local `wrangler dev`. Each deployed environment is
+# one Worker (the queue consumer is the same Worker) with its own secret store, and
+# `npm run secrets:push` reads one of these files and sends it there.
+#
+#   cp .dev.vars.deployed.example .dev.vars.staging
+#   cp .dev.vars.deployed.example .dev.vars.production
+#   # fill them in, then:
+#   npm run secrets:push -- --env staging            # reports, sends nothing
+#   npm run secrets:push -- --env staging --apply
+#
+# What is deliberately NOT here: ENVIRONMENT, CORS_ORIGINS, DOCS_ENABLED, OTP_CHANNELS,
+# EMAIL_FROM_*, ZEPTOMAIL_API_URL and WHATSAPP_*  (phone number id, template, language). They are
+# `vars` in wrangler.jsonc, per environment. A secret of the same name is shadowed by the config
+# value on every deploy, so setting one here would look set and never apply. The push refuses them.
+#
+# A blank line (`NAME=`) is left alone: it never overwrites what is already on the Worker.
+
+# ZeptoMail "Send Mail token" (ZeptoMail → Mail Agent → Setup Info → API). Required.
+ZEPTOMAIL_API_KEY=
+
+# Secret mixed into stored OTP hashes and used to seal codes on the delivery queue.
+# Generate with: openssl rand -hex 32
+# MUST differ between staging and production: a leak from staging must not help against production.
+# It is ALREADY set on both Workers. Leave it blank unless you are rotating it; rotating
+# invalidates codes issued in the last 10 minutes.
+OTP_PEPPER=
+
+# WhatsApp Cloud API access token (Meta → WhatsApp → API setup; a permanent system-user token).
+# Optional: only needed once whatsapp is in OTP_CHANNELS.
+WHATSAPP_ACCESS_TOKEN=

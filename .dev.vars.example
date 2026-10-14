@@ -1,5 +1,9 @@
-# Copy to .dev.vars for local secrets (never committed). wrangler dev loads it automatically.
-# In production, set each one with: npx wrangler secret put NAME
+# Three files hold secrets, none of them committed:
+#   .dev.vars                          local: `wrangler dev` loads it. Copy this file to create it.
+#   .dev.vars.staging / .production    deployed environments, sent to Cloudflare with
+#                                      `npm run secrets:push -- --env staging`. Template:
+#                                      .dev.vars.deployed.example. Do not put real credentials in .dev.vars.
+# Beware: `wrangler dev --env staging` would load .dev.vars.staging, i.e. real staging credentials.
 # After adding a secret here, run `npm run cf-typegen` so it shows up on c.env.
 
 # ZeptoMail "Send Mail token" (ZeptoMail → Mail Agent → Setup Info → API).
