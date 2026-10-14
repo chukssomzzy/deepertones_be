@@ -2,6 +2,8 @@
 # build check, as separate jobs so a red check names what broke without anyone opening
 # the log, and a slow tier never holds up the result of a fast one. They share no state.
 #
+# The scripts tier is CI tooling under scripts/ (asset sync) and runs in plain Node.
+#
 # No job here takes a secret, and none must ever need one. Both test tiers run
 # inside workerd through @cloudflare/vitest-plugin against the top level of
 # wrangler.jsonc, which only declares local bindings. If a future change makes a
@@ -55,6 +57,21 @@ jobs:
       # bindings simulated by Miniflare. No network, no credentials.
       - name: Integration tests
         run: npm run test:integration
+
+  scripts:
+    name: Scripts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # Plain Node, no Workers pool; the Cloudflare API is faked, so no credentials.
+      - name: Scripts tests
+        run: npm run test:scripts
 
   typecheck:
     name: Typecheck

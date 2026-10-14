@@ -19,11 +19,12 @@
     "lint:arch": "depcruise src --config .dependency-cruiser.cjs",
     "openapi": "tsx scripts/openapi.ts",
     "emails:preview": "tsx scripts/email-preview.ts",
-    "assets:upload": "wrangler r2 object put deepertones-assets/email/logo.png --file assets/email/logo.png --content-type image/png --remote",
+    "assets:sync": "tsx scripts/sync-assets.ts",
     "openapi:lint": "REDOCLY_TELEMETRY=off redocly lint docs/openapi.json",
     "test": "vitest run",
     "test:unit": "vitest run --project unit",
     "test:integration": "vitest run --project integration",
+    "test:scripts": "vitest run --project scripts",
     "test:watch": "vitest"
   },
   "dependencies": {

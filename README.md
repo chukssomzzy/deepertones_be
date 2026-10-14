@@ -7,9 +7,10 @@ Serverless API for deepertones: [Hono](https://hono.dev) on Cloudflare Workers.
 | Command                       | What it does                                                          |
 | ----------------------------- | --------------------------------------------------------------------- |
 | `npm run dev`                 | Local server on http://localhost:8787 (real workerd runtime)          |
-| `npm test`                    | Both test tiers                                                       |
+| `npm test`                    | All test tiers (unit, integration, scripts)                           |
 | `npm run test:unit`           | Unit tests (`src/**/*.test.ts`): one module in isolation, with fakes  |
 | `npm run test:integration`    | Integration tests (`test/integration`): real local D1, whole Worker   |
+| `npm run test:scripts`        | Tooling tests (`scripts/**`): plain Node, Cloudflare API faked        |
 | `npm run typecheck`           | `tsc` over src and tests                                              |
 | `npm run lint:arch`           | Architecture rules (dependency-cruiser); see docs/architecture.md     |
 | `npm run openapi`             | Regenerate `docs/openapi.json` from the routes (commit the result)    |
@@ -17,6 +18,7 @@ Serverless API for deepertones: [Hono](https://hono.dev) on Cloudflare Workers.
 | `npm run db:generate`         | Generate a SQL migration from changed `*.table.ts` files              |
 | `npm run db:migrate:local`    | Apply migrations to the local D1 used by `npm run dev`                |
 | `npm run cf-typegen`          | Regenerate `worker-configuration.d.ts` after editing bindings         |
+| `npm run assets:sync`         | Sync `assets/` to R2 (CI does this; `-- --dry-run` previews)          |
 | `npm run deploy:staging`      | Deploy the staging Worker (CI does this; see Deploying)               |
 | `npm run deploy:production`   | Deploy the production Worker (CI does this; see Deploying)            |
 
@@ -175,17 +177,34 @@ Notes:
 ## Email assets
 
 Email images are served from the R2 bucket `deepertones-assets` on the custom domain `assets.deepertones.com`,
-shared by every environment. One-time setup:
+shared by every environment. CI keeps it in sync with the `assets/` folder:
 
-1. `npx wrangler r2 bucket create deepertones-assets`
-2. Connect the custom domain in the Cloudflare dashboard, or
-   `npx wrangler r2 bucket domain add deepertones-assets --domain assets.deepertones.com --zone-id <zone>`
-3. `npm run assets:upload` (uploads `assets/email/logo.png`; rerun whenever the file changes)
+1. Drop the files in `assets/` (the path under `assets/` is the URL path, so `assets/email/logo.png` is
+   `https://assets.deepertones.com/email/logo.png`).
+2. Merge to `staging`. The `Sync assets` workflow uploads what changed.
 
-Creating the bucket and domain and running `npm run assets:upload` happen once, by the account owner (or with their
-go-ahead); they are not part of normal development.
+The sync is idempotent: it records each file's hash in `_sync-manifest.json` in the bucket and uploads only
+files that are new or changed. The first run creates the bucket and attaches the custom domain. It never
+deletes: a file removed from `assets/` is listed as orphaned in the run log and stays in the bucket; delete it
+by hand in the Cloudflare dashboard if you really want it gone. To re-upload everything, run the workflow
+manually with `force` ticked.
 
-Gmail and Outlook do not render SVG, so the logo is a PNG at 2x its display size.
+The sync runs on `staging` only: changes land there first and `main` only receives what staging already had, so
+syncing from `main` could roll an asset in the shared bucket back. A manual run is only allowed from `staging`.
+`_sync-manifest.json` is public at `assets.deepertones.com` and lists every asset key, so nothing secret may go
+in `assets/`. An object changed or deleted by hand in the dashboard is not noticed until a `--force` run (the
+manual workflow has a `force` box).
+
+To preview what a sync would do, with `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID` set:
+
+```
+npm run assets:sync -- --dry-run
+```
+
+The API token needs R2 edit. Attaching the custom domain may also need zone-level permission for
+`deepertones.com`; if the first run fails there, its error says so.
+
+SVG is rejected: Gmail and Outlook do not render it, so the logo is a PNG at 2x its display size.
 
 ## Deploying
 

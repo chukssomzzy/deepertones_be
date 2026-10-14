@@ -10,25 +10,29 @@ export default defineConfig(async () => {
   // Read in Node, handed to workerd as a binding, applied by test/integration/setup.ts.
   const migrations = await readD1Migrations('./migrations')
 
+  // Only the two Workers tiers get the Workers pool. `scripts` is plain Node, so the plugin
+  // must not be a root-level plugin (that would apply it to every project).
+  const workers = () =>
+    cloudflareTest({
+      wrangler: { configPath: './wrangler.jsonc' },
+      // Test-only values, so no test needs a real secret.
+      miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', ZEPTOMAIL_API_KEY: 'test-key', WHATSAPP_ACCESS_TOKEN: 'test-token' } },
+    })
+
   return {
-    plugins: [
-      cloudflareTest({
-        wrangler: { configPath: './wrangler.jsonc' },
-        // Test-only values, so no test needs a real secret.
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', ZEPTOMAIL_API_KEY: 'test-key', WHATSAPP_ACCESS_TOKEN: 'test-token' } },
-      }),
-    ],
     test: {
       projects: [
-        { extends: true, test: { name: 'unit', include: ['src/**/*.test.ts'] } },
+        { plugins: [workers()], test: { name: 'unit', include: ['src/**/*.test.ts'] } },
         {
-          extends: true,
+          plugins: [workers()],
           test: {
             name: 'integration',
             include: ['test/integration/**/*.test.ts'],
             setupFiles: ['./test/integration/setup.ts'],
           },
         },
+        // Node-side tooling (CI scripts): plain Node, no Workers pool.
+        { test: { name: 'scripts', include: ['scripts/**/*.test.ts'], environment: 'node' } },
       ],
     },
   }

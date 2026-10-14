@@ -1,0 +1,68 @@
+# Keeps the R2 bucket behind https://assets.deepertones.com in step with assets/.
+#
+# One bucket serves every environment (the files are public and identical), so
+# there is no GitHub environment here: the two secrets are repository-level.
+#
+# Runs from `staging` only. Changes land on staging first and `main` only
+# receives what staging already had, so syncing from main could roll an asset
+# in the shared bucket back to an older version. The job is also gated on the
+# branch, so a manual run from any other branch cannot push its assets. The sync is idempotent: a manifest
+# (_sync-manifest.json) in the bucket records each file's hash, so a run with
+# nothing changed writes nothing. It never deletes: a file removed from
+# assets/ is listed as orphaned in the log and left in the bucket, because a
+# bad push must not be able to break an image in an email that is already sent.
+#
+# The first run creates the bucket and attaches the custom domain. Attaching
+# the domain may need the API token to have zone-level permission for
+# deepertones.com in addition to R2 edit; if the first run fails there, the
+# error says so.
+#
+# See the "Email assets" section of README.md.
+name: Sync assets
+
+on:
+  push:
+    branches: [staging]
+    paths:
+      - 'assets/**'
+      - 'scripts/assets/**'
+      - 'scripts/sync-assets.ts'
+      - '.github/workflows/sync-assets.yml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Re-upload every file, even those the manifest says are unchanged
+        type: boolean
+        default: false
+
+# Never cancelled: cutting an upload in half could leave files uploaded but not
+# in the manifest. A queued run simply redoes whatever is missing.
+concurrency:
+  group: sync-assets
+  cancel-in-progress: false
+
+# Checkout is all the run's own token is used for; Cloudflare is reached with
+# the API token instead.
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync assets
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    if: github.ref_name == 'staging'
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - name: Sync assets to R2
+        # The secrets are scoped to this step so `npm ci` and the lifecycle
+        # scripts of dependencies never see the token. Neither is ever printed.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: npm run assets:sync${{ inputs.force && ' -- --force' || '' }}
