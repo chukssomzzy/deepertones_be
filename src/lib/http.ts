@@ -2,7 +2,7 @@ import { catchError, type Observable, throwError, timeout, TimeoutError } from '
 import { fromFetch } from 'rxjs/fetch'
 
 /**
- * The one HTTP client for vendor adapters (src/providers only; lint:arch enforces it). It returns an
+ * The one HTTP client for vendor adapters (src/providers, plus build scripts under scripts/; lint:arch only checks src, so the scripts side is by convention). It returns an
  * Observable so an adapter can compose operators over it. Adapters convert at their own boundary
  * with `firstValueFrom`, so services stay Promise-based and never see rxjs.
  *

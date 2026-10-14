@@ -148,7 +148,9 @@ boundary with `firstValueFrom`, so services stay Promise-based and never import 
 - **No retries.** A retried OTP send could deliver, and bill, a second code. Retrying is each
   caller's decision.
 - **Provider-only.** The `http-only-in-providers` rule lets only `src/providers/**` import
-  `lib/http.ts`, so services, repositories and routes never make HTTP calls.
+  `lib/http.ts`, so services, repositories and routes never make HTTP calls. Build scripts under
+  `scripts/` (the asset sync's Cloudflare client) also use it; `lint:arch` only checks `src`, so
+  that is by convention.
 
 ### D1 + Drizzle, tables per module
 SQLite at the edge with a native binding, local simulation in dev and tests, and no connection
@@ -269,6 +271,25 @@ against a deliberately violating file.
 It needs **TypeScript ≤ 6**: dependency-cruiser reads TS through the compiler's JS API, which
 TypeScript 7 (the Go port) does not ship yet. On TS 7 it checks 0 modules and passes, so CI
 fails the Architecture job if it ever reports 0 modules.
+
+### Static assets (R2)
+
+Files the outside world must fetch by URL (today the email logo) live in `assets/` and are synced to the R2
+bucket `deepertones-assets`, served at `assets.deepertones.com`, by `.github/workflows/sync-assets.yml`.
+
+- One bucket for every environment: the files are public and identical, so per-env buckets would only drift.
+- Synced by CI from the repo, not uploaded by hand: the folder is the source of truth and a manual upload
+  nobody ran looks exactly like one that failed.
+- Runs on merges to `staging` only, and manual runs only from `staging`: `main` receives what staging
+  already had, so syncing from it could roll a shared asset back.
+- `_sync-manifest.json` is public (it lists asset keys), so nothing secret may go in `assets/`. Objects edited
+  or deleted by hand in the dashboard are not noticed until a `--force` run.
+- Idempotent through a hash manifest (`_sync-manifest.json`) in the bucket, so unchanged pushes write nothing.
+- Never deletes: removed files are reported as orphaned. An email already sent still points at its images.
+- The sync is a Node script over the Cloudflare REST API (`scripts/assets`), not wrangler, so it can create the
+  bucket and domain, and its logic is unit-tested against a fake client. It is outside `src/`, so it is not a
+  Worker module and the layering rules do not apply to it.
+- SVG is rejected: Gmail and Outlook do not render it.
 
 ### Email templates
 
