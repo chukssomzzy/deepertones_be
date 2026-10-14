@@ -4,7 +4,8 @@ import { once } from './lib/once'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
-import { OtpService } from './modules/otp/otp.service'
+import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
+import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
 
@@ -23,13 +24,26 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const health = once(() => new HealthService(new D1HealthRepository(db()), env.ENVIRONMENT))
 
+  // Shared: later modules send email too.
+  const email = once(
+    () =>
+      new ZeptoMailEmailSender({
+        apiUrl: env.ZEPTOMAIL_API_URL,
+        apiKey: env.ZEPTOMAIL_API_KEY,
+        fromAddress: env.EMAIL_FROM_ADDRESS,
+        fromName: env.EMAIL_FROM_NAME,
+      }),
+  )
+
   const otp = once(
     () =>
       new OtpService({
         repository: new D1OtpRepository(db()),
         jobs: new CloudflareQueuesJobQueue({ 'otp-delivery': env.OTP_DELIVERY_QUEUE }),
-        delivery: new MetaWhatsAppOtpDelivery({
-          accessToken: env.WHATSAPP_ACCESS_TOKEN,
+        channels: parseOtpChannels(env.OTP_CHANNELS),
+        email: email(),
+        whatsapp: new MetaWhatsAppOtpDelivery({
+          accessToken: env.WHATSAPP_ACCESS_TOKEN ?? '',
           phoneNumberId: env.WHATSAPP_PHONE_NUMBER_ID,
           templateName: env.WHATSAPP_OTP_TEMPLATE,
           languageCode: env.WHATSAPP_OTP_LANGUAGE,

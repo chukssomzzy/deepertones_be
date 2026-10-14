@@ -2,7 +2,10 @@
 # In production, set each one with: npx wrangler secret put NAME
 # After adding a secret here, run `npm run cf-typegen` so it shows up on c.env.
 
+# ZeptoMail "Send Mail token" (ZeptoMail → Mail Agent → Setup Info → API).
+ZEPTOMAIL_API_KEY=
 # WhatsApp Cloud API access token (Meta → WhatsApp → API setup; use a permanent system-user token).
+# Only needed once whatsapp is in OTP_CHANNELS.
 WHATSAPP_ACCESS_TOKEN=
 # Secret mixed into stored OTP hashes. Generate one with: openssl rand -hex 32
 OTP_PEPPER=

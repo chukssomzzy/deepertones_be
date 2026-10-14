@@ -45,6 +45,7 @@ src/
     <capability>.provider.ts      interface services depend on
     <vendor>.<capability>.ts      one adapter per vendor
     memory.<capability>.ts        fake for tests
+    (email/ sends transactional email: an EmailSender port, the ZeptoMail adapter, a memory fake)
     (job-queue/ is the producer side of the job system: a JobQueue port, Cloudflare Queues + memory adapters)
 docs/openapi.json          the generated spec, committed (npm run openapi)
 scripts/                   build-time scripts (spec generation)
@@ -54,6 +55,7 @@ test/integration/          tests against real local bindings
 
 `modules/health` is the reference implementation of every piece above that it needs.
 `providers/otp-delivery/` is the first real provider: the interface, the Meta WhatsApp adapter, and the memory fake.
+`providers/email/` follows the same shape for email.
 
 ## Decisions
 
@@ -280,30 +282,64 @@ template's sample to `.email-preview/` and opens it. The `emails-are-pure` rule 
 modules, providers, jobs, middleware and wiring: templates are pure functions of their data. The logo is a
 PNG on R2 at `assets.deepertones.com` (see README, "Email assets").
 
-### OTP over WhatsApp
-Sign-in codes are sent through the Meta WhatsApp Cloud API, called directly, using an approved
-authentication template. There are no HTTP routes yet: auth will call `container.otp.send(phone)`
-and `container.otp.verify(phone, code)`.
+### Email (ZeptoMail)
+Transactional email goes through ZeptoMail (Zoho), behind an `EmailSender` port with one adapter,
+`ZeptoMailEmailSender`, and a memory fake for tests. One shared sender is built in the container,
+because later modules will send email too.
 
+- **Our own templates, in `src/emails/`** (see "Email templates" above). Modules render with
+  `renderEmail(name, data)` and pass the result to the sender. *Why:* a template is code that must
+  change with the feature, so it is typed code the compiler checks, instead of living in a vendor
+  dashboard. `html` escapes every interpolated value by default and the shared layout is the one
+  header and footer, so a template cannot forget to escape or drift from the brand.
+- **Sender `no-reply@mail.deepertones.com`.** The subdomain keeps the reputation of app mail apart
+  from anything sent from the main domain.
+- **Tracking is off** (no open or click tracking): sign-in mail needs neither, and rewritten links
+  hurt trust in a message that carries a code.
+- **No retries in the adapter.** A retry is the caller's decision: the `deliver-otp` job already
+  retries with backoff, and a blind retry inside the adapter could send the same email twice.
+- **The adapter classifies, the caller decides.** A rejected recipient address, a 5xx and a 429 become
+  `EmailDeliveryError` (`recipient-rejected` or `unavailable`). A bad key, an unverified sender
+  domain, no credits or an account not yet approved are our own setup being wrong, so they are plain
+  errors: a bug or an account task, not a user problem.
+
+### OTP over channels (email now, WhatsApp later)
+A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
+through ZeptoMail (see above); WhatsApp, through the Meta WhatsApp Cloud API with an approved
+authentication template, is built but switched off until Meta approves the template. There are no
+HTTP routes yet: auth will call `container.otp.send({ channel, address })` and
+`container.otp.verify({ channel, address }, code)`.
+
+- **`OTP_CHANNELS` decides what people may request.** A comma-separated list of channel names in
+  `wrangler.jsonc` (`email`, `whatsapp`), read once by `parseOtpChannels`; an unknown name throws,
+  so a typo is loud. `send` checks the channel first and answers `OTP_CHANNEL_UNAVAILABLE` (400) for
+  one that is off. `verify` and the delivery job do not check it, so a code issued before a channel
+  was switched off still verifies and still delivers.
+- **Recipient = channel + address.** `OtpRecipient` is a union, so a WhatsApp recipient always
+  carries a `PhoneNumber` and an email recipient an `EmailAddress`. Cooldown, hourly cap, latest
+  challenge and purge are all per recipient, so an email and a phone number never share limits.
 - **Meta direct, not through a WhatsApp vendor.** Vendors pay Meta's per-message rate and add a
   margin on top. Calling the Cloud API ourselves avoids that margin.
 - **Business registered in Nigeria.** Users are in Nigeria. A Nigerian business pays the local
   authentication rate; an overseas one pays Meta's much higher authentication-international rate.
-- **One phone format.** `parsePhoneNumber` (`lib/phone.ts`) returns a branded E.164 `PhoneNumber`.
-  A number without a country code is read as Nigerian. Every lookup, store and send uses the
-  canonical form, so `0803…` and `+234803…` are the same number.
-- **Only an HMAC of the code is stored**: `HMAC-SHA256(OTP_PEPPER, "<phone>:<code>")`. A leaked
-  table cannot be brute-forced without the pepper. The phone is part of the input, so a code sent
-  to one number never verifies for another. The comparison is constant time (`timingSafeEqual`).
+- **One format per channel.** `parsePhoneNumber` (`lib/phone.ts`) returns a branded E.164
+  `PhoneNumber`; a number without a country code is read as Nigerian. `parseEmailAddress`
+  (`lib/email-address.ts`) returns a trimmed, lower-case `EmailAddress`. Every lookup, store and
+  send uses the canonical form, so `0803…` and `+234803…` are the same number and `Ada@Example.com`
+  is `ada@example.com`.
+- **Only an HMAC of the code is stored**: `HMAC-SHA256(OTP_PEPPER, "<channel>:<address>:<code>")`. A leaked
+  table cannot be brute-forced without the pepper. The channel and address are part of the input, so a code sent
+  to one recipient never verifies for another. The comparison is constant time (`timingSafeEqual`).
 - **Codes come from the CSPRNG**, six digits, via `randomDigits`, which rejects bytes that would
   bias the digits.
 - **One policy object, `OTP_POLICY`**: 6 digits, valid 10 minutes, 5 wrong tries, single use, a
-  60s resend cooldown, and at most 5 sends per number per rolling hour. The template's code expiry
-  is set by hand in Meta, so it must match `ttlMinutes`.
+  60s resend cooldown, and at most 5 sends per recipient per rolling hour. The WhatsApp template's
+  code expiry is set by hand in Meta, so it must match `ttlMinutes`; the email says the same
+  number, taken from the policy.
 - **A new code supersedes the old one.** Verify checks only the latest challenge.
-- **`send` stores, then queues; it does not call Meta.** It stores the challenge as `queued`,
+- **`send` stores, then queues; it does not call the provider.** It stores the challenge as `queued`,
   seals the code and enqueues the `deliver-otp` job, then returns `{ challengeId, expiresAt }`.
-  *Why:* the person no longer waits on Meta, and a Meta outage becomes retries instead of an
+  *Why:* the person no longer waits on the provider, and a provider outage becomes retries instead of an
   error. This deliberately reverses the earlier "deliver before storing" rule: the challenge now
   exists before delivery, so a failed one is marked `failed` and the cooldown and hourly cap count
   only non-failed challenges, which keeps "a failed send does not use up your limit". If the enqueue
@@ -314,18 +350,18 @@ and `container.otp.verify(phone, code)`.
   a usable code; a sealed code copied into another challenge's message cannot be opened; and the
   key differs from the HMAC key used for stored hashes because `info` differs. No new secret.
 - **What counts toward the cooldown and hourly cap.** Every challenge counts except those that
-  failed as `unavailable` (our outage or Meta's must not use up the person's limits). A terminal
+  failed as `unavailable` (our outage or the provider's must not use up the person's limits). A terminal
   `recipient-rejected` counts like a normal send, which closes a free retry loop. Per-IP/edge rate
   limiting at the route is still required, for attackers who rotate numbers.
-- **The queue message carries no phone**, only `{ challengeId, sealedCode }`: less personal data in
+- **The queue message carries no address**, only `{ challengeId, sealedCode }`: less personal data in
   the queue and its dead-letter queue, and the DB row is the authoritative source.
 - **Delivery status** (`queued`, `delivered`, `failed` with `recipient-rejected` or `unavailable`)
   is read with `deliveryStatus(challengeId)`. `verify` ignores it: a fast typist is not rejected
-  because the status has not caught up. "Delivered" means Meta accepted the message. A challenge whose job was dropped
+  because the status has not caught up. "Delivered" means the provider accepted the message. A challenge whose job was dropped
   (superseded, expired or used) keeps reporting `queued`: the job is done and nothing was sent. A
   failed resend replaces the earlier code, because only the latest challenge verifies.
 - **The `deliver-otp` job** (key = challenge id) drops a message whose challenge is no longer the
-  latest for its phone, is expired, used, or no longer `queued`. A rejected recipient is permanent
+  latest for its recipient, is expired, used, or no longer `queued`. A rejected recipient is permanent
   (challenge marked failed, run acked). A seal that cannot be opened is permanent too. Anything
   else is temporary and retried with full-jitter backoff (base 5s, factor 3, cap 135s), so five
   attempts finish well inside the 10 minute code life. When retries run out, the dead-letter hook
@@ -338,25 +374,31 @@ and `container.otp.verify(phone, code)`.
 - **The resend cooldown and hourly cap are check-then-act.** Parallel sends for one number can each
   go out. That is accepted while there are no routes; the auth PR must put per-IP/edge rate
   limiting in front of the send endpoint.
-- **Old rows are purged on send.** Challenges older than 24h for that number are deleted when a
+- **Old rows are purged on send.** Challenges older than 24h for that recipient are deleted when a
   new one is stored, so the table does not grow without bound.
-- **Error codes are the UI contract.** Send: `INVALID_PHONE` (400), `OTP_COOLDOWN` and
+- **Error codes are the UI contract.** Send: `OTP_CHANNEL_UNAVAILABLE` (400, the channel is off),
+  `INVALID_PHONE` and `INVALID_EMAIL` (400), `OTP_COOLDOWN` and
   `OTP_SEND_LIMIT` (429, with `Retry-After`), `OTP_DELIVERY_UNAVAILABLE` (503, only when the
   enqueue itself fails). A rejected recipient is not a `send` error: it appears later as
   `deliveryStatus` `failed` with reason `recipient-rejected`. Verify: `OTP_INVALID` (400, with `attemptsRemaining`),
   `OTP_EXPIRED` (400), `OTP_TOO_MANY_ATTEMPTS` (429).
 - **The adapter classifies, the service decides.** The Meta adapter sorts Meta's error codes into
-  `unavailable` and `recipient-rejected` (`OtpDeliveryError`). The `deliver` job turns `recipient-rejected` into a
+  `unavailable` and `recipient-rejected` (`OtpDeliveryError`), and the ZeptoMail adapter does the same with
+  `EmailDeliveryError`. The `deliver` job turns `recipient-rejected` from either into a
   permanent failure recorded on the challenge, and rethrows `unavailable` so the queue retries. Anything else, such as a bad token or missing template, is a configuration
   bug: it is not a `DomainError`, so it becomes a 500.
-- **Real WhatsApp in every environment**, local dev included, so a bad token or template shows up
-  before production. Tests never reach Meta: the service runs on `MemoryOtpDelivery` and
-  `FakeOtpRepository`, and the adapter is tested with a stubbed `fetch`.
-- **The two secrets are required.** `WHATSAPP_ACCESS_TOKEN` and `OTP_PEPPER` are listed in
+- **Real providers in every environment**, local dev included, so a bad key or template shows up
+  before production. Tests never reach Meta or ZeptoMail: the service runs on `MemoryOtpDelivery`,
+  `MemoryEmailSender` and `FakeOtpRepository`, and the adapters are tested with a stubbed `fetch`.
+- **The two required secrets are `ZEPTOMAIL_API_KEY` and `OTP_PEPPER`.** They are listed in
   `secrets.required`, so a deploy fails until both are set on that environment's Worker.
+  `WHATSAPP_ACCESS_TOKEN` is not required while WhatsApp is off; it is typed as an optional binding
+  in `src/lib/env.ts` (wrangler only types required secrets), and the adapter throws if WhatsApp
+  is enabled without it. Make it required again when `whatsapp` joins `OTP_CHANNELS`, and also delete the optional
+  declaration in `src/lib/env.ts`, or the regenerated required type will conflict with it.
 - **Not built yet:** a delivery-status webhook (Meta reports some undeliverable numbers only
-  later, so `recipient-rejected` covers the synchronous rejections only), an SMS fallback, and
-  auth itself.
+  later, so `recipient-rejected` covers the synchronous rejections only; ZeptoMail bounces are
+  not read back either), an SMS fallback, and auth itself.
 
 ## Adding a module
 

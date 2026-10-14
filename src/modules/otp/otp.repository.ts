@@ -1,49 +1,50 @@
 import { and, desc, eq, gt, gte, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
-import type { PhoneNumber } from '../../lib/phone'
 import type { PublicOf } from '../../lib/types'
 import { otpChallenges } from './otp.table'
-import type { NewOtpChallenge, OtpChallenge } from './otp.types'
+import type { NewOtpChallenge, OtpChallenge, OtpRecipient } from './otp.types'
 
 export type { NewOtpChallenge, OtpChallenge }
 
 const PURGE_AFTER_MS = 24 * 60 * 60 * 1000
 
+const forRecipient = (r: OtpRecipient) => and(eq(otpChallenges.channel, r.channel), eq(otpChallenges.address, r.address))
+
 export class D1OtpRepository {
   constructor(private readonly db: Db) {}
 
-  /** The most recently created challenge for the phone, consumed or not; null if none. */
-  async findLatest(phone: PhoneNumber): Promise<OtpChallenge | null> {
+  /** The most recently created challenge for the recipient, consumed or not; null if none. */
+  async findLatest(recipient: OtpRecipient): Promise<OtpChallenge | null> {
     const [row] = await this.db
       .select()
       .from(otpChallenges)
-      .where(eq(otpChallenges.phone, phone))
+      .where(forRecipient(recipient))
       .orderBy(desc(otpChallenges.createdAt), sql`rowid desc`) // rowid breaks createdAt ties: the later insert wins
       .limit(1)
     return (row as OtpChallenge | undefined) ?? null
   }
 
-  /** The challenge with this id, whether or not it is the latest for its phone; null if none. */
+  /** The challenge with this id, whether or not it is the latest for its recipient; null if none. */
   async findById(id: string): Promise<OtpChallenge | null> {
     const [row] = await this.db.select().from(otpChallenges).where(eq(otpChallenges.id, id))
     return (row as OtpChallenge | undefined) ?? null
   }
 
-  /** Creation times of the phone's challenges at or after `since`, newest first, leaving out those that failed as 'unavailable' (our outage must not use up the person's limits; a rejected recipient still counts). */
-  async sendTimes(phone: PhoneNumber, since: Date): Promise<Date[]> {
+  /** Creation times of the recipient's challenges at or after `since`, newest first, leaving out those that failed as 'unavailable' (our outage must not use up the person's limits; a rejected recipient still counts). */
+  async sendTimes(recipient: OtpRecipient, since: Date): Promise<Date[]> {
     const rows = await this.db
       .select({ createdAt: otpChallenges.createdAt })
       .from(otpChallenges)
-      .where(and(eq(otpChallenges.phone, phone), gte(otpChallenges.createdAt, since), or(ne(otpChallenges.deliveryStatus, 'failed'), ne(otpChallenges.failureReason, 'unavailable'))))
+      .where(and(forRecipient(recipient), gte(otpChallenges.createdAt, since), or(ne(otpChallenges.deliveryStatus, 'failed'), ne(otpChallenges.failureReason, 'unavailable'))))
       .orderBy(desc(otpChallenges.createdAt))
     return rows.map((r) => r.createdAt)
   }
 
-  /** Stores the challenge and deletes the phone's challenges more than 24h older than it, atomically. */
+  /** Stores the challenge and deletes the recipient's challenges more than 24h older than it, atomically. */
   async create(challenge: NewOtpChallenge): Promise<void> {
     const cutoff = new Date(challenge.createdAt.getTime() - PURGE_AFTER_MS)
     await this.db.batch([
-      this.db.delete(otpChallenges).where(and(eq(otpChallenges.phone, challenge.phone), lt(otpChallenges.createdAt, cutoff))),
+      this.db.delete(otpChallenges).where(and(forRecipient(challenge), lt(otpChallenges.createdAt, cutoff))),
       this.db.insert(otpChallenges).values(challenge),
     ])
   }

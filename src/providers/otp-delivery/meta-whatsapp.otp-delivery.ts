@@ -38,6 +38,7 @@ export class MetaWhatsAppOtpDelivery implements OtpDelivery {
     const { accessToken, phoneNumberId, templateName, languageCode, timeoutMs = DEFAULT_TIMEOUT_MS } = this.config
     // Empty until someone copies it from Meta; fail here (a bug to fix) rather than build a bad URL.
     if (!phoneNumberId) throw new Error('WHATSAPP_PHONE_NUMBER_ID is not set')
+    if (!accessToken) throw new Error('WHATSAPP_ACCESS_TOKEN is not set')
     let response: HttpResponse
     try {
       response = await firstValueFrom(

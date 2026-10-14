@@ -13,15 +13,23 @@
     "CORS_ORIGINS": "http://localhost:3000,http://localhost:5173",
     // "true" serves Swagger UI at /docs and the spec at /openapi.json; anything else 404s both.
     "DOCS_ENABLED": "true",
-    // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
-    "WHATSAPP_PHONE_NUMBER_ID": "",
+    // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
+    "OTP_CHANNELS": "email",
+    // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
+    "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+    "EMAIL_FROM_NAME": "Deeper Tones",
+    // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
+    "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",
+    // The WhatsApp phone number id, from Meta → WhatsApp → API setup.
+    "WHATSAPP_PHONE_NUMBER_ID": "1297385913467660",
     // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
     "WHATSAPP_OTP_LANGUAGE": "en"
   },
-  // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+  // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
   // have been run for this environment (add --env staging / --env production).
-  "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
+  // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
 
   // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -85,15 +93,23 @@
         "CORS_ORIGINS": "",
         // The frontend team reads the docs here.
         "DOCS_ENABLED": "true",
+        // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
+        "OTP_CHANNELS": "email",
+        // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
+        "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+        "EMAIL_FROM_NAME": "Deeper Tones",
+        // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
+        "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",
         // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+      // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
       // have been run for this environment (add --env staging / --env production).
-      "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
+      // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -133,15 +149,23 @@
         "CORS_ORIGINS": "",
         // Production does not advertise its API surface. Flip to "true" to publish the docs.
         "DOCS_ENABLED": "false",
+        // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
+        "OTP_CHANNELS": "email",
+        // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
+        "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+        "EMAIL_FROM_NAME": "Deeper Tones",
+        // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
+        "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",
         // TODO: the WhatsApp phone number id, from Meta → WhatsApp → API setup.
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until `wrangler secret put WHATSAPP_ACCESS_TOKEN` and `wrangler secret put OTP_PEPPER`
+      // Deploys fail until `wrangler secret put ZEPTOMAIL_API_KEY` and `wrangler secret put OTP_PEPPER`
       // have been run for this environment (add --env staging / --env production).
-      "secrets": { "required": ["WHATSAPP_ACCESS_TOKEN", "OTP_PEPPER"] },
+      // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production

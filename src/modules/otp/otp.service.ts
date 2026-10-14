@@ -1,11 +1,15 @@
+import { renderEmail } from '../../emails/registry'
 import { PermanentJobError } from '../../jobs/job'
 import { hmacSha256Hex, openText, randomDigits, sealText, timingSafeEqual } from '../../lib/crypto'
 import { NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
-import { parsePhoneNumber, type PhoneNumber } from '../../lib/phone'
+import { parseEmailAddress } from '../../lib/email-address'
+import { parsePhoneNumber } from '../../lib/phone'
+import { type EmailSender, EmailDeliveryError } from '../../providers/email/email.provider'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import { type OtpDelivery, OtpDeliveryError } from '../../providers/otp-delivery/otp-delivery.provider'
 import { type DeliverOtpMessage, deliverOtpSpec } from './otp.job-specs'
 import type { OtpRepository } from './otp.repository'
+import type { OtpChannel, OtpRecipient } from './otp.types'
 
 /** The WhatsApp template's code expiry must match ttlMinutes (set it in Meta's template editor). */
 export const OTP_POLICY = {
@@ -24,18 +28,39 @@ const QUEUE_SEAL_INFO = 'deepertones/otp-queue/v1'
 
 export type OtpServiceDeps = {
   repository: OtpRepository
-  delivery: OtpDelivery
   jobs: JobQueue
   /** Server secret mixed into every code hash, so a leaked table cannot be brute-forced offline. */
   pepper: string
   now?: () => Date
   generateCode?: () => string
   newId?: () => string
+  /** The channels people may request a code on. Deliveries and verifications of codes already issued on a channel switched off since still work. */
+  channels: readonly OtpChannel[]
+  whatsapp: OtpDelivery
+  email: EmailSender
 }
+
+const CHANNELS: readonly OtpChannel[] = ['whatsapp', 'email']
+
+/** Reads the OTP_CHANNELS setting: comma-separated channel names. An unknown name throws, so a typo in config is loud rather than silently disabling a channel. */
+export const parseOtpChannels = (raw: string): OtpChannel[] =>
+  raw
+    .split(',')
+    .map((name) => name.trim())
+    .filter((name) => name !== '')
+    .map((name) => {
+      if (!(CHANNELS as readonly string[]).includes(name)) throw new Error(`OTP_CHANNELS has an unknown channel "${name}"; use ${CHANNELS.join(', ')}`)
+      return name as OtpChannel
+    })
+
+const parseRecipient = (channel: OtpChannel, address: string): OtpRecipient =>
+  channel === 'email' ? { channel, address: parseEmailAddress(address) } : { channel, address: parsePhoneNumber(address) }
 
 export class OtpService {
   private readonly repository: OtpRepository
-  private readonly delivery: OtpDelivery
+  private readonly whatsapp: OtpDelivery
+  private readonly email: EmailSender
+  private readonly channels: readonly OtpChannel[]
   private readonly jobs: JobQueue
   private readonly pepper: string
   private readonly now: () => Date
@@ -44,7 +69,9 @@ export class OtpService {
 
   constructor(deps: OtpServiceDeps) {
     this.repository = deps.repository
-    this.delivery = deps.delivery
+    this.whatsapp = deps.whatsapp
+    this.email = deps.email
+    this.channels = deps.channels
     this.jobs = deps.jobs
     this.pepper = deps.pepper
     this.now = deps.now ?? (() => new Date())
@@ -55,14 +82,18 @@ export class OtpService {
   /**
    * Issues a fresh code, superseding any earlier one, and queues its delivery. The challenge is
    * stored first (as `queued`) and the job carries the code sealed, so the person never waits on
-   * WhatsApp and retries survive an outage. Failed challenges do not count toward the limits.
+   * the channel's provider and retries survive an outage. Failed challenges do not count toward the limits.
    */
-  async send(rawPhone: string): Promise<{ challengeId: string; expiresAt: Date }> {
-    const phone = parsePhoneNumber(rawPhone)
+  async send(input: { channel: OtpChannel; address: string }): Promise<{ challengeId: string; expiresAt: Date }> {
+    // Checked before parsing, so a disabled channel never reveals anything about its address rules.
+    if (!this.channels.includes(input.channel)) {
+      throw new ValidationError('OTP_CHANNEL_UNAVAILABLE', 'Codes cannot be sent that way right now')
+    }
+    const recipient = parseRecipient(input.channel, input.address)
     const now = this.now()
 
     // +1 ms keeps a send exactly an hour old out of the window, so a wait is never 0 seconds.
-    const recent = await this.repository.sendTimes(phone, new Date(now.getTime() - HOUR + 1))
+    const recent = await this.repository.sendTimes(recipient, new Date(now.getTime() - HOUR + 1))
     const last = recent[0]
     if (last) {
       const cooldownEnds = last.getTime() + OTP_POLICY.cooldownSeconds * SECOND
@@ -84,8 +115,8 @@ export class OtpService {
     const expiresAt = new Date(now.getTime() + OTP_POLICY.ttlMinutes * 60 * SECOND)
     await this.repository.create({
       id: challengeId,
-      phone,
-      codeHash: await this.hash(phone, code),
+      ...recipient,
+      codeHash: await this.hash(recipient, code),
       createdAt: now,
       expiresAt,
     })
@@ -112,7 +143,7 @@ export class OtpService {
     const challenge = await this.repository.findById(message.challengeId)
     if (!challenge || challenge.deliveryStatus !== 'queued') return
     if (challenge.consumedAt || challenge.expiresAt.getTime() <= this.now().getTime()) return
-    const latest = await this.repository.findLatest(challenge.phone)
+    const latest = await this.repository.findLatest(challenge)
     if (latest?.id !== challenge.id) return
 
     let code: string
@@ -124,11 +155,19 @@ export class OtpService {
     }
 
     try {
-      await this.delivery.send(challenge.phone, code)
+      if (challenge.channel === 'whatsapp') {
+        await this.whatsapp.send(challenge.address, code)
+      } else {
+        await this.email.send({
+          ...renderEmail('otp-code', { code, ttlMinutes: OTP_POLICY.ttlMinutes }),
+          to: challenge.address,
+          reference: challenge.id,
+        })
+      }
     } catch (error) {
-      if (error instanceof OtpDeliveryError && error.reason === 'recipient-rejected') {
+      if ((error instanceof OtpDeliveryError || error instanceof EmailDeliveryError) && error.reason === 'recipient-rejected') {
         await this.repository.markFailed(challenge.id, 'recipient-rejected')
-        throw new PermanentJobError('The recipient cannot receive WhatsApp messages', { cause: error })
+        throw new PermanentJobError('The recipient cannot receive codes on this channel', { cause: error })
       }
       throw error
     }
@@ -146,22 +185,22 @@ export class OtpService {
     return { status: challenge.deliveryStatus, failureReason: challenge.failureReason }
   }
 
-  /** Checks a code against the phone's latest challenge; a correct one is consumed. Returns the canonical phone. */
-  async verify(rawPhone: string, code: string): Promise<PhoneNumber> {
-    const phone = parsePhoneNumber(rawPhone)
+  /** Checks a code against the recipient's latest challenge; a correct one is consumed. Returns the canonical recipient. Does not check `channels`: a code already issued stays valid. */
+  async verify(input: { channel: OtpChannel; address: string }, code: string): Promise<OtpRecipient> {
+    const recipient = parseRecipient(input.channel, input.address)
     const now = this.now()
 
-    const challenge = await this.repository.findLatest(phone)
+    const challenge = await this.repository.findLatest(recipient)
     if (!challenge || challenge.consumedAt || challenge.expiresAt.getTime() <= now.getTime()) {
       throw expired()
     }
     if (challenge.attempts >= OTP_POLICY.maxAttempts) throw tooManyAttempts()
 
-    const matches = timingSafeEqual(challenge.codeHash, await this.hash(phone, code))
+    const matches = timingSafeEqual(challenge.codeHash, await this.hash(recipient, code))
     if (matches) {
-      if (await this.repository.consume(challenge.id, now, OTP_POLICY.maxAttempts)) return phone
+      if (await this.repository.consume(challenge.id, now, OTP_POLICY.maxAttempts)) return recipient
       // Refused: the guard failed between our read and the update. Say which rule, from a fresh read.
-      const current = await this.repository.findLatest(phone)
+      const current = await this.repository.findLatest(recipient)
       if (current && current.attempts >= OTP_POLICY.maxAttempts) throw tooManyAttempts()
       throw expired()
     }
@@ -173,9 +212,9 @@ export class OtpService {
     })
   }
 
-  // Bound to the phone, so a code sent to one number never verifies for another.
-  private hash(phone: PhoneNumber, code: string) {
-    return hmacSha256Hex(this.pepper, `${phone}:${code}`)
+  // Bound to the channel and address, so a code sent to one never verifies for another.
+  private hash(recipient: OtpRecipient, code: string) {
+    return hmacSha256Hex(this.pepper, `${recipient.channel}:${recipient.address}:${code}`)
   }
 }
 

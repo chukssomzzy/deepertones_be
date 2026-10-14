@@ -15,7 +15,7 @@ export default defineConfig(async () => {
       cloudflareTest({
         wrangler: { configPath: './wrangler.jsonc' },
         // Test-only values, so no test needs a real secret.
-        miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', WHATSAPP_ACCESS_TOKEN: 'test-token' } },
+        miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', ZEPTOMAIL_API_KEY: 'test-key', WHATSAPP_ACCESS_TOKEN: 'test-token' } },
       }),
     ],
     test: {

@@ -1,27 +1,29 @@
-import type { PhoneNumber } from '../../lib/phone'
 import type { NewOtpChallenge, OtpChallenge, OtpRepository } from './otp.repository'
+import type { OtpRecipient } from './otp.types'
+
+const sameRecipient = (a: OtpRecipient, b: OtpRecipient) => a.channel === b.channel && a.address === b.address
 
 const PURGE_AFTER_MS = 24 * 60 * 60 * 1000
 
 export class FakeOtpRepository implements OtpRepository {
   private rows: OtpChallenge[] = []
 
-  async findLatest(phone: PhoneNumber): Promise<OtpChallenge | null> {
-    const mine = this.rows.filter((r) => r.phone === phone)
+  async findLatest(recipient: OtpRecipient): Promise<OtpChallenge | null> {
+    const mine = this.rows.filter((r) => sameRecipient(r, recipient))
     const latest = mine.reduce<OtpChallenge | null>((a, r) => (!a || r.createdAt >= a.createdAt ? r : a), null)
     return latest && { ...latest }
   }
 
-  async sendTimes(phone: PhoneNumber, since: Date): Promise<Date[]> {
+  async sendTimes(recipient: OtpRecipient, since: Date): Promise<Date[]> {
     return this.rows
-      .filter((r) => r.phone === phone && r.createdAt >= since && !(r.deliveryStatus === 'failed' && r.failureReason === 'unavailable'))
+      .filter((r) => sameRecipient(r, recipient) && r.createdAt >= since && !(r.deliveryStatus === 'failed' && r.failureReason === 'unavailable'))
       .map((r) => r.createdAt)
       .sort((a, b) => b.getTime() - a.getTime())
   }
 
   async create(challenge: NewOtpChallenge): Promise<void> {
     const cutoff = challenge.createdAt.getTime() - PURGE_AFTER_MS
-    this.rows = this.rows.filter((r) => r.phone !== challenge.phone || r.createdAt.getTime() >= cutoff)
+    this.rows = this.rows.filter((r) => !sameRecipient(r, challenge) || r.createdAt.getTime() >= cutoff)
     this.rows.push({ ...challenge, attempts: 0, consumedAt: null, deliveryStatus: 'queued', failureReason: null, deliveredAt: null })
   }
 
