@@ -386,8 +386,12 @@ fails the Architecture job if it ever reports 0 modules.
 
 Files the outside world must fetch by URL (today the email logo) live in `assets/` and are synced to the R2
 bucket `deepertones-assets`, served at `assets.deepertones.com`, by `.github/workflows/sync-assets.yml`.
+`deepertones-assets` is the one public bucket for everything public: the CI sync owns `email/` and every other key
+that comes from `assets/`, and the Worker owns `catalog/<environment>/…` (see "Catalog images"). The two never
+overlap, because the sync refuses, before uploading anything, any local file whose key starts with `catalog/`.
 
 - One bucket for every environment: the files are public and identical, so per-env buckets would only drift.
+  Catalog images share it too, separated by key prefix rather than by bucket.
 - Synced by CI from the repo, not uploaded by hand: the folder is the source of truth and a manual upload
   nobody ran looks exactly like one that failed.
 - Runs on merges to `staging` only, and manual runs only from `staging`: `main` receives what staging
@@ -495,16 +499,20 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
   file header (PNG IHDR; the first JPEG SOF marker; WebP `VP8 `, `VP8L` or `VP8X`) without decoding any
   pixels, and an image with a side of 0 or over 4096 is refused, as is a header cut short. The download
   is capped at 5 MB by default.
-- **A public bucket per environment, written by the Worker.** Images go to
-  `deepertones-catalog-images-{staging,production}` through an R2 binding, not to `deepertones-assets`,
-  which CI syncs from the repo's `assets/` folder and owns. Keys are validated (lowercase path
-  segments of `a-z 0-9 . _ -`, no `..`; anything else throws, because a bad key is our bug) and
+- **The shared public bucket, written by the Worker.** Images go to `deepertones-assets` (the same bucket CI
+  syncs `assets/` into, served at `assets.deepertones.com`) through the `CATALOG_IMAGES` R2 binding. The Worker
+  writes only under `catalog/<environment>/` (the service's `imageKeyPrefix`, which the container sets to
+  `catalog/${ENVIRONMENT}`), so staging and production stay apart in the one bucket, and the CI sync, which
+  owns `email/` and the rest and refuses any `catalog/` file, can never overwrite them. The local binding in
+  `wrangler.jsonc` is a simulation: `wrangler dev` and the tests use a local bucket. Keys are validated (lowercase path
+  segments of `a-z 0-9 . _ -`, no `..`; anything else throws, because a bad key is our bug; so
+  `catalog/staging/products/<uuid>.jpg` passes, since UUIDs are lowercase hex and hyphens) and
   encoded per segment in the public URL. Objects are served with `public, max-age=86400`, deliberately
   not `immutable`: deleting or replacing an image takes effect after at most a day of edge cache. A
   takedown can be made immediate with a manual cache purge of that URL.
-- **Serve with `nosniff`.** The images domain should send `X-Content-Type-Options: nosniff`, so a
+- **Serve with `nosniff`.** `assets.deepertones.com` should send `X-Content-Type-Options: nosniff`, so a
   browser never reinterprets a stored object. That is a Cloudflare response header rule on the zone, an
-  infra step outside this code.
+  infra step outside this code (optional, see README, "Product catalog setup").
 - **The vision match is the second gate.** Checks on the URL and bytes prove a file is an image, not
   that it shows the right product: a hostile page can serve a valid image of the wrong thing. The
   catalog service must pass the image through `ProductAnalyst.imageShowsProduct` before `put`.
@@ -550,7 +558,8 @@ described in "Product catalog service"; routes come later.
 
 ### Product catalog service
 `ProductCatalogService` (`catalog.service.ts`) is the only way into the catalog from outside the module. It is built in
-the container from `D1CatalogRepository`, the Claude researcher and analyst, and the R2 image store, and imports
+the container from `D1CatalogRepository`, the Claude researcher and analyst, and the R2 image store (plus the
+`imageKeyPrefix` `catalog/<environment>`), and imports
 provider **types** only. The catalog is shared data, not per-user, so it has no `GuestDataCleaner`. The repository
 stays dumb; every decision below lives in the service (or `catalog.analysis.ts`, a pure helper it calls).
 
@@ -599,7 +608,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
 - **Stock image import** runs after the formulation is stored, only when the product has no image and none was looked
   for in the last `FRESH_FOR_DAYS`. Gates, in order: the image store's safe download (see "Catalog images"; `null`
   for a bad URL, type or size), then `imageShowsProduct` (the vision match), and only then `put` to
-  `products/<productId>.<jpg|png|webp>` and the product's image key, source page and time. A missing URL, a failed
+  `<imageKeyPrefix>/products/<productId>.<jpg|png|webp>` (for example
+  `catalog/staging/products/<productId>.jpg`) and the product's image key, source page and time. A missing URL, a failed
   download or a "no match" only marks the image as checked. **Every error is swallowed**: if the download, the model
   or the bucket throws, the research still reports the ingredients as found, nothing is marked (so the next
   research retries), and the log line is `{ outcome: 'image-import-failed', productId }`, never a URL, because the

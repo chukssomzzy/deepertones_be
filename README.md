@@ -142,25 +142,24 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
 
 ## Product catalog setup
 
-Product research and analysis call Claude, and stock images are kept in a public R2 bucket per environment. None of
-this is created by a deploy; the account owner does it by hand, once per environment (design in "Product catalog
-service" in `docs/architecture.md`):
+Product research and analysis call Claude, and stock images are kept in the existing public bucket
+`deepertones-assets`, served at `assets.deepertones.com` (see [Email assets](#email-assets)), under
+`catalog/<environment>/`. There is no bucket or domain to create: both already exist, and the CI asset sync never
+touches `catalog/` (it refuses a local file under that prefix). Design in "Product catalog service" in
+`docs/architecture.md`. What is left for the account owner, once per environment:
 
-1. Create the R2 buckets `deepertones-catalog-images-staging` and `deepertones-catalog-images-production`
-   (Cloudflare dashboard → R2). Not `deepertones-assets`: CI owns that one.
-2. Connect `images.staging.deepertones.com` and `images.deepertones.com` as custom domains of the matching bucket
-   (bucket → Settings → Custom Domains). `CATALOG_IMAGES_PUBLIC_URL` in `wrangler.jsonc` already points at them.
-3. Add a response header rule (the `deepertones.com` zone → Rules → Transform Rules → Modify Response Header) that
-   sets `X-Content-Type-Options: nosniff` for those two hosts.
-4. Create an Anthropic API key per environment (Claude Console → API keys; a separate key or workspace for each, so
+1. Create an Anthropic API key per environment (Claude Console → API keys; a separate key or workspace for each, so
    spend limits and revocation are per environment) and put it in `.dev.vars.staging` and `.dev.vars.production` as
    `ANTHROPIC_API_KEY`.
-5. Push them: `npm run secrets:push -- --env staging --apply`, then `npm run secrets:push -- --env production --apply`.
+2. Push them: `npm run secrets:push -- --env staging --apply`, then `npm run secrets:push -- --env production --apply`.
+3. Optional: add a response header rule (the `deepertones.com` zone → Rules → Transform Rules → Modify Response
+   Header) that sets `X-Content-Type-Options: nosniff` for `assets.deepertones.com`, so a browser never
+   reinterprets a stored object.
 
-Deploys fail until `ANTHROPIC_API_KEY` is set on the environment's Worker (it is in `secrets.required`), and a deploy
-that binds a bucket that does not exist fails too, so do steps 1 to 5 before merging to `staging` or `main`. Locally
-nothing needs creating: the tests and `wrangler dev` use a local bucket, which serves no public URL, so product views
-show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
+Deploys fail until `ANTHROPIC_API_KEY` is set on the environment's Worker (it is in `secrets.required`), so do steps 1
+and 2 before merging to `staging` or `main`. The first catalog image can only be written once `deepertones-assets`
+exists, which the first asset sync creates. Locally nothing needs creating: the tests and `wrangler dev` use a local
+bucket, which serves no public URL, so product views show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
 
 ## ZeptoMail setup
 

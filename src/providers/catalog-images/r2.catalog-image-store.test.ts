@@ -401,7 +401,7 @@ describe('R2CatalogImageStore keys', () => {
   const PNG: ProductImage = { bytes: Uint8Array.from(PNG_MAGIC), mediaType: 'image/png' }
   const bucket = () => ({ put: vi.fn(async () => ({}) as R2Object), delete: vi.fn(async () => undefined) })
 
-  it.each(['products/p1.png', 'p1', 'products/ab-12_cd.v2.webp', '0abc', 'a/b/c.jpg'])('accepts the key %s', async (key) => {
+  it.each(['products/p1.png', 'p1', 'products/ab-12_cd.v2.webp', '0abc', 'a/b/c.jpg', 'catalog/development/products/0b9f3c1e-7a2d-4e5f-8c6b-1d2e3f4a5b6c.jpg'])('accepts the key %s', async (key) => {
     const fake = bucket()
     const store = make({ bucket: fake as unknown as R2Bucket })
 

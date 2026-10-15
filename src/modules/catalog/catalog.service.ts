@@ -62,6 +62,8 @@ export type ProductCatalogServiceDeps = {
   researcher: ProductResearcher
   analyst: ProductAnalyst
   images: CatalogImageStore
+  /** Where stock images go in the shared public bucket, e.g. `catalog/staging`: the Worker's own corner, apart from the CI-synced assets. */
+  imageKeyPrefix: string
   now?: () => Date
   newId?: () => string
   policy?: CatalogPolicy
@@ -123,6 +125,7 @@ export class ProductCatalogService {
   private readonly researcher: ProductResearcher
   private readonly analyst: ProductAnalyst
   private readonly images: CatalogImageStore
+  private readonly imageKeyPrefix: string
   private readonly now: () => Date
   private readonly newId: () => string
   private readonly policy: CatalogPolicy
@@ -132,6 +135,7 @@ export class ProductCatalogService {
     this.researcher = deps.researcher
     this.analyst = deps.analyst
     this.images = deps.images
+    this.imageKeyPrefix = deps.imageKeyPrefix
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
     this.policy = deps.policy ?? CATALOG_POLICY
@@ -408,7 +412,7 @@ export class ProductCatalogService {
         await this.repository.markImageChecked(product.id, now)
         return
       }
-      const key = `products/${product.id}.${IMAGE_EXTENSIONS[image.mediaType]}`
+      const key = `${this.imageKeyPrefix}/products/${product.id}.${IMAGE_EXTENSIONS[image.mediaType]}`
       await this.images.put(key, image)
       await this.repository.setProductImage(product.id, { key, sourceUrl: imageUrl, checkedAt: now })
     } catch {

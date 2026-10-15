@@ -174,4 +174,12 @@ describe('syncAssets', () => {
     expect(r.calls.attach).toBe(0)
     expect(r.calls.puts).toEqual([])
   })
+
+  it.each([[false], [true]])('rejects a catalog/ file up front, before any write (dryRun=%s)', async (dryRun) => {
+    const reserved = { key: 'catalog/staging/products/x.png', bytes: enc('y') }
+    await expect(run(r, [{ key: 'a.png', bytes: enc('x') }, reserved], { dryRun })).rejects.toThrow(/catalog\/staging\/products\/x\.png.*reserved/)
+    expect(r.calls.create).toBe(0)
+    expect(r.calls.attach).toBe(0)
+    expect(r.calls.puts).toEqual([])
+  })
 })

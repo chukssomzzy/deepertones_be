@@ -20,6 +20,7 @@ const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 
 const SOURCE_URL = 'https://www.cerave.com/hydrating-cleanser'
+const IMAGE_KEY_PREFIX = 'catalog/test'
 const IMAGE_URL = 'https://www.cerave.com/images/hydrating-cleanser.jpg'
 // The regulation URL the seed reference data attaches to banned substances and named fragrance allergens.
 const EUR_LEX = 'https://eur-lex.europa.eu/eli/reg/2009/1223/oj'
@@ -58,6 +59,7 @@ const setup = (options: SetupOptions = {}) => {
     researcher,
     analyst,
     images,
+    imageKeyPrefix: IMAGE_KEY_PREFIX,
     now: () => clock,
     newId: () => `id-${++n}`,
     ...(options.policy ? { policy: { ...CATALOG_POLICY, ...options.policy } } : {}),
@@ -485,7 +487,7 @@ describe('ProductCatalogService.research', () => {
       ['image/jpeg', 'jpg'],
       ['image/png', 'png'],
       ['image/webp', 'webp'],
-    ] as const)('stores an accepted %s image as products/<id>.%s and sets it on the product', async (mediaType, extension) => {
+    ] as const)('stores an accepted %s image as <prefix>/products/<id>.%s and sets it on the product', async (mediaType, extension) => {
       const ctx = setup()
       const productId = await productFor(ctx)
       const image: ProductImage = { bytes: new Uint8Array([9, 9]), mediaType }
@@ -495,13 +497,26 @@ describe('ProductCatalogService.research', () => {
 
       const result = await ctx.service.research(productId)
 
-      const key = `products/${productId}.${extension}`
+      const key = `${IMAGE_KEY_PREFIX}/products/${productId}.${extension}`
       expect(ctx.images.stored.get(key)).toEqual(image)
       expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: key, imageSourceUrl: IMAGE_URL, imageCheckedAt: T0 })
       expect(ctx.analyst.calls.imageShowsProduct).toHaveLength(1)
       expect(ctx.analyst.calls.imageShowsProduct[0]![0]).toEqual(image)
       expect(ctx.analyst.calls.imageShowsProduct[0]![1]).toMatchObject({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' })
       expect(result.kind).toBe('found')
+    })
+
+    it('stores the image under the configured key prefix, so the Worker stays in its own corner of the shared bucket', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.images.respondTo(IMAGE_URL, JPEG)
+      ctx.analyst.imageShowsProductWith(() => true)
+      withImage(ctx)
+
+      await ctx.service.research(productId)
+
+      expect([...ctx.images.stored.keys()]).toEqual([`catalog/test/products/${productId}.jpg`])
+      expect((await ctx.repository.findProductById(productId))?.imageKey).toBe(`catalog/test/products/${productId}.jpg`)
     })
 
     it('marks the image as checked, with no image, when the download fails', async () => {
@@ -881,7 +896,7 @@ describe('ProductCatalogService.productView', () => {
         name: 'Hydrating Facial Cleanser',
         variant: 'Night',
         category: 'skin',
-        imageUrl: ctx.images.publicUrl(`products/${productId}.jpg`),
+        imageUrl: ctx.images.publicUrl(`${IMAGE_KEY_PREFIX}/products/${productId}.jpg`),
       },
       formulation: {
         id: formulationId,

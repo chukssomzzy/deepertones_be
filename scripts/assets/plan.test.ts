@@ -36,6 +36,16 @@ describe('planAssetSync', () => {
   it('rejects a local file that collides with the manifest key', () => {
     expect(() => planAssetSync([{ key: MANIFEST_KEY, sha256: '1' }], null)).toThrow()
   })
+
+  it('rejects a local file under the catalog/ prefix, which the Worker owns', () => {
+    expect(() => planAssetSync([{ key: 'email/logo.png', sha256: '1' }, { key: 'catalog/staging/products/x.jpg', sha256: '2' }], null)).toThrow(
+      /catalog\/staging\/products\/x\.jpg.*reserved.*Worker/,
+    )
+  })
+
+  it('only reserves the catalog/ prefix, not a name that merely starts with it', () => {
+    expect(planAssetSync([{ key: 'catalogue/a.png', sha256: '1' }], null).upload).toEqual(['catalogue/a.png'])
+  })
 })
 
 describe('contentTypeFor', () => {

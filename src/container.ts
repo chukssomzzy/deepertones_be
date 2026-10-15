@@ -55,6 +55,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1CatalogRepository(db()),
         researcher: new AnthropicProductResearcher(anthropic()),
         analyst: new AnthropicProductAnalyst(anthropic()),
+        // The bucket is shared with the CI asset sync, which refuses any catalog/ key; the environment keeps staging and production apart.
+        imageKeyPrefix: `catalog/${env.ENVIRONMENT}`,
         images: new R2CatalogImageStore({
           bucket: env.CATALOG_IMAGES,
           publicBaseUrl: env.CATALOG_IMAGES_PUBLIC_URL,

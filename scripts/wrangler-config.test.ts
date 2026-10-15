@@ -33,9 +33,9 @@ type Block = {
 const catalogConfig = config as unknown as Block & { env: Record<string, Block> }
 
 const blocks: [string, Block | undefined, { bucket: string; publicUrl: string }][] = [
-  ['top level', catalogConfig, { bucket: 'deepertones-catalog-images-local', publicUrl: '' }],
-  ['env.staging', catalogConfig.env.staging, { bucket: 'deepertones-catalog-images-staging', publicUrl: 'https://images.staging.deepertones.com' }],
-  ['env.production', catalogConfig.env.production, { bucket: 'deepertones-catalog-images-production', publicUrl: 'https://images.deepertones.com' }],
+  ['top level', catalogConfig, { bucket: 'deepertones-assets', publicUrl: '' }],
+  ['env.staging', catalogConfig.env.staging, { bucket: 'deepertones-assets', publicUrl: 'https://assets.deepertones.com' }],
+  ['env.production', catalogConfig.env.production, { bucket: 'deepertones-assets', publicUrl: 'https://assets.deepertones.com' }],
 ]
 
 describe('wrangler.jsonc product catalog config', () => {

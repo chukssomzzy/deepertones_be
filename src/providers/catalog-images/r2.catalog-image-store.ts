@@ -13,9 +13,9 @@ const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 const CACHE_CONTROL = 'public, max-age=86400'
 
 export type R2CatalogImageStoreConfig = {
-  /** The public catalog-image bucket for this environment. */
+  /** The public bucket; stock images go under their own key prefix (see ProductCatalogService), apart from the CI-synced assets. */
   bucket: R2Bucket
-  /** Where the bucket is served from, e.g. https://images.deepertones.com; '' when it has no public address. */
+  /** Where the bucket is served from, e.g. https://assets.deepertones.com; '' when it has no public address. */
   publicBaseUrl: string
   /** Give up on each request after this long; default 10000. */
   timeoutMs?: number
