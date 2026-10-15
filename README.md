@@ -161,6 +161,8 @@ and 2 before merging to `staging` or `main`. The first catalog image can only be
 exists, which the first asset sync creates. Locally nothing needs creating: the tests and `wrangler dev` use a local
 bucket, which serves no public URL, so product views show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
 
+To measure the research and analysis steps against fixed cases, run `npm run eval:catalog` (it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
+
 ## ZeptoMail setup
 
 Sign-in codes go out by email through ZeptoMail (Zoho). The code is in `src/modules/otp` and

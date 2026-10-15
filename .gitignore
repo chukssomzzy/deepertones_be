@@ -41,3 +41,6 @@ Session.vim
 
 # email preview output
 .email-preview/
+
+# catalog eval reports
+.eval/

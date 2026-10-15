@@ -645,6 +645,27 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   `addLabelIngredients` on an unknown product are the same, `analyse` on an unknown formulation is
   `FORMULATION_NOT_FOUND`.
 
+### Catalog eval
+`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the two model-backed catalog steps against fixed cases in
+`scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested.
+
+- **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
+  `checkAnalysis`, exactly as the service does, and scores what would be stored: every flagged fact is covered by a
+  concern of its kind naming its ingredient, and a banned substance is judged high. A case's expected facts are
+  checked against `flagFacts` in `cases.test.ts`, so a case cannot drift from the reference data.
+- **Research mode** runs `AnthropicProductResearcher` on real products sold in Nigeria and checks the product is found
+  and the list holds the ingredients we expect. These check retrieval quality, not ground truth: a brand can
+  reformulate, so a failing research case may need its data updated.
+- **Cost.** One analysis call per analysis case (6) and one web-search research turn per research case (7, up to 5
+  searches each), run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
+- **Keys.** Locally it reads `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`) from the environment, else `.dev.vars`.
+  In CI (`.github/workflows/eval-catalog.yml`, weekly and by hand) it needs the `ANTHROPIC_API_KEY` repository secret and
+  skips with a notice when it is empty. It is never run by `npm test` or `tests.yml`, which hold no secrets.
+- **Report-only.** It prints a table of ids, pass, problem codes and timings, and writes `.eval/catalog-<time>.json`
+  (git-ignored; the workflow uploads it). It never prints the key, a prompt or raw model output, only fixed problem
+  codes. Exit 0 when every case passed, 1 when one failed, 2 when it could not start. The CI job is
+  `continue-on-error`, so a failure never blocks a merge; read it as a trend, not a gate.
+
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
 through ZeptoMail (see above); WhatsApp, through the Meta WhatsApp Cloud API with an approved
