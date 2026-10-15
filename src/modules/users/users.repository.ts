@@ -1,4 +1,4 @@
-import { and, eq, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, lt, notExists, sql } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { devices, users } from './users.table'
@@ -17,6 +17,9 @@ const isIdentifierTaken = (error: unknown): boolean => {
   }
   return false
 }
+
+// D1 allows 100 bound parameters per statement; the status literal and headroom leave this many ids.
+const DELETE_CHUNK = 90
 
 export class D1UsersRepository {
   constructor(private readonly db: Db) {}
@@ -100,6 +103,43 @@ export class D1UsersRepository {
   async unlinkDevices(userId: string): Promise<number> {
     const rows = await this.db.delete(devices).where(eq(devices.userId, userId)).returning({ deviceHash: devices.deviceHash })
     return rows.length
+  }
+
+  /** Ids of guests no device points at and nobody has seen since before the cutoff, oldest first. */
+  async unreachableGuestIds(lastSeenBefore: Date, limit: number): Promise<string[]> {
+    const rows = await this.db
+      .select({ id: users.id })
+      .from(users)
+      .where(
+        and(
+          eq(users.status, 'anonymous'),
+          lt(users.lastSeenAt, lastSeenBefore),
+          notExists(this.db.select({ one: sql`1` }).from(devices).where(eq(devices.userId, users.id))),
+        ),
+      )
+      .orderBy(asc(users.lastSeenAt))
+      .limit(limit)
+    return rows.map((row) => row.id)
+  }
+
+  /**
+   * Deletes guests (never a verified user, even if its id is passed) and returns how many went. Their device
+   * rows go with them through the foreign key's ON DELETE CASCADE. Chunked under D1's bound-parameter limit, in
+   * ONE batch so the whole call is all-or-nothing.
+   */
+  async deleteUsers(ids: string[]): Promise<number> {
+    if (ids.length === 0) return 0
+    const statements = []
+    for (let i = 0; i < ids.length; i += DELETE_CHUNK) {
+      statements.push(
+        this.db
+          .delete(users)
+          .where(and(inArray(users.id, ids.slice(i, i + DELETE_CHUNK)), eq(users.status, 'anonymous')))
+          .returning({ id: users.id }),
+      )
+    }
+    const results = await this.db.batch(statements as [(typeof statements)[number], ...(typeof statements)[number][]])
+    return results.reduce((total, rows) => total + rows.length, 0)
   }
 }
 

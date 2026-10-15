@@ -63,6 +63,10 @@
     { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } }
   ],
 
+  // Daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
+  // Env blocks do not inherit triggers, so each deployed environment restates it.
+  "triggers": { "crons": ["17 3 * * *"] },
+
   "observability": {
     "enabled": true
   },
@@ -151,6 +155,8 @@
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "2005", "simple": { "limit": 30, "period": 60 } }
       ],
+      // Daily guest cleanup, 03:17 UTC (see the top level).
+      "triggers": { "crons": ["17 3 * * *"] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -217,6 +223,8 @@
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "3004", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "3005", "simple": { "limit": 30, "period": 60 } }
       ],
+      // Daily guest cleanup, 03:17 UTC (see the top level).
+      "triggers": { "crons": ["17 3 * * *"] },
       "d1_databases": [
         {
           "binding": "DB",

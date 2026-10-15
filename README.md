@@ -281,7 +281,8 @@ instead of removing it.
 
 In `wrangler.jsonc`, the top level is local development. Deployed Workers come only from
 `env.staging` and `env.production` (named `deepertones-be-staging` / `deepertones-be-production`).
-Env blocks do not inherit `vars` or bindings, so add each one to both.
+Env blocks do not inherit `vars`, bindings or `triggers`, so add each one to both.
+The daily guest-cleanup cron (`triggers.crons`, 03:17 UTC) is deployed with the Worker; see Guest cleanup in `docs/architecture.md`.
 
 Each deploy applies D1 migrations first, then deploys the Worker: the schema leads the code. A
 migration that drops a column or table must therefore ship one release *after* the code that

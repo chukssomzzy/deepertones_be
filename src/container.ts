@@ -56,7 +56,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
-  const users = once(() => new UsersService({ repository: new D1UsersRepository(db()) }))
+  // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
+  const users = once(() => new UsersService({ repository: new D1UsersRepository(db()), guestDataCleaners: [] }))
 
   const tokens = once(() => new TokenService({ secret: env.JWT_SECRET, previousSecret: env.JWT_SECRET_PREVIOUS || undefined }))
 

@@ -14,6 +14,10 @@ describe('the Worker entry', () => {
     expect(typeof app.request).toBe('function')
   })
 
+  it('has a scheduled handler for the cleanup cron', () => {
+    expect(typeof worker.scheduled).toBe('function')
+  })
+
   it('has a queue handler that is wired to the dispatcher', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(typeof worker.queue).toBe('function')

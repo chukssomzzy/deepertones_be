@@ -226,6 +226,112 @@ export const usersRepositoryContract = (name: string, make: () => UsersRepositor
 
       expect(await repo.unlinkDevices(crypto.randomUUID())).toBe(0)
     })
+
+    describe('guest cleanup', () => {
+      const DAY = 24 * 60 * MINUTE
+      // Everything below happens well before BASE, so guests other tests leave at BASE never match.
+      const CUTOFF = at(-30 * DAY)
+      const beforeCutoff = (extraMs: number) => new Date(CUTOFF.getTime() - extraMs)
+
+      // A guest last seen at `seenAt`; unlinked (no device points at it) unless `linked`.
+      const guestSeen = async (repo: UsersRepository, seenAt: Date, linked = false) => {
+        const g = await guest(repo, freshHash(), seenAt)
+        await repo.touch(g.id, seenAt)
+        if (!linked) await repo.unlinkDevices(g.id)
+        return g
+      }
+
+      it('unreachableGuestIds includes a guest with no device last seen before the cutoff', async () => {
+        const repo = await make()
+        const old = await guestSeen(repo, beforeCutoff(DAY))
+
+        expect(await repo.unreachableGuestIds(CUTOFF, 100)).toContain(old.id)
+      })
+
+      it('unreachableGuestIds excludes a guest a device still points at, however old', async () => {
+        const repo = await make()
+        const linked = await guestSeen(repo, beforeCutoff(DAY), true)
+
+        expect(await repo.unreachableGuestIds(CUTOFF, 100)).not.toContain(linked.id)
+      })
+
+      it('unreachableGuestIds excludes an unlinked guest seen at or after the cutoff', async () => {
+        const repo = await make()
+        const atCutoff = await guestSeen(repo, CUTOFF)
+        const recent = await guestSeen(repo, new Date(CUTOFF.getTime() + 1))
+
+        const ids = await repo.unreachableGuestIds(CUTOFF, 100)
+
+        expect(ids).not.toContain(atCutoff.id)
+        expect(ids).not.toContain(recent.id)
+      })
+
+      it('unreachableGuestIds includes a guest seen one millisecond before the cutoff', async () => {
+        const repo = await make()
+        const justOld = await guestSeen(repo, beforeCutoff(1))
+
+        expect(await repo.unreachableGuestIds(CUTOFF, 100)).toContain(justOld.id)
+      })
+
+      it('unreachableGuestIds never includes a verified user, even old and unlinked', async () => {
+        const repo = await make()
+        const g = await guest(repo)
+        await repo.promote(g.id, freshEmail(), beforeCutoff(DAY))
+        await repo.unlinkDevices(g.id)
+
+        expect(await repo.unreachableGuestIds(CUTOFF, 100)).not.toContain(g.id)
+      })
+
+      it('unreachableGuestIds returns at most limit ids, oldest first', async () => {
+        const repo = await make()
+        // Older than anything another test seeds, so these are the oldest rows in the table.
+        const oldest = await guestSeen(repo, beforeCutoff(900 * DAY))
+        const second = await guestSeen(repo, beforeCutoff(899 * DAY))
+        await guestSeen(repo, beforeCutoff(898 * DAY))
+
+        expect(await repo.unreachableGuestIds(CUTOFF, 2)).toEqual([oldest.id, second.id])
+      })
+
+      it('deleteUsers removes exactly the given guests and returns how many', async () => {
+        const repo = await make()
+        const a = await guestSeen(repo, beforeCutoff(DAY))
+        const b = await guestSeen(repo, beforeCutoff(DAY))
+        const kept = await guestSeen(repo, beforeCutoff(DAY))
+
+        expect(await repo.deleteUsers([a.id, b.id])).toBe(2)
+
+        expect(await repo.findById(a.id)).toBeNull()
+        expect(await repo.findById(b.id)).toBeNull()
+        expect(await repo.findById(kept.id)).not.toBeNull()
+      })
+
+      it('deleteUsers also removes the devices pointing at the deleted guests', async () => {
+        const repo = await make()
+        const g = await guestSeen(repo, beforeCutoff(DAY), true)
+
+        await repo.deleteUsers([g.id])
+
+        expect(await repo.findDevice(g.deviceHash)).toBeNull()
+      })
+
+      it('deleteUsers never deletes a verified user, even when its id is passed', async () => {
+        const repo = await make()
+        const g = await guest(repo)
+        await repo.promote(g.id, freshEmail(), at(MINUTE))
+        const anon = await guestSeen(repo, beforeCutoff(DAY))
+
+        expect(await repo.deleteUsers([g.id, anon.id])).toBe(1)
+
+        expect(await repo.findById(g.id)).toMatchObject({ status: 'verified' })
+        expect(await repo.findById(anon.id)).toBeNull()
+      })
+
+      it('deleteUsers with no ids deletes nothing and returns 0', async () => {
+        const repo = await make()
+
+        expect(await repo.deleteUsers([])).toBe(0)
+      })
+    })
   })
 }
 

@@ -94,4 +94,24 @@ export class FakeUsersRepository implements UsersRepository {
     }
     return count
   }
+
+  async unreachableGuestIds(lastSeenBefore: Date, limit: number): Promise<string[]> {
+    const linked = new Set([...this.devices.values()].map((d) => d.userId))
+    return [...this.users.values()]
+      .filter((u) => u.status === 'anonymous' && !linked.has(u.id) && u.lastSeenAt.getTime() < lastSeenBefore.getTime())
+      .sort((a, b) => a.lastSeenAt.getTime() - b.lastSeenAt.getTime())
+      .slice(0, limit)
+      .map((u) => u.id)
+  }
+
+  async deleteUsers(ids: string[]): Promise<number> {
+    let count = 0
+    for (const id of ids) {
+      if (this.users.get(id)?.status !== 'anonymous') continue
+      this.users.delete(id)
+      for (const [hash, device] of this.devices) if (device.userId === id) this.devices.delete(hash)
+      count++
+    }
+    return count
+  }
 }
