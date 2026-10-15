@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { isSafePublicHttpsUrl } from '../../lib/url-safety'
 import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
@@ -47,7 +48,8 @@ export class AnthropicProductResearcher implements ProductResearcher {
     const { sourceUrl } = answer
     if (!withinBounds(ingredients) || !sourceUrl || !sourceUrlsOf(message).has(sourceUrl)) return NOT_FOUND
 
-    const imageUrl = safeImageUrl(answer.imageUrl)
+    // A first filter only: the image store checks again when it downloads.
+    const imageUrl = isSafePublicHttpsUrl(answer.imageUrl) ? answer.imageUrl : undefined
     return { found: true, ingredients, sourceUrl, ...(imageUrl !== undefined && { imageUrl }) }
   }
 }
@@ -61,36 +63,6 @@ const withinBounds = (ingredients: string[]): boolean =>
   ingredients.length > 0 &&
   ingredients.length <= MAX_INGREDIENTS &&
   ingredients.every((name) => name.length <= MAX_INGREDIENT_LENGTH && !CONTROL_CHARACTER.test(name))
-
-const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/
-
-/**
- * An https URL on a public-looking host, or undefined. The product is still found without an image.
- * This is a first filter only: the PR that downloads the image must check again, refuse redirects to
- * unsafe hosts, cap the bytes it reads and sniff the magic bytes instead of trusting the URL or header.
- */
-const safeImageUrl = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
-    return undefined
-  }
-  // The URL parser turns decimal, octal and hex IPv4 spellings into dotted form, so one pattern covers them.
-  const host = url.hostname.replace(/\.$/, '')
-  const unsafe =
-    url.protocol !== 'https:' ||
-    url.username !== '' ||
-    url.password !== '' ||
-    url.port !== '' ||
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.startsWith('[') ||
-    IPV4_LITERAL.test(host) ||
-    !host.includes('.')
-  return unsafe ? undefined : value
-}
 
 /**
  * The last JSON object in the text that fits the answer shape: the final answer comes after any

@@ -26,7 +26,7 @@ src/
   container.ts             composition root: the ONLY file that knows concrete classes
   docs.ts                  spec header, /openapi.json and Swagger UI at /docs
   middleware/              requestContext, container, cors, auth
-  lib/                     shared plumbing: factory, errors, openapi, actor, context, jwt, db, http, once
+  lib/                     shared plumbing: factory, errors, openapi, actor, context, jwt, db, http, once, url-safety, image-header
   modules/<feature>/
     <feature>.routes.ts           thin controller
     <feature>.service.ts          business logic
@@ -143,13 +143,20 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   there: it is the one runAs-allowlisted jobs entry, and a separate file would need a rule change.
 
 ### Outbound HTTP
-Provider adapters call vendors through `lib/http.ts` (`requestJson$`), built on rxjs `fromFetch`.
+Provider adapters call vendors through `lib/http.ts`, built on rxjs `fromFetch`: `requestJson$` for JSON APIs
+and `requestBytes$` for binary downloads.
 It returns an Observable so an adapter can compose operators; the adapter converts at its own
 boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs.
 
 - **Every call has a timeout** (`timeoutMs`); on expiry the request is aborted and the stream
   errors with `HttpTimeoutError`. Other transport failures are `HttpNetworkError`. Any HTTP status
   is a value, not an error: the adapter decides what a 4xx or 5xx means.
+- **`requestBytes$` is for untrusted servers.** It never follows redirects (`redirect: 'manual'`): a 3xx is
+  a value with its `location`, so the adapter vets each hop before requesting it. The size cap
+  (`maxBytes`) is enforced while reading: a larger `content-length` fails before any byte is read, and
+  otherwise the body is streamed and cancelled as soon as the cap is passed, so an endless body cannot
+  fill memory (never `arrayBuffer()`). Exceeding it is `HttpTooLargeError`, its own error and not a
+  transport one, because the server did answer. `timeoutMs` covers the whole body.
 - **No retries.** A retried OTP send could deliver, and bill, a second code. Retrying is each
   caller's decision.
 - **Provider-only.** The `http-only-in-providers` rule lets only `src/providers/**` import
@@ -463,12 +470,44 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
 - **The researcher's bounds.** At most 150 ingredients, each at most 120 characters after trimming
   and without control characters, or the answer is `{ found: false }`. JSON is extracted in linear
   time, so hostile text with thousands of braces cannot stall the Worker.
-- **`imageUrl` hygiene.** Only an https URL with no userinfo or port, on a host that is not
-  `localhost`, `*.localhost`, an IP literal or a single label, is kept; otherwise the image is
-  omitted and the product is still found. This is a first filter: the PR that downloads the image
-  must re-check, refuse redirects to unsafe hosts, cap the bytes it reads and sniff magic bytes.
+- **`imageUrl` hygiene.** Only a URL that passes `isSafePublicHttpsUrl` (`lib/url-safety.ts`) is kept;
+  otherwise the image is omitted and the product is still found. This is a first filter: the image
+  store (see "Catalog images") checks again.
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
+
+### Catalog images
+`providers/catalog-images` fetches a product's stock image and keeps it. The port is
+`CatalogImageStore` (`fetchImage`, `put`, `delete`, `publicUrl`); `R2CatalogImageStore` and
+`MemoryCatalogImageStore` implement it. A failed download is `null`, never an error.
+
+- **Safe-URL rules.** `isSafePublicHttpsUrl` accepts only https URLs of at most 2048 characters with no
+  userinfo, no explicit port (read from the raw text, because the URL parser silently drops `:443`),
+  no IP literal in any spelling the parser normalises, no `localhost` or `*.localhost`, and no
+  single-label host. The adapter checks the start URL and every redirect target, resolves a relative
+  `location` against the URL that sent it, and follows at most 2 redirects (3 requests), each with its
+  own 10 s timeout.
+- **Blocked hosts.** `blockedHostSuffixes` (default none) refuses any hop whose hostname equals a
+  suffix or ends with `.`+suffix. The container passes our own zones, so a redirect cannot point the
+  Worker back at us; the suffixes are not hard-coded in the adapter.
+- **The header decides the type and the size.** JPEG, PNG or WebP by signature only; the
+  `Content-Type` header is ignored, so SVG, HTML and GIF are refused. Width and height are read from the
+  file header (PNG IHDR; the first JPEG SOF marker; WebP `VP8 `, `VP8L` or `VP8X`) without decoding any
+  pixels, and an image with a side of 0 or over 4096 is refused, as is a header cut short. The download
+  is capped at 5 MB by default.
+- **A public bucket per environment, written by the Worker.** Images go to
+  `deepertones-catalog-images-{staging,production}` through an R2 binding, not to `deepertones-assets`,
+  which CI syncs from the repo's `assets/` folder and owns. Keys are validated (lowercase path
+  segments of `a-z 0-9 . _ -`, no `..`; anything else throws, because a bad key is our bug) and
+  encoded per segment in the public URL. Objects are served with `public, max-age=86400`, deliberately
+  not `immutable`: deleting or replacing an image takes effect after at most a day of edge cache. A
+  takedown can be made immediate with a manual cache purge of that URL.
+- **Serve with `nosniff`.** The images domain should send `X-Content-Type-Options: nosniff`, so a
+  browser never reinterprets a stored object. That is a Cloudflare response header rule on the zone, an
+  infra step outside this code.
+- **The vision match is the second gate.** Checks on the URL and bytes prove a file is an image, not
+  that it shows the right product: a hostile page can serve a valid image of the wrong thing. The
+  catalog service must pass the image through `ProductAnalyst.imageShowsProduct` before `put`.
 
 ### Product catalog data
 `modules/catalog` holds the shared, per-product data behind the product scan (#20): products, aliases, formulations,

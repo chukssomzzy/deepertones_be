@@ -126,6 +126,12 @@ describe('AnthropicProductResearcher.research', () => {
     expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
   })
 
+  it('omits imageUrl for a host the shared URL-safety check rejects', async () => {
+    const result = await research(searched(JSON.stringify(answer({ imageUrl: 'https://0x7f.1/x.png' }))))
+
+    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
+  })
+
   it('omits imageUrl when the answer has none', async () => {
     const { imageUrl: _omitted, ...withoutImage } = answer()
 
