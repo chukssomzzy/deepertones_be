@@ -1,5 +1,6 @@
 import { createFactory } from 'hono/factory'
 import type { Container } from '../container'
+import type { Actor, TokenProblem } from './actor'
 import type { BaseEnv } from './env'
 
 /**
@@ -11,6 +12,8 @@ export type AppEnv = {
   Variables: BaseEnv['Variables'] & {
     /** This request's services, built by the container middleware. */
     services: Container
+    /** Who the bearer token says is calling, set by the auth middleware. Unset where it does not run. */
+    auth?: { actor: Actor; tokenProblem?: TokenProblem }
   }
 }
 

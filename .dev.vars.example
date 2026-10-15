@@ -13,3 +13,9 @@ ZEPTOMAIL_API_KEY=
 WHATSAPP_ACCESS_TOKEN=
 # Secret mixed into stored OTP hashes. Generate one with: openssl rand -hex 32
 OTP_PEPPER=
+# Signs access and refresh tokens. Generate with: openssl rand -hex 32. Use a different value per environment.
+JWT_SECRET=
+# Only while rotating JWT_SECRET: put the old value here so existing tokens keep verifying. Leave blank otherwise.
+JWT_SECRET_PREVIOUS=
+# Keys the hash of device ids. Generate with: openssl rand -hex 32. NEVER rotate it: that orphans every device's guest.
+DEVICE_ID_KEY=

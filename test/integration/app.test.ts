@@ -69,6 +69,20 @@ describe('GET /health', () => {
   })
 })
 
+describe('auth middleware in the app', () => {
+  it('never rejects: a request with an invalid bearer token still reaches a public route', async () => {
+    const res = await fetchWorker('/health', { headers: { Authorization: 'Bearer not.a.jwt' } })
+
+    expect(res.status).toBe(200)
+  })
+
+  it('does not reject a Basic-scheme Authorization header either', async () => {
+    const res = await fetchWorker('/health', { headers: { Authorization: 'Basic dXNlcjpwYXNz' } })
+
+    expect(res.status).toBe(200)
+  })
+})
+
 describe('unknown routes', () => {
   it('return the standard 404 error body', async () => {
     const res = await fetchWorker('/nope')

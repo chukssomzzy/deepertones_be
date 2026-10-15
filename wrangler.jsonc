@@ -26,10 +26,11 @@
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
     "WHATSAPP_OTP_LANGUAGE": "en"
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
+  // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
 
   // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -106,10 +107,11 @@
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
+      // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -162,10 +164,11 @@
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY and OTP_PEPPER are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
+      // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production

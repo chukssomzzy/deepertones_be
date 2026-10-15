@@ -1,6 +1,7 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { buildContainer } from '../../src/container'
+import { TokenService } from '../../src/modules/auth/tokens.service'
 import { OtpService } from '../../src/modules/otp/otp.service'
 
 describe('buildContainer', () => {
@@ -10,6 +11,19 @@ describe('buildContainer', () => {
     expect(env.ZEPTOMAIL_API_KEY).toBeTruthy()
 
     expect(buildContainer(env).otp).toBeInstanceOf(OtpService)
+  })
+
+  it('builds the token service from JWT_SECRET, accepting tokens signed with JWT_SECRET_PREVIOUS', async () => {
+    expect(env.JWT_SECRET).toBeTruthy()
+    const tokens = buildContainer(env).tokens
+    expect(tokens).toBeInstanceOf(TokenService)
+
+    const { accessToken } = await tokens.issue({ id: 'u_1', status: 'anonymous', tokenVersion: 0 })
+    expect(await tokens.verifyAccess(accessToken)).toMatchObject({ ok: true, userId: 'u_1' })
+
+    const rotated = buildContainer({ ...env, JWT_SECRET: 'rotated-in', JWT_SECRET_PREVIOUS: env.JWT_SECRET }).tokens
+    expect(await rotated.verifyAccess(accessToken)).toMatchObject({ ok: true })
+    expect(await buildContainer({ ...env, JWT_SECRET: 'rotated-in' }).tokens.verifyAccess(accessToken)).toEqual({ ok: false, problem: 'invalid' })
   })
 
   it('sends an email code through the real queue binding and leaves the challenge queued', async () => {
