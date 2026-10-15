@@ -470,6 +470,45 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
 
+### Product catalog data
+`modules/catalog` holds the shared, per-product data behind the product scan (#20): products, aliases, formulations,
+concerns and traits, research attempts, and the pure rules that feed them. This is the data layer only; the service
+and routes come later.
+
+- **Identity keys** (`catalog.identity.ts`) are `brand|name|variant`, each part normalised: lower case, accents and
+  apostrophes dropped, `&` read as "and", other marks turned into spaces. Pack sizes are removed (`ml`, `mg`, `kg`,
+  `oz`, `fl oz` at any number; a bare `g` or `l` only from 10 up, so "Shade 4 L" is kept). A `+` touching a letter or
+  digit is read as "plus" ("SPF 50+" and "Hydro Boost+"; a standalone " + " is just a space). A space is put between a
+  letter and the digit after it ("NC15" is "nc 15"), never between a digit and a letter, so "250ml" still reaches the
+  size rule. A dot survives only between two digits ("2.5"). **Brand spellings are not merged yet**: two spellings of
+  one brand make two brand keys, so a product under the other spelling is not found as a near miss.
+- **Near-miss candidates** are same-brand products with a different identity key whose name and variant words overlap
+  (Jaccard similarity, default threshold 0.6, at most 3). They are looked up newest first (`productsByBrandKey`), and
+  the model, not the code, decides whether one is the same product; its answer is stored as an alias.
+- **Aliases** map another key to a product. An alias never shadows an identity key, and the first product to take
+  one keeps it (`addAlias` is one `insert or ignore` statement; an unknown product throws). `createProduct` is an
+  insert-or-ignore on the identity key that returns the stored row, so two scans of one new product both carry on
+  with the same product.
+- **Formulations** are one ingredient list each, in label order, with where it came from (a web page or the label
+  photo) and when it was found. A list that differs materially is a new formulation, never an overwrite.
+  `latestFormulation` takes the latest found time and the later insert on a tie. `touchFormulation` only moves the
+  found time forward.
+- **`saveAnalysis` is atomic.** It checks the formulation exists (throws, stores nothing, if not), then runs ONE
+  `db.batch`: delete the old traits, delete the old concerns, insert each concern (one statement per concern, under
+  D1's 100-parameter limit), insert the traits (de-duplicated per concern), and set the versions on the formulation.
+  A reader sees the old analysis or the new one, never half of either.
+- **The seed reference list** (`catalog.reference.ts`, `REFERENCE_VERSION`) is the deterministic safety net: the rule
+  checks (`flagFacts`) match each ingredient exactly against hand-compiled names and aliases, including the parts of
+  `Aqua (Water)`, `Parfum/Fragrance` and `Hydroquinone 4%`. **It is a seed, not the full CosIng annexes**, and
+  `REFERENCE_COVERAGE` is `'partial'`: the catalog service must carry that to users so a clean result never reads as
+  an all-clear. Banned substances and the named fragrance allergens carry an https regulation URL as their `source`;
+  commonly cited concerns (pore-clogging, sun sensitivity, irritation, pregnancy caution, undisclosed fragrance) have
+  a `null` source and say so in their rule, so a regulation is never shown as backing something no regulation says.
+  A `null` source is left out of the analyst's prompt.
+- **Follow-ups:** a proper import of the public CosIng export; the expanded labelled-allergen list from Regulation
+  (EU) 2023/1545 (about 80 substances, where the seed has the original 26); restricted substances with their limits
+  and conditions of use; alias coverage, which is hand-built.
+
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
 through ZeptoMail (see above); WhatsApp, through the Meta WhatsApp Cloud API with an approved

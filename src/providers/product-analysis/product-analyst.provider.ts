@@ -5,7 +5,8 @@ export type FlaggedFact = {
   kind: string
   ingredient: string
   rule: string
-  source: string
+  /** An https URL for a regulatory listing; null for a commonly cited concern that has no official source. */
+  source: string | null
 }
 
 export type AnalysisInput = {

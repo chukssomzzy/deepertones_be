@@ -43,6 +43,13 @@
       "when": 1791989582739,
       "tag": "0005_organic_gamora",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1792070633253,
+      "tag": "0006_stiff_warlock",
+      "breakpoints": true
     }
   ]
 }
