@@ -16,6 +16,14 @@
     "description": "Every JSON response has an envelope, and `status` equals the HTTP status. Success: `{ success: true, status, message, data }`. Error: `{ success: false, status, message, error: { code, details?, requestId } }`. Branch on `success`, then on `error.code`, not on `message`."
   },
   "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "The access token from /auth/anonymous, /auth/otp/verify or /auth/refresh."
+      }
+    },
     "schemas": {
       "HealthResponse": {
         "type": "object",
@@ -100,6 +108,173 @@
           "message",
           "error"
         ]
+      },
+      "Session": {
+        "type": "object",
+        "properties": {
+          "tokens": {
+            "type": "object",
+            "properties": {
+              "accessToken": {
+                "type": "string",
+                "description": "Send as `Authorization: Bearer ...`. Lives 15 minutes."
+              },
+              "refreshToken": {
+                "type": "string",
+                "description": "Send only to `/auth/refresh`. Lives 60 days from each use."
+              },
+              "accessExpiresAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "refreshExpiresAt": {
+                "type": "string",
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "accessToken",
+              "refreshToken",
+              "accessExpiresAt",
+              "refreshExpiresAt"
+            ]
+          },
+          "user": {
+            "$ref": "#/components/schemas/User"
+          }
+        },
+        "required": [
+          "tokens",
+          "user"
+        ]
+      },
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "anonymous",
+              "verified"
+            ],
+            "description": "`anonymous` is a guest; `verified` has proven an email or phone."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "status",
+          "email",
+          "phone"
+        ]
+      },
+      "DeviceBody": {
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 200,
+            "description": "A stable id for this install: Android `getAndroidId`, or a UUID kept in the iOS Keychain."
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "ios",
+              "android"
+            ]
+          }
+        },
+        "required": [
+          "deviceId",
+          "platform"
+        ]
+      },
+      "OtpChallengeResponse": {
+        "type": "object",
+        "properties": {
+          "challengeId": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the code stops working."
+          }
+        },
+        "required": [
+          "challengeId",
+          "expiresAt"
+        ]
+      },
+      "SendOtpBody": {
+        "type": "object",
+        "properties": {
+          "channel": {
+            "type": "string",
+            "enum": [
+              "email",
+              "whatsapp"
+            ]
+          },
+          "address": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 320,
+            "example": "ada@example.com"
+          }
+        },
+        "required": [
+          "channel",
+          "address"
+        ]
+      },
+      "VerifyOtpBody": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/SendOtpBody"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "pattern": "^\\d{6}$",
+                "example": "482913"
+              }
+            },
+            "required": [
+              "code"
+            ]
+          }
+        ]
+      },
+      "RefreshBody": {
+        "type": "object",
+        "properties": {
+          "refreshToken": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          }
+        },
+        "required": [
+          "refreshToken"
+        ]
       }
     },
     "parameters": {}
@@ -113,6 +288,7 @@
         ],
         "summary": "Check the API and its dependencies",
         "description": "For uptime checks: the status code alone says whether the API can serve requests.",
+        "security": [],
         "responses": {
           "200": {
             "description": "Everything is reachable",
@@ -162,6 +338,685 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/anonymous": {
+      "post": {
+        "operationId": "bootstrapGuest",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Start a guest session for this device",
+        "description": "Call at app start. The same device id always gets the same guest, until that guest verifies an account.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The guest and its tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not JSON (Content-Type must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/otp/send": {
+      "post": {
+        "operationId": "sendOtp",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Email or WhatsApp a sign-in code",
+        "description": "Needs the guest session's access token. A code is sent at most once a minute per address.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendOtpBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The code is on its way",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/OtpChallengeResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not JSON (Content-Type must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/otp/verify": {
+      "post": {
+        "operationId": "verifyOtp",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Check a code and sign in",
+        "description": "Verifies the calling guest with the address, or signs them in as the address's existing owner. Replaces every earlier token: store the new pair.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyOtpBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The verified user and new tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not JSON (Content-Type must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/refresh": {
+      "post": {
+        "operationId": "refreshSession",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Trade a refresh token for a new token pair",
+        "description": "Ignores the Authorization header, so an expired access token does not matter.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RefreshBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The same user, new tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not JSON (Content-Type must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/auth/logout": {
+      "post": {
+        "operationId": "logout",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "Sign out everywhere and start a fresh guest session",
+        "description": "Every refresh token the user holds stops working. The response is a new guest for this device.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeviceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "A new guest and its tokens",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Session"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The body is not JSON (Content-Type must be application/json)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me": {
+      "get": {
+        "operationId": "getMe",
+        "tags": [
+          "Auth"
+        ],
+        "summary": "The signed-in user",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The user",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/User"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {

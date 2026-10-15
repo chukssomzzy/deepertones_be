@@ -256,7 +256,7 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
   `public` actors, which the guards turn into the right 401.
 
 ### Users and guests
-`modules/users` owns identity. Nothing is wired to routes yet; `container.users` is there for the auth PRs.
+`modules/users` owns identity. Its routes live in `modules/auth` (see Auth routes).
 
 - **One `users` table** for guests and verified people. `status` is `anonymous` (a guest) or `verified`;
   `email` and `phone` are nullable and each unique; `token_version` starts at 0.
@@ -289,7 +289,7 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
   the secret by `kid`. `JWT_SECRET` signs; `JWT_SECRET_PREVIOUS`, when set, verifies only. Rotating therefore signs
   nobody out. The algorithm is checked strictly, the signature in constant time, and `expired` is reported only
   after the signature is valid, so a forged expired token is `invalid`.
-- **`token_version` is checked only at refresh**, by the refresh flow (next PR), which compares the token's `ver`
+- **`token_version` is checked only at refresh**, by `AuthService.refresh`, which compares the token's `ver`
   with the user's row. `TokenService` has no database access, and the middleware does no database read.
 - **The middleware never rejects.** It runs after `container` (it needs `services.tokens`; the container is lazy, so
   this is cheap) and before `requestContext`, so it (like any middleware before it, such as a future rate limiter)
@@ -302,6 +302,35 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
   rotate.
 - **Accepted risks**: a stolen refresh token works until the user logs out (it slides for up to 60 days); a logout
   reaches the user's other devices within 15 minutes, when their access tokens expire and their refresh fails.
+
+### Auth routes
+`modules/auth` holds `AuthService` (the only place that combines users, otp and tokens), `auth.routes.ts`
+(`/auth/*`, plus `GET /me` as its own sub-app) and the schemas and presenter. All of it goes through services.
+
+| Route | Caller | Rate limit (per 60 s) |
+| --- | --- | --- |
+| `POST /auth/anonymous` | public: starts a guest session for `{ deviceId, platform }` | 10 per IP |
+| `POST /auth/otp/send` | bearer (guests included) | 3 per IP and 3 per user |
+| `POST /auth/otp/verify` | bearer: promotes the guest, or signs in as the address's owner | 10 per IP |
+| `POST /auth/refresh` | public: `{ refreshToken }`; the Authorization header is ignored | 30 per IP |
+| `POST /auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
+| `GET /me` | bearer | none |
+
+- **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`. Refreshing
+  slides the refresh token's 60 days.
+- **Device ids are HMAC'd** with `DEVICE_ID_KEY` before they reach the database; the raw id is never stored.
+- **Verify and logout unlink the user's devices**, so the device's next bootstrap creates a new guest rather than
+  returning data that belonged to the pre-login (or just logged-out) identity.
+- **Linking is refused up front.** A verified caller using an address nobody owns gets 409 `ACCOUNT_LINKING_UNAVAILABLE` from send and verify, before a code is sent or consumed (checked against the user's row, not the token's status). A guest that signs in as an existing owner has its token version bumped, retiring its refresh token.
+- **Rate limits** are Workers rate-limit bindings (`ratelimits` in `wrangler.jsonc`, restated in every environment
+  block), applied by `rateLimit(binding, 'ip' | 'user')` (`middleware/rate-limit.ts`) as route middleware in
+  `defineRoute`. It runs after `auth`, outside the request context, so it reads `c.var.auth`, never
+  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller. Over the limit
+  is 429 `RATE_LIMITED` with `Retry-After: 60`. A `namespace_id` is an account-wide counter, so each binding in
+  each environment has its own. Counts are per Cloudflare location and approximate: the OTP per-recipient cooldown
+  and cap still apply underneath.
+- **OpenAPI**: the `bearerAuth` scheme is registered in `mountDocs`. Protected routes declare
+  `security: [{ bearerAuth: [] }]`; public routes (including `/health`) declare `security: []`.
 
 ### Unit and integration tests
 Both run inside workerd via `@cloudflare/vitest-plugin`; they differ in scope.
@@ -379,8 +408,8 @@ because later modules will send email too.
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
 through ZeptoMail (see above); WhatsApp, through the Meta WhatsApp Cloud API with an approved
 authentication template, is built but switched off until Meta approves the template. There are no
-HTTP routes yet: auth will call `container.otp.send({ channel, address })` and
-`container.otp.verify({ channel, address }, code)`.
+HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
+`otp.verify({ channel, address }, code)` behind the auth routes (see Auth routes).
 
 - **`OTP_CHANNELS` decides what people may request.** A comma-separated list of channel names in
   `wrangler.jsonc` (`email`, `whatsapp`), read once by `parseOtpChannels`; an unknown name throws,
@@ -444,8 +473,7 @@ HTTP routes yet: auth will call `container.otp.send({ channel, address })` and
   unexpired, so the 5-try limit and single use hold under concurrency. Storing a send is one
   `db.batch`, per the atomic-writes rule above.
 - **The resend cooldown and hourly cap are check-then-act.** Parallel sends for one number can each
-  go out. That is accepted while there are no routes; the auth PR must put per-IP/edge rate
-  limiting in front of the send endpoint.
+  go out. The send route is therefore rate limited per IP and per user (see Auth routes).
 - **Old rows are purged on send.** Challenges older than 24h for that recipient are deleted when a
   new one is stored, so the table does not grow without bound.
 - **Error codes are the UI contract.** Send: `OTP_CHANNEL_UNAVAILABLE` (400, the channel is off),

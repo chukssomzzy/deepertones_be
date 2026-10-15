@@ -54,6 +54,13 @@ const serversFor = (origin: string) => {
 
 /** /openapi.json (generated from the app's routes) and Swagger UI at /docs. */
 export const mountDocs = (app: OpenAPIHono<AppEnv>) => {
+  // Routes opt in with `security: [{ bearerAuth: [] }]`; public routes say `security: []`.
+  app.openAPIRegistry.registerComponent('securitySchemes', 'bearerAuth', {
+    type: 'http',
+    scheme: 'bearer',
+    bearerFormat: 'JWT',
+    description: 'The access token from /auth/anonymous, /auth/otp/verify or /auth/refresh.',
+  })
   app.get('/openapi.json', docsEnabled, (c) =>
     c.json(app.getOpenAPI31Document({ ...apiDocument, servers: serversFor(new URL(c.req.url).origin) })),
   )

@@ -1,6 +1,7 @@
 import { D1JobRunsRepository } from './jobs/job-runs.repository'
 import { createDb } from './lib/db'
 import { once } from './lib/once'
+import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
@@ -59,7 +60,14 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const tokens = once(() => new TokenService({ secret: env.JWT_SECRET, previousSecret: env.JWT_SECRET_PREVIOUS || undefined }))
 
+  const auth = once(
+    () => new AuthService({ users: users(), otp: otp(), tokens: tokens(), deviceIdKey: env.DEVICE_ID_KEY }),
+  )
+
   return {
+    get auth() {
+      return auth()
+    },
     get health() {
       return health()
     },
