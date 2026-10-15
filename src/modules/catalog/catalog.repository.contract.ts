@@ -103,6 +103,20 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
 
         expect(await repo.findProductByKey(fresh('unknown'))).toBeNull()
       })
+
+      it('findProductById finds a product by its id', async () => {
+        const repo = await make()
+        const input = newProduct({ variant: 'Night' })
+        await repo.createProduct(input)
+
+        expect(await repo.findProductById(input.id)).toMatchObject({ id: input.id, identityKey: input.identityKey, variant: 'Night', imageKey: null })
+      })
+
+      it('findProductById returns null for an unknown id', async () => {
+        const repo = await make()
+
+        expect(await repo.findProductById(freshId())).toBeNull()
+      })
     })
 
     describe('aliases', () => {
@@ -239,6 +253,36 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           })
           expect(f!.foundAt.getTime()).toBe(at(MINUTE).getTime())
         }
+      })
+
+      it('createFormulation for an ingredient list the product already has returns the existing formulation and stores no duplicate', async () => {
+        const repo = await make()
+        const product = await withProduct(repo)
+        const first = newFormulation(product.id, { foundAt: at(HOUR) })
+        await repo.createFormulation(first)
+
+        const again = await repo.createFormulation(
+          newFormulation(product.id, { ingredients: first.ingredients, ingredientsKey: first.ingredientsKey, sourceKind: 'label', sourceUrl: null, foundAt: at(2 * HOUR) }),
+        )
+
+        expect(again).toMatchObject({ id: first.id, sourceKind: 'web', sourceUrl: first.sourceUrl })
+        expect(again.foundAt.getTime()).toBe(at(HOUR).getTime())
+        // A duplicate stored later would win the tie-break for latest; the first must still be the only one.
+        expect((await repo.latestFormulation(product.id))!.id).toBe(first.id)
+        expect((await repo.findFormulationByIngredientsKey(product.id, first.ingredientsKey))!.id).toBe(first.id)
+      })
+
+      it('createFormulation stores the same ingredient list for another product as that product\'s own formulation', async () => {
+        const repo = await make()
+        const mine = await withProduct(repo)
+        const theirs = await withProduct(repo)
+        const first = newFormulation(mine.id)
+        await repo.createFormulation(first)
+
+        const other = await repo.createFormulation(newFormulation(theirs.id, { ingredients: first.ingredients, ingredientsKey: first.ingredientsKey }))
+
+        expect(other.productId).toBe(theirs.id)
+        expect(other.id).not.toBe(first.id)
       })
 
       it('touchFormulation never moves the found time backwards', async () => {
@@ -547,16 +591,18 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
 
     describe('research attempts', () => {
       // The attempt count is table-wide and D1 may be shared with other tests, so these assert how much it changes.
-      const attempt = (over: { productId?: string | null; attemptedAt: Date; outcome?: 'found' | 'not-found' | 'failed' }) => ({
+      type Outcome = 'started' | 'found' | 'not-found' | 'failed'
+      const attempt = (over: { id?: string; productId?: string | null; attemptedAt: Date; outcome?: Outcome }) => ({
         id: freshId(),
         productId: null,
-        outcome: 'found' as const,
+        outcome: 'found' as Outcome,
         ...over,
       })
+      const windowStart = (hours: number) => at(hours * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
 
       it('researchAttemptsSince counts an attempt made exactly at the cutoff and later, not one a millisecond before', async () => {
         const repo = await make()
-        const since = at(1000 * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
+        const since = windowStart(1000)
         const before = await repo.researchAttemptsSince(since)
 
         await repo.recordResearchAttempt(attempt({ attemptedAt: new Date(since.getTime() - 1) }))
@@ -569,18 +615,134 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         expect(await repo.researchAttemptsSince(since)).toBe(before + 2)
       })
 
-      it('researchAttemptsSince counts attempts of every outcome, for a known product or none', async () => {
+      it('researchAttemptsSince counts started, found and not-found attempts, for a known product or none, but not failed ones', async () => {
         const repo = await make()
         const product = newProduct()
         await repo.createProduct(product)
-        const since = at(2000 * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
+        const since = windowStart(2000)
         const before = await repo.researchAttemptsSince(since)
 
         await repo.recordResearchAttempt(attempt({ attemptedAt: since, outcome: 'found', productId: product.id }))
         await repo.recordResearchAttempt(attempt({ attemptedAt: since, outcome: 'not-found', productId: product.id }))
-        await repo.recordResearchAttempt(attempt({ attemptedAt: since, outcome: 'failed', productId: null }))
-
+        await repo.recordResearchAttempt(attempt({ attemptedAt: since, outcome: 'started', productId: null }))
         expect(await repo.researchAttemptsSince(since)).toBe(before + 3)
+
+        await repo.recordResearchAttempt(attempt({ attemptedAt: since, outcome: 'failed', productId: product.id }))
+        expect(await repo.researchAttemptsSince(since)).toBe(before + 3)
+      })
+
+      it('settleResearchAttempt turns a started attempt into its outcome: failed stops counting, found and not-found keep counting', async () => {
+        const repo = await make()
+        const since = windowStart(3000)
+        const before = await repo.researchAttemptsSince(since)
+        const [toFail, toFind, toMiss] = [freshId(), freshId(), freshId()]
+        for (const id of [toFail, toFind, toMiss]) await repo.recordResearchAttempt(attempt({ id, attemptedAt: since, outcome: 'started' }))
+        expect(await repo.researchAttemptsSince(since)).toBe(before + 3)
+
+        await repo.settleResearchAttempt(toFail, 'failed')
+        expect(await repo.researchAttemptsSince(since)).toBe(before + 2)
+
+        await repo.settleResearchAttempt(toFind, 'found')
+        await repo.settleResearchAttempt(toMiss, 'not-found')
+        expect(await repo.researchAttemptsSince(since)).toBe(before + 2)
+      })
+
+      it('lastResearchOutcome is null for a product that has had no attempt', async () => {
+        const repo = await make()
+        const product = newProduct()
+        await repo.createProduct(product)
+
+        expect(await repo.lastResearchOutcome(product.id)).toBeNull()
+        expect(await repo.lastResearchOutcome(freshId())).toBeNull()
+      })
+
+      it('lastResearchOutcome returns the product\'s most recent attempt by time, whatever order they were recorded in, and only that product\'s', async () => {
+        const repo = await make()
+        const product = newProduct()
+        const other = newProduct()
+        await repo.createProduct(product)
+        await repo.createProduct(other)
+        await repo.recordResearchAttempt(attempt({ productId: product.id, attemptedAt: at(2 * HOUR), outcome: 'not-found' }))
+        await repo.recordResearchAttempt(attempt({ productId: product.id, attemptedAt: at(HOUR), outcome: 'failed' }))
+        await repo.recordResearchAttempt(attempt({ productId: other.id, attemptedAt: at(5 * HOUR), outcome: 'found' }))
+
+        const last = await repo.lastResearchOutcome(product.id)
+
+        expect(last!.outcome).toBe('not-found')
+        expect(last!.attemptedAt.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('lastResearchOutcome follows a settled attempt to its outcome and keeps the time it started', async () => {
+        const repo = await make()
+        const product = newProduct()
+        await repo.createProduct(product)
+        const id = freshId()
+        await repo.recordResearchAttempt(attempt({ id, productId: product.id, attemptedAt: at(HOUR), outcome: 'started' }))
+        expect((await repo.lastResearchOutcome(product.id))!.outcome).toBe('started')
+
+        await repo.settleResearchAttempt(id, 'not-found')
+
+        const last = await repo.lastResearchOutcome(product.id)
+        expect(last!.outcome).toBe('not-found')
+        expect(last!.attemptedAt.getTime()).toBe(at(HOUR).getTime())
+      })
+    })
+
+    describe('analysis attempts', () => {
+      type Outcome = 'ok' | 'rejected' | 'failed'
+      const withFormulation = async (repo: CatalogRepository) => {
+        const product = newProduct()
+        await repo.createProduct(product)
+        return repo.createFormulation(newFormulation(product.id))
+      }
+      const attempt = (formulationId: string, over: { attemptedAt?: Date; outcome?: Outcome; analysisVersion?: number; referenceVersion?: string } = {}) => ({
+        id: freshId(),
+        formulationId,
+        attemptedAt: BASE,
+        outcome: 'ok' as Outcome,
+        analysisVersion: 1,
+        referenceVersion: 'ref-a',
+        ...over,
+      })
+
+      it('analysisAttemptsSince counts an attempt of any outcome made exactly at the cutoff and later, not one a millisecond before', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const since = at(4000 * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
+        const before = await repo.analysisAttemptsSince(since)
+
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: new Date(since.getTime() - 1) }))
+        expect(await repo.analysisAttemptsSince(since)).toBe(before)
+
+        for (const outcome of ['ok', 'rejected', 'failed'] as const) {
+          await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: since, outcome }))
+        }
+        expect(await repo.analysisAttemptsSince(since)).toBe(before + 3)
+      })
+
+      it('rejectedAnalyses counts only the rejections of that formulation under exactly those versions', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const other = await withFormulation(repo)
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'rejected' }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'rejected' }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'ok' }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'failed' }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'rejected', analysisVersion: 2 }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { outcome: 'rejected', referenceVersion: 'ref-b' }))
+        await repo.recordAnalysisAttempt(attempt(other.id, { outcome: 'rejected' }))
+
+        expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(2)
+        expect(await repo.rejectedAnalyses(formulation.id, 2, 'ref-a')).toBe(1)
+        expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-b')).toBe(1)
+        expect(await repo.rejectedAnalyses(other.id, 1, 'ref-a')).toBe(1)
+      })
+
+      it('rejectedAnalyses is zero for a formulation with no attempts', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+
+        expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(0)
       })
     })
   })

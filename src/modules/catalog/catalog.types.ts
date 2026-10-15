@@ -1,4 +1,4 @@
-import type { formulationConcerns, formulations, products, researchAttempts } from './catalog.table'
+import type { analysisAttempts, formulationConcerns, formulations, products, researchAttempts } from './catalog.table'
 import type { Trait } from './catalog.vocabulary'
 
 export type Product = typeof products.$inferSelect
@@ -20,3 +20,5 @@ export type DraftConcernRow = Omit<ConcernRow, 'id' | 'formulationId' | 'positio
 export type StoredConcern = DraftConcernRow & Pick<ConcernRow, 'id' | 'formulationId' | 'position'>
 
 export type ResearchAttempt = typeof researchAttempts.$inferSelect
+
+export type AnalysisAttempt = typeof analysisAttempts.$inferSelect

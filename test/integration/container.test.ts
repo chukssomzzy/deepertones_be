@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { buildContainer } from '../../src/container'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { OtpService } from '../../src/modules/otp/otp.service'
 
 describe('buildContainer', () => {
@@ -11,6 +12,12 @@ describe('buildContainer', () => {
     expect(env.ZEPTOMAIL_API_KEY).toBeTruthy()
 
     expect(buildContainer(env).otp).toBeInstanceOf(OtpService)
+  })
+
+  it('builds the product catalog service from the environment bindings', () => {
+    expect(env.ANTHROPIC_API_KEY).toBeTruthy()
+
+    expect(buildContainer(env).catalog).toBeInstanceOf(ProductCatalogService)
   })
 
   it('builds the token service from JWT_SECRET, accepting tokens signed with JWT_SECRET_PREVIOUS', async () => {

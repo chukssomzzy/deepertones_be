@@ -137,8 +137,30 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET` and `DEVICE_ID_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET` and `DEVICE_ID_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate each with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
+
+## Product catalog setup
+
+Product research and analysis call Claude, and stock images are kept in a public R2 bucket per environment. None of
+this is created by a deploy; the account owner does it by hand, once per environment (design in "Product catalog
+service" in `docs/architecture.md`):
+
+1. Create the R2 buckets `deepertones-catalog-images-staging` and `deepertones-catalog-images-production`
+   (Cloudflare dashboard → R2). Not `deepertones-assets`: CI owns that one.
+2. Connect `images.staging.deepertones.com` and `images.deepertones.com` as custom domains of the matching bucket
+   (bucket → Settings → Custom Domains). `CATALOG_IMAGES_PUBLIC_URL` in `wrangler.jsonc` already points at them.
+3. Add a response header rule (the `deepertones.com` zone → Rules → Transform Rules → Modify Response Header) that
+   sets `X-Content-Type-Options: nosniff` for those two hosts.
+4. Create an Anthropic API key per environment (Claude Console → API keys; a separate key or workspace for each, so
+   spend limits and revocation are per environment) and put it in `.dev.vars.staging` and `.dev.vars.production` as
+   `ANTHROPIC_API_KEY`.
+5. Push them: `npm run secrets:push -- --env staging --apply`, then `npm run secrets:push -- --env production --apply`.
+
+Deploys fail until `ANTHROPIC_API_KEY` is set on the environment's Worker (it is in `secrets.required`), and a deploy
+that binds a bucket that does not exist fails too, so do steps 1 to 5 before merging to `staging` or `main`. Locally
+nothing needs creating: the tests and `wrangler dev` use a local bucket, which serves no public URL, so product views
+show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
 
 ## ZeptoMail setup
 

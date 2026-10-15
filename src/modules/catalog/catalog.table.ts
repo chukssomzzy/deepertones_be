@@ -54,7 +54,8 @@ export const formulations = sqliteTable(
   },
   (t) => [
     index('formulations_product_id_found_at_idx').on(t.productId, t.foundAt),
-    index('formulations_product_id_ingredients_key_idx').on(t.productId, t.ingredientsKey),
+    // One formulation per ingredient list: concurrent writers of the same list converge on one row.
+    uniqueIndex('formulations_product_id_ingredients_key_idx').on(t.productId, t.ingredientsKey),
   ],
 )
 
@@ -89,14 +90,33 @@ export const concernTraits = sqliteTable(
   (t) => [primaryKey({ columns: [t.concernId, t.trait] })],
 )
 
-/** Every attempt to research a new product's ingredients, counted against the daily global cap. */
+/**
+ * Every attempt to research a new product's ingredients, counted against the daily global cap. An attempt is written
+ * as 'started' before the researcher is called and settled afterwards, so a crash in between still counts.
+ */
 export const researchAttempts = sqliteTable(
   'research_attempts',
   {
     id: text('id').primaryKey(),
     productId: text('product_id').references(() => products.id, { onDelete: 'set null' }),
     attemptedAt: integer('attempted_at', { mode: 'timestamp_ms' }).notNull(),
-    outcome: text('outcome', { enum: ['found', 'not-found', 'failed'] }).notNull(),
+    outcome: text('outcome', { enum: ['started', 'found', 'not-found', 'failed'] }).notNull(),
   },
   (t) => [index('research_attempts_attempted_at_idx').on(t.attemptedAt)],
+)
+
+/** Every analysis attempt, counted against the daily analysis cap, and the rejections that stop a formulation being retried for ever. */
+export const analysisAttempts = sqliteTable(
+  'analysis_attempts',
+  {
+    id: text('id').primaryKey(),
+    formulationId: text('formulation_id')
+      .notNull()
+      .references(() => formulations.id, { onDelete: 'cascade' }),
+    attemptedAt: integer('attempted_at', { mode: 'timestamp_ms' }).notNull(),
+    outcome: text('outcome', { enum: ['ok', 'rejected', 'failed'] }).notNull(),
+    analysisVersion: integer('analysis_version').notNull(),
+    referenceVersion: text('reference_version').notNull(),
+  },
+  (t) => [index('analysis_attempts_attempted_at_idx').on(t.attemptedAt), index('analysis_attempts_formulation_id_idx').on(t.formulationId)],
 )

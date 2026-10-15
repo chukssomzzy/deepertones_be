@@ -511,8 +511,8 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
 
 ### Product catalog data
 `modules/catalog` holds the shared, per-product data behind the product scan (#20): products, aliases, formulations,
-concerns and traits, research attempts, and the pure rules that feed them. This is the data layer only; the service
-and routes come later.
+concerns and traits, research attempts, and the pure rules that feed them. The service on top of it is
+described in "Product catalog service"; routes come later.
 
 - **Identity keys** (`catalog.identity.ts`) are `brand|name|variant`, each part normalised: lower case, accents and
   apostrophes dropped, `&` read as "and", other marks turned into spaces. Pack sizes are removed (`ml`, `mg`, `kg`,
@@ -547,6 +547,93 @@ and routes come later.
 - **Follow-ups:** a proper import of the public CosIng export; the expanded labelled-allergen list from Regulation
   (EU) 2023/1545 (about 80 substances, where the seed has the original 26); restricted substances with their limits
   and conditions of use; alias coverage, which is hand-built.
+
+### Product catalog service
+`ProductCatalogService` (`catalog.service.ts`) is the only way into the catalog from outside the module. It is built in
+the container from `D1CatalogRepository`, the Claude researcher and analyst, and the R2 image store, and imports
+provider **types** only. The catalog is shared data, not per-user, so it has no `GuestDataCleaner`. The repository
+stays dumb; every decision below lives in the service (or `catalog.analysis.ts`, a pure helper it calls).
+
+- **resolve → research → analyse.** `resolve(identity)` finds the product by identity key or alias, else asks the
+  model about same-brand near misses, else creates it. It returns what the product needs next: `ready`,
+  `needs-analysis` (a formulation exists but is not analysed by the current versions), `analysis-failed` (see "Analysis
+  attempts") or `needs-research` (no formulation, or the latest is stale). `research(productId)` stores the found
+  ingredients as a formulation; `analyse(formulationId)` stores the concerns; `addLabelIngredients` stores a list read
+  from a back label. Callers (the scan jobs) run one of these per step.
+- **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest
+  formulation as `found` when it is fresh, without calling the researcher or recording an attempt. `analyse` returns at
+  once when the formulation is already analysed by the current `ANALYSIS_VERSION` and `REFERENCE_VERSION`.
+- **Concurrency converges through unique keys, not locks.** `createProduct` is insert-or-ignore on the identity key,
+  `addAlias` on the alias key, and `createFormulation` on `(product_id, ingredients_key)` (a unique index, migration
+  0007); each returns the stored row, so two writers of the same thing carry on with the same row. `storeFormulation`
+  just creates and, when it got an older row back, moves that row's found time to now. Two simultaneous researches of one
+  product may both call the researcher (the cost of no lock) but end with one formulation.
+- **Lazy re-analysis, not background re-analysis.** The issue asks for formulations to be re-analysed in the
+  background when `ANALYSIS_VERSION` (or `REFERENCE_VERSION`) is bumped. That is a deliberate deviation: a version
+  bump only makes `resolve` answer `needs-analysis` the next time that product is scanned, and the same goes for a
+  formulation found more than `FRESH_FOR_DAYS` ago, which answers `needs-research` (a formulation of exactly
+  `FRESH_FOR_DAYS` is still fresh). It is cheaper (products nobody scans again cost nothing, and a bump does not
+  trigger a burst of model calls) and the user gets the fresh answer at the time it matters. Staleness is checked
+  first, so a stale formulation that was never analysed is researched again, not analysed.
+- **Alias guard.** A near miss is put to the model only if it has the same category as the scanned label and its
+  variant does not conflict: two non-empty variants that differ (compared normalised, so case and spacing do not matter)
+  are different products (a night cream is not its day cream), while a missing variant on either side still compares. This
+  keeps a shampoo from being merged into its conditioner on the model's word alone. `CATALOG_POLICY` sets the rest: the
+  brand's newest 50 products, similarity 0.6, at most 3 asks; the first "same" is remembered as an alias.
+- **Research accounting.** An attempt is written as `started` BEFORE the researcher is called and settled to `found`,
+  `not-found` or `failed` after, so a crash in between still counts. `started`, `found` and `not-found` count against
+  `dailyResearchBudget` (200 per rolling 24 hours; an attempt exactly 24 hours old still counts); `failed` does not,
+  because an outage costs nothing. If the `started` row cannot be written, the researcher is not called. If settling
+  fails, the researcher's result or error is returned unchanged and the log line is `{ outcome: 'attempt-bookkeeping-failed' }`,
+  nothing more. Refusals record nothing: a spent budget, a negative-cache hit and an idempotent no-op are all free.
+- **Negative cache.** A product whose last attempt was `not-found` less than 7 days ago answers `not-found` without
+  calling the researcher, so a product nobody can find is not paid for on every scan. A failure is never cached.
+- **Stale fallback.** When the new research is refused or finds nothing, `not-found` and `budget-exhausted` carry
+  `fallbackFormulationId`: the product's stale formulation, but only if it was analysed by the current analysis and
+  reference versions. The scan can then show the old, still valid answer instead of failing.
+- **The free-text gate.** Text that came from a web page or the model is shown to users, so it is checked on the way in.
+  Researched ingredients, and label ingredients, are refused if any entry contains a link (`scheme://` or `www.`) or an
+  angle bracket: research then counts as `not-found` and stores nothing, a label as `LABEL_UNREADABLE`. In an analysis, `why`
+  is at most 600 characters, `whoShouldTakeCare` at most 300, neither may carry a link or markup, and there are at most
+  20 concerns. A breach rejects the whole analysis.
+- **Stock image import** runs after the formulation is stored, only when the product has no image and none was looked
+  for in the last `FRESH_FOR_DAYS`. Gates, in order: the image store's safe download (see "Catalog images"; `null`
+  for a bad URL, type or size), then `imageShowsProduct` (the vision match), and only then `put` to
+  `products/<productId>.<jpg|png|webp>` and the product's image key, source page and time. A missing URL, a failed
+  download or a "no match" only marks the image as checked. **Every error is swallowed**: if the download, the model
+  or the bucket throws, the research still reports the ingredients as found, nothing is marked (so the next
+  research retries), and the log line is `{ outcome: 'image-import-failed', productId }`, never a URL, because the
+  URL came from a web page.
+- **Analysis validation** (`checkAnalysis`) treats the model as untrusted and stores nothing unless all of it holds.
+  *Vocabulary*: kind, severity and every trait must be in the fixed lists (matched ignoring case, stored in canonical
+  form); one unknown value rejects the whole analysis. *Ingredient mapping*: each ingredient a concern names is
+  matched to a label ingredient by its comparable parts (so `water` finds `Aqua (Water)` and `mercury` finds
+  `Mercury 2%`) and written in the label's own spelling; a name not on the label is dropped, and a concern left with no
+  ingredient is dropped. *Severity*: a banned-substance concern is stored as `high` whatever the model said. *Source
+  filtering*, per concern: a source survives only if a flagged fact of that concern's kind and one of its ingredients
+  carries it as its regulation URL, so a made-up link is never shown, and neither is a real one on a concern it does not
+  back. *Flagged-fact coverage*, judged last (after the drops): every flagged fact needs a surviving concern of its kind
+  that names its label ingredient. A rejection leaves any earlier analysis as it was.
+- **Rejections say a fixed code and nothing else.** `AnalysisRejectedError` (a retryable `UnavailableError`, code
+  `ANALYSIS_REJECTED`) names the problem as one of `TOO_MANY_CONCERNS`, `UNKNOWN_KIND`, `UNKNOWN_SEVERITY`,
+  `UNKNOWN_TRAIT`, `TEXT_REJECTED`, `UNCOVERED_FLAGGED_FACT`. Never a word the model wrote or an ingredient from the
+  label, because messages reach logs and job records.
+- **Analysis attempts.** Every analysis call that gets as far as the model records an `analysis_attempts` row (`ok`,
+  `rejected` or `failed`) with the analysis and reference versions it ran under. The analyst's own error is rethrown
+  unchanged; failing to record is logged as `attempt-bookkeeping-failed` and never hides the result. Three rejections
+  at the same two versions make the third throw `PermanentJobError` (the job runner does not retry it), a fourth call
+  throws it without calling the model, and `resolve` answers `analysis-failed` instead of `needs-analysis`. A change of
+  either version makes the count start again, so a fixed prompt or reference list gets a fresh chance.
+- **Daily analysis budget.** All attempts, of any outcome, count against `dailyAnalysisBudget` (300 per rolling 24
+  hours, an attempt exactly 24 hours old still counting). Once it is spent, `analyse` throws `CatalogBusyError` (an
+  `UnavailableError`, code `CATALOG_BUSY`) without calling the model; unlike research, which can answer
+  `budget-exhausted`, analysis has no useful result to hand back, so the job retries later.
+- **The product view carries reference coverage.** `productView(formulationId)` returns the product (with its public
+  image URL, or `null`), the formulation with its source, the concerns, and `reference: { version, coverage }`. While
+  the seed list is `'partial'`, a result with no concerns is "nothing in the checks we run", never an all-clear, and
+  clients must say so. An unknown formulation is `NotFoundError('PRODUCT_NOT_FOUND')`; `research` and
+  `addLabelIngredients` on an unknown product are the same, `analyse` on an unknown formulation is
+  `FORMULATION_NOT_FOUND`.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent

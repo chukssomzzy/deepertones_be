@@ -1,6 +1,16 @@
 import type { CatalogRepository } from './catalog.repository'
 import type { DraftConcernRow, Formulation, NewFormulation, NewProduct, Product, ResearchAttempt, StoredConcern } from './catalog.types'
 
+/** What recordAnalysisAttempt takes; the D1 implementation must accept the same fields. */
+export type AnalysisAttemptInput = {
+  id: string
+  formulationId: string
+  attemptedAt: Date
+  outcome: 'ok' | 'rejected' | 'failed'
+  analysisVersion: number
+  referenceVersion: string
+}
+
 const copyFormulation = (f: Formulation): Formulation => ({ ...f, ingredients: [...f.ingredients] })
 
 /** In-memory CatalogRepository for unit tests. Behaviour is pinned by catalogRepositoryContract. */
@@ -11,6 +21,7 @@ export class FakeCatalogRepository implements CatalogRepository {
   private formulations: Formulation[] = []
   private concerns = new Map<string, StoredConcern[]>()
   private attempts: ResearchAttempt[] = []
+  private analysisAttempts: AnalysisAttemptInput[] = []
 
   async createProduct(input: NewProduct): Promise<Product> {
     const existing = [...this.products.values()].find((p) => p.identityKey === input.identityKey)
@@ -23,6 +34,11 @@ export class FakeCatalogRepository implements CatalogRepository {
   async findProductByKey(key: string): Promise<Product | null> {
     const byIdentity = [...this.products.values()].find((p) => p.identityKey === key)
     const found = byIdentity ?? this.products.get(this.aliases.get(key) ?? '')
+    return found ? { ...found } : null
+  }
+
+  async findProductById(id: string): Promise<Product | null> {
+    const found = this.products.get(id)
     return found ? { ...found } : null
   }
 
@@ -44,6 +60,9 @@ export class FakeCatalogRepository implements CatalogRepository {
   }
 
   async createFormulation(input: NewFormulation): Promise<Formulation> {
+    // A product has one formulation per ingredient list: a second create for the same list returns the first.
+    const existing = this.formulations.find((f) => f.productId === input.productId && f.ingredientsKey === input.ingredientsKey)
+    if (existing) return copyFormulation(existing)
     const formulation: Formulation = { ...input, analysisVersion: null, referenceVersion: null, analysedAt: null }
     this.formulations.push(formulation)
     return copyFormulation(formulation)
@@ -121,7 +140,38 @@ export class FakeCatalogRepository implements CatalogRepository {
     this.attempts.push({ ...attempt })
   }
 
+  async settleResearchAttempt(id: string, outcome: ResearchAttempt['outcome']): Promise<void> {
+    const attempt = this.attempts.find((a) => a.id === id)
+    if (attempt) attempt.outcome = outcome
+  }
+
+  /** Started, found and not-found attempts count; a failed one (an outage) costs nothing. */
   async researchAttemptsSince(since: Date): Promise<number> {
-    return this.attempts.filter((a) => a.attemptedAt.getTime() >= since.getTime()).length
+    return this.attempts.filter((a) => a.attemptedAt.getTime() >= since.getTime() && a.outcome !== 'failed').length
+  }
+
+  /** The product's most recent attempt of any outcome (the later insert wins a tie), or null if it has none. */
+  async lastResearchOutcome(productId: string): Promise<{ outcome: ResearchAttempt['outcome']; attemptedAt: Date } | null> {
+    let last: ResearchAttempt | null = null
+    for (const a of this.attempts) {
+      if (a.productId === productId && (!last || a.attemptedAt.getTime() >= last.attemptedAt.getTime())) last = a
+    }
+    return last ? { outcome: last.outcome, attemptedAt: last.attemptedAt } : null
+  }
+
+  async recordAnalysisAttempt(attempt: AnalysisAttemptInput): Promise<void> {
+    this.analysisAttempts.push({ ...attempt })
+  }
+
+  /** How many analysis attempts, of any outcome, were made at or after `since`. */
+  async analysisAttemptsSince(since: Date): Promise<number> {
+    return this.analysisAttempts.filter((a) => a.attemptedAt.getTime() >= since.getTime()).length
+  }
+
+  /** How many analyses of this formulation were rejected under exactly these versions. */
+  async rejectedAnalyses(formulationId: string, analysisVersion: number, referenceVersion: string): Promise<number> {
+    return this.analysisAttempts.filter(
+      (a) => a.formulationId === formulationId && a.outcome === 'rejected' && a.analysisVersion === analysisVersion && a.referenceVersion === referenceVersion,
+    ).length
   }
 }

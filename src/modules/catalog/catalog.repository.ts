@@ -1,9 +1,9 @@
-import { and, asc, count, desc, eq, gte, inArray, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
-import { concernTraits, formulationConcerns, formulations, productAliases, products, researchAttempts } from './catalog.table'
-import type { DraftConcernRow, Formulation, NewFormulation, NewProduct, Product, ResearchAttempt, StoredConcern } from './catalog.types'
+import { analysisAttempts, concernTraits, formulationConcerns, formulations, productAliases, products, researchAttempts } from './catalog.table'
+import type { AnalysisAttempt, DraftConcernRow, Formulation, NewFormulation, NewProduct, Product, ResearchAttempt, StoredConcern } from './catalog.types'
 
 // Drizzle wraps the driver error, so the SQLite message may be on the cause.
 const isForeignKeyFailure = (error: unknown): boolean => {
@@ -28,6 +28,11 @@ export class D1CatalogRepository {
     const [row] = await this.db.select().from(products).where(eq(products.identityKey, input.identityKey))
     if (!row) throw new Error(`product ${input.id} was not stored`)
     return row
+  }
+
+  async findProductById(id: string): Promise<Product | null> {
+    const [row] = await this.db.select().from(products).where(eq(products.id, id))
+    return row ?? null
   }
 
   /** The product whose identity key is `key`, else the one an alias maps `key` to; null if neither. */
@@ -70,9 +75,18 @@ export class D1CatalogRepository {
       .limit(limit)
   }
 
+  /**
+   * Stores the formulation, or, when the product already has one with this ingredient list (an earlier scan, or a
+   * concurrent one that won the race), stores nothing. Either way returns the stored row, so the caller carries on with the winner.
+   */
   async createFormulation(input: NewFormulation): Promise<Formulation> {
-    await this.db.insert(formulations).values(input)
-    return { ...input, analysisVersion: null, referenceVersion: null, analysedAt: null }
+    await this.db.insert(formulations).values(input).onConflictDoNothing({ target: [formulations.productId, formulations.ingredientsKey] })
+    const [row] = await this.db
+      .select()
+      .from(formulations)
+      .where(and(eq(formulations.productId, input.productId), eq(formulations.ingredientsKey, input.ingredientsKey)))
+    if (!row) throw new Error(`formulation ${input.id} was not stored`)
+    return row
   }
 
   async findFormulation(id: string): Promise<Formulation | null> {
@@ -187,9 +201,54 @@ export class D1CatalogRepository {
     await this.db.insert(researchAttempts).values(attempt)
   }
 
-  /** How many research attempts, of any outcome, were made at or after `since`. */
+  /** Turns a started attempt into its outcome. The time it started is kept. */
+  async settleResearchAttempt(id: string, outcome: ResearchAttempt['outcome']): Promise<void> {
+    await this.db.update(researchAttempts).set({ outcome }).where(eq(researchAttempts.id, id))
+  }
+
+  /** How many research attempts were made at or after `since`: started, found and not-found ones. A failed attempt (an outage) costs nothing. */
   async researchAttemptsSince(since: Date): Promise<number> {
-    const [row] = await this.db.select({ n: count() }).from(researchAttempts).where(gte(researchAttempts.attemptedAt, since))
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(researchAttempts)
+      .where(and(gte(researchAttempts.attemptedAt, since), ne(researchAttempts.outcome, 'failed')))
+    return row?.n ?? 0
+  }
+
+  /** The product's most recent attempt of any outcome (the later insert wins a tie), or null if it has none. */
+  async lastResearchOutcome(productId: string): Promise<{ outcome: ResearchAttempt['outcome']; attemptedAt: Date } | null> {
+    const [row] = await this.db
+      .select({ outcome: researchAttempts.outcome, attemptedAt: researchAttempts.attemptedAt })
+      .from(researchAttempts)
+      .where(eq(researchAttempts.productId, productId))
+      .orderBy(desc(researchAttempts.attemptedAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
+  async recordAnalysisAttempt(attempt: AnalysisAttempt): Promise<void> {
+    await this.db.insert(analysisAttempts).values(attempt)
+  }
+
+  /** How many analysis attempts, of any outcome, were made at or after `since`. */
+  async analysisAttemptsSince(since: Date): Promise<number> {
+    const [row] = await this.db.select({ n: count() }).from(analysisAttempts).where(gte(analysisAttempts.attemptedAt, since))
+    return row?.n ?? 0
+  }
+
+  /** How many analyses of this formulation were rejected under exactly these versions. */
+  async rejectedAnalyses(formulationId: string, analysisVersion: number, referenceVersion: string): Promise<number> {
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(analysisAttempts)
+      .where(
+        and(
+          eq(analysisAttempts.formulationId, formulationId),
+          eq(analysisAttempts.outcome, 'rejected'),
+          eq(analysisAttempts.analysisVersion, analysisVersion),
+          eq(analysisAttempts.referenceVersion, referenceVersion),
+        ),
+      )
     return row?.n ?? 0
   }
 }

@@ -24,13 +24,17 @@
     "WHATSAPP_PHONE_NUMBER_ID": "1297385913467660",
     // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-    "WHATSAPP_OTP_LANGUAGE": "en"
+    "WHATSAPP_OTP_LANGUAGE": "en",
+    // The Claude model used for product research and analysis.
+    "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+    // Where the catalog image bucket is served from. Empty locally: dev serves no public images, so product views show no image.
+    "CATALOG_IMAGES_PUBLIC_URL": ""
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
 
   // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -82,8 +86,11 @@
     }
   ],
 
+  // The public catalog-image bucket, written by the Worker (a local bucket here). Per environment it is created by hand,
+  // with a custom domain and a nosniff response-header rule set up in the dashboard. Not deepertones-assets: CI owns that bucket.
+  "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-catalog-images-local" }],
+
   // More storage bindings, added as we need them:
-  // "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "deepertones" }],
   // "kv_namespaces": [{ "binding": "KV", "id": "" }],
   //
   // The test suite boots this file's top level. Never mark a binding here "remote": true:
@@ -119,13 +126,17 @@
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-        "WHATSAPP_OTP_LANGUAGE": "en"
+        "WHATSAPP_OTP_LANGUAGE": "en",
+        // The Claude model used for product research and analysis.
+        "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+        // Where the catalog image bucket is served from (a custom domain on the bucket).
+        "CATALOG_IMAGES_PUBLIC_URL": "https://images.staging.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -164,7 +175,10 @@
           "database_id": "558afc3f-0a25-488f-9e7c-d62675124507",
           "migrations_dir": "migrations"
         }
-      ]
+      ],
+      // The public catalog-image bucket, written by the Worker. Create it, connect its custom domain and add a
+      // nosniff response-header rule in the dashboard. Not deepertones-assets: CI owns that bucket.
+      "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-catalog-images-staging" }]
     },
     "production": {
       "routes": [{ "pattern": "api.deepertones.com", "custom_domain": true }],
@@ -187,13 +201,17 @@
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-        "WHATSAPP_OTP_LANGUAGE": "en"
+        "WHATSAPP_OTP_LANGUAGE": "en",
+        // The Claude model used for product research and analysis.
+        "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+        // Where the catalog image bucket is served from (a custom domain on the bucket).
+        "CATALOG_IMAGES_PUBLIC_URL": "https://images.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
       // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production
@@ -232,7 +250,10 @@
           "database_id": "2a224d3f-1ddb-4761-a21b-5025502b2fce",
           "migrations_dir": "migrations"
         }
-      ]
+      ],
+      // The public catalog-image bucket, written by the Worker. Create it, connect its custom domain and add a
+      // nosniff response-header rule in the dashboard. Not deepertones-assets: CI owns that bucket.
+      "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-catalog-images-production" }]
     }
   }
 }
