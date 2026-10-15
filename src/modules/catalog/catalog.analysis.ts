@@ -5,7 +5,15 @@ import type { DraftConcernRow } from './catalog.types'
 import { CONCERN_KINDS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 /** Why an analysis was refused: a fixed code, never a word the model or the label supplied. */
-export type AnalysisProblem = 'TOO_MANY_CONCERNS' | 'UNKNOWN_KIND' | 'UNKNOWN_SEVERITY' | 'UNKNOWN_TRAIT' | 'TEXT_REJECTED' | 'UNCOVERED_FLAGGED_FACT'
+export type AnalysisProblem =
+  | 'TOO_MANY_CONCERNS'
+  | 'UNKNOWN_KIND'
+  | 'UNKNOWN_SEVERITY'
+  | 'UNKNOWN_TRAIT'
+  | 'TEXT_TOO_LONG'
+  | 'TEXT_HAS_LINK'
+  | 'TEXT_HAS_MARKUP'
+  | 'UNCOVERED_FLAGGED_FACT'
 
 export type AnalysisCheck = { ok: true; concerns: DraftConcernRow[] } | { ok: false; reason: AnalysisProblem }
 
@@ -13,19 +21,30 @@ export const MAX_CONCERNS = 20
 export const MAX_WHY_LENGTH = 600
 export const MAX_WHO_LENGTH = 300
 
-// A scheme, a "www." host, or an angle bracket. Text from the web or the model is shown to users, and none of it
-// has any business carrying a link or markup.
-const LINK_OR_MARKUP = /[a-z][a-z0-9+.-]*:\/\/|\bwww\./i
-const ANGLE_BRACKET = /[<>]/
+// Text from the web or the model is shown to users, and none of it has any business carrying a link or markup.
+// A link is a scheme or a "www." host. Markup is a "<" that starts a tag, a closing tag or a comment: straight before a
+// letter, "/" or "!". Other angle brackets are ordinary text ("<1 ppm", "pH < 5", "> 2%").
+const LINK = /[a-z][a-z0-9+.-]*:\/\/|\bwww\./i
+const MARKUP = /<[a-z/!]/i
 
-export const hasLinkOrMarkup = (text: string): boolean => LINK_OR_MARKUP.test(text) || ANGLE_BRACKET.test(text)
+export const hasLink = (text: string): boolean => LINK.test(text)
+export const hasMarkup = (text: string): boolean => MARKUP.test(text)
+export const hasLinkOrMarkup = (text: string): boolean => hasLink(text) || hasMarkup(text)
 
 const canonical = <T extends string>(vocabulary: readonly T[], value: string): T | undefined => {
   const wanted = value.trim().toLowerCase()
   return vocabulary.find((word) => word === wanted)
 }
 
-const textOk = (text: string, max: number) => text.length <= max && !hasLinkOrMarkup(text)
+type TextProblem = Extract<AnalysisProblem, `TEXT_${string}`>
+
+/** A link is reported before markup, so text with both says TEXT_HAS_LINK. */
+const textProblem = (text: string, max: number): TextProblem | undefined => {
+  if (text.length > max) return 'TEXT_TOO_LONG'
+  if (hasLink(text)) return 'TEXT_HAS_LINK'
+  if (hasMarkup(text)) return 'TEXT_HAS_MARKUP'
+  return undefined
+}
 
 /**
  * Turns the model's draft concerns into storable ones, or says why they cannot be stored. The model is not trusted:
@@ -51,7 +70,8 @@ export const checkAnalysis = (drafts: DraftConcern[], ingredients: string[], fac
     if (!severity) return { ok: false, reason: 'UNKNOWN_SEVERITY' }
     const traits = draft.traits.map((trait) => canonical(TRAITS, trait))
     if (traits.includes(undefined)) return { ok: false, reason: 'UNKNOWN_TRAIT' }
-    if (!textOk(draft.why, MAX_WHY_LENGTH) || !textOk(draft.whoShouldTakeCare, MAX_WHO_LENGTH)) return { ok: false, reason: 'TEXT_REJECTED' }
+    const text = textProblem(draft.why, MAX_WHY_LENGTH) ?? textProblem(draft.whoShouldTakeCare, MAX_WHO_LENGTH)
+    if (text) return { ok: false, reason: text }
 
     const named = draft.ingredients.map((name) => new Set(ingredientParts(name)))
     const onLabel = ingredients.filter((_, i) => named.some((parts) => [...parts].some((part) => labelParts[i]!.has(part))))

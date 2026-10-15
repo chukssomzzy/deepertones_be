@@ -1,5 +1,6 @@
 import { PermanentJobError } from '../../jobs/job'
 import { NotFoundError, UnavailableError, ValidationError } from '../../lib/errors'
+import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
@@ -50,7 +51,7 @@ export class AnalysisRejectedError extends UnavailableError {
   }
 }
 
-/** The day's budget for model calls is spent. Nothing was called; try again later. */
+/** The day's budget for model calls is spent, or the AI spend cap was reached. Nothing was called; try again later. */
 export class CatalogBusyError extends UnavailableError {
   constructor() {
     super('CATALOG_BUSY', 'The catalog has reached its daily limit; try again later')
@@ -155,7 +156,7 @@ export class ProductCatalogService {
     const comparable = brandProducts.filter((p) => p.category === identity.category && !variantsConflict(p.variant, identity.variant))
     const candidates = nearMissCandidates(identity, comparable, { threshold: this.policy.nearMissThreshold, limit: this.policy.nearMissLimit })
     for (const candidate of candidates) {
-      if (await this.analyst.sameProduct(identity, identityOf(candidate))) {
+      if (await this.isSameProduct(identity, candidate)) {
         await this.repository.addAlias(key, candidate.id)
         return this.nextStep(candidate)
       }
@@ -185,7 +186,7 @@ export class ProductCatalogService {
    *
    * An attempt is recorded as started BEFORE the researcher is called and settled after, so a crash in between still
    * counts against the budget; if that cannot be recorded, nothing is called. A failed attempt (an outage) stops
-   * counting. Failing to settle never hides what the researcher did or threw.
+   * counting, and so does one the AI spend cap stopped, which answers budget-exhausted. Failing to settle never hides what the researcher did or threw.
    */
   async research(productId: string): Promise<ResearchResult> {
     const product = await this.requireProduct(productId)
@@ -209,7 +210,9 @@ export class ProductCatalogService {
     try {
       result = await this.researcher.research(identityOf(product))
     } catch (error) {
+      // The AI spend cap stopped the research: like an outage it settles as failed, so it is not cached as not-found and the next scan may try again.
       await this.settleAttempt(attemptId, 'failed')
+      if (error instanceof AiBudgetExceededError) return { kind: 'budget-exhausted', ...this.fallbackFor(latest) }
       throw error
     }
     // The list comes from a web page, so it is not stored if any entry carries a link or markup.
@@ -241,8 +244,8 @@ export class ProductCatalogService {
    * Has the model explain the formulation, checks the answer (see checkAnalysis) and stores it in one write.
    *
    * Does nothing when the formulation is already analysed by the current versions, so a repeated job costs nothing.
-   * Refused without calling the model, and without recording an attempt, when the daily budget is spent
-   * (CatalogBusyError) or the analysis has been rejected 3 times at these versions (PermanentJobError). Every
+   * Refused without calling the model, and without recording an attempt, when the daily budget is spent or the AI
+   * spend cap is reached (CatalogBusyError), or the analysis has been rejected 3 times at these versions (PermanentJobError). Every
    * other call records one attempt, whatever its outcome. A rejected answer leaves any earlier analysis as it was
    * and throws AnalysisRejectedError, or PermanentJobError when it was the 3rd rejection.
    */
@@ -261,6 +264,7 @@ export class ProductCatalogService {
     const flaggedFacts = flagFacts(formulation.ingredients)
     let outcome: 'ok' | 'rejected' | 'failed' = 'failed'
     let problem: AnalysisProblem | undefined
+    let refusedByCap = false
     try {
       const drafts = await this.analyst.analyse({
         product: identityOf(product),
@@ -283,17 +287,24 @@ export class ProductCatalogService {
         outcome = 'rejected'
         problem = checked.reason
       }
+    } catch (error) {
+      if (!(error instanceof AiBudgetExceededError)) throw error
+      refusedByCap = true
+      throw new CatalogBusyError()
     } finally {
-      await this.bookkeeping(() =>
-        this.repository.recordAnalysisAttempt({
-          id: this.newId(),
-          formulationId,
-          attemptedAt: now,
-          outcome,
-          analysisVersion: ANALYSIS_VERSION,
-          referenceVersion: REFERENCE_VERSION,
-        }),
-      )
+      // A refusal records nothing: the model was not called, so it is neither a failure nor a spent attempt.
+      if (!refusedByCap) {
+        await this.bookkeeping(() =>
+          this.repository.recordAnalysisAttempt({
+            id: this.newId(),
+            formulationId,
+            attemptedAt: now,
+            outcome,
+            analysisVersion: ANALYSIS_VERSION,
+            referenceVersion: REFERENCE_VERSION,
+          }),
+        )
+      }
     }
     if (problem) {
       const error = new AnalysisRejectedError(problem)
@@ -334,6 +345,16 @@ export class ProductCatalogService {
         sources: c.sources,
       })),
       reference: { version: REFERENCE_VERSION, coverage: REFERENCE_COVERAGE },
+    }
+  }
+
+  /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
+  private async isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
+    try {
+      return await this.analyst.sameProduct(identity, identityOf(candidate))
+    } catch (error) {
+      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
+      throw error
     }
   }
 

@@ -5,6 +5,7 @@
 import { readFileSync } from 'node:fs'
 import { ingredientParts, normaliseIngredient } from '../../src/modules/catalog/catalog.ingredients'
 import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
+import { AI_JOBS, type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
 import { SEVERITIES } from '../../src/modules/catalog/catalog.vocabulary'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
 import { parseEnvFile } from '../secrets/plan'
@@ -13,7 +14,17 @@ import type { AnalysisCase, ResearchCase } from './cases'
 /** A concern as checkAnalysis stores it. */
 export type StoredDraft = DraftConcernRow
 
-export type CaseResult = { id: string; pass: boolean; problems: string[] }
+/**
+ * `costMicros` is what the case's model calls cost, filled in by the runner. `detail` is what a research case got back,
+ * for the JSON report only (never the console), so a fixture can be checked against what the model returned.
+ */
+export type CaseResult = {
+  id: string
+  pass: boolean
+  problems: string[]
+  costMicros?: number
+  detail?: { sourceHost?: string; ingredients: string[] }
+}
 
 /** What happened when a case was run: stored by the checks, refused by them, or the adapter threw (its error name only). */
 export type AnalysisOutcome = { stored: StoredDraft[] } | { rejected: string } | { error: string }
@@ -54,34 +65,54 @@ export const scoreResearch = (c: ResearchCase, outcome: ResearchOutcome): CaseRe
 
   // Compared by the catalog's own parts, so "Theobroma Cacao (Cocoa) Seed Butter" has both spellings.
   const present = new Set(outcome.ingredients.flatMap(ingredientParts))
-  return result(
+  const scored = result(
     c.id,
     c.expect.ingredientsInclude.filter((name) => !present.has(normaliseIngredient(name))).map((name) => `missing-ingredient:${name}`),
   )
+  // The host only: the path and query of a page the model picked can carry anything.
+  const sourceHost = hostOf(outcome.sourceUrl)
+  return { ...scored, detail: { ...(sourceHost !== undefined && { sourceHost }), ingredients: outcome.ingredients } }
 }
 
-export const summarise = (results: CaseResult[]): { total: number; passed: number; failed: number; passRate: number } => {
+const hostOf = (url: string): string | undefined => {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return undefined
+  }
+}
+
+/** `costMicros` adds up every case's cost, a case that never reached the model counting as free. */
+export const summarise = (results: CaseResult[]): { total: number; passed: number; failed: number; passRate: number; costMicros: number } => {
   const total = results.length
   const passed = results.filter((r) => r.pass).length
-  return { total, passed, failed: total - passed, passRate: total === 0 ? 0 : passed / total }
+  const costMicros = results.reduce((sum, r) => sum + (r.costMicros ?? 0), 0)
+  return { total, passed, failed: total - passed, passRate: total === 0 ? 0 : passed / total, costMicros }
 }
 
 export type Mode = 'analysis' | 'research' | 'all'
-export type Args = { mode: Mode; limit: number | undefined; model: string | undefined }
+export type Args = { mode: Mode; limit: number | undefined; maxUsd: number; models: Partial<Record<AiJob, string>> }
 
 const MODES: readonly Mode[] = ['analysis', 'research', 'all']
-export const USAGE = 'Usage: npm run eval:catalog -- [--mode analysis|research|all] [--limit N] [--model NAME]'
+export const JOBS: readonly AiJob[] = AI_JOBS
+const DEFAULT_MAX_USD = 2
+export const USAGE =
+  'Usage: npm run eval:catalog -- [--mode analysis|research|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
+  `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */
 export const parseArgs = (argv: string[]): Args => {
   let mode: Mode = 'all'
   let limit: number | undefined
-  let model: string | undefined
+  let maxUsd = DEFAULT_MAX_USD
+  const models: Args['models'] = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const equals = arg.startsWith('--') ? arg.indexOf('=') : -1
     const flag = equals === -1 ? arg : arg.slice(0, equals)
-    if (flag !== '--mode' && flag !== '--limit' && flag !== '--model') throw new Error(`Unrecognised argument "${arg}". ${USAGE}`)
+    if (flag !== '--mode' && flag !== '--limit' && flag !== '--model' && flag !== '--max-usd') {
+      throw new Error(`Unrecognised argument "${arg}". ${USAGE}`)
+    }
 
     const value = equals === -1 ? argv[++i] : arg.slice(equals + 1)
     if (value === undefined || value === '' || value.startsWith('-')) throw new Error(`${flag} needs a value. ${USAGE}`)
@@ -92,14 +123,21 @@ export const parseArgs = (argv: string[]): Args => {
     } else if (flag === '--limit') {
       if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error(`--limit must be a whole number of at least 1. ${USAGE}`)
       limit = Number(value)
+    } else if (flag === '--max-usd') {
+      if (!/^\d+(\.\d+)?$/.test(value) || !(Number(value) > 0) || !Number.isFinite(Number(value))) {
+        throw new Error(`--max-usd must be a number of dollars above 0. ${USAGE}`)
+      }
+      maxUsd = Number(value)
     } else {
-      model = value
+      const split = value.indexOf('=')
+      const job = value.slice(0, split)
+      const model = value.slice(split + 1)
+      if (split === -1 || !JOBS.includes(job as AiJob) || model === '') throw new Error(`--model must be JOB=MODEL with a known job. ${USAGE}`)
+      models[job as AiJob] = model
     }
   }
-  return { mode, limit, model }
+  return { mode, limit, maxUsd, models }
 }
-
-const DEFAULT_MODEL = 'claude-sonnet-5-5'
 
 export type EnvInput = {
   env?: Record<string, string | undefined>
@@ -108,25 +146,23 @@ export type EnvInput = {
 }
 
 /**
- * The key and model: the environment first, then `.dev.vars` (the same file `wrangler dev` reads), then the
- * default model. A blank value is no value. The error names the variable and carries no value from either place.
+ * The key: the environment first, then `.dev.vars` (the same file `wrangler dev` reads). A blank value is no value.
+ * The error names the variable and carries no value from either place. Models are per job, not read from here.
  */
 export const loadEnv = async ({
   env = process.env,
   readFile = (path) => readFileSync(path, 'utf8'),
-}: EnvInput = {}): Promise<{ apiKey: string; model: string }> => {
+}: EnvInput = {}): Promise<{ apiKey: string }> => {
   let apiKey = env.ANTHROPIC_API_KEY || undefined
-  let model = env.ANTHROPIC_MODEL || undefined
-  if (!apiKey || !model) {
+  if (!apiKey) {
     let file: Map<string, string> | undefined
     try {
       file = parseEnvFile(await readFile('.dev.vars'))
     } catch (error) {
       if ((error as { code?: unknown } | null)?.code !== 'ENOENT') throw error
     }
-    apiKey ||= file?.get('ANTHROPIC_API_KEY') || undefined
-    model ||= file?.get('ANTHROPIC_MODEL') || undefined
+    apiKey = file?.get('ANTHROPIC_API_KEY') || undefined
   }
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set: export it, or put it in .dev.vars.')
-  return { apiKey, model: model ?? DEFAULT_MODEL }
+  return { apiKey }
 }

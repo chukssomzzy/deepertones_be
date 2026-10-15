@@ -1,11 +1,13 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PermanentJobError } from '../../jobs/job'
 import { NotFoundError, UnavailableError, ValidationError } from '../../lib/errors'
+import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.catalog-image-store'
 import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.product-analyst'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
+import { identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
 import { AnalysisRejectedError, CATALOG_POLICY, CatalogBusyError, ProductCatalogService } from './catalog.service'
@@ -324,6 +326,20 @@ describe('ProductCatalogService.resolve near misses', () => {
     expect(await ctx.service.resolve(TARGET)).toEqual({ kind: 'ready', productId, formulationId })
   })
 
+  it('throws CatalogBusyError, merging nothing and creating nothing, when the AI spend cap stops the question', async () => {
+    const ctx = setup()
+    await catalogued(ctx, ['B'])
+    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+
+    const error = await errorOf(ctx.service.resolve(TARGET))
+
+    expect(error).toBeInstanceOf(CatalogBusyError)
+    expect(await ctx.repository.findProductByKey(identityKey(TARGET))).toBeNull()
+    // With room again the same scan asks the model afresh and carries on.
+    ctx.analyst.sameProductWith(() => false)
+    expect((await ctx.service.resolve(TARGET)).kind).toBe('needs-research')
+  })
+
   it('compares only with the brand\'s newest brandScanLimit products', async () => {
     const ctx = setup({ policy: { brandScanLimit: 2 } })
     // B is the near miss but the oldest; two newer, unrelated products fill the scan.
@@ -416,6 +432,50 @@ describe('ProductCatalogService.research', () => {
     await expect(ctx.service.research(productId)).rejects.toThrow('search is down')
 
     expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'failed', attemptedAt: T0 })
+  })
+
+  describe('when the AI spend cap is reached', () => {
+    const CAP_REACHED = () => new AiBudgetExceededError('The AI spend cap would be exceeded')
+
+    it('answers budget-exhausted instead of throwing, and stores nothing', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.researcher.failNextWith(CAP_REACHED())
+
+      const result = await ctx.service.research(productId)
+
+      expect(result).toEqual({ kind: 'budget-exhausted' })
+      expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+    })
+
+    it('settles the started attempt as failed, so it neither counts against the daily research budget nor is remembered as not-found', async () => {
+      const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+      const productId = await productFor(ctx)
+      ctx.researcher.failNextWith(CAP_REACHED())
+
+      await ctx.service.research(productId)
+
+      expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'failed', attemptedAt: T0 })
+      expect(await ctx.repository.researchAttemptsSince(T0)).toBe(0)
+    })
+
+    it('researches the same product again as soon as there is room, because the refusal is not cached', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.researcher.failNextWith(CAP_REACHED())
+      await ctx.service.research(productId)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+
+      expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+    })
+
+    it('still rethrows every other error from the researcher', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.researcher.failNextWith(new Error('search is down'))
+
+      await expect(ctx.service.research(productId)).rejects.toThrow('search is down')
+    })
   })
 
   describe('daily budget', () => {
@@ -600,6 +660,7 @@ describe('ProductCatalogService.research', () => {
     it.each([
       ['the download throws', () => ({ images: new FetchThrows() }), () => undefined],
       ['the model check throws', () => ({ images: undefined }), (ctx: Ctx) => ctx.analyst.failNextWith(new Error('model down'))],
+      ['the model check is refused by the AI spend cap', () => ({ images: undefined }), (ctx: Ctx) => ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))],
       ['storing the image throws', () => ({ images: new PutThrows() }), () => undefined],
     ] as const)('still reports the ingredients as found when %s', async (_label, options, arrange) => {
       const ctx = setup(options())
@@ -682,6 +743,33 @@ describe('ProductCatalogService.addLabelIngredients', () => {
     expect(error).toBeInstanceOf(ValidationError)
     expect(error.code).toBe('LABEL_UNREADABLE')
     expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+  })
+})
+
+describe('ProductCatalogService.addLabelIngredients free text', () => {
+  const productFor = async (ctx: Ctx) => (await ctx.service.resolve(identity())).productId
+
+  it.each([['see http://evil.example'], ['see www.evil.example'], ['<script>evil()</script>'], ['</b>evil'], ['<!-- evil -->'], ['strength <evil']])(
+    'rejects a list with the entry "%s" as an unreadable label and stores nothing',
+    async (hostile) => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+
+      const error = await errorOf(ctx.service.addLabelIngredients(productId, ['Aqua', hostile]))
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('LABEL_UNREADABLE')
+      expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+    },
+  )
+
+  it.each([['strength > evil'], ['strength < evil'], ['Mercury <1 ppm'], ['pH < 5'], ['> 2%']])('accepts the entry "%s", because a comparison sign is not markup', async (entry) => {
+    const ctx = setup()
+    const productId = await productFor(ctx)
+
+    const formulationId = await ctx.service.addLabelIngredients(productId, ['Aqua', entry])
+
+    expect((await ctx.repository.findFormulation(formulationId))!.ingredients).toEqual(['Aqua', entry])
   })
 })
 
@@ -1090,21 +1178,39 @@ describe('ProductCatalogService.research negative cache', () => {
 describe('ProductCatalogService.research of text that came from the web', () => {
   const productFor = async (ctx: Ctx) => (await ctx.service.resolve(identity())).productId
 
+  const listWith = (ctx: Ctx, ingredient: string) =>
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', ingredient, 'Glycerin'], sourceUrl: SOURCE_URL }))
+
   it.each([
     ['http://evil.example/offer'],
     ['https://evil.example/offer'],
     ['visit www.evil.example'],
     ['<script>evil()</script>'],
-    ['strength > evil'],
-    ['strength < evil'],
+    ['</b>evil'],
+    ['<!-- evil -->'],
+    ['strength <evil'],
   ])('treats a list with the ingredient "%s" as not found and stores nothing', async (hostile) => {
     const ctx = setup()
     const productId = await productFor(ctx)
-    ctx.researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', hostile, 'Glycerin'], sourceUrl: SOURCE_URL }))
+    listWith(ctx, hostile)
 
     expect(await ctx.service.research(productId)).toEqual({ kind: 'not-found' })
     expect(await ctx.repository.latestFormulation(productId)).toBeNull()
   })
+
+  it.each([['strength > evil'], ['strength < evil'], ['Mercury <1 ppm'], ['pH < 5'], ['> 2%']])(
+    'stores a list with the ingredient "%s", because a comparison sign is not markup',
+    async (ingredient) => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      listWith(ctx, ingredient)
+
+      const result = await ctx.service.research(productId)
+
+      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect((await ctx.repository.latestFormulation(productId))!.ingredients).toEqual(['Aqua', ingredient, 'Glycerin'])
+    },
+  )
 })
 
 describe('ProductCatalogService.research of a stale product', () => {
@@ -1125,6 +1231,25 @@ describe('ProductCatalogService.research of a stale product', () => {
     }
 
     expect(await ctx.service.research(stale.productId)).toEqual({ kind, fallbackFormulationId: stale.formulationId })
+  })
+
+  it('offers its stale analysed formulation as a fallback when the AI spend cap stops the new research', async () => {
+    const ctx = setup()
+    const stale = await analysed(ctx)
+    ctx.advance(STALE)
+    ctx.researcher.failNextWith(new AiBudgetExceededError('cap'))
+
+    expect(await ctx.service.research(stale.productId)).toEqual({ kind: 'budget-exhausted', fallbackFormulationId: stale.formulationId })
+  })
+
+  it.each(OLDER_CODE)('offers no fallback when the AI spend cap stops the new research and the stale formulation was analysed with %s', async (_label, older) => {
+    const ctx = setup()
+    const stale = await researched(ctx)
+    await analysedByOlderCode(ctx, stale.formulationId, older)
+    ctx.advance(STALE)
+    ctx.researcher.failNextWith(new AiBudgetExceededError('cap'))
+
+    expect(await ctx.service.research(stale.productId)).toEqual({ kind: 'budget-exhausted' })
   })
 
   it('offers no fallback when the stale formulation was never analysed', async () => {
@@ -1180,13 +1305,18 @@ describe('ProductCatalogService.resolve alias guard', () => {
 
 describe('ProductCatalogService.analyse free text from the model', () => {
   const FIELDS = ['why', 'whoShouldTakeCare'] as const
-  const HOSTILE = [
-    'read more at http://evil.example/offer',
-    'read more at https://evil.example/offer',
-    'read more at www.evil.example',
-    'use <script>evil()</script>',
+  const LINKS = ['read more at http://evil.example/offer', 'read more at https://evil.example/offer', 'read more at www.evil.example']
+  // HTML-like tags: a "<" straight before a letter, "/" or "!".
+  const MARKUP = ['use <script>evil()</script>', 'use <SCRIPT>evil()</SCRIPT>', 'it ends </p> evil', 'a <!-- evil --> comment', 'a rating <evil']
+  // Chemistry and ordinary prose use these; none is markup.
+  const COMPARISONS = [
+    'limited to <1 ppm in leave-on products',
+    'when pH < 5',
+    'above > 2%',
+    'at most <= 2% evil',
     'a rating > evil',
     'a rating < evil',
+    'a rating <',
   ]
   const MAX = { why: 600, whoShouldTakeCare: 300 }
 
@@ -1218,18 +1348,49 @@ describe('ProductCatalogService.analyse free text from the model', () => {
 
     const error = await rejected(ctx, formulationId)
 
-    expect(error.message).toContain('TEXT_REJECTED')
+    expect(error.message).toContain('TEXT_TOO_LONG')
   })
 
-  it.each(FIELDS.flatMap((field) => HOSTILE.map((text) => [field, text] as const)))('rejects %s containing "%s", storing nothing and never repeating it', async (field, text) => {
+  it.each(FIELDS.flatMap((field) => LINKS.map((text) => [field, text] as const)))('rejects %s containing the link "%s" as TEXT_HAS_LINK, storing nothing and never repeating it', async (field, text) => {
     const ctx = setup()
     const formulationId = await withMercury(ctx)
     ctx.analyst.analyseWith(() => [draft({ [field]: text })])
 
     const error = await rejected(ctx, formulationId)
 
-    expect(error.message).toContain('TEXT_REJECTED')
+    expect(error.message).toContain('TEXT_HAS_LINK')
     expect(error.message).not.toContain('evil')
+  })
+
+  it.each(FIELDS.flatMap((field) => MARKUP.map((text) => [field, text] as const)))('rejects %s containing the markup "%s" as TEXT_HAS_MARKUP, storing nothing and never repeating it', async (field, text) => {
+    const ctx = setup()
+    const formulationId = await withMercury(ctx)
+    ctx.analyst.analyseWith(() => [draft({ [field]: text })])
+
+    const error = await rejected(ctx, formulationId)
+
+    expect(error.message).toContain('TEXT_HAS_MARKUP')
+    expect(error.message).not.toContain('evil')
+  })
+
+  it.each(FIELDS)('rejects %s containing both a link and markup as TEXT_HAS_LINK', async (field) => {
+    const ctx = setup()
+    const formulationId = await withMercury(ctx)
+    ctx.analyst.analyseWith(() => [draft({ [field]: 'use <b>evil</b> at http://evil.example' })])
+
+    const error = await rejected(ctx, formulationId)
+
+    expect(error.message).toContain('TEXT_HAS_LINK')
+  })
+
+  it.each(FIELDS.flatMap((field) => COMPARISONS.map((text) => [field, text] as const)))('accepts %s containing "%s", because a comparison sign is not markup', async (field, text) => {
+    const ctx = setup()
+    const formulationId = await withMercury(ctx)
+    ctx.analyst.analyseWith(() => [draft({ [field]: text })])
+
+    await ctx.service.analyse(formulationId)
+
+    expect((await ctx.service.productView(formulationId)).concerns[0]![field]).toBe(text)
   })
 
   it('accepts 20 concerns and rejects 21, storing nothing', async () => {
@@ -1389,6 +1550,57 @@ describe('ProductCatalogService.analyse attempts', () => {
     }
 
     expect(await ctx.service.resolve(identity())).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  describe('when the AI spend cap is reached', () => {
+    const arrangeCap = (ctx: Ctx) => ctx.analyst.failNextWith(new AiBudgetExceededError('The AI spend cap would be exceeded'))
+
+    it('throws CatalogBusyError, so the job is retried later, and stores nothing', async () => {
+      const ctx = setup()
+      const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+      arrangeCap(ctx)
+
+      const error = await errorOf(ctx.service.analyse(formulationId))
+
+      expect(error).toBeInstanceOf(CatalogBusyError)
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect((await ctx.service.productView(formulationId)).formulation.analysedAt).toBeNull()
+    })
+
+    it('is not a rejection of the analysis, however often it happens', async () => {
+      const ctx = setup()
+      const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+
+      for (let i = 0; i < 4; i++) {
+        arrangeCap(ctx)
+        await errorOf(ctx.service.analyse(formulationId))
+      }
+
+      expect(await ctx.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)).toBe(0)
+      expect(await ctx.service.resolve(identity())).toMatchObject({ kind: 'needs-analysis', formulationId })
+    })
+
+    it('records no analysis attempt: a refusal is free and does not use up the daily budget', async () => {
+      const ctx = setup()
+      const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+      arrangeCap(ctx)
+
+      await errorOf(ctx.service.analyse(formulationId))
+
+      expect(await ctx.repository.analysisAttemptsSince(new Date(0))).toBe(0)
+    })
+
+    it('analyses the same formulation once there is room again', async () => {
+      const ctx = setup()
+      const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+      arrangeCap(ctx)
+      await errorOf(ctx.service.analyse(formulationId))
+      ctx.analyst.analyseWith(() => [draft()])
+
+      await ctx.service.analyse(formulationId)
+
+      expect((await ctx.service.productView(formulationId)).concerns).toHaveLength(1)
+    })
   })
 
   describe('daily budget', () => {

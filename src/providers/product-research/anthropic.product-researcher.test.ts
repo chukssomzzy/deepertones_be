@@ -1,13 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AnthropicClient } from '../anthropic/anthropic.client'
-import { AnthropicRequestError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
+import type { AiJob } from '../anthropic/ai-spend.provider'
+import { AnthropicRequestError, AnthropicUnavailableError, costMicros } from '../anthropic/anthropic.provider'
+import { MemoryAiSpendLedger } from '../anthropic/memory.ai-spend-ledger'
 import {
   API_KEY,
+  BIG_CAP_MICROS,
   type Block,
   caught,
   citation,
   errorResponse,
   MODEL,
+  MODELS,
   messageResponse,
   requestText,
   searchCall,
@@ -50,7 +54,18 @@ const searched = (finalText: string, urls = [OFFICIAL, RETAILER], citations?: Bl
 
 const respondWith = (content: Block[], stop_reason = 'end_turn') => () => messageResponse({ content, stop_reason })
 
-const make = () => new AnthropicProductResearcher(new AnthropicClient({ apiKey: API_KEY, model: MODEL, apiUrl: 'https://anthropic.example/v1/messages' }))
+const ROUTED_TO = 'claude-haiku-5-5'
+
+/** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job the adapter uses shows in the model it sends. */
+const make = (ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+  new AnthropicProductResearcher(
+    new AnthropicClient({
+      apiKey: API_KEY,
+      models: routed ? { ...MODELS, [routed]: ROUTED_TO } : MODELS,
+      ledger,
+      apiUrl: 'https://anthropic.example/v1/messages',
+    }),
+  )
 
 const research = async (content: Block[]) => {
   stubFetch(respondWith(content))
@@ -59,6 +74,57 @@ const research = async (content: Block[]) => {
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+describe('AnthropicProductResearcher job routing', () => {
+  it("asks Claude as the 'research' job and uses the model configured for it", async () => {
+    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+
+    await make(undefined, 'research').research(PRODUCT)
+
+    expect(calls[0]!.body.model).toBe(ROUTED_TO)
+  })
+
+  it('does not use the model of any other job', async () => {
+    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const others = (Object.keys(MODELS) as AiJob[]).filter((job) => job !== 'research')
+
+    for (const job of others) await make(undefined, job).research(PRODUCT)
+
+    expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
+  })
+
+  it("records the call on the ledger under the 'research' job", async () => {
+    stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await make(ledger).research(PRODUCT)
+
+    expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([['research', MODEL, 'settled']])
+  })
+
+  it('reserves room for the five searches the request allows, on top of the tokens', async () => {
+    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await make(ledger).research(PRODUCT)
+
+    // Five searches at 10000 micros is 50000 on its own; the 4096-token output allowance at $10 per million adds 40960.
+    expect(calls[0]!.body.tools[0].max_uses).toBe(5)
+    expect(ledger.entries[0]!.estimateMicros).toBeGreaterThanOrEqual(50_000 + 40_960)
+  })
+
+  it('on Haiku, reserves enough to cover a call that used 100001 input tokens, 4096 output tokens and all 5 searches', async () => {
+    stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await make(ledger, 'research').research(PRODUCT)
+
+    // ROUTED_TO is claude-haiku-5-5: five searches' worth of results can push the prompt over 100000 tokens, the long tier.
+    const worstSeen = costMicros(ROUTED_TO, { inputTokens: 100_001, outputTokens: 4096, cacheWriteTokens: 0, cacheReadTokens: 0, webSearches: 5 })
+    expect(ledger.entries[0]).toMatchObject({ model: ROUTED_TO })
+    expect(ledger.entries[0]!.estimateMicros).toBeGreaterThanOrEqual(worstSeen)
+  })
 })
 
 describe('AnthropicProductResearcher.research', () => {

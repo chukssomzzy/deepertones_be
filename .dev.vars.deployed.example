@@ -12,7 +12,8 @@
 #   npm run secrets:push -- --env staging --apply
 #
 # What is deliberately NOT here: ENVIRONMENT, CORS_ORIGINS, DOCS_ENABLED, OTP_CHANNELS,
-# EMAIL_FROM_*, ZEPTOMAIL_API_URL, WHATSAPP_*  (phone number id, template, language), ANTHROPIC_MODEL and CATALOG_IMAGES_PUBLIC_URL. They are
+# EMAIL_FROM_*, ZEPTOMAIL_API_URL, WHATSAPP_*  (phone number id, template, language), ANTHROPIC_MODEL_* (one per job),
+# AI_DAILY_BUDGET_USD and CATALOG_IMAGES_PUBLIC_URL. They are
 # `vars` in wrangler.jsonc, per environment. A secret of the same name is shadowed by the config
 # value on every deploy, so setting one here would look set and never apply. The push refuses them.
 #

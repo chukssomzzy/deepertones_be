@@ -25,8 +25,13 @@
     // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
     "WHATSAPP_OTP_LANGUAGE": "en",
-    // The Claude model used for product research and analysis.
-    "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+    // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+    "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+    // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+    "AI_DAILY_BUDGET_USD": "1",
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
     "CATALOG_IMAGES_PUBLIC_URL": ""
   },
@@ -128,8 +133,13 @@
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en",
-        // The Claude model used for product research and analysis.
-        "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+        // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+        "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        "AI_DAILY_BUDGET_USD": "5",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
@@ -203,8 +213,13 @@
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
         "WHATSAPP_OTP_LANGUAGE": "en",
-        // The Claude model used for product research and analysis.
-        "ANTHROPIC_MODEL": "claude-sonnet-5-5",
+        // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+        "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        "AI_DAILY_BUDGET_USD": "30",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },

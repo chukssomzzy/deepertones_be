@@ -33,12 +33,15 @@ export class AnthropicProductResearcher implements ProductResearcher {
   constructor(private readonly client: AnthropicClient) {}
 
   async research(product: ProductIdentity): Promise<ResearchResult> {
-    const message = await this.client.createMessage({
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: 'user', content: `Find the ingredient list for this product:\n${JSON.stringify(product)}` }],
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: MAX_SEARCHES }],
-    })
+    const message = await this.client.createMessage(
+      {
+        max_tokens: MAX_TOKENS,
+        system: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: `Find the ingredient list for this product:\n${JSON.stringify(product)}` }],
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: MAX_SEARCHES }],
+      },
+      { job: 'research' },
+    )
 
     // The model can name a page it never saw, so the source must be one the search returned.
     // Any answer that cannot be read or checked is "not found": the caller has a fallback for that.

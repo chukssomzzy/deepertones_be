@@ -1,12 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AnthropicClient } from '../anthropic/anthropic.client'
+import type { AiJob } from '../anthropic/ai-spend.provider'
 import { AnthropicRefusalError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
+import { MemoryAiSpendLedger } from '../anthropic/memory.ai-spend-ledger'
 import {
   API_KEY,
+  BIG_CAP_MICROS,
   type Block,
   caught,
   errorResponse,
   MODEL,
+  MODELS,
   messageResponse,
   requestText,
   stubFetch,
@@ -59,7 +63,18 @@ const JPEG_BYTES = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x4
 // Base64 of JPEG_BYTES, computed outside the code under test.
 const JPEG_BASE64 = '/9j/4AAQSkZJRvr7'
 
-const make = () => new AnthropicProductAnalyst(new AnthropicClient({ apiKey: API_KEY, model: MODEL, apiUrl: 'https://anthropic.example/v1/messages' }))
+const ROUTED_TO = 'claude-haiku-5-5'
+
+/** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job a method uses shows in the model it sends. */
+const make = (ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+  new AnthropicProductAnalyst(
+    new AnthropicClient({
+      apiKey: API_KEY,
+      models: routed ? { ...MODELS, [routed]: ROUTED_TO } : MODELS,
+      ledger,
+      apiUrl: 'https://anthropic.example/v1/messages',
+    }),
+  )
 
 const structured = (value: unknown, stop_reason = 'end_turn') => () =>
   messageResponse({ content: [textBlock(JSON.stringify(value))], stop_reason })
@@ -79,6 +94,58 @@ const schemaOf = (body: any) => body.output_config.format.schema
 
 afterEach(() => {
   vi.unstubAllGlobals()
+})
+
+const JOBS = Object.keys(MODELS) as AiJob[]
+
+describe('AnthropicProductAnalyst job routing', () => {
+  // Each method is run once with ONLY its own job on ROUTED_TO, and once with every other job on ROUTED_TO:
+  // it must send ROUTED_TO in the first case and MODEL in the second, which pins the job it asks as.
+  const methods: [string, AiJob, (analyst: AnthropicProductAnalyst) => Promise<unknown>, unknown][] = [
+    ['analyse', 'analysis', (a) => a.analyse(INPUT), { concerns: [] }],
+    ['sameProduct', 'same-product', (a) => a.sameProduct(PRODUCT, OTHER), { same: true }],
+    ['imageShowsProduct', 'image-check', (a) => a.imageShowsProduct({ bytes: JPEG_BYTES, mediaType: 'image/jpeg' }, PRODUCT), { matches: true }],
+  ]
+
+  it.each(methods)('%s asks Claude as the %s job and uses the model configured for it', async (_method, job, run, reply) => {
+    const calls = stubFetch(structured(reply))
+
+    await run(make(undefined, job))
+
+    expect(calls[0]!.body.model).toBe(ROUTED_TO)
+  })
+
+  it.each(methods)('%s does not use the model of any other job', async (_method, job, run, reply) => {
+    const calls = stubFetch(structured(reply))
+    const others = JOBS.filter((other) => other !== job)
+
+    for (const other of others) await run(make(undefined, other))
+
+    expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
+  })
+
+  it.each(methods)('%s records its call on the ledger under the %s job', async (_method, job, run, reply) => {
+    stubFetch(structured(reply))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await run(make(ledger))
+
+    expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([[job, MODEL, 'settled']])
+  })
+
+  it('reserves room for the image as a flat 5000 input tokens, however large the photo is', async () => {
+    stubFetch(structured({ matches: true }))
+    const small = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+    const large = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await make(small).imageShowsProduct({ bytes: new Uint8Array(10), mediaType: 'image/png' }, PRODUCT)
+    await make(large).imageShowsProduct({ bytes: new Uint8Array(300_000), mediaType: 'image/png' }, PRODUCT)
+
+    // 5000 tokens at $2 per million is 10000 micros of input, the 4096-token answer allowance 40960; the rest of the body is small.
+    expect(small.entries[0]!.estimateMicros).toBe(large.entries[0]!.estimateMicros)
+    expect(small.entries[0]!.estimateMicros).toBeGreaterThanOrEqual(10_000 + 40_960)
+    expect(small.entries[0]!.estimateMicros).toBeLessThan(10_000 + 40_960 + 1_000)
+  })
 })
 
 describe('AnthropicProductAnalyst.analyse', () => {
@@ -168,20 +235,20 @@ describe('AnthropicProductAnalyst token budgets', () => {
     expect(calls[0]!.body.max_tokens).toBe(16000)
   })
 
-  it('gives sameProduct 2048 max_tokens', async () => {
+  it('gives sameProduct 4096 max_tokens', async () => {
     const calls = stubFetch(structured({ same: true }))
 
     await make().sameProduct(PRODUCT, OTHER)
 
-    expect(calls[0]!.body.max_tokens).toBe(2048)
+    expect(calls[0]!.body.max_tokens).toBe(4096)
   })
 
-  it('gives imageShowsProduct 2048 max_tokens', async () => {
+  it('gives imageShowsProduct 4096 max_tokens', async () => {
     const calls = stubFetch(structured({ matches: true }))
 
     await make().imageShowsProduct({ bytes: JPEG_BYTES, mediaType: 'image/jpeg' }, PRODUCT)
 
-    expect(calls[0]!.body.max_tokens).toBe(2048)
+    expect(calls[0]!.body.max_tokens).toBe(4096)
   })
 })
 

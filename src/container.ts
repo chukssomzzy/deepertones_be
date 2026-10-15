@@ -1,6 +1,8 @@
 import { D1JobRunsRepository } from './jobs/job-runs.repository'
 import { createDb } from './lib/db'
 import { once } from './lib/once'
+import { D1AiUsageRepository } from './modules/ai-usage/ai-usage.repository'
+import { AiUsageService } from './modules/ai-usage/ai-usage.service'
 import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
@@ -45,8 +47,32 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
-  // One client for the researcher and the analyst, so they share the key, model and timeout.
-  const anthropic = once(() => new AnthropicClient({ apiKey: env.ANTHROPIC_API_KEY, model: env.ANTHROPIC_MODEL }))
+  // The app's only AI spend cap. Built here, not by the client, so the client can be given a different ledger (the eval's).
+  const aiUsage = once(() => {
+    const dailyBudgetUsd = Number(env.AI_DAILY_BUDGET_USD)
+    // A cap that is missing or unreadable must not quietly become "no cap" (or "everything refused").
+    if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
+      throw new Error('AI_DAILY_BUDGET_USD must be a positive number of US dollars, e.g. "5"')
+    }
+    return new AiUsageService({ repository: new D1AiUsageRepository(db()), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
+  })
+
+  // One client for the researcher and the analyst, so they share the key, the models and the spend ledger.
+  const anthropic = once(
+    () =>
+      new AnthropicClient({
+        apiKey: env.ANTHROPIC_API_KEY,
+        ledger: aiUsage(),
+        models: {
+          research: env.ANTHROPIC_MODEL_RESEARCH,
+          analysis: env.ANTHROPIC_MODEL_ANALYSIS,
+          'same-product': env.ANTHROPIC_MODEL_JUDGE,
+          'image-check': env.ANTHROPIC_MODEL_VISION,
+          recognize: env.ANTHROPIC_MODEL_VISION,
+          'read-label': env.ANTHROPIC_MODEL_VISION,
+        },
+      }),
+  )
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -93,6 +119,9 @@ export const buildContainer = (env: CloudflareBindings) => {
   )
 
   return {
+    get aiUsage() {
+      return aiUsage()
+    },
     get auth() {
       return auth()
     },

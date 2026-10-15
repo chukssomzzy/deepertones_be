@@ -175,6 +175,17 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
     })
   })
 
+  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS'])(
+    'lists %s as config, so it is never pushed as a secret',
+    (name) => {
+      expect(NOT_SECRETS).toHaveProperty(name)
+    },
+  )
+
+  it('no longer lists ANTHROPIC_MODEL, which wrangler.jsonc replaced with one variable per job', () => {
+    expect(NOT_SECRETS).not.toHaveProperty('ANTHROPIC_MODEL')
+  })
+
   it('never lists a name as both a secret and config', () => {
     for (const name of Object.keys(NOT_SECRETS)) expect(SECRETS, name).not.toHaveProperty(name)
   })

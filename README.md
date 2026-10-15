@@ -161,7 +161,23 @@ and 2 before merging to `staging` or `main`. The first catalog image can only be
 exists, which the first asset sync creates. Locally nothing needs creating: the tests and `wrangler dev` use a local
 bucket, which serves no public URL, so product views show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
 
-To measure the research and analysis steps against fixed cases, run `npm run eval:catalog` (it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
+### AI spend cap
+
+Every Claude request is counted against a daily dollar cap, `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (a `var` in each
+environment: `1` locally, `5` on staging, `30` on production; it must be a positive number). It resets at 00:00 UTC. It is
+the app's only spend cap: there is no Console limit behind it, by decision, so change it in the config. The
+`ai_usage` table (migration 0008) holds the record, so run the migrations on an environment before deploying to it. To see
+what has been spent:
+
+```
+npm run ai:spend -- --env staging          # also --env production; local by default; --days N (default 30)
+```
+
+It prints today, the last 7 days and the last N days in dollars, then each job and model. The models per job are
+`ANTHROPIC_MODEL_RESEARCH`, `_VISION`, `_JUDGE` (Haiku) and `_ANALYSIS` (Sonnet) in the same file. Design in "AI cost
+tracking" in `docs/architecture.md`.
+
+To measure the research and analysis steps against fixed cases, run `npm run eval:catalog` (it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
 
 ## ZeptoMail setup
 
