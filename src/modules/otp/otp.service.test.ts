@@ -891,5 +891,41 @@ describe('OtpService channels', () => {
 
       expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'recipient-rejected' })
     })
+
+    describe('when the email provider is misconfigured', () => {
+      const PROVIDER_MESSAGE = 'ZeptoMail send failed (HTTP 400, code TM_4001, details SM_111)'
+
+      it('fails permanently naming the provider error, and records the challenge as unavailable', async () => {
+        const { challengeId } = await service.send({ channel: 'email', address: EMAIL_RAW })
+        const failure = new EmailDeliveryError('misconfigured', PROVIDER_MESSAGE)
+        email.failNextWith(failure)
+
+        const thrown = await errorOf(service.deliver(lastBody()))
+
+        expect(thrown).toBeInstanceOf(PermanentJobError)
+        expect(thrown.message).toContain('SM_111')
+        expect(thrown.cause).toBe(failure)
+        expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'unavailable' })
+      })
+
+      it('does not send again when the same message is redelivered', async () => {
+        await service.send({ channel: 'email', address: EMAIL_RAW })
+        email.failNextWith(new EmailDeliveryError('misconfigured', PROVIDER_MESSAGE))
+        await errorOf(service.deliver(lastBody()))
+
+        await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+        expect(email.sent).toEqual([])
+      })
+
+      it('does not count the failed challenge toward the cooldown', async () => {
+        await service.send({ channel: 'email', address: EMAIL_RAW })
+        email.failNextWith(new EmailDeliveryError('misconfigured', PROVIDER_MESSAGE))
+        await errorOf(service.deliver(lastBody()))
+        now = new Date(T0.getTime() + 15 * SECOND)
+
+        await expect(service.send({ channel: 'email', address: EMAIL_RAW })).resolves.toBeDefined()
+      })
+    })
   })
 })

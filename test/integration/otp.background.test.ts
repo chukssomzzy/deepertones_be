@@ -43,6 +43,12 @@ const zeptoRejectsRecipient = () =>
     { status: 400 },
   )
 
+const zeptoRejectsSenderDomain = () =>
+  Response.json(
+    { error: { code: 'TM_4001', message: 'Invalid Data', request_id: 'r', details: [{ code: 'SM_111', message: 'Sender domain not verified' }] } },
+    { status: 400 },
+  )
+
 const metaCalls: { body: { to: string; template: { components: { parameters: { text: string }[] }[] } } }[] = []
 const zeptoCalls: { body: { to: { email_address: { address: string } }[]; subject: string; htmlbody: string; textbody: string; client_reference: string } }[] = []
 
@@ -316,6 +322,22 @@ describe('background email OTP delivery through the Worker queue handler', () =>
     expect(result.explicitAcks).toEqual(['m'])
     expect(result.retryMessages).toEqual([])
     expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'recipient-rejected' })
+  })
+
+  it('acks and records failure as unavailable when ZeptoMail reports a configuration error (SM_111)', async () => {
+    const { service, jobs } = makeService()
+    const { challengeId } = await service.send({ channel: 'email', address: freshEmail() })
+    stubZepto(zeptoRejectsSenderDomain)
+
+    const { result } = await runQueue(MAIN, lastBody(jobs))
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(result.retryMessages).toEqual([])
+    expect(zeptoCalls).toHaveLength(1)
+    expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'unavailable' })
+    const run = await new D1JobRunsRepository(createDb(env.DB)).get('deliver-otp', challengeId)
+    expect(run).toMatchObject({ status: 'failed' })
+    expect(run!.lastError).toContain('SM_111')
   })
 
   it('retries and keeps the challenge queued when ZeptoMail is down (503)', async () => {

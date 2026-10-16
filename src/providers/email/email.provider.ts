@@ -17,6 +17,8 @@ export type EmailDeliveryFailure =
   | 'unavailable'
   /** The provider will not deliver to this address. */
   | 'recipient-rejected'
+  /** Our own setup or account is wrong (key, sender domain, credits, approval); retrying will not help until someone fixes it. */
+  | 'misconfigured'
 
 export class EmailDeliveryError extends Error {
   constructor(
