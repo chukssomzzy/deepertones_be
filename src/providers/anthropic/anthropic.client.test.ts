@@ -581,7 +581,12 @@ describe('AnthropicClient reserving before a request', () => {
 
     await make(fetch, { ledger }).structured(BODY, SCHEMA, RESEARCH)
 
-    expect(calls[0]!.body.output_config.format.schema).toMatchObject({ type: 'object', properties: { same: { type: 'boolean' } } })
+    expect(calls[0]!.body.output_config.format.schema).toMatchObject({
+      type: 'object',
+      properties: { same: { type: 'boolean' } },
+      required: ['same'],
+      additionalProperties: false,
+    })
     expect(ledger.entries[0]!.estimateMicros).toBe(worstCaseOf(calls[0]!.body))
   })
 
@@ -909,6 +914,8 @@ describe('AnthropicClient releasing only when the request was clearly not proces
     const error = await caught(make(fetch, { timeoutMs: 10, ledger }).createMessage(BODY, RESEARCH))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    // The message names the kind of failure, as it did before the SDK.
+    expect((error as Error).message).toMatch(/timeout/i)
     expect(ledger.entries.map((e) => [e.status, e.costMicros === e.estimateMicros])).toEqual([['settled', true]])
   })
 
