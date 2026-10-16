@@ -184,7 +184,7 @@ export const RESEARCH_CASES: ResearchCase[] = [
   {
     id: 'nivea-soft',
     product: { brand: 'NIVEA', name: 'Soft Moisturising Cream', category: 'skin' },
-    expect: { found: true, ingredientsInclude: ['Glycerin', 'Paraffinum Liquidum'] },
+    expect: { found: true, ingredientsInclude: ['Glycerin', 'Myristyl Alcohol', 'Simmondsia Chinensis Seed Oil'] },
   },
   {
     id: 'dove-beauty-bar',
@@ -197,9 +197,9 @@ export const RESEARCH_CASES: ResearchCase[] = [
     expect: { found: true, ingredientsInclude: ['Glycerin', 'Petrolatum', 'Stearic Acid', 'Theobroma Cacao Seed Butter'] },
   },
   {
-    id: 'black-opal-dark-spot-serum',
-    product: { brand: 'Black Opal', name: 'Even True Advanced Dark Spot Serum', category: 'skin' },
-    expect: { found: true, ingredientsInclude: ['Glycerin', 'Niacinamide'] },
+    id: 'palmers-cocoa-butter-lotion',
+    product: { brand: "Palmer's", name: 'Cocoa Butter Formula Body Lotion', category: 'body' },
+    expect: { found: true, ingredientsInclude: ['Theobroma Cacao Seed Butter', 'Glycerin'] },
   },
   {
     id: 'neutrogena-hydro-boost',

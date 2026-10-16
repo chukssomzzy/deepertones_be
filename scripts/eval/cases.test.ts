@@ -107,7 +107,7 @@ describe('RESEARCH_CASES', () => {
   })
 
   it('covers well-known brands sold in Nigeria', () => {
-    const wellKnown = ['cerave', 'the ordinary', 'nivea', 'black opal', 'dove', 'vaseline', 'garnier', 'neutrogena', 'la roche-posay', 'olay']
+    const wellKnown = ['cerave', 'the ordinary', 'nivea', 'black opal', "palmer's", 'dove', 'vaseline', 'garnier', 'neutrogena', 'la roche-posay', 'olay']
     const brands = new Set(RESEARCH_CASES.map((c) => c.product.brand.trim().toLowerCase()))
 
     expect([...brands].filter((b) => wellKnown.includes(b)).length).toBeGreaterThanOrEqual(4)

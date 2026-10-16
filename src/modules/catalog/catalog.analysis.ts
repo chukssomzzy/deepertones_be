@@ -18,8 +18,8 @@ export type AnalysisProblem =
 export type AnalysisCheck = { ok: true; concerns: DraftConcernRow[] } | { ok: false; reason: AnalysisProblem }
 
 export const MAX_CONCERNS = 20
-export const MAX_WHY_LENGTH = 600
-export const MAX_WHO_LENGTH = 300
+export const MAX_WHY_LENGTH = 800
+export const MAX_WHO_LENGTH = 400
 
 // Text from the web or the model is shown to users, and none of it has any business carrying a link or markup.
 // A link is a scheme or a "www." host. Markup is a "<" that starts a tag, a closing tag or a comment: straight before a

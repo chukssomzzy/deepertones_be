@@ -670,10 +670,11 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   Researched ingredients, and label ingredients, are refused if any entry contains a link (`scheme://` or `www.`) or
   markup: research then counts as `not-found` and stores nothing, a label as `LABEL_UNREADABLE`. Markup is a `<` straight
   before a letter, `/` or `!` (a tag, a closing tag, a comment). Other angle brackets are ordinary text, so `<1 ppm`,
-  `pH < 5` and `> 2%` pass. In an analysis, `why` is at most 600 characters, `whoShouldTakeCare` at most 300, neither may
+  `pH < 5` and `> 2%` pass. In an analysis, `why` is at most 800 characters, `whoShouldTakeCare` at most 400, neither may
   carry a link or markup, and there are at most 20 concerns. A breach rejects the whole analysis. A text with both a link and
   markup is reported as the link. The analyst's prompt asks for no links in the text and for comparisons written as words
-  or symbols with a space ("less than 1 ppm").
+  or symbols with a space ("less than 1 ppm"). It also states a tighter length budget (`why` at most 450 characters,
+  `whoShouldTakeCare` at most 200, repeated in the schema descriptions) so a slightly long answer still clears the gate.
 - **Stock image import** runs after the formulation is stored, only when the product has no image and none was looked
   for in the last `FRESH_FOR_DAYS`. Gates, in order: the image store's safe download (see "Catalog images"; `null`
   for a bad URL, type or size), then `imageShowsProduct` (the vision match), and only then `put` to

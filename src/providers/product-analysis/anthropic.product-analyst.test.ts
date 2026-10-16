@@ -196,6 +196,19 @@ describe('AnthropicProductAnalyst.analyse', () => {
     assertApiSafe(schema)
   })
 
+  it('states the length budget for why and whoShouldTakeCare in the prompt and in the schema descriptions', async () => {
+    const calls = stubFetch(structured({ concerns: [] }))
+
+    await make().analyse(INPUT)
+
+    const body = calls[0]!.body
+    expect(body.system).toContain('2-3 sentences, at most 450 characters')
+    expect(body.system).toContain('one sentence, at most 200 characters')
+    const concern = schemaOf(body).properties.concerns.items.properties
+    expect(concern.why.description).toContain('450 characters')
+    expect(concern.whoShouldTakeCare.description).toContain('200 characters')
+  })
+
   it('puts the product, its ingredients and every flagged fact in the prompt', async () => {
     const calls = stubFetch(structured({ concerns: [] }))
 

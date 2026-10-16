@@ -1318,7 +1318,7 @@ describe('ProductCatalogService.analyse free text from the model', () => {
     'a rating < evil',
     'a rating <',
   ]
-  const MAX = { why: 600, whoShouldTakeCare: 300 }
+  const MAX = { why: 800, whoShouldTakeCare: 400 }
 
   /** Analyses, expects the analysis to be rejected and nothing stored, and returns the error. */
   const rejected = async (ctx: Ctx, formulationId: string) => {
