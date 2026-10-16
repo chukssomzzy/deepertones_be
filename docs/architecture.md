@@ -146,7 +146,8 @@ request. Queues deliver at least once, so the system is built around repeat-safe
 Provider adapters call vendors through `lib/http.ts`, built on rxjs `fromFetch`: `requestJson$` for JSON APIs
 and `requestBytes$` for binary downloads.
 It returns an Observable so an adapter can compose operators; the adapter converts at its own
-boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs.
+boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs. The one exception
+is Claude, which goes through its official SDK (see "Claude (Anthropic) providers").
 
 - **Every call has a timeout** (`timeoutMs`); on expiry the request is aborted and the stream
   errors with `HttpTimeoutError`. Other transport failures are `HttpNetworkError`. Any HTTP status
@@ -443,19 +444,24 @@ because later modules will send email too.
 Product research and analysis call Claude through one `AnthropicClient`, and two thin adapters
 (`AnthropicProductResearcher`, `AnthropicProductAnalyst`) own the prompts and the answer shapes.
 
-- **Raw Messages API over `requestJson$`, no SDK.** The SDK adds a dependency and its own fetch,
-  retries and timeouts, which would bypass the rules in "Outbound HTTP". The client sends the
-  documented headers and nothing else; no retries.
+- **The official SDK, not `requestJson$`.** `@anthropic-ai/sdk` brings Claude's headers, error shapes
+  and types, so this is the one vendor outside "Outbound HTTP". It is built with `maxRetries: 0`: the
+  job dispatcher is the only retrier, and each request is billed once. `timeoutMs` and a test `fetch`
+  are passed through; the client maps SDK errors to the classes below and never reads their `message`.
 - **One client, built in the container and injected.** Adapters `import type { AnthropicClient }`
   only, because `concrete-classes-only-in-container` forbids importing a concrete provider class
   anywhere else. The errors and the helpers adapters need as values (`textOf`, `sourceUrlsOf`) live in
   `anthropic.provider.ts`, the one file of the folder an adapter may import as a value. Nothing
   re-exports them from the client.
 - **Structured outputs, never a forced `tool_choice`.** Sonnet 5.5 rejects forced tool choice, so
-  answers are constrained with `output_config.format` (`json_schema`). Schemas close every object
-  (`additionalProperties: false`) and use none of the keywords the API rejects (length, range and
-  count limits); enums come from vocabularies the caller passes in. `max_tokens` leaves room for
-  adaptive thinking, which counts against it.
+  answers are constrained with `output_config.format` (`json_schema`). Callers pass a zod schema and
+  get its inferred type back; the client sends `z.toJSONSchema` (not the SDK's `zodOutputFormat`,
+  which turns `enum` into description text) and checks the reply with `safeParse`. Schemas use none of
+  the keywords the API rejects (length, range and count limits); enums come from vocabularies the
+  caller passes in. `max_tokens` leaves room for adaptive thinking, which counts against it.
+- **Internals are `#private`.** Constants and helpers in the client and adapters are class members,
+  not module-level names; only what other files import (the errors, types and helpers in
+  `anthropic.provider.ts`) is exported.
 - **Web search returns JSON text, checked against the search.** The researcher cannot use structured
   outputs with the search tool, so its prompt demands a JSON-only final answer. The last object in the
   text that fits the shape wins; the `sourceUrl` must be a URL the search returned or a cited page
@@ -468,7 +474,7 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
   timeout or network), 429, 5xx, a reply that is not a message, or a turn still paused: retry later.
   `AnthropicConfigError`: our key, billing or permissions are wrong (401, 402, 403): a setup task, not
   retryable, like a bad ZeptoMail key. `AnthropicRequestError`: permanent for this input (400, 404,
-  413, `max_tokens`, unparseable structured JSON). `AnthropicRefusalError` is a refusal. Error messages carry the HTTP status,
+  413, `max_tokens`, structured JSON that is unparseable or off-schema). `AnthropicRefusalError` is a refusal. Error messages carry the HTTP status,
   `error.type` and `request_id` only, never the key, the request or response content, or the API's own
   `error.message`. An empty key rejects naming `ANTHROPIC_API_KEY` before any request.
 - **The researcher's bounds.** At most 150 ingredients, each at most 120 characters after trimming
