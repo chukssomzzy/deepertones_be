@@ -440,8 +440,9 @@ because later modules will send email too.
   must fix it, so retrying cannot help.
 
 ### Claude (Anthropic) providers
-Product research and analysis call Claude through one `AnthropicClient`, and two thin adapters
-(`AnthropicProductResearcher`, `AnthropicProductAnalyst`) own the prompts and the answer shapes.
+Product research, analysis and photo reading call Claude through one `AnthropicClient`, and thin adapters
+(`AnthropicProductResearcher`, `AnthropicProductAnalyst`, `AnthropicProductRecognizer`, `AnthropicLabelReader`) own the
+prompts and the answer shapes.
 
 - **Raw Messages API over `requestJson$`, no SDK.** The SDK adds a dependency and its own fetch,
   retries and timeouts, which would bypass the rules in "Outbound HTTP". The client sends the
@@ -480,6 +481,15 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
   store (see "Catalog images") checks again.
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
+- **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
+  in a photo: a beauty or personal-care product (with brand, name, optional variant, category and a 0 to 1 confidence),
+  or `other-product`, `face-or-person` or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  ingredient list off a label photo, in label order and as printed, never completed from memory. Both run on the vision
+  model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
+  as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
+  trimming), with a link, markup or (ingredients) a control character, or a list of more than 150 entries, becomes
+  `unreadable` / `{ readable: false }`, never an error. The link and markup check lives in `lib/text-safety.ts`, shared with
+  the catalog, because a provider may not import from a module.
 
 ### AI cost tracking
 Every Claude request is counted against a daily dollar cap. This is the app's only spend cap: by the owner's decision
@@ -576,6 +586,30 @@ there is no Console spend limit behind it, so the code is the backstop.
 - **The vision match is the second gate.** Checks on the URL and bytes prove a file is an image, not
   that it shows the right product: a hostile page can serve a valid image of the wrong thing. The
   catalog service must pass the image through `ProductAnalyst.imageShowsProduct` before `put`.
+
+### Private photos
+`providers/photo-store` keeps the photos users take of products. The port is `PhotoStore` (`put`, `get`, `delete`,
+`deleteMany`); `R2PhotoStore` and `MemoryPhotoStore` implement it. Unlike catalog images, these are private.
+
+- **One private bucket for every environment.** `deepertones-private`, bound as `PRIVATE_PHOTOS` in all three
+  `wrangler.jsonc` blocks, next to the public `CATALOG_IMAGES`, never in its place. It has no public domain and r2.dev
+  is off, so the only way out is a signed photo link. Environments are told apart by key prefix, as in the public
+  bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket.
+- **Key layout.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, where `<environment>` is
+  `development`, `staging`, `production` or `test`, and each id is lowercase `a-z 0-9 -` (UUIDs pass). Every method
+  validates the key and throws a plain `Error` on a bad one, before touching the bucket: a bad key is our bug.
+  `deleteMany` validates every key before deleting any, then deletes in batches of 1000 (the R2 limit).
+- **`put` and `get`.** `put` stores the bytes with the media type and `Cache-Control: private, no-store`. `get` returns
+  the stored bytes and media type, or null for a missing key or any stored type other than `image/jpeg` or
+  `image/webp` (the stored type decides, not the extension). `delete` of a missing key is not an error. Storage
+  failures are thrown so the caller can retry.
+- **Signed photo links.** `lib/photo-link.ts` signs `{ key, userId, expiresAt }` as an opaque token: base64url of
+  `payload.signature`, where the payload is JSON and the signature is HMAC-SHA-256 under a key derived with
+  HKDF-SHA-256 from the secret (empty salt, info `deepertones/photo-link/v1`, 256 bits). The container will pass
+  `JWT_SECRET`; there is no new secret, and the distinct info keeps this key unrelated to the one that signs JWTs. A
+  link lives `PHOTO_LINK_TTL_SECONDS` (5 minutes). `verifyPhotoLink` takes the clock as an argument and returns the key
+  and user, or null for anything malformed, over 2048 characters, wrongly signed or expired; reasons are not told
+  apart. The signature is compared in constant time.
 
 ### Product catalog data
 `modules/catalog` holds the shared, per-product data behind the product scan (#20): products, aliases, formulations,

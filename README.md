@@ -161,6 +161,13 @@ and 2 before merging to `staging` or `main`. The first catalog image can only be
 exists, which the first asset sync creates. Locally nothing needs creating: the tests and `wrangler dev` use a local
 bucket, which serves no public URL, so product views show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
 
+### Private photo storage
+
+Users' product photos go to the private R2 bucket `deepertones-private` (binding `PRIVATE_PHOTOS`), one bucket for every
+environment, keys under `photos/<environment>/`. The bucket already exists (created 2026-10-15), so there is nothing to do:
+no bucket, domain or secret to create. Keep it private: never attach a custom domain or enable r2.dev. Design in
+"Private photos" in `docs/architecture.md`.
+
 ### AI spend cap
 
 Every Claude request is counted against a daily dollar cap, `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (a `var` in each

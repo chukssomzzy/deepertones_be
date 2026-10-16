@@ -1,3 +1,4 @@
+import { base64Of } from '../../lib/base64'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { ProductIdentity } from '../product-research/product-researcher.provider'
 import type { AnalysisInput, DraftConcern, ProductAnalyst, ProductImage } from './product-analyst.provider'
@@ -127,12 +128,4 @@ export class AnthropicProductAnalyst implements ProductAnalyst {
     )
     return matches
   }
-}
-
-// fromCharCode(...bytes) on a whole photo overflows the call stack, so build the string in slices.
-const CHUNK = 0x8000
-const base64Of = (bytes: Uint8Array): string => {
-  let binary = ''
-  for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK))
-  return btoa(binary)
 }

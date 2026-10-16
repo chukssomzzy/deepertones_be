@@ -94,7 +94,14 @@
   // The one public bucket, deepertones-assets, for everything public. The CI sync owns email/ and the other keys from the
   // repo's assets/ folder; the Worker owns catalog/<environment>/…. The two never overlap (the sync refuses a catalog/ file).
   // Here it is a local simulation: wrangler dev and the tests write to a local bucket, never the real one.
-  "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" }],
+  //
+  // The one private bucket, deepertones-private, for users' product photos, shared by every environment (the owner's rule).
+  // Keys are prefixed photos/<environment>/…. It has no public domain and r2.dev is off: photos leave only through signed
+  // photo links the Worker checks. Local here too, like the public bucket.
+  "r2_buckets": [
+    { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+    { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
+  ],
 
   // More storage bindings, added as we need them:
   // "kv_namespaces": [{ "binding": "KV", "id": "" }],
@@ -189,7 +196,13 @@
       ],
       // The one public bucket, shared with the CI sync, which owns email/ and the other repo assets/ keys. The Worker writes
       // only under catalog/<environment>/…, so the two never overlap.
-      "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" }]
+      //
+      // The one private bucket for every environment (the owner's rule): keys are prefixed photos/<environment>/…, it has no
+      // public domain and r2.dev is off, so photos leave only through signed photo links.
+      "r2_buckets": [
+        { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+        { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
+      ]
     },
     "production": {
       "routes": [{ "pattern": "api.deepertones.com", "custom_domain": true }],
@@ -269,7 +282,13 @@
       ],
       // The one public bucket, shared with the CI sync, which owns email/ and the other repo assets/ keys. The Worker writes
       // only under catalog/<environment>/…, so the two never overlap.
-      "r2_buckets": [{ "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" }]
+      //
+      // The one private bucket for every environment (the owner's rule): keys are prefixed photos/<environment>/…, it has no
+      // public domain and r2.dev is off, so photos leave only through signed photo links.
+      "r2_buckets": [
+        { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+        { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
+      ]
     }
   }
 }

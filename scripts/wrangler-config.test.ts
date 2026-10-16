@@ -67,3 +67,16 @@ describe('wrangler.jsonc product catalog config', () => {
     expect(block?.secrets?.required).toContain('ANTHROPIC_API_KEY')
   })
 })
+
+// Users' product photos are private: one private bucket for every environment, told apart by key prefix
+// (photos/<environment>/…), with no public address. It sits beside the public assets bucket, never in its place.
+describe('wrangler.jsonc private photo storage', () => {
+  it.each(blocks)('%s binds the private photo bucket as PRIVATE_PHOTOS', (_, block) => {
+    expect(block?.r2_buckets?.find((b) => b.binding === 'PRIVATE_PHOTOS')?.bucket_name).toBe('deepertones-private')
+  })
+
+  it.each(blocks)('%s keeps the public CATALOG_IMAGES binding next to it, as the only other R2 binding', (_, block) => {
+    const buckets = Object.fromEntries((block?.r2_buckets ?? []).map((b) => [b.binding, b.bucket_name]))
+    expect(buckets).toEqual({ CATALOG_IMAGES: 'deepertones-assets', PRIVATE_PHOTOS: 'deepertones-private' })
+  })
+})
