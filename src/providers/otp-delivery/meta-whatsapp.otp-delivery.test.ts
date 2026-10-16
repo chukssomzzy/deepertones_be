@@ -57,7 +57,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   it('posts the authentication template to the Graph API with the code in body and button', async () => {
     const { delivery, calls } = make(() => json(SUCCESS_BODY))
 
-    await expect(delivery.send(TO, '4829')).resolves.toBeUndefined()
+    await expect(delivery.send(TO, '482913')).resolves.toBeUndefined()
 
     expect(calls).toHaveLength(1)
     const call = calls[0]!
@@ -75,8 +75,8 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
         name: 'otp_login',
         language: { code: 'en_US' },
         components: [
-          { type: 'body', parameters: [{ type: 'text', text: '4829' }] },
-          { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: '4829' }] },
+          { type: 'body', parameters: [{ type: 'text', text: '482913' }] },
+          { type: 'button', sub_type: 'url', index: '0', parameters: [{ type: 'text', text: '482913' }] },
         ],
       },
     })
@@ -85,7 +85,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   it('reports unavailable when the network request fails', async () => {
     const { delivery } = make(() => Promise.reject(new TypeError('network down')))
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(error).toBeInstanceOf(OtpDeliveryError)
     expect(error).toMatchObject({ reason: 'unavailable' })
@@ -103,7 +103,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   ])('reports unavailable on %s', async (_label, respond) => {
     const { delivery } = make(respond)
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(error).toBeInstanceOf(OtpDeliveryError)
     expect(error).toMatchObject({ reason: 'unavailable' })
@@ -115,7 +115,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   ])('reports recipient-rejected on Meta code %s', async (_label, code) => {
     const { delivery } = make(() => metaError(code, 400))
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(error).toBeInstanceOf(OtpDeliveryError)
     expect(error).toMatchObject({ reason: 'recipient-rejected' })
@@ -127,7 +127,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   ])('throws a plain error with the Meta code for %s, never leaking the token', async (_label, code, status) => {
     const { delivery } = make(() => metaError(code, status))
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(error).toBeInstanceOf(Error)
     expect(error).not.toBeInstanceOf(OtpDeliveryError)
@@ -138,7 +138,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
   it.each([400, 401])('throws a plain error with the HTTP status for a non-JSON %i body, never leaking the token', async (status) => {
     const { delivery } = make(() => new Response('Bad Request', { status }))
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(error).toBeInstanceOf(Error)
     expect(error).not.toBeInstanceOf(OtpDeliveryError)
@@ -162,7 +162,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
       timeoutMs: 10,
     })
 
-    const error = await caught(delivery.send(TO, '4829'))
+    const error = await caught(delivery.send(TO, '482913'))
 
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(signal!.aborted).toBe(true)
@@ -178,7 +178,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
     it('rejects send with a plain error naming WHATSAPP_PHONE_NUMBER_ID, without calling Meta', async () => {
       const { delivery, calls } = make(() => json(SUCCESS_BODY), '')
 
-      const error = await caught(delivery.send(TO, '4829'))
+      const error = await caught(delivery.send(TO, '482913'))
 
       expect(error).toBeInstanceOf(Error)
       expect(error).not.toBeInstanceOf(OtpDeliveryError)
@@ -197,7 +197,7 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
         languageCode: 'en_US',
       })
 
-      const error = await caught(delivery.send(TO, '4829'))
+      const error = await caught(delivery.send(TO, '482913'))
 
       expect(error).toBeInstanceOf(Error)
       expect(error).not.toBeInstanceOf(OtpDeliveryError)

@@ -452,9 +452,9 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
 - **Only an HMAC of the code is stored**: `HMAC-SHA256(OTP_PEPPER, "<channel>:<address>:<code>")`. A leaked
   table cannot be brute-forced without the pepper. The channel and address are part of the input, so a code sent
   to one recipient never verifies for another. The comparison is constant time (`timingSafeEqual`).
-- **Codes come from the CSPRNG**, four digits, via `randomDigits`, which rejects bytes that would
+- **Codes come from the CSPRNG**, six digits, via `randomDigits`, which rejects bytes that would
   bias the digits.
-- **One policy object, `OTP_POLICY`**: 4 digits, valid 10 minutes, 3 wrong tries, single use, a
+- **One policy object, `OTP_POLICY`**: 6 digits, valid 10 minutes, 5 wrong tries, single use, a
   60s resend cooldown, and at most 5 sends per recipient per rolling hour. The WhatsApp template's
   code expiry is set by hand in Meta, so it must match `ttlMinutes`; the email says the same
   number, taken from the policy.

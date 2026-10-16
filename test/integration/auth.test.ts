@@ -112,7 +112,7 @@ const codeFor = async (): Promise<string> => {
   await worker.queue!(batch, WORKER_ENV, ctx)
   expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual(['m'])
   vi.unstubAllGlobals()
-  const code = /\b(\d{4})\b/.exec(sent[0]!.textbody)?.[1]
+  const code = /\b(\d{6})\b/.exec(sent[0]!.textbody)?.[1]
   if (!code) throw new Error('no code in the email')
   return code
 }
@@ -283,7 +283,7 @@ describe('promoting a guest by OTP', () => {
     const device = newDevice()
 
     const send = await device.sendCode(undefined as unknown as string, freshEmail())
-    const verify = await device.verifyCode(undefined as unknown as string, freshEmail(), '1234')
+    const verify = await device.verifyCode(undefined as unknown as string, freshEmail(), '123456')
 
     expect(send.status).toBe(401)
     expect(await errorCodeOf(send)).toBe('AUTH_REQUIRED')
@@ -478,7 +478,7 @@ describe('review fixes', () => {
     const { accessToken } = await tokensFor(owner)
 
     const send = await device.sendCode(accessToken, freshEmail())
-    const verify = await device.verifyCode(accessToken, freshEmail(), '1234')
+    const verify = await device.verifyCode(accessToken, freshEmail(), '123456')
 
     expect(send.status).toBe(409)
     expect(await errorCodeOf(send)).toBe('ACCOUNT_LINKING_UNAVAILABLE')

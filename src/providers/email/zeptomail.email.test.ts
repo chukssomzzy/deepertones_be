@@ -6,8 +6,8 @@ import { ZeptoMailEmailSender } from './zeptomail.email'
 const API_URL = 'https://api.zeptomail.example/v1.1/email'
 const API_KEY = 'wSsVR-super-secret-key'
 const TO = parseEmailAddress('Ada@Example.com')
-const HTML = '<p>Private html body 4829</p>'
-const TEXT = 'Private text body 4829'
+const HTML = '<p>Private html body 482913</p>'
+const TEXT = 'Private text body 482913'
 
 const MESSAGE: EmailMessage = {
   to: TO,

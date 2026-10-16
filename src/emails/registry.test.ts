@@ -49,18 +49,18 @@ describe.each(Object.entries(templates))('layout of the %s email', (name, templa
 })
 
 describe('otp-code email', () => {
-  const out = renderEmail('otp-code', { code: '4829', ttlMinutes: 10 })
+  const out = renderEmail('otp-code', { code: '482913', ttlMinutes: 10 })
 
   it('puts the code in the subject', () => {
-    expect(out.subject).toBe('4829 is your Deeper Tones sign-in code')
+    expect(out.subject).toBe('482913 is your Deeper Tones sign-in code')
   })
 
   it('shows the code in the html', () => {
-    expect(out.html).toContain('4829')
+    expect(out.html).toContain('482913')
   })
 
   it('tells the reader the code, its lifetime and what to do if they did not ask', () => {
-    expect(out.text).toContain('4829')
+    expect(out.text).toContain('482913')
     expect(out.text).toContain('10 minutes')
     expect(out.text).toMatch(/didn.?t (ask|request)/i)
   })
@@ -76,7 +76,7 @@ describe('otp-code email', () => {
   })
 
   it('states the lifetime it was given', () => {
-    expect(renderEmail('otp-code', { code: '1111', ttlMinutes: 15 }).text).toContain('15 minutes')
+    expect(renderEmail('otp-code', { code: '111111', ttlMinutes: 15 }).text).toContain('15 minutes')
   })
 
   it('escapes markup in the data', () => {
@@ -88,7 +88,7 @@ describe('otp-code email', () => {
 
 describe('otp-code pluralisation', () => {
   it('says "1 minute" for a one-minute code', () => {
-    const out = renderEmail('otp-code', { code: '4829', ttlMinutes: 1 })
+    const out = renderEmail('otp-code', { code: '482913', ttlMinutes: 1 })
     expect(out.text).toContain('It expires in 1 minute.')
     expect(out.text).not.toContain('1 minutes')
     expect(out.html).toContain('Your code expires in 1 minute.')
@@ -100,7 +100,7 @@ describe('renderEmail types', () => {
     // Never executed: only the type checker evaluates these lines.
     const neverRun = () => {
       // @ts-expect-error ttlMinutes is required
-      renderEmail('otp-code', { code: '4829' })
+      renderEmail('otp-code', { code: '482913' })
       // @ts-expect-error no such template
       renderEmail('no-such-template', { code: '1' })
     }

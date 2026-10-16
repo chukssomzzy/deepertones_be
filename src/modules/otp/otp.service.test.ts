@@ -20,8 +20,8 @@ const SECOND = 1000
 const MINUTE = 60 * SECOND
 const HOUR = 60 * MINUTE
 
-const CODE = '4829'
-const WRONG = '0000'
+const CODE = '482913'
+const WRONG = '000000'
 const PEPPER = 'test-pepper'
 
 /** One row per channel: how a caller writes the address, its canonical form, another recipient, a second spelling of the same one, and an invalid one. */
@@ -67,7 +67,7 @@ class DownQueue extends MemoryJobQueue {
 
 describe('OTP_POLICY', () => {
   it('is the agreed policy', () => {
-    expect(OTP_POLICY).toEqual({ length: 4, ttlMinutes: 10, maxAttempts: 3, cooldownSeconds: 60, maxSendsPerHour: 5 })
+    expect(OTP_POLICY).toEqual({ length: 6, ttlMinutes: 10, maxAttempts: 5, cooldownSeconds: 60, maxSendsPerHour: 5 })
   })
 })
 
@@ -266,15 +266,15 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
       expect(new Set([a, b, d]).size).toBe(3)
     })
 
-    it('uses a real random four digit code by default, and that code is the one verify accepts', async () => {
+    it('uses a real random six digit code by default, and that code is the one verify accepts', async () => {
       const real = new OtpService({ repository, whatsapp, email, jobs, channels: ['email', 'whatsapp'], pepper: PEPPER })
 
       const { expiresAt } = await real.send({ channel: c.channel, address: c.canonical })
       await real.deliver(lastBody())
 
       // Only this test reads the code back out of what was sent; every other one injects generateCode.
-      const delivered = c.channel === 'whatsapp' ? whatsapp.sent[0]!.code : email.sent[0]!.subject.match(/\d{4}/)![0]
-      expect(delivered).toMatch(/^\d{4}$/)
+      const delivered = c.channel === 'whatsapp' ? whatsapp.sent[0]!.code : email.sent[0]!.subject.match(/\d{6}/)![0]
+      expect(delivered).toMatch(/^\d{6}$/)
       expect(expiresAt.getTime()).toBeGreaterThan(Date.now())
       await expect(real.verify({ channel: c.channel, address: c.canonical }, delivered)).resolves.toEqual(canonical)
     })
@@ -405,13 +405,13 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
     })
 
     it('delivers the very code that verify accepts', async () => {
-      codes.push('1357')
+      codes.push('135790')
       await send()
 
       await service.deliver(lastBody())
 
-      expect(lastSentWas(c.canonical, '1357')).toBe(true)
-      expect(await verify(c.raw, '1357')).toEqual(canonical)
+      expect(lastSentWas(c.canonical, '135790')).toBe(true)
+      expect(await verify(c.raw, '135790')).toEqual(canonical)
     })
 
     it('lets verify succeed while delivery is still queued', async () => {
@@ -617,23 +617,23 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
     it('counts down the attempts remaining on each wrong code', async () => {
       await send()
 
-      for (const attemptsRemaining of [2, 1]) {
+      for (const attemptsRemaining of [4, 3, 2, 1]) {
         const error = await errorOf(verify(c.raw, WRONG))
         expect(error).toBeInstanceOf(ValidationError)
         expect(error).toMatchObject({ code: 'OTP_INVALID', details: { attemptsRemaining } })
       }
     })
 
-    it('still accepts the correct code after two wrong tries', async () => {
+    it('still accepts the correct code after four wrong tries', async () => {
       await send()
-      for (let i = 0; i < 2; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 4; i++) await errorOf(verify(c.raw, WRONG))
 
       expect(await verify(c.raw, CODE)).toEqual(canonical)
     })
 
-    it('kills the code on the third wrong try, which itself is rate limited without a retry hint', async () => {
+    it('kills the code on the fifth wrong try, which itself is rate limited without a retry hint', async () => {
       await send()
-      for (let i = 0; i < 2; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 4; i++) await errorOf(verify(c.raw, WRONG))
 
       const error = await errorOf(verify(c.raw, WRONG))
 
@@ -644,7 +644,7 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
     it('rejects even the correct code once the attempts are used up', async () => {
       await send()
-      for (let i = 0; i < 3; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 5; i++) await errorOf(verify(c.raw, WRONG))
 
       const error = await errorOf(verify(c.raw, CODE))
 
@@ -654,15 +654,15 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
     it('reports expired rather than too many attempts once a locked code has also expired', async () => {
       await send()
-      for (let i = 0; i < 3; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 5; i++) await errorOf(verify(c.raw, WRONG))
       at(10 * MINUTE)
 
       expect(await errorOf(verify(c.raw, CODE))).toMatchObject({ code: 'OTP_EXPIRED' })
     })
 
     it('a new send supersedes the old code, which stops verifying', async () => {
-      const first = '1111'
-      const second = '2222'
+      const first = '111111'
+      const second = '222222'
       codes.push(first, second)
       await send()
       at(60 * SECOND)
@@ -673,12 +673,12 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
     })
 
     it('does not accept the code sent to one recipient for another', async () => {
-      codes.push('1111', '2222')
+      codes.push('111111', '222222')
       await send(c.canonical)
       await send(c.otherRaw)
 
-      expect(await errorOf(verify(c.otherRaw, '1111'))).toMatchObject({ code: 'OTP_INVALID' })
-      expect(await verify(c.otherRaw, '2222')).toEqual(other)
+      expect(await errorOf(verify(c.otherRaw, '111111'))).toMatchObject({ code: 'OTP_INVALID' })
+      expect(await verify(c.otherRaw, '222222')).toEqual(other)
     })
 
     it('reports too many attempts when the attempts run out between the read and the consume', async () => {
@@ -835,14 +835,14 @@ describe('OtpService channels', () => {
     })
 
     it('does not accept the code sent to an email for a phone, nor the reverse', async () => {
-      codes.push('1111', '2222')
+      codes.push('111111', '222222')
       await service.send({ channel: 'email', address: EMAIL_RAW })
       await service.send({ channel: 'whatsapp', address: PHONE_RAW })
 
-      expect(await errorOf(service.verify({ channel: 'email', address: EMAIL }, '2222'))).toMatchObject({ code: 'OTP_INVALID' })
-      expect(await errorOf(service.verify({ channel: 'whatsapp', address: PHONE }, '1111'))).toMatchObject({ code: 'OTP_INVALID' })
-      expect(await service.verify({ channel: 'email', address: EMAIL }, '1111')).toEqual({ channel: 'email', address: EMAIL })
-      expect(await service.verify({ channel: 'whatsapp', address: PHONE }, '2222')).toEqual({ channel: 'whatsapp', address: PHONE })
+      expect(await errorOf(service.verify({ channel: 'email', address: EMAIL }, '222222'))).toMatchObject({ code: 'OTP_INVALID' })
+      expect(await errorOf(service.verify({ channel: 'whatsapp', address: PHONE }, '111111'))).toMatchObject({ code: 'OTP_INVALID' })
+      expect(await service.verify({ channel: 'email', address: EMAIL }, '111111')).toEqual({ channel: 'email', address: EMAIL })
+      expect(await service.verify({ channel: 'whatsapp', address: PHONE }, '222222')).toEqual({ channel: 'whatsapp', address: PHONE })
     })
 
     it('does not verify a code sent to an email on the whatsapp channel', async () => {
@@ -854,7 +854,7 @@ describe('OtpService channels', () => {
 
   describe('delivery by channel', () => {
     it('emails the code once, to the address, referencing the challenge, and never calls WhatsApp', async () => {
-      codes.push('1357')
+      codes.push('135790')
       const { challengeId } = await service.send({ channel: 'email', address: EMAIL_RAW })
 
       await service.deliver(lastBody())
@@ -864,22 +864,22 @@ describe('OtpService channels', () => {
       const message = email.sent[0]!
       expect(message.to).toBe(EMAIL)
       expect(message.reference).toBe(challengeId)
-      expect(message.subject).toBe('1357 is your Deeper Tones sign-in code')
-      expect(message.html).toContain('1357')
-      expect(message.text).toContain('1357')
+      expect(message.subject).toBe('135790 is your Deeper Tones sign-in code')
+      expect(message.html).toContain('135790')
+      expect(message.text).toContain('135790')
       expect(message.text).toContain('10 minutes')
-      const expected = renderEmail('otp-code', { code: '1357', ttlMinutes: 10 })
+      const expected = renderEmail('otp-code', { code: '135790', ttlMinutes: 10 })
       expect({ subject: message.subject, html: message.html, text: message.text }).toEqual(expected)
       expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'delivered', failureReason: null })
     })
 
     it('sends the whatsapp code to the phone and never sends an email', async () => {
-      codes.push('1357')
+      codes.push('135790')
       await service.send({ channel: 'whatsapp', address: PHONE_RAW })
 
       await service.deliver(lastBody())
 
-      expect(whatsapp.sent).toEqual([{ to: PHONE, code: '1357' }])
+      expect(whatsapp.sent).toEqual([{ to: PHONE, code: '135790' }])
       expect(email.sent).toEqual([])
     })
 
