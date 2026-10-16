@@ -80,6 +80,13 @@ const catalogued = async (brand: string, name: string) => {
   return found.formulationId
 }
 
+// The Worker builds its own container per queue message, so the client cannot be handed a fetch here: the SDK picks up the global one when it is built.
+const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  vi.stubGlobal('fetch', fetch)
+  return calls
+}
+
 const recognised = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))] })
 const beautyProduct = (brand: string, name: string) =>
   recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
@@ -106,7 +113,7 @@ describe('scan items advanced through the Worker queue handler', () => {
     const formulationId = await catalogued(brand, 'Hydrating Cleanser')
     const { userId, photo, scanId, itemId } = await startScan()
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'recognising' })
-    const calls = stubFetch(beautyProduct(brand, 'Hydrating Cleanser'))
+    const calls = stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
 
     const recognise = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
@@ -126,7 +133,7 @@ describe('scan items advanced through the Worker queue handler', () => {
     const brand = freshBrand()
     await catalogued(brand, 'Hydrating Cleanser')
     const { userId, scanId, itemId } = await startScan()
-    const calls = stubFetch(beautyProduct(brand, 'Hydrating Cleanser'))
+    const calls = stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
     await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
     const again = await runQueue(MAIN, { itemId, step: 'recognise', at: AT }, 2)
@@ -139,7 +146,7 @@ describe('scan items advanced through the Worker queue handler', () => {
   it('rejects a photo of a person and deletes it from the private bucket at once', async () => {
     const { userId, scanId, itemId, key } = await startScan()
     expect(await env.PRIVATE_PHOTOS.get(key)).not.toBeNull()
-    stubFetch(face)
+    stubAnthropic(face)
 
     const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
@@ -150,7 +157,7 @@ describe('scan items advanced through the Worker queue handler', () => {
 
   it('marks the item failed as unavailable when its message reaches the dead-letter queue, without calling Anthropic', async () => {
     const { userId, scanId, itemId } = await startScan()
-    const calls = stubFetch(face)
+    const calls = stubAnthropic(face)
 
     const result = await runQueue(DEAD_LETTER, { itemId, step: 'recognise', at: AT }, 5)
 
@@ -161,7 +168,7 @@ describe('scan items advanced through the Worker queue handler', () => {
 
   it('keeps a finished item as it was when a dead letter arrives for it', async () => {
     const { userId, scanId, itemId } = await startScan()
-    stubFetch(face)
+    stubAnthropic(face)
     await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
     const result = await runQueue(DEAD_LETTER, { itemId, step: 'recognise', at: AT }, 5)
@@ -172,7 +179,7 @@ describe('scan items advanced through the Worker queue handler', () => {
 
   it('retries, leaving the item recognising, when Anthropic is unavailable', async () => {
     const { userId, scanId, itemId } = await startScan()
-    stubFetch(() => json({ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }, 529))
+    stubAnthropic(() => json({ type: 'error', error: { type: 'overloaded_error', message: 'busy' } }, 529))
 
     const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
@@ -183,7 +190,7 @@ describe('scan items advanced through the Worker queue handler', () => {
 
   it('rejects a photo the model refuses as unreadable and deletes it, acking the message', async () => {
     const { userId, scanId, itemId, key } = await startScan()
-    stubFetch(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
+    stubAnthropic(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
 
     const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
@@ -195,7 +202,7 @@ describe('scan items advanced through the Worker queue handler', () => {
   it('fails the item as unavailable and acks without a retry when the model\'s answer cannot be used, so the photo is not paid for again', async () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const { userId, scanId, itemId } = await startScan()
-    const calls = stubFetch(() => messageResponse({ content: [textBlock('this is not JSON')] }))
+    const calls = stubAnthropic(() => messageResponse({ content: [textBlock('this is not JSON')] }))
 
     const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
@@ -207,7 +214,7 @@ describe('scan items advanced through the Worker queue handler', () => {
 
   it('acks the reaper\'s re-send of a step that already ran, because it carries the same key, and calls nothing', async () => {
     const { userId, scanId, itemId } = await startScan()
-    const calls = stubFetch(face)
+    const calls = stubAnthropic(face)
     await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
     const resent = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })

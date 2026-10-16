@@ -5,30 +5,34 @@ import { assertPhotoKey, assertPhotoMedia, type PhotoEnvironment, type PhotoStor
 export class MemoryPhotoStore implements PhotoStore {
   readonly stored = new Map<string, ProductImage>()
 
-  constructor(private readonly config: { environment: PhotoEnvironment }) {}
+  readonly #environment: PhotoEnvironment
+
+  constructor({ environment }: { environment: PhotoEnvironment }) {
+    this.#environment = environment
+  }
 
   async put(key: string, image: ProductImage): Promise<void> {
-    this.assertKey(key)
+    this.#assertKey(key)
     assertPhotoMedia(key, image)
     this.stored.set(key, image)
   }
 
   async get(key: string): Promise<ProductImage | null> {
-    this.assertKey(key)
+    this.#assertKey(key)
     return this.stored.get(key) ?? null
   }
 
   async delete(key: string): Promise<void> {
-    this.assertKey(key)
+    this.#assertKey(key)
     this.stored.delete(key)
   }
 
   async deleteMany(keys: string[]): Promise<void> {
-    for (const key of keys) this.assertKey(key)
+    for (const key of keys) this.#assertKey(key)
     for (const key of keys) this.stored.delete(key)
   }
 
-  private assertKey(key: string): void {
-    assertPhotoKey(key, this.config.environment)
+  #assertKey(key: string): void {
+    assertPhotoKey(key, this.#environment)
   }
 }
