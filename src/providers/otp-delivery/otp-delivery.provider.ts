@@ -10,6 +10,8 @@ export type OtpDeliveryFailure =
   | 'unavailable'
   /** The provider will not deliver to this number (not reachable, or not allowed). */
   | 'recipient-rejected'
+  /** Our own setup or account is wrong (token, phone number id, template, billing); retrying will not help until someone fixes it. */
+  | 'misconfigured'
 
 export class OtpDeliveryError extends Error {
   constructor(

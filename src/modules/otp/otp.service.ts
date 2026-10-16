@@ -137,8 +137,8 @@ export class OtpService {
   /**
    * The delivery job's body. Drops messages that no longer matter (unknown, superseded, expired, used, or
    * already settled; a dropped challenge keeps reporting `queued`). A rejected recipient or a misconfigured
-   * email provider fails permanently; any other error is rethrown so the queue retries, and repeating a
-   * delivery just resends the same code.
+   * provider on either channel fails permanently; any other error is rethrown so the queue retries, and
+   * repeating a delivery just resends the same code.
    */
   async deliver(message: DeliverOtpMessage): Promise<void> {
     const challenge = await this.repository.findById(message.challengeId)
@@ -171,9 +171,9 @@ export class OtpService {
         throw new PermanentJobError('The recipient cannot receive codes on this channel', { cause: error })
       }
       // Retrying cannot fix our own setup; fail now so the user can ask again. `unavailable` keeps it off their limits.
-      if (error instanceof EmailDeliveryError && error.reason === 'misconfigured') {
+      if ((error instanceof OtpDeliveryError || error instanceof EmailDeliveryError) && error.reason === 'misconfigured') {
         await this.repository.markFailed(challenge.id, 'unavailable')
-        throw new PermanentJobError(`The email provider is misconfigured: ${error.message}`, { cause: error })
+        throw new PermanentJobError(`The ${challenge.channel} provider is misconfigured: ${error.message}`, { cause: error })
       }
       throw error
     }

@@ -484,7 +484,8 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
   failed resend replaces the earlier code, because only the latest challenge verifies.
 - **The `deliver-otp` job** (key = challenge id) drops a message whose challenge is no longer the
   latest for its recipient, is expired, used, or no longer `queued`. A rejected recipient is permanent
-  (challenge marked failed, run acked). A seal that cannot be opened is permanent too. Anything
+  (challenge marked failed, run acked). A seal that cannot be opened is permanent too, and so is a
+  provider that reports our own setup is wrong (`misconfigured`, recorded as `unavailable`). Anything
   else is temporary and retried with full-jitter backoff (base 5s, factor 3, cap 135s), so five
   attempts finish well inside the 10 minute code life. When retries run out, the dead-letter hook
   marks the challenge failed (`unavailable`) unless it was delivered. A repeat resends the same
@@ -504,12 +505,13 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
   `deliveryStatus` `failed` with reason `recipient-rejected`. Verify: `OTP_INVALID` (400, with `attemptsRemaining`),
   `OTP_EXPIRED` (400), `OTP_TOO_MANY_ATTEMPTS` (429).
 - **The adapter classifies, the service decides.** The Meta adapter sorts Meta's error codes into
-  `unavailable` and `recipient-rejected` (`OtpDeliveryError`), and the ZeptoMail adapter does the same with
-  `EmailDeliveryError`. The `deliver` job turns `recipient-rejected` from either into a
-  permanent failure recorded on the challenge, and rethrows `unavailable` so the queue retries. Email
-  `misconfigured` is also a permanent failure, recorded as `unavailable` (so it does not use up the
-  person's limits), with the provider's codes in the job run's `last_error`. Any other plain error,
-  such as a WhatsApp bad token or missing template, is rethrown and retried.
+  `recipient-rejected`, `unavailable` (5xx, 429, rate limits and Meta's transient codes) and `misconfigured`
+  (everything else, plus empty settings) as `OtpDeliveryError`, and the ZeptoMail adapter does the same with
+  `EmailDeliveryError`. The `deliver` job turns `recipient-rejected` from either into a permanent failure
+  recorded on the challenge, and rethrows `unavailable` so the queue retries. `misconfigured` from either
+  channel is also a permanent failure, recorded as `unavailable` (so it does not use up the person's
+  limits), with the provider's codes in the job run's `last_error`. Any other plain error (a bug) is
+  rethrown and retried.
 - **Real providers in every environment**, local dev included, so a bad key or template shows up
   before production. Tests never reach Meta or ZeptoMail: the service runs on `MemoryOtpDelivery`,
   `MemoryEmailSender` and `FakeOtpRepository`, and the adapters are tested with a stubbed `fetch`.
