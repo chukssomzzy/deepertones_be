@@ -28,27 +28,27 @@ export type R2CatalogImageStoreConfig = {
  * stored without passing it.
  */
 export class R2CatalogImageStore implements CatalogImageStore {
-  static readonly #DEFAULT_TIMEOUT_MS = 10_000
-  static readonly #DEFAULT_MAX_BYTES = 5_000_000
-  static readonly #MAX_REDIRECTS = 2
-  static readonly #REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
+  private static readonly DEFAULT_TIMEOUT_MS = 10_000
+  private static readonly DEFAULT_MAX_BYTES = 5_000_000
+  private static readonly MAX_REDIRECTS = 2
+  private static readonly REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
   // One day, not immutable: a deleted or replaced image must stop being served soon (takedowns).
-  static readonly #CACHE_CONTROL = 'public, max-age=86400'
+  private static readonly CACHE_CONTROL = 'public, max-age=86400'
   // Lowercase path segments of letters, digits, '.', '_' and '-'. A key that breaks this is our bug, not the vendor's.
-  static readonly #KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/
+  private static readonly KEY_PATTERN = /^[a-z0-9][a-z0-9._-]*(\/[a-z0-9][a-z0-9._-]*)*$/
 
-  readonly #config: R2CatalogImageStoreConfig
+  private readonly config: R2CatalogImageStoreConfig
 
   constructor(config: R2CatalogImageStoreConfig) {
-    this.#config = config
+    this.config = config
   }
 
   async fetchImage(url: string): Promise<ProductImage | null> {
-    const { timeoutMs = R2CatalogImageStore.#DEFAULT_TIMEOUT_MS, maxBytes = R2CatalogImageStore.#DEFAULT_MAX_BYTES, blockedHostSuffixes = [] } = this.#config
+    const { timeoutMs = R2CatalogImageStore.DEFAULT_TIMEOUT_MS, maxBytes = R2CatalogImageStore.DEFAULT_MAX_BYTES, blockedHostSuffixes = [] } = this.config
     let current = url
     for (let redirects = 0; ; redirects++) {
       // Every hop, not just the first: a safe host can redirect to an internal one.
-      if (!isSafePublicHttpsUrl(current) || R2CatalogImageStore.#isBlockedHost(current, blockedHostSuffixes)) return null
+      if (!isSafePublicHttpsUrl(current) || R2CatalogImageStore.isBlockedHost(current, blockedHostSuffixes)) return null
       let response: HttpBytesResponse
       try {
         response = await firstValueFrom(requestBytes$(current, { timeoutMs, maxBytes }))
@@ -57,13 +57,13 @@ export class R2CatalogImageStore implements CatalogImageStore {
         throw error
       }
 
-      if (!R2CatalogImageStore.#REDIRECT_STATUSES.has(response.status)) {
+      if (!R2CatalogImageStore.REDIRECT_STATUSES.has(response.status)) {
         if (!response.ok) return null
         // The header is the server's claim; only the bytes count.
         const header = readImageHeader(response.bytes)
         return header ? { bytes: response.bytes, mediaType: header.mediaType } : null
       }
-      if (redirects === R2CatalogImageStore.#MAX_REDIRECTS || !response.location) return null
+      if (redirects === R2CatalogImageStore.MAX_REDIRECTS || !response.location) return null
       try {
         current = new URL(response.location, current).href
       } catch {
@@ -73,22 +73,22 @@ export class R2CatalogImageStore implements CatalogImageStore {
   }
 
   async put(key: string, image: ProductImage): Promise<void> {
-    R2CatalogImageStore.#assertValidKey(key)
-    await this.#config.bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mediaType, cacheControl: R2CatalogImageStore.#CACHE_CONTROL } })
+    R2CatalogImageStore.assertValidKey(key)
+    await this.config.bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mediaType, cacheControl: R2CatalogImageStore.CACHE_CONTROL } })
   }
 
   async delete(key: string): Promise<void> {
-    R2CatalogImageStore.#assertValidKey(key)
-    await this.#config.bucket.delete(key)
+    R2CatalogImageStore.assertValidKey(key)
+    await this.config.bucket.delete(key)
   }
 
   publicUrl(key: string): string | null {
-    R2CatalogImageStore.#assertValidKey(key)
-    const base = this.#config.publicBaseUrl.replace(/\/+$/, '')
+    R2CatalogImageStore.assertValidKey(key)
+    const base = this.config.publicBaseUrl.replace(/\/+$/, '')
     return base === '' ? null : `${base}/${key.split('/').map(encodeURIComponent).join('/')}`
   }
 
-  static #isBlockedHost(url: string, suffixes: string[]): boolean {
+  private static isBlockedHost(url: string, suffixes: string[]): boolean {
     const host = new URL(url).hostname.replace(/\.+$/, '').toLowerCase()
     return suffixes.some((suffix) => {
       const blocked = suffix.replace(/^\.+|\.+$/g, '').toLowerCase()
@@ -96,7 +96,7 @@ export class R2CatalogImageStore implements CatalogImageStore {
     })
   }
 
-  static #assertValidKey(key: string): void {
-    if (!R2CatalogImageStore.#KEY_PATTERN.test(key) || key.includes('..')) throw new Error(`Invalid catalog image key: ${JSON.stringify(key)}`)
+  private static assertValidKey(key: string): void {
+    if (!R2CatalogImageStore.KEY_PATTERN.test(key) || key.includes('..')) throw new Error(`Invalid catalog image key: ${JSON.stringify(key)}`)
   }
 }

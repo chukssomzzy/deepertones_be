@@ -3,20 +3,20 @@ import type { CatalogImageStore } from './catalog-image-store.provider'
 
 /** Serves the images you set per URL, keeps what is put, and records every fetch. For tests. */
 export class MemoryCatalogImageStore implements CatalogImageStore {
-  static readonly #PUBLIC_BASE = 'https://images.test'
+  private static readonly PUBLIC_BASE = 'https://images.test'
 
   readonly fetched: string[] = []
   readonly stored = new Map<string, ProductImage>()
-  readonly #responses = new Map<string, ProductImage | null>()
+  private readonly responses = new Map<string, ProductImage | null>()
 
   /** `null` makes the URL answer null again, as if the download failed. */
   respondTo(url: string, image: ProductImage | null) {
-    this.#responses.set(url, image)
+    this.responses.set(url, image)
   }
 
   async fetchImage(url: string): Promise<ProductImage | null> {
     this.fetched.push(url)
-    return this.#responses.get(url) ?? null
+    return this.responses.get(url) ?? null
   }
 
   async put(key: string, image: ProductImage): Promise<void> {
@@ -28,6 +28,6 @@ export class MemoryCatalogImageStore implements CatalogImageStore {
   }
 
   publicUrl(key: string): string {
-    return `${MemoryCatalogImageStore.#PUBLIC_BASE}/${key}`
+    return `${MemoryCatalogImageStore.PUBLIC_BASE}/${key}`
   }
 }
