@@ -458,6 +458,26 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
       })
     })
 
+    describe('countBackPhotos', () => {
+      it('counts the back photos recorded for that item only, and answers 0 for an item with none', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const scan = newScan(userId)
+        const [first, second] = [newItem(scan, 0), newItem(scan, 1)]
+        await repository.createScan(scan, [first, second])
+        await repository.updateItem(first.id, 'recognising', { state: 'needs-back-photo', updatedAt: at(MINUTE) })
+        expect(await repository.countBackPhotos(first.id)).toBe(0)
+
+        for (const [n, minutes] of [[1, 2], [2, 4], [3, 6]] as const) {
+          await repository.updateItem(first.id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(minutes * MINUTE) }, newUpload(first.id, userId, at(minutes * MINUTE)))
+          expect(await repository.countBackPhotos(first.id)).toBe(n)
+          await repository.updateItem(first.id, 'reading-label', { state: 'needs-back-photo', updatedAt: at((minutes + 1) * MINUTE) })
+        }
+
+        expect(await repository.countBackPhotos(second.id)).toBe(0)
+      })
+    })
+
     describe('guest cleanup', () => {
       it('photoKeysForUsers lists the photo and back-photo keys of those users\' items, leaving out deleted photos and other users', async () => {
         const { repository, newUser } = await make()

@@ -918,7 +918,7 @@ comes in a later PR.
   `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
   later) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
-  when the last back photo could not be read, was refused by the model, or is gone.
+  when the last back photo could not be read, was refused by the model, or is gone. After the 3rd back photo the item is `failed` with the same reason.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `recognised` (once read), `product` (a
   `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
   (`/scans/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
@@ -971,7 +971,10 @@ comes in a later PR.
   - `read-label` (`reading-label`): reads the back photo and stores the list with `catalog.addLabelIngredients`. A list
     that cannot be read, or that the catalog refuses (`LABEL_UNREADABLE`: empty, too long, a link or markup), deletes the back
     photo and goes back to `needs-back-photo` with `label-unreadable`; so does a back photo that is missing (ask again,
-    rather than fail). A list that is stored goes to `analysing` (queues `analyse`) with `back_photo_key` cleared, and then
+    rather than fail). That is so for the first `SCAN_POLICY.maxBackPhotos` (3) back photos: the item is allowed 3, counted
+    from its `scan_back_photos` rows (`countBackPhotos`), and when the 3rd cannot be read either the item ends `failed` with
+    `label-unreadable` (front photo kept, back photo key cleared, nothing queued), so no 4th is asked for and `back-photo`
+    answers 409 `ITEM_NOT_AWAITING_BACK_PHOTO`. A list that is stored goes to `analysing` (queues `analyse`) with `back_photo_key` cleared, and then
     the back photo is deleted from the bucket; the delete comes after the move so an undone move still has its photo, and a
     delete that fails is logged (`photo-cleanup-failed`, ids) and does not fail the step (the object stays in the bucket
     with no row pointing at it). The upload's `scan_back_photos` row stays, so it still counts toward the quota.
@@ -985,7 +988,7 @@ comes in a later PR.
     at `max_tokens`: the same photo would get the same answer) fails it as `unavailable` and throws `PermanentJobError`, so the run is
     recorded failed and there is no paid retry; `AiBudgetExceededError` fails it as `research-busy`, keeping the photo, without
     throwing, which is what `research-busy` means everywhere else. `read-label`: refusal and unusable answer are the same as
-    an unreadable label (back to `needs-back-photo` / `label-unreadable`, back photo deleted, no throw); the spend cap fails the
+    an unreadable label (back to `needs-back-photo` / `label-unreadable`, or `failed` / `label-unreadable` after the 3rd back photo; back photo deleted, no throw); the spend cap fails the
     item as `research-busy` and keeps the photo. Any other error (`AnthropicUnavailableError`, a bug) is thrown and retried.
   - **Waiting for work in progress.** When the catalog says another call is already researching the product
     (`ResearchInProgressError`) or analysing the formulation (`AnalysisInProgressError`), the step leaves the item as it

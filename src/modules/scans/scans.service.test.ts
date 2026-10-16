@@ -223,11 +223,12 @@ const analysingItem = async (ctx: Ctx, ingredients: string[] = CLEAN) => {
 }
 
 describe('SCAN_POLICY', () => {
-  it('sets the photo, size, dimension, daily quota and confirmation limits', () => {
+  it('sets the photo, size, dimension, back photo, daily quota and confirmation limits', () => {
     expect(SCAN_POLICY).toEqual({
       maxPhotosPerScan: 10,
       maxPhotoBytes: 2_000_000,
       maxPhotoEdge: 1600,
+      maxBackPhotos: 3,
       dailyPhotosPerUser: 30,
       dailyPhotosPerIp: 100,
       confirmBelowConfidence: 0.6,
@@ -1028,6 +1029,144 @@ describe('ScanService.advance: read-label', () => {
 
     expect((await stateOf(ctx, scanId, itemId)).state).toBe('reading-label')
     expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+  })
+})
+
+describe('ScanService.advance: the cap on back photos per item', () => {
+  const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
+  const refused = () => new AnthropicRefusalError('Claude refused to answer')
+  const unusable = () => new AnthropicRequestError('Claude returned text that is not valid JSON')
+  const addBack = (ctx: Ctx, scanId: string, itemId: string, marker: number) =>
+    asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(marker), IP))
+  /** Reads the back photo the item holds as unreadable, then (if the item asked again) uploads the next one. Returns once the item is reading again. */
+  const failOneRead = async (ctx: Ctx, scanId: string, itemId: string, marker: number) => {
+    unreadable(ctx)
+    await run(ctx, itemId, 'read-label')
+    await addBack(ctx, scanId, itemId, marker)
+  }
+  /** An item whose `n`th back photo (1-based) has just been uploaded, the first `n - 1` having been read as unreadable. */
+  const readingBackPhoto = async (ctx: Ctx, n: number) => {
+    const { scanId, itemId } = await reach(ctx, 'reading-label')
+    for (let i = 1; i < n; i++) await failOneRead(ctx, scanId, itemId, 10 + i)
+    return { scanId, itemId }
+  }
+
+  it.each([1, 2])('asks again for a back photo, as label-unreadable, when the unreadable one is the %ith', async (n) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, n)
+    unreadable(ctx)
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: 'label-unreadable' })
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+  })
+
+  it('ends the item as failed with label-unreadable when the 3rd back photo is unreadable, deleting the back photo and queueing nothing more', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    unreadable(ctx)
+    const queuedBefore = ctx.jobs.enqueued.length
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
+    expect(ctx.jobs.enqueued).toHaveLength(queuedBefore)
+  })
+
+  // The other final failures (fail(), e.g. research-busy, analysis-failed) keep the front photo: only a rejected photo is deleted. This mirrors them,
+  // so the failed item still shows the user's own photo.
+  it('keeps the front photo of an item it ends, as the other failures do', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    unreadable(ctx)
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBe(photoKey(scanId, itemId))
+    expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+  })
+
+  it('still analyses the item when the 3rd back photo is readable: the cap applies only to a failure', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    ctx.labelReader.respondWith(() => ({ readable: true, ingredients: CLEAN }))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+  })
+
+  it.each([
+    ['the reader cannot read the label', (ctx: Ctx) => unreadable(ctx)],
+    ['the list it read is refused by the catalog (it carries a link)', (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: true, ingredients: ['Aqua', 'see https://evil.example'] }))],
+    ['the list it read is empty', (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: true, ingredients: [] }))],
+    ['the model refuses', (ctx: Ctx) => ctx.labelReader.failNextWith(refused())],
+    ['the model sends an unusable answer', (ctx: Ctx) => ctx.labelReader.failNextWith(unusable())],
+    ['the back photo is gone from the store', (ctx: Ctx, scanId: string, itemId: string) => void ctx.photos.stored.delete(backKey(scanId, itemId))],
+  ])('ends the item as failed with label-unreadable on the 3rd back photo when %s', async (_label, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    arrange(ctx, scanId, itemId)
+
+    await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+    expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
+    expect(queued(ctx).filter((m) => m.step === 'analyse')).toEqual([])
+  })
+
+  it.each([
+    ['the back photo is gone from the store', (ctx: Ctx, scanId: string, itemId: string) => void ctx.photos.stored.delete(backKey(scanId, itemId))],
+    ['the reader cannot read the label', (ctx: Ctx) => unreadable(ctx)],
+  ])('asks again on the 2nd back photo when %s', async (_label, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 2)
+    arrange(ctx, scanId, itemId)
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: 'label-unreadable' })
+  })
+
+  it('counts back photos per item: another item of the same scan with two unreadable ones does not use up this one\'s allowance', async () => {
+    const ctx = setup()
+    let recognised = 0
+    ctx.recognizer.respondWith(() => seen({ name: `Cleanser ${++recognised}` }))
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    const [a, b] = scan.items.map((i: { id: string }) => i.id) as [string, string]
+    for (const id of [a, b]) {
+      await run(ctx, id, 'recognise')
+      await run(ctx, id, 'match')
+      await run(ctx, id, 'research')
+      await addBack(ctx, scan.id, id, 9)
+    }
+    await failOneRead(ctx, scan.id, a, 11)
+    await failOneRead(ctx, scan.id, a, 12)
+
+    unreadable(ctx)
+    await run(ctx, b, 'read-label')
+
+    expect(await stateOf(ctx, scan.id, b)).toEqual({ state: 'needs-back-photo', reason: 'label-unreadable' })
+    await run(ctx, a, 'read-label')
+    expect(await stateOf(ctx, scan.id, a)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+  })
+
+  it('refuses a further back photo for an item it has ended, with ITEM_NOT_AWAITING_BACK_PHOTO', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    unreadable(ctx)
+    await run(ctx, itemId, 'read-label')
+
+    const error = await errorOf(addBack(ctx, scanId, itemId, 13))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
   })
 })
 
@@ -2156,7 +2295,7 @@ describe('ScanService: the daily quota counts every back photo', () => {
   }
 
   it('counts three uploads in a row on one item as three photos', async () => {
-    const ctx = setup({ policy: { dailyPhotosPerUser: 4 } })
+    const ctx = setup({ policy: { dailyPhotosPerUser: 4, maxBackPhotos: 10 } })
     const { scanId, itemId } = await reach(ctx, 'needs-back-photo')
     // The front photo is one; each of the next two uploads is one more.
     await sendAndFailToRead(ctx, scanId, itemId, IP, 1)
