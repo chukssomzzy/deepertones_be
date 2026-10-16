@@ -21,6 +21,17 @@ describe('TokenService constants', () => {
   })
 })
 
+describe('TokenService secrets', () => {
+  it('keeps the signing secrets out of the service when it is spread or serialised', () => {
+    const service = serviceAt(ISSUED, { secret: 'secret-a', previousSecret: 'secret-b' })
+
+    const spread = { ...service }
+    expect(Object.keys(spread)).toContain('now')
+    expect(JSON.stringify(spread)).not.toContain('secret-a')
+    expect(JSON.stringify(spread)).not.toContain('secret-b')
+  })
+})
+
 describe('TokenService.issue', () => {
   it('reports when each token expires', async () => {
     const tokens = await issued()

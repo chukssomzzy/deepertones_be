@@ -79,6 +79,23 @@ describe('OTP_POLICY', () => {
   })
 })
 
+describe('OtpService secrets', () => {
+  it('keeps the pepper out of the service when it is spread or listed', () => {
+    const service = new OtpService({
+      repository: new FakeOtpRepository(),
+      whatsapp: new MemoryOtpDelivery(),
+      email: new MemoryEmailSender(),
+      jobs: new MemoryJobQueue(),
+      channels: ['email', 'whatsapp'],
+      pepper: PEPPER,
+    })
+
+    const spread = { ...service }
+    expect(Object.keys(spread)).toContain('channels')
+    expect(Object.values(spread)).not.toContain(PEPPER)
+  })
+})
+
 describe('parseOtpChannels', () => {
   it('reads a single channel', () => {
     expect(parseOtpChannels('email')).toEqual(['email'])

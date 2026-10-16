@@ -32,13 +32,14 @@ export class AuthService {
   private readonly users: UsersService
   private readonly otp: OtpService
   private readonly tokens: TokenService
-  private readonly deviceIdKey: string
+  // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
+  readonly #deviceIdKey: string
 
   constructor(deps: AuthServiceDeps) {
     this.users = deps.users
     this.otp = deps.otp
     this.tokens = deps.tokens
-    this.deviceIdKey = deps.deviceIdKey
+    this.#deviceIdKey = deps.deviceIdKey
   }
 
   /**
@@ -47,7 +48,7 @@ export class AuthService {
    * in staging and production.
    */
   async bootstrap(deviceId: string, platform: Device['platform']): Promise<Session> {
-    const deviceHash = await hmacSha256Hex(this.deviceIdKey, deviceId)
+    const deviceHash = await hmacSha256Hex(this.#deviceIdKey, deviceId)
     return this.session(await this.users.guestForDevice(deviceHash, platform))
   }
 
