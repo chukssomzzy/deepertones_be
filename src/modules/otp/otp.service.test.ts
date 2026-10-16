@@ -488,7 +488,7 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
     it.each([
       ['an unavailable provider', () => (c.channel === 'email' ? new EmailDeliveryError('unavailable', 'down') : new OtpDeliveryError('unavailable', 'down'))],
-      ['an unexpected error', () => new Error('bad token')],
+      ['an unexpected error', () => new Error('a bug')],
     ])('rethrows %s unchanged and leaves the challenge queued so it can be retried', async (_label, makeFailure) => {
       const { challengeId } = await send()
       const failure = makeFailure()
@@ -503,6 +503,50 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
       expect((await service.deliveryStatus(challengeId)).status).toBe('delivered')
       expect(sentCount()).toBe(1)
       expect(lastSentWas(c.canonical, CODE)).toBe(true)
+    })
+
+    describe('when the provider is misconfigured', () => {
+      const PROVIDER_MESSAGE =
+        c.channel === 'email'
+          ? 'ZeptoMail send failed (HTTP 401, code TM_3601, details SERR_157)'
+          : 'WhatsApp send failed (HTTP 401, code 190)'
+      const misconfigured = () =>
+        c.channel === 'email'
+          ? new EmailDeliveryError('misconfigured', PROVIDER_MESSAGE)
+          : new OtpDeliveryError('misconfigured', PROVIDER_MESSAGE)
+
+      it('fails permanently naming the channel and the provider error, and records the challenge as unavailable', async () => {
+        const { challengeId } = await send()
+        const failure = misconfigured()
+        failNextWithError(failure)
+
+        const thrown = await errorOf(service.deliver(lastBody()))
+
+        expect(thrown).toBeInstanceOf(PermanentJobError)
+        expect(thrown.message).toContain(`The ${c.channel} provider is misconfigured`)
+        expect(thrown.message).toContain(PROVIDER_MESSAGE)
+        expect(thrown.cause).toBe(failure)
+        expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'unavailable' })
+      })
+
+      it('does not send again when the same message is redelivered', async () => {
+        await send()
+        failNextWithError(misconfigured())
+        await errorOf(service.deliver(lastBody()))
+
+        await expect(service.deliver(lastBody())).resolves.toBeUndefined()
+
+        expect(sentCount()).toBe(0)
+      })
+
+      it('does not count the failed challenge toward the cooldown', async () => {
+        await send()
+        failNextWithError(misconfigured())
+        await errorOf(service.deliver(lastBody()))
+        at(15 * SECOND)
+
+        await expect(send()).resolves.toBeDefined()
+      })
     })
 
     it('fails permanently and sends nothing when the sealed code was tampered with', async () => {

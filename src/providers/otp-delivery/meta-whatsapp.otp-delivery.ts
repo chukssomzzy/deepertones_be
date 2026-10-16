@@ -21,6 +21,8 @@ export class MetaWhatsAppOtpDelivery implements OtpDelivery {
   private static readonly RECIPIENT_REJECTED_CODES = new Set([
     131026, // message undeliverable (not on WhatsApp, or has not accepted the terms / old app version)
     131030, // recipient not in the allowed list (the app is in test mode)
+    130403, // blocked between the business and this user
+    131021, // sender and recipient are the same number
   ])
 
   /** Meta error codes meaning "slow down": the same request may succeed later. */
@@ -32,6 +34,17 @@ export class MetaWhatsAppOtpDelivery implements OtpDelivery {
     131056, // too many messages from this business to this one recipient
   ])
 
+  /** Meta error codes meaning a temporary problem on Meta's side: the same request may succeed later. */
+  private static readonly TRANSIENT_CODES = new Set([
+    1, // invalid request or possible server error; Meta says check platform status
+    2, // temporary downtime or overload
+    131000, // unknown error; Meta says retry
+    131016, // service temporarily unavailable
+    131057, // business account in maintenance mode
+    133004, // server temporarily unavailable
+    2494100, // phone number in maintenance mode
+  ])
+
   // `#`, not `private`: it holds the access token, and a runtime-private field stays out of JSON.stringify and spreads.
   readonly #config: MetaWhatsAppOtpDeliveryConfig
 
@@ -41,9 +54,9 @@ export class MetaWhatsAppOtpDelivery implements OtpDelivery {
 
   async send(to: PhoneNumber, code: string): Promise<void> {
     const { accessToken, phoneNumberId, templateName, languageCode, timeoutMs = MetaWhatsAppOtpDelivery.DEFAULT_TIMEOUT_MS } = this.#config
-    // Empty until someone copies it from Meta; fail here (a bug to fix) rather than build a bad URL.
-    if (!phoneNumberId) throw new Error('WHATSAPP_PHONE_NUMBER_ID is not set')
-    if (!accessToken) throw new Error('WHATSAPP_ACCESS_TOKEN is not set')
+    // Empty until someone copies it from Meta; fail here (misconfigured) rather than build a bad URL.
+    if (!phoneNumberId) throw new OtpDeliveryError('misconfigured', 'WHATSAPP_PHONE_NUMBER_ID is not set')
+    if (!accessToken) throw new OtpDeliveryError('misconfigured', 'WHATSAPP_ACCESS_TOKEN is not set')
     let response: HttpResponse
     try {
       response = await firstValueFrom(
@@ -79,11 +92,19 @@ export class MetaWhatsAppOtpDelivery implements OtpDelivery {
     if (metaCode !== undefined && MetaWhatsAppOtpDelivery.RECIPIENT_REJECTED_CODES.has(metaCode)) {
       throw new OtpDeliveryError('recipient-rejected', `WhatsApp rejected the recipient (code ${metaCode})`)
     }
-    if (response.status >= 500 || response.status === 429 || (metaCode !== undefined && MetaWhatsAppOtpDelivery.RATE_LIMIT_CODES.has(metaCode))) {
+    if (
+      response.status >= 500 ||
+      response.status === 429 ||
+      (metaCode !== undefined &&
+        (MetaWhatsAppOtpDelivery.RATE_LIMIT_CODES.has(metaCode) || MetaWhatsAppOtpDelivery.TRANSIENT_CODES.has(metaCode)))
+    ) {
       throw new OtpDeliveryError('unavailable', `WhatsApp unavailable (HTTP ${response.status}, code ${metaCode ?? 'none'})`)
     }
-    // Our own configuration is wrong (bad token, missing template...): a bug, not a user problem.
-    throw new Error(`WhatsApp send failed (HTTP ${response.status}, code ${metaCode ?? 'none'})`)
+    // Anything else that is not the recipient or transient means our own setup is wrong (token,
+    // permissions, template, phone number registration, billing, a policy restriction...): a human
+    // must fix it, so the caller should not retry. That also catches codes we have not seen yet, so
+    // a genuinely new, retryable Meta error would wrongly stop retrying until it is added to TRANSIENT_CODES.
+    throw new OtpDeliveryError('misconfigured', `WhatsApp send failed (HTTP ${response.status}, code ${metaCode ?? 'none'})`)
   }
 
   private static metaErrorCode(body: unknown): number | undefined {

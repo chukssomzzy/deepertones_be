@@ -149,6 +149,36 @@ describe('background WhatsApp OTP delivery through the Worker queue handler', ()
     expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'recipient-rejected' })
   })
 
+  it('acks and records failure as unavailable when Meta rejects our access token (190)', async () => {
+    const { service, jobs } = makeService()
+    const { challengeId } = await service.send({ channel: 'whatsapp', address: freshPhone() })
+    stubMeta(() => metaError(190, 401))
+
+    const { result } = await runQueue(MAIN, lastBody(jobs))
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(result.retryMessages).toEqual([])
+    expect(metaCalls).toHaveLength(1)
+    expect(await service.deliveryStatus(challengeId)).toEqual({ status: 'failed', failureReason: 'unavailable' })
+    const run = await new D1JobRunsRepository(createDb(env.DB)).get('deliver-otp', challengeId)
+    expect(run).toMatchObject({ status: 'failed' })
+    expect(run!.lastError).toContain('190')
+    expect(run!.lastError).toContain('misconfigured')
+  })
+
+  it('retries and keeps the challenge queued when Meta reports a transient error at HTTP 400 (131000)', async () => {
+    const { service, jobs } = makeService()
+    const { challengeId } = await service.send({ channel: 'whatsapp', address: freshPhone() })
+    stubMeta(() => metaError(131000, 400))
+
+    const { result, retries } = await runQueue(MAIN, lastBody(jobs))
+
+    expect(result.retryMessages).toEqual([{ msgId: 'm' }])
+    expect(result.explicitAcks).toEqual([])
+    expect(retries.get('m')).toEqual(expect.any(Number))
+    expect((await service.deliveryStatus(challengeId)).status).toBe('queued')
+  })
+
   it('retries with a numeric delay and keeps the challenge queued when Meta is down (503)', async () => {
     const { service, jobs } = makeService()
     const { challengeId } = await service.send({ channel: 'whatsapp', address: freshPhone() })
