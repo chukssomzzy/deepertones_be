@@ -1,5 +1,5 @@
-import { firstValueFrom } from 'rxjs'
-import { type HttpResponse, HttpTransportError, requestJson$ } from '../../lib/http'
+import Anthropic, { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
+import { z } from 'zod'
 import {
   AnthropicConfigError,
   AnthropicRefusalError,
@@ -11,25 +11,50 @@ import {
   textOf,
 } from './anthropic.provider'
 
-const DEFAULT_API_URL = 'https://api.anthropic.com/v1/messages'
-const DEFAULT_TIMEOUT_MS = 60000
-const API_VERSION = '2023-06-01'
-/** How many times a paused turn (server-side tools hit their iteration limit) is re-sent before giving up. */
-const MAX_CONTINUATIONS = 3
-/** Bad key, billing or permissions: our setup, not the input. */
-const CONFIG_STATUSES = new Set([401, 402, 403])
-
 export type AnthropicClientConfig = {
   apiKey: string
   model: string
   /** Give up on each request after this long; default 60000, as a web search turn is slow. */
   timeoutMs?: number
-  apiUrl?: string
+  baseURL?: string
+  /** A test seam: the fetch the SDK sends through. */
+  fetch?: typeof fetch
 }
 
-/** Calls the Claude Messages API. Takes raw requests; the product adapters own the prompts. */
+/** Calls the Claude Messages API through the official SDK. Takes raw requests; the product adapters own the prompts. */
 export class AnthropicClient {
-  constructor(private readonly config: AnthropicClientConfig) {}
+  /** How many times a paused turn (server-side tools hit their iteration limit) is re-sent before giving up. */
+  static readonly #MAX_CONTINUATIONS = 3
+  /** Bad key, billing or permissions: our setup, not the input. */
+  static readonly #CONFIG_STATUSES = new Set([401, 402, 403])
+  // The API's error.message is free text that can echo our prompt, so it is never read. The type and
+  // request id go into our error messages, so accept only identifier-shaped strings.
+  static readonly #TYPE_SHAPE = /^[a-z_]{1,64}$/
+  static readonly #REQUEST_ID_SHAPE = /^req_[A-Za-z0-9]{1,64}$/
+
+  readonly #sdk: Anthropic
+  readonly #timeoutMs: number
+  readonly #apiKey: string
+  readonly #model: string
+
+  constructor({ apiKey, model, timeoutMs = 60000, baseURL, fetch }: AnthropicClientConfig) {
+    this.#apiKey = apiKey
+    this.#model = model
+    this.#timeoutMs = timeoutMs
+    // maxRetries 0 is load-bearing: the job dispatcher is the only retrier, and every request is billed once.
+    // The SDK would otherwise read ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_LOG (debug logs
+    // response bodies), so each is pinned here. It offers no switch for ANTHROPIC_CUSTOM_HEADERS, which a
+    // Worker never sets.
+    this.#sdk = new Anthropic({
+      apiKey,
+      authToken: null,
+      baseURL: baseURL ?? 'https://api.anthropic.com',
+      logLevel: 'off',
+      timeout: timeoutMs,
+      maxRetries: 0,
+      fetch,
+    })
+  }
 
   /**
    * One logical turn. A `pause_turn` reply (server tools such as web search ran long) is continued
@@ -38,74 +63,82 @@ export class AnthropicClient {
   async createMessage(body: MessageRequest): Promise<Message> {
     const content: ContentBlock[] = []
     for (let continuation = 0; ; continuation++) {
-      const message = await this.send(
+      const message = await this.#send(
         content.length === 0 ? body : { ...body, messages: [...body.messages, { role: 'assistant', content }] },
       )
       content.push(...message.content)
       if (message.stop_reason !== 'pause_turn') return { ...message, content }
-      if (continuation === MAX_CONTINUATIONS) {
-        throw new AnthropicUnavailableError(`Claude was still paused after ${MAX_CONTINUATIONS} continuations`)
+      if (continuation === AnthropicClient.#MAX_CONTINUATIONS) {
+        throw new AnthropicUnavailableError(`Claude was still paused after ${AnthropicClient.#MAX_CONTINUATIONS} continuations`)
       }
     }
   }
 
-  /** A reply constrained to `schema` (structured outputs), parsed. The caller owns the type; the API enforces the schema. */
-  async structured<T>(body: MessageRequest, schema: Record<string, unknown>): Promise<T> {
-    const message = await this.send({ ...body, output_config: { format: { type: 'json_schema', schema } } })
+  /** A reply constrained to `schema` (structured outputs), parsed and checked against it. */
+  async structured<S extends z.ZodType>(body: MessageRequest, schema: S): Promise<z.infer<S>> {
+    // Not messages.parse with zodOutputFormat: parse reads only the first text block (an answer can span
+    // several), and the SDK's schema transform (0.135.0) moves `enum` into a description, so the API
+    // would never see the allowed values. The schema is zod's own JSON Schema, which closes every object.
+    const { $schema: _draft, ...jsonSchema } = z.toJSONSchema(schema)
+    const message = await this.#send({ ...body, output_config: { format: { type: 'json_schema', schema: jsonSchema } } })
     if (message.stop_reason === 'refusal') throw new AnthropicRefusalError('Claude refused to answer')
     // A cut-off answer is not valid JSON, and asking again with the same limit would be cut off again.
     if (message.stop_reason === 'max_tokens') throw new AnthropicRequestError('Claude ran out of max_tokens before finishing the answer')
+    let json: unknown
     try {
-      return JSON.parse(textOf(message)) as T
+      json = JSON.parse(textOf(message))
     } catch {
       throw new AnthropicRequestError('Claude returned text that is not valid JSON')
     }
+    const parsed = schema.safeParse(json)
+    if (!parsed.success) throw new AnthropicRequestError('Claude returned JSON that does not match the schema')
+    return parsed.data
   }
 
-  private async send(body: MessageRequest & { output_config?: unknown }): Promise<Message> {
-    const { apiKey, model, timeoutMs = DEFAULT_TIMEOUT_MS, apiUrl = DEFAULT_API_URL } = this.config
+  async #send(body: MessageRequest & { output_config?: unknown }): Promise<Message> {
     // Empty until someone copies it into the environment; fail here (a bug to fix) rather than send a bad request.
-    if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set')
-    let response: HttpResponse
+    if (!this.#apiKey) throw new Error('ANTHROPIC_API_KEY is not set')
     try {
-      response = await firstValueFrom(
-        requestJson$(apiUrl, {
-          method: 'POST',
-          timeoutMs,
-          headers: { 'x-api-key': apiKey, 'anthropic-version': API_VERSION, 'content-type': 'application/json' },
-          body: JSON.stringify({ ...body, model }),
-        }),
+      // MessageRequest keeps tools and content blocks loose (Record<string, unknown>), which the SDK's
+      // strict union param types reject; the API validates them, so cast once here.
+      const reply = await this.#sdk.messages.create(
+        { ...body, model: this.#model } as Anthropic.Messages.MessageCreateParamsNonStreaming,
+        // The SDK's own timeout stops covering the request once headers arrive; this bounds the body read too.
+        { signal: AbortSignal.timeout(this.#timeoutMs) },
       )
+      return AnthropicClient.#toMessage(reply)
     } catch (error) {
-      // Only the kind (HttpTimeoutError or HttpNetworkError), never the cause text.
-      if (error instanceof HttpTransportError) throw new AnthropicUnavailableError(`Claude request failed before a response (${error.name})`)
-      throw error
+      throw AnthropicClient.#toError(error)
     }
-    if (response.ok) return asMessage(response.body)
-
-    const { type, requestId } = apiError(response.body)
-    const described = `HTTP ${response.status}, type ${type ?? 'none'}, request_id ${requestId ?? 'none'}`
-    if (response.status === 429 || response.status >= 500) throw new AnthropicUnavailableError(`Claude unavailable (${described})`)
-    if (CONFIG_STATUSES.has(response.status)) throw new AnthropicConfigError(`Claude rejected our credentials or account (${described})`)
-    throw new AnthropicRequestError(`Claude rejected the request (${described})`)
   }
-}
 
-const asMessage = (body: unknown): Message => {
-  const { content, stop_reason } = (body ?? {}) as { content?: unknown; stop_reason?: unknown }
-  // Not a message at all (an HTML page from a proxy, say): the API did not really answer, so it is transient.
-  if (!Array.isArray(content)) throw new AnthropicUnavailableError('Claude returned a reply that is not a message')
-  return { ...(body as object), role: 'assistant', content: content as ContentBlock[], stop_reason: typeof stop_reason === 'string' ? stop_reason : null }
-}
+  static #toMessage(body: unknown): Message {
+    const { content, stop_reason } = (body ?? {}) as { content?: unknown; stop_reason?: unknown }
+    // Not a message at all (an HTML page from a proxy, say): the API did not really answer, so it is transient.
+    if (!Array.isArray(content)) throw new AnthropicUnavailableError('Claude returned a reply that is not a message')
+    return { ...(body as object), role: 'assistant', content: content as ContentBlock[], stop_reason: typeof stop_reason === 'string' ? stop_reason : null }
+  }
 
-// The API's error.message is free text that can echo our prompt, so it is never read. The type and
-// request id go into our error messages, so accept only identifier-shaped strings.
-const TYPE_SHAPE = /^[a-z_]{1,64}$/
-const REQUEST_ID_SHAPE = /^req_[A-Za-z0-9]{1,64}$/
-const shaped = (value: unknown, shape: RegExp): string | undefined =>
-  typeof value === 'string' && shape.test(value) ? value : undefined
+  /** Maps an SDK error to ours, naming only the kind, status, error type and request id. Anything unreadable is Unavailable by constructor name only. */
+  static #toError(error: unknown): unknown {
+    if (error instanceof AnthropicUnavailableError) return error
+    // Includes APIConnectionTimeoutError; only the kind, never the cause text.
+    if (error instanceof APIConnectionError) return new AnthropicUnavailableError(`Claude request failed before a response (${error.constructor.name})`)
+    if (error instanceof APIUserAbortError) return new AnthropicUnavailableError('Claude request was aborted (timeout)')
+    // A body that is cut off or malformed surfaces as a raw SyntaxError or TypeError whose message can embed model output.
+    if (!(error instanceof APIError)) return new AnthropicUnavailableError(`Claude reply could not be read (${(error as object)?.constructor?.name})`)
 
-const apiError = (body: unknown): { type: string | undefined; requestId: string | undefined } => {
-  const { error, request_id } = (body ?? {}) as { error?: { type?: unknown } | null; request_id?: unknown }
-  return { type: shaped(error?.type, TYPE_SHAPE), requestId: shaped(request_id, REQUEST_ID_SHAPE) }
+    const body = error.error as { error?: { type?: unknown }; request_id?: unknown } | undefined
+    const type = AnthropicClient.#shaped(body?.error?.type, AnthropicClient.#TYPE_SHAPE)
+    const requestId = AnthropicClient.#shaped(error.requestID ?? body?.request_id, AnthropicClient.#REQUEST_ID_SHAPE)
+    const described = `HTTP ${error.status}, type ${type ?? 'none'}, request_id ${requestId ?? 'none'}`
+    const { status } = error
+    if (status === undefined || status === 429 || status >= 500) return new AnthropicUnavailableError(`Claude unavailable (${described})`)
+    if (AnthropicClient.#CONFIG_STATUSES.has(status)) return new AnthropicConfigError(`Claude rejected our credentials or account (${described})`)
+    return new AnthropicRequestError(`Claude rejected the request (${described})`)
+  }
+
+  static #shaped(value: unknown, shape: RegExp): string | undefined {
+    return typeof value === 'string' && shape.test(value) ? value : undefined
+  }
 }

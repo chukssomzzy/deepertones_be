@@ -1,12 +1,17 @@
 import { z } from 'zod'
-import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
+import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
 
-const MAX_TOKENS = 4096
-const MAX_SEARCHES = 5
+// A type cannot name a #private member, so the answer shape is spelled out beside the schema it mirrors.
+type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null; imageUrl?: unknown }
 
-const SYSTEM_PROMPT = `You find the official ingredient list of one beauty or personal-care product, using web search.
+/** Researches a product's ingredients with Claude and its web search tool. */
+export class AnthropicProductResearcher implements ProductResearcher {
+  static readonly #MAX_TOKENS = 4096
+  static readonly #MAX_SEARCHES = 5
+
+  static readonly #SYSTEM_PROMPT = `You find the official ingredient list of one beauty or personal-care product, using web search.
 
 - Search for the exact product: brand, name and variant. Prefer the brand's own website, then a major retailer's page for the same product. Never use a different variant or a similar-looking product.
 - Copy the full INCI ingredient list in label order, one ingredient per entry, exactly as printed. Do not add, reorder, translate or complete it from memory.
@@ -18,116 +23,123 @@ const SYSTEM_PROMPT = `You find the official ingredient list of one beauty or pe
 Your final message must be only one JSON object, with no prose and no code fence:
 {"found": boolean, "ingredients": string[], "sourceUrl": string | null, "imageUrl": string | null}`
 
-const answerSchema = z.object({
-  found: z.boolean(),
-  ingredients: z.array(z.string()),
-  sourceUrl: z.string().nullish(),
-  imageUrl: z.unknown().optional(),
-})
+  static readonly #ANSWER_SCHEMA = z.object({
+    found: z.boolean(),
+    ingredients: z.array(z.string()),
+    sourceUrl: z.string().nullish(),
+    imageUrl: z.unknown().optional(),
+  })
 
-const NOT_FOUND: ResearchResult = { found: false }
+  static readonly #NOT_FOUND: ResearchResult = { found: false }
 
-/** Researches a product's ingredients with Claude and its web search tool. */
-export class AnthropicProductResearcher implements ProductResearcher {
-  constructor(private readonly client: AnthropicClient) {}
+  // An INCI list is a few dozen entries; anything far outside this is a mangled page or an injection.
+  static readonly #MAX_INGREDIENTS = 150
+  static readonly #MAX_INGREDIENT_LENGTH = 120
+  static readonly #CONTROL_CHARACTER = /\p{Cc}/u
+  static readonly #IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/
+
+  readonly #client: AnthropicClient
+
+  constructor(client: AnthropicClient) {
+    this.#client = client
+  }
 
   async research(product: ProductIdentity): Promise<ResearchResult> {
-    const message = await this.client.createMessage({
-      max_tokens: MAX_TOKENS,
-      system: SYSTEM_PROMPT,
+    const message = await this.#client.createMessage({
+      max_tokens: AnthropicProductResearcher.#MAX_TOKENS,
+      system: AnthropicProductResearcher.#SYSTEM_PROMPT,
       messages: [{ role: 'user', content: `Find the ingredient list for this product:\n${JSON.stringify(product)}` }],
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: MAX_SEARCHES }],
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: AnthropicProductResearcher.#MAX_SEARCHES }],
     })
 
     // The model can name a page it never saw, so the source must be one the search returned.
     // Any answer that cannot be read or checked is "not found": the caller has a fallback for that.
-    const answer = lastAnswerIn(textOf(message))
-    if (!answer?.found) return NOT_FOUND
+    const notFound = AnthropicProductResearcher.#NOT_FOUND
+    const answer = AnthropicProductResearcher.#lastAnswerIn(textOf(message))
+    if (!answer?.found) return notFound
     const ingredients = answer.ingredients.map((name) => name.trim()).filter((name) => name !== '')
     const { sourceUrl } = answer
-    if (!withinBounds(ingredients) || !sourceUrl || !sourceUrlsOf(message).has(sourceUrl)) return NOT_FOUND
+    if (!AnthropicProductResearcher.#withinBounds(ingredients) || !sourceUrl || !sourceUrlsOf(message).has(sourceUrl)) return notFound
 
-    const imageUrl = safeImageUrl(answer.imageUrl)
+    const imageUrl = AnthropicProductResearcher.#safeImageUrl(answer.imageUrl)
     return { found: true, ingredients, sourceUrl, ...(imageUrl !== undefined && { imageUrl }) }
   }
-}
 
-// An INCI list is a few dozen entries; anything far outside this is a mangled page or an injection.
-const MAX_INGREDIENTS = 150
-const MAX_INGREDIENT_LENGTH = 120
-const CONTROL_CHARACTER = /\p{Cc}/u
+  static #withinBounds(ingredients: string[]): boolean {
+    return (
+      ingredients.length > 0 &&
+      ingredients.length <= AnthropicProductResearcher.#MAX_INGREDIENTS &&
+      ingredients.every(
+        (name) => name.length <= AnthropicProductResearcher.#MAX_INGREDIENT_LENGTH && !AnthropicProductResearcher.#CONTROL_CHARACTER.test(name),
+      )
+    )
+  }
 
-const withinBounds = (ingredients: string[]): boolean =>
-  ingredients.length > 0 &&
-  ingredients.length <= MAX_INGREDIENTS &&
-  ingredients.every((name) => name.length <= MAX_INGREDIENT_LENGTH && !CONTROL_CHARACTER.test(name))
+  /**
+   * An https URL on a public-looking host, or undefined. The product is still found without an image.
+   * This is a first filter only: the PR that downloads the image must check again, refuse redirects to
+   * unsafe hosts, cap the bytes it reads and sniff the magic bytes instead of trusting the URL or header.
+   */
+  static #safeImageUrl(value: unknown): string | undefined {
+    if (typeof value !== 'string') return undefined
+    let url: URL
+    try {
+      url = new URL(value)
+    } catch {
+      return undefined
+    }
+    // The URL parser turns decimal, octal and hex IPv4 spellings into dotted form, so one pattern covers them.
+    const host = url.hostname.replace(/\.$/, '')
+    const unsafe =
+      url.protocol !== 'https:' ||
+      url.username !== '' ||
+      url.password !== '' ||
+      url.port !== '' ||
+      host === 'localhost' ||
+      host.endsWith('.localhost') ||
+      host.startsWith('[') ||
+      AnthropicProductResearcher.#IPV4_LITERAL.test(host) ||
+      !host.includes('.')
+    return unsafe ? undefined : value
+  }
 
-const IPV4_LITERAL = /^\d{1,3}(\.\d{1,3}){3}$/
-
-/**
- * An https URL on a public-looking host, or undefined. The product is still found without an image.
- * This is a first filter only: the PR that downloads the image must check again, refuse redirects to
- * unsafe hosts, cap the bytes it reads and sniff the magic bytes instead of trusting the URL or header.
- */
-const safeImageUrl = (value: unknown): string | undefined => {
-  if (typeof value !== 'string') return undefined
-  let url: URL
-  try {
-    url = new URL(value)
-  } catch {
+  /**
+   * The last JSON object in the text that fits the answer shape: the final answer comes after any
+   * chatter. Walks back from the last "}" to its matching "{", so the work is linear in the text.
+   * Stray braces after the answer end the search with nothing found rather than risk a quadratic scan.
+   */
+  static #lastAnswerIn(text: string): Answer | undefined {
+    for (let end = text.lastIndexOf('}'); end !== -1; ) {
+      const start = AnthropicProductResearcher.#balancedStart(text, end)
+      if (start === -1) return undefined
+      try {
+        const parsed = AnthropicProductResearcher.#ANSWER_SCHEMA.safeParse(JSON.parse(text.slice(start, end + 1)))
+        if (parsed.success) return parsed.data
+      } catch {
+        // not JSON; try the object before it
+      }
+      end = text.lastIndexOf('}', start - 1)
+    }
     return undefined
   }
-  // The URL parser turns decimal, octal and hex IPv4 spellings into dotted form, so one pattern covers them.
-  const host = url.hostname.replace(/\.$/, '')
-  const unsafe =
-    url.protocol !== 'https:' ||
-    url.username !== '' ||
-    url.password !== '' ||
-    url.port !== '' ||
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host.startsWith('[') ||
-    IPV4_LITERAL.test(host) ||
-    !host.includes('.')
-  return unsafe ? undefined : value
-}
 
-/**
- * The last JSON object in the text that fits the answer shape: the final answer comes after any
- * chatter. Walks back from the last "}" to its matching "{", so the work is linear in the text.
- * Stray braces after the answer end the search with nothing found rather than risk a quadratic scan.
- */
-const lastAnswerIn = (text: string): z.infer<typeof answerSchema> | undefined => {
-  for (let end = text.lastIndexOf('}'); end !== -1; ) {
-    const start = balancedStart(text, end)
-    if (start === -1) return undefined
-    try {
-      const parsed = answerSchema.safeParse(JSON.parse(text.slice(start, end + 1)))
-      if (parsed.success) return parsed.data
-    } catch {
-      // not JSON; try the object before it
+  /** Index of the brace opening the object that closes at `end`, or -1. Braces inside strings do not count. */
+  static #balancedStart(text: string, end: number): number {
+    let depth = 0
+    let inString = false
+    for (let i = end; i >= 0; i--) {
+      const char = text[i]
+      if (char === '"' && !AnthropicProductResearcher.#isEscaped(text, i)) inString = !inString
+      else if (inString) continue
+      else if (char === '}') depth++
+      else if (char === '{' && --depth === 0) return i
     }
-    end = text.lastIndexOf('}', start - 1)
+    return -1
   }
-  return undefined
-}
 
-/** Index of the brace opening the object that closes at `end`, or -1. Braces inside strings do not count. */
-const balancedStart = (text: string, end: number): number => {
-  let depth = 0
-  let inString = false
-  for (let i = end; i >= 0; i--) {
-    const char = text[i]
-    if (char === '"' && !isEscaped(text, i)) inString = !inString
-    else if (inString) continue
-    else if (char === '}') depth++
-    else if (char === '{' && --depth === 0) return i
+  static #isEscaped(text: string, quote: number): boolean {
+    let backslashes = 0
+    while (text[quote - 1 - backslashes] === '\\') backslashes++
+    return backslashes % 2 === 1
   }
-  return -1
-}
-
-const isEscaped = (text: string, quote: number): boolean => {
-  let backslashes = 0
-  while (text[quote - 1 - backslashes] === '\\') backslashes++
-  return backslashes % 2 === 1
 }
