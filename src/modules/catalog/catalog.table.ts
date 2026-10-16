@@ -1,6 +1,5 @@
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import { PRODUCT_FORMS } from '../../providers/product-research/product-researcher.provider'
-import { CATEGORIES, CONCERN_KINDS, SEVERITIES, TRAITS } from './catalog.vocabulary'
+import { CATEGORIES, CONCERN_KINDS, PRODUCT_FORMS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 /** A product, once for everyone. `identity_key` is built by catalog.identity. */
 export const products = sqliteTable(

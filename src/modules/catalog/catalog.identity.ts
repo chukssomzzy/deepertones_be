@@ -34,6 +34,9 @@ type Branded = Named & { brand: string; form?: string | null }
 
 export const brandKey = (brand: string): string => normaliseText(brand)
 
+/** Whether two products have the same form; none counts as a value, as it does in the key. */
+export const sameForm = (a: { form?: string | null }, b: { form?: string | null }): boolean => (a.form ?? '') === (b.form ?? '')
+
 /** One product, one key: brand, name and variant normalised, with pack sizes ignored, then the form (empty for none). */
 export const identityKey = (product: Branded): string =>
   `${brandKey(product.brand)}|${comparable(product.name)}|${comparable(product.variant)}|${product.form ?? ''}`

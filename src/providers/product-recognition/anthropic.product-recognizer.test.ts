@@ -231,6 +231,27 @@ describe('AnthropicProductRecognizer answers', () => {
     })
   })
 
+  it('returns a product with no form when the model leaves the form out', async () => {
+    const { form: _form, ...withoutForm } = product()
+    const { recognizer } = recognizerOver(structured(withoutForm))
+
+    const result = await recognizer.recognize(JPEG)
+
+    expect(result).toMatchObject({ classification: 'beauty-product', brand: 'Glow Co' })
+    expect(result).not.toHaveProperty('form')
+  })
+
+  it('tells the model to take texture forms only from a printed word, and to let shape decide only spray, roll-on, stick and bar', async () => {
+    const { calls, recognizer } = recognizerOver(structured(product()))
+
+    await recognizer.recognize(JPEG)
+
+    const prompt = requestText(calls[0]!.body)
+    expect(prompt).toMatch(/cream, lotion, gel, balm, serum, oil, liquid, powder[^.]*printed/i)
+    expect(prompt).toMatch(/none is printed[^.]*unknown/i)
+    expect(prompt).toMatch(/shape[^.]*only[^.]*spray[^.]*roll-on[^.]*stick[^.]*bar/i)
+  })
+
   it.each(FORMS)('returns the form %s', async (form) => {
     const { recognizer } = recognizerOver(structured(product({ form })))
 

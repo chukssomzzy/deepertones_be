@@ -1,5 +1,5 @@
 import { z } from '@hono/zod-openapi'
-import { PRODUCT_FORMS } from '../../providers/product-research/product-researcher.provider'
+import { PRODUCT_FORMS } from '../catalog/catalog.vocabulary'
 import { SCAN_POLICY } from './scans.service'
 
 const Category = z.enum(['skin', 'hair', 'body', 'makeup', 'other'])

@@ -1,7 +1,7 @@
-export type ProductCategory = 'skin' | 'hair' | 'body' | 'makeup' | 'other'
+import { PRODUCT_FORMS, type ProductForm } from '../../modules/catalog/catalog.vocabulary'
 
-export const PRODUCT_FORMS = ['spray', 'roll-on', 'stick', 'cream', 'lotion', 'gel', 'oil', 'serum', 'liquid', 'bar', 'powder', 'balm'] as const
-export type ProductForm = (typeof PRODUCT_FORMS)[number]
+export { PRODUCT_FORMS, type ProductForm }
+export type ProductCategory = 'skin' | 'hair' | 'body' | 'makeup' | 'other'
 
 /** Who a product is, as read from its label. */
 export type ProductIdentity = {

@@ -1,7 +1,8 @@
 import { sql } from 'drizzle-orm'
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { users } from '../users/users.table'
-import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
+import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
+import { PRODUCT_FORMS } from '../catalog/catalog.vocabulary'
 
 /**
  * One upload of photos. `ip_hash` is an HMAC of the caller's IP (the raw address is never stored), for the per-IP daily
@@ -59,7 +60,7 @@ export const scanItems = sqliteTable(
     recognisedBrand: text('recognised_brand'),
     recognisedName: text('recognised_name'),
     recognisedVariant: text('recognised_variant'),
-    recognisedForm: text('recognised_form').$type<ProductForm>(),
+    recognisedForm: text('recognised_form', { enum: PRODUCT_FORMS }),
     recognisedCategory: text('recognised_category').$type<ProductCategory>(),
     recognisedConfidence: real('recognised_confidence'),
     productId: text('product_id'),
