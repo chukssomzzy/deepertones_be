@@ -727,9 +727,9 @@ export class ScanService {
 
   /** An item is owned through its scan: the scan's profile decides, not the item's own user_id, which only feeds the quotas. */
   private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
-    await this.ownedScan(scanId)
-    const item = await this.repository.findItem(itemId)
-    if (!item || item.scanId !== scanId) throw ScanService.scanNotFound()
+    const { items } = await this.ownedScan(scanId)
+    const item = items.find((candidate) => candidate.id === itemId)
+    if (!item) throw ScanService.scanNotFound()
     return item
   }
 
