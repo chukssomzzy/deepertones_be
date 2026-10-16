@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { ScanItemView } from './scans.service'
 import { toScanItemResponse } from './scans.presenter'
+import { ScanItemResponse } from './scans.schemas'
 
 const readyItem = (): ScanItemView => ({
   id: 'item-1',
@@ -51,5 +52,14 @@ describe('toScanItemResponse', () => {
     } as unknown as ScanItemView
 
     expect(toScanItemResponse(grown)).toEqual(toScanItemResponse(item))
+  })
+
+  it('shows a failed item with the reason label-unreadable, which the response schema allows', () => {
+    const item: ScanItemView = { id: 'item-2', position: 1, state: 'failed', reason: 'label-unreadable', image: { kind: 'user', url: '/scans/photos/t' } }
+
+    const response = toScanItemResponse(item)
+
+    expect(response).toMatchObject({ state: 'failed', reason: 'label-unreadable' })
+    expect(ScanItemResponse.safeParse(response).success).toBe(true)
   })
 })

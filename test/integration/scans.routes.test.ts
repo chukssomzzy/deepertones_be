@@ -483,6 +483,26 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () =>
     expect(await stateOf(guest, scanId, itemId)).toBe('reading-label')
   })
 
+  it('ends the item as failed/label-unreadable after 3 unreadable back photos, and answers 409 ITEM_NOT_AWAITING_BACK_PHOTO to a 4th', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingBackPhoto(guest)
+    const unreadable = () => messageResponse({ content: [textBlock(JSON.stringify({ readable: false, ingredients: [] }))] })
+    const itemNow = async () => (await dataOf<ScanView>(await getScan(guest, scanId))).items.find((i) => i.id === itemId)!
+
+    for (const photo of [10, 11, 12]) {
+      expect((await addBackPhoto(guest, scanId, itemId, fileOf(markedJpeg(photo), 'back'))).status).toBe(202)
+      stubAnthropic(unreadable)
+      await runStep(itemId, 'read-label')
+      vi.unstubAllGlobals()
+      if (photo < 12) expect(await itemNow()).toMatchObject({ state: 'needs-back-photo', reason: 'label-unreadable' })
+    }
+
+    expect(await itemNow()).toMatchObject({ state: 'failed', reason: 'label-unreadable' })
+    const res = await addBackPhoto(guest, scanId, itemId, fileOf(markedJpeg(13), 'back'))
+    expect(res.status).toBe(409)
+    expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+  })
+
   it('answers 409 ITEM_NOT_AWAITING_BACK_PHOTO for an item that is not waiting for one', async () => {
     const guest = await newGuest()
     const scan = await createdScan(guest)

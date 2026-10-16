@@ -394,7 +394,7 @@
               "label-unreadable",
               null
             ],
-            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`)."
+            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read)."
           },
           "recognised": {
             "type": "object",
