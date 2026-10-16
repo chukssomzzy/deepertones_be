@@ -232,6 +232,18 @@ describe('SCAN_POLICY', () => {
   })
 })
 
+describe('ScanService secrets', () => {
+  it('keeps the photo link and IP hash secrets out of the service when it is spread or listed', () => {
+    const { service } = setup()
+
+    const spread = { ...service }
+    expect(Object.keys(spread)).toContain('environment')
+    const values = Object.values(spread)
+    expect(values).not.toContain(PHOTO_SECRET)
+    expect(values).not.toContain(IP_SECRET)
+  })
+})
+
 describe('ScanService.create', () => {
   it('makes a scan of one recognising item per photo, in photo order, and says when it was made', async () => {
     const ctx = setup()

@@ -77,6 +77,14 @@ request. It is lazy (`once`), so a request only builds what it touches. Services
 and providers are classes that take their dependencies in the constructor. Unit tests build a
 service directly with fakes, so no DI framework and no module mocking is needed.
 
+### Private members: `private` by default, `#` for secrets
+A class's constants and helpers are class members (`private static readonly`, `private static`), not
+module-level names; only what other files import is exported. Use TypeScript `private` by default. Use
+ECMAScript `#` only for a field that holds a secret (an API key, a signing secret, a client that
+carries a key): TS `private` is erased, so the field is still an own property that a spread,
+`Object.values` or `JSON.stringify` exposes, while a `#` field is private at runtime too. Each `#`
+secret field has a test that spreading its object does not expose it.
+
 ### Repository types are inferred; provider interfaces are written
 A repository has one real implementation, so `tracks.repository.ts` exports `class D1TracksRepository`
 and `export type TracksRepository = PublicOf<D1TracksRepository>`. The D1 class is the single source:
@@ -493,10 +501,10 @@ prompts and the answer shapes.
   which turns `enum` into description text) and checks the reply with `safeParse`. Schemas use none of
   the keywords the API rejects (length, range and count limits); enums come from vocabularies the
   caller passes in. `max_tokens` leaves room for adaptive thinking, which counts against it.
-- **Internals are TypeScript `private`.** `#` is only for fields that hold a secret (the API key and
-  the SDK instance that carries it). Constants and helpers in the client and adapters are private class
-  members, not module-level names; only what other files import (the errors, types and helpers in
-  `anthropic.provider.ts`) is exported.
+- **Internals are private class members.** Constants and helpers in the client and adapters are
+  `private` class members, not module-level names; only what other files import (the errors, types
+  and helpers in `anthropic.provider.ts`) is exported. The client's API key and the SDK client that
+  carries it are `#` fields (see "Private members").
 - **Web search returns JSON text, checked against the search.** The researcher cannot use structured
   outputs with the search tool, so its prompt demands a JSON-only final answer. The last object in the
   text that fits the shape wins; the `sourceUrl` must be a URL the search returned or a cited page

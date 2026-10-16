@@ -4,11 +4,7 @@ import type { EnqueueOptions, JobQueue } from './job-queue.provider'
 
 /** Sends to the Queue binding for the job's queue. `queues` maps a job's `queue` name to its binding. */
 export class CloudflareQueuesJobQueue implements JobQueue {
-  private readonly queues: Record<string, Queue>
-
-  constructor(queues: Record<string, Queue>) {
-    this.queues = queues
-  }
+  constructor(private readonly queues: Record<string, Queue>) {}
 
   async enqueue<S extends z.ZodType>(job: JobSpec<S>, body: z.input<S>, options: EnqueueOptions = {}): Promise<void> {
     const queue = this.queues[job.queue]

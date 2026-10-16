@@ -4,7 +4,7 @@ import type { AnthropicClient } from '../anthropic/anthropic.client'
 import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
 
-// A type cannot name a private member, so the answer shape is spelled out beside the schema it mirrors.
+// A type outside the class cannot read its private members (TS2341), so the answer shape is spelled out beside the schema it mirrors.
 type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null; imageUrl?: unknown }
 
 /** Researches a product's ingredients with Claude and its web search tool. */

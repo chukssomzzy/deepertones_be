@@ -1,3 +1,4 @@
+import Anthropic from '@anthropic-ai/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { AiBudgetExceededError, type AiJob, type AiSpendLedger } from './ai-spend.provider'
@@ -77,6 +78,18 @@ const expectNoLeak = (error: unknown) => {
 }
 
 afterEach(() => vi.restoreAllMocks())
+
+describe('AnthropicClient secrets', () => {
+  it('keeps the API key and the SDK holding it out of the client when it is spread or listed', () => {
+    const client = make(async () => new Response('{}'))
+
+    const spread = { ...client }
+    expect(Object.keys(spread)).toContain('models')
+    const values = Object.values(spread)
+    expect(values).not.toContain(API_KEY)
+    expect(values.some((value) => value instanceof Anthropic)).toBe(false)
+  })
+})
 
 describe('AnthropicClient.createMessage', () => {
   it('posts the body to the Messages API with the key, version and content-type headers and the model of its job', async () => {

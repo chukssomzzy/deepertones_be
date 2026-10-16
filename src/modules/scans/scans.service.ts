@@ -82,7 +82,7 @@ export type ScanServiceDeps = {
   policy?: ScanPolicy
 }
 
-// Spelled out because a type query cannot name a private member.
+// Spelled out because a type outside the class cannot read its private members (TS2341).
 type WorkingState = 'recognising' | 'matching' | 'researching' | 'reading-label' | 'analysing'
 type ValidPhoto = { image: ProductImage; extension: 'jpg' | 'webp' }
 
