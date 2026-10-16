@@ -115,13 +115,13 @@ describe('ZeptoMailEmailSender.send', () => {
     expect(error).toMatchObject({ reason: 'recipient-rejected' })
   })
 
-  it('throws a plain error when ZeptoMail rejects our from address (our config is wrong)', async () => {
+  it('reports misconfigured when ZeptoMail rejects our from address (our config is wrong)', async () => {
     const { sender } = make(() => zeptoError(400, 'TM_4001', [{ code: 'SM_113', target: 'from' }]))
 
     const error = await caught(sender.send(MESSAGE))
 
-    expect(error).toBeInstanceOf(Error)
-    expect(error).not.toBeInstanceOf(EmailDeliveryError)
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
   })
 
   it.each([
@@ -164,7 +164,7 @@ describe('ZeptoMailEmailSender.send', () => {
     expect(error).toMatchObject({ reason: 'unavailable' })
   })
 
-  it('throws a plain error with the HTTP status and ZeptoMail codes for a bad API key, never leaking secrets or content', async () => {
+  it('reports misconfigured with the HTTP status and ZeptoMail codes for a bad API key, never leaking secrets or content', async () => {
     const { sender } = make(() =>
       json(
         { error: { code: 'TM_3601', details: [{ code: 'SERR_157', message: 'Invalid API Token found' }] } },
@@ -174,8 +174,8 @@ describe('ZeptoMailEmailSender.send', () => {
 
     const error = await caught(sender.send(MESSAGE))
 
-    expect(error).toBeInstanceOf(Error)
-    expect(error).not.toBeInstanceOf(EmailDeliveryError)
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
     const message = (error as Error).message
     expect(message).toContain('401')
     expect(message).toContain('TM_3601')
@@ -187,26 +187,40 @@ describe('ZeptoMailEmailSender.send', () => {
   })
 
   it.each([
+    ['no credits', 'TM_5001', 'LE_101'],
     ['credits exhausted', 'TM_5001', 'LE_102'],
     ['domain not verified', 'TM_4001', 'SM_111'],
-  ])('throws a plain error with the codes when %s', async (_label, code, detailCode) => {
+    ['account not approved (SM_128)', 'TM_4001', 'SM_128'],
+    ['account not approved (SM_133)', 'TM_4001', 'SM_133'],
+  ])('reports misconfigured with the codes when %s', async (_label, code, detailCode) => {
     const { sender } = make(() => zeptoError(400, code, [{ code: detailCode }]))
 
     const error = await caught(sender.send(MESSAGE))
 
-    expect(error).toBeInstanceOf(Error)
-    expect(error).not.toBeInstanceOf(EmailDeliveryError)
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
     expect((error as Error).message).toContain(code)
     expect((error as Error).message).toContain(detailCode)
     expect((error as Error).message).not.toContain(API_KEY)
   })
 
-  it('drops vendor codes that are not code-shaped, so free text never reaches the message', async () => {
+  it('reports misconfigured for any other rejection, even one with no ZeptoMail codes', async () => {
+    const { sender } = make(() => new Response('forbidden', { status: 403 }))
+
+    const error = await caught(sender.send(MESSAGE))
+
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
+    expect((error as Error).message).toContain('403')
+  })
+
+  it('reports misconfigured but drops vendor codes that are not code-shaped, so free text never reaches the message', async () => {
     const { sender } = make(() => zeptoError(400, 'ada@example.com', [{ code: 'ada@example.com' }]))
 
     const error = await caught(sender.send(MESSAGE))
 
-    expect(error).toBeInstanceOf(Error)
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
     expect((error as Error).message).toContain('400')
     expect((error as Error).message).not.toContain('ada@example.com')
   })
@@ -214,13 +228,13 @@ describe('ZeptoMailEmailSender.send', () => {
   it.each([
     ['apiUrl', 'ZEPTOMAIL_API_URL'],
     ['apiKey', 'ZEPTOMAIL_API_KEY'],
-  ] as const)('rejects send naming %s setting when it is empty, without calling ZeptoMail', async (key, setting) => {
+  ] as const)('reports misconfigured naming the %s setting when it is empty, without calling ZeptoMail', async (key, setting) => {
     const { sender, calls } = make(() => json(SUCCESS_BODY), { [key]: '' })
 
     const error = await caught(sender.send(MESSAGE))
 
-    expect(error).toBeInstanceOf(Error)
-    expect(error).not.toBeInstanceOf(EmailDeliveryError)
+    expect(error).toBeInstanceOf(EmailDeliveryError)
+    expect(error).toMatchObject({ reason: 'misconfigured' })
     expect((error as Error).message).toContain(setting)
     expect(calls).toEqual([])
   })

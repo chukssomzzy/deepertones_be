@@ -8,8 +8,9 @@ const DEFAULT_TIMEOUT_MS = 8000
 const INVALID_ADDRESS_CODE = 'SM_113'
 
 /*
- * Codes meaning our own setup is wrong, so they surface as plain errors (a bug or an account task,
- * not something the user can fix or a retry will cure):
+ * Codes meaning our own setup is wrong, so they surface as `misconfigured` (a bug or an account task,
+ * not something the user can fix or a retry will cure). Any other rejection that is not the recipient
+ * and not a 5xx or 429 is treated the same way:
  *   SERR_157         invalid API key
  *   SM_111           sender domain not verified
  *   LE_101, LE_102   no credits left / credits expired
@@ -32,9 +33,9 @@ export class ZeptoMailEmailSender implements EmailSender {
 
   async send(message: EmailMessage): Promise<void> {
     const { apiUrl, apiKey, fromAddress, fromName, timeoutMs = DEFAULT_TIMEOUT_MS } = this.config
-    // Empty until someone copies them from ZeptoMail; fail here (a bug to fix) rather than send a bad request.
-    if (!apiUrl) throw new Error('ZEPTOMAIL_API_URL is not set')
-    if (!apiKey) throw new Error('ZEPTOMAIL_API_KEY is not set')
+    // Empty until someone copies them from ZeptoMail; fail here (misconfigured) rather than send a bad request.
+    if (!apiUrl) throw new EmailDeliveryError('misconfigured', 'ZEPTOMAIL_API_URL is not set')
+    if (!apiKey) throw new EmailDeliveryError('misconfigured', 'ZEPTOMAIL_API_KEY is not set')
     let response: HttpResponse
     try {
       response = await firstValueFrom(
@@ -74,8 +75,9 @@ export class ZeptoMailEmailSender implements EmailSender {
     if (response.status >= 500 || response.status === 429) {
       throw new EmailDeliveryError('unavailable', `ZeptoMail unavailable (HTTP ${response.status}, ${codes})`)
     }
-    // Our own configuration or account is wrong (key, sender domain, credits...): a bug, not a user problem.
-    throw new Error(`ZeptoMail send failed (HTTP ${response.status}, ${codes})`)
+    // Anything else that is not the recipient means our own configuration or account is wrong (key, sender
+    // domain, credits...): a human must fix it, so the caller should not retry.
+    throw new EmailDeliveryError('misconfigured', `ZeptoMail send failed (HTTP ${response.status}, ${codes})`)
   }
 }
 

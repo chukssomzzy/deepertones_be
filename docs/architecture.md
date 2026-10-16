@@ -421,8 +421,9 @@ because later modules will send email too.
   retries with backoff, and a blind retry inside the adapter could send the same email twice.
 - **The adapter classifies, the caller decides.** A rejected recipient address, a 5xx and a 429 become
   `EmailDeliveryError` (`recipient-rejected` or `unavailable`). A bad key, an unverified sender
-  domain, no credits or an account not yet approved are our own setup being wrong, so they are plain
-  errors: a bug or an account task, not a user problem.
+  domain, no credits, an account not yet approved (and any other rejection that is not the recipient,
+  or an empty setting) become `EmailDeliveryError` `misconfigured`: our own setup is wrong and a human
+  must fix it, so retrying cannot help.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
@@ -505,8 +506,10 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
 - **The adapter classifies, the service decides.** The Meta adapter sorts Meta's error codes into
   `unavailable` and `recipient-rejected` (`OtpDeliveryError`), and the ZeptoMail adapter does the same with
   `EmailDeliveryError`. The `deliver` job turns `recipient-rejected` from either into a
-  permanent failure recorded on the challenge, and rethrows `unavailable` so the queue retries. Anything else, such as a bad token or missing template, is a configuration
-  bug: it is not a `DomainError`, so it becomes a 500.
+  permanent failure recorded on the challenge, and rethrows `unavailable` so the queue retries. Email
+  `misconfigured` is also a permanent failure, recorded as `unavailable` (so it does not use up the
+  person's limits), with the provider's codes in the job run's `last_error`. Any other plain error,
+  such as a WhatsApp bad token or missing template, is rethrown and retried.
 - **Real providers in every environment**, local dev included, so a bad key or template shows up
   before production. Tests never reach Meta or ZeptoMail: the service runs on `MemoryOtpDelivery`,
   `MemoryEmailSender` and `FakeOtpRepository`, and the adapters are tested with a stubbed `fetch`.
