@@ -45,7 +45,7 @@ export class MemoryAiSpendLedger implements AiSpendLedger {
   }
 
   async settle(reservationId: string, input: { usage: AiUsage; costMicros: number }): Promise<void> {
-    const entry = this.#openEntry(reservationId)
+    const entry = this.openEntry(reservationId)
     if (!entry) return
     entry.status = 'settled'
     entry.costMicros = input.costMicros
@@ -53,12 +53,12 @@ export class MemoryAiSpendLedger implements AiSpendLedger {
   }
 
   async release(reservationId: string): Promise<void> {
-    const entry = this.#openEntry(reservationId)
+    const entry = this.openEntry(reservationId)
     if (entry) entry.status = 'released'
   }
 
   /** Only a reservation that is still open can be settled or released; anything else is left as it is. */
-  #openEntry(id: string): LedgerEntry | undefined {
+  private openEntry(id: string): LedgerEntry | undefined {
     const entry = this.entries.find((e) => e.id === id)
     return entry?.status === 'reserved' ? entry : undefined
   }

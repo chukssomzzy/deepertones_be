@@ -34,7 +34,7 @@ type Client = { writer: WritableStreamDefaultWriter<Uint8Array>; stopTimers: () 
  * client reconnects to a new snapshot. Nothing is stored.
  */
 export class ScanStream extends DurableObject<CloudflareBindings> {
-  readonly #clients = new Set<Client>()
+  private readonly clients = new Set<Client>()
 
   /** The request body is the scan as JSON, sent to this client as its first frame. The response streams until `done`, the lifetime cap or the client leaving. */
   override async fetch(request: Request): Promise<Response> {
@@ -42,8 +42,8 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
     const { readable, writable } = new TransformStream<Uint8Array>()
     const writer = writable.getWriter()
     const { pingMs, maxLifetimeMs } = SCAN_STREAM_TIMING
-    const ping = setInterval(() => this.#send(client, PING), pingMs)
-    const lifetime = setTimeout(() => this.#end(client, null), maxLifetimeMs)
+    const ping = setInterval(() => this.send(client, PING), pingMs)
+    const lifetime = setTimeout(() => this.end(client, null), maxLifetimeMs)
     const client: Client = {
       writer,
       stopTimers: () => {
@@ -51,50 +51,50 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
         clearTimeout(lifetime)
       },
     }
-    this.#clients.add(client)
+    this.clients.add(client)
     // Needs the enable_request_signal compatibility flag; without it nothing here learns that a client left.
-    request.signal.addEventListener('abort', () => this.#drop(client))
-    this.#send(client, frame('snapshot', snapshot))
+    request.signal.addEventListener('abort', () => this.drop(client))
+    this.send(client, frame('snapshot', snapshot))
     return new Response(readable, { headers: SSE_HEADERS })
   }
 
   async publish(event: ScanEvent): Promise<void> {
     if (event.type === 'done') {
-      for (const client of [...this.#clients]) this.#end(client, frame('done', '{}'))
+      for (const client of [...this.clients]) this.end(client, frame('done', '{}'))
       return
     }
     const bytes = frame('item', JSON.stringify(event.item))
-    for (const client of [...this.#clients]) this.#send(client, bytes)
+    for (const client of [...this.clients]) this.send(client, bytes)
   }
 
   clientCount(): number {
-    return this.#clients.size
+    return this.clients.size
   }
 
   /**
    * Never awaits the write: a client that stopped reading would hold publish, and with it the queue consumer and every
    * other client, for as long as it stays silent. Its backlog is bounded instead, and a client too far behind is dropped.
    */
-  #send(client: Client, bytes: Uint8Array): void {
-    if (!this.#clients.has(client)) return
+  private send(client: Client, bytes: Uint8Array): void {
+    if (!this.clients.has(client)) return
     if ((client.writer.desiredSize ?? 0) < -MAX_QUEUED_FRAMES) {
-      this.#drop(client)
+      this.drop(client)
       return
     }
-    client.writer.write(bytes).catch(() => this.#drop(client))
+    client.writer.write(bytes).catch(() => this.drop(client))
   }
 
   /** Writes the last frame, if any, and closes the stream after it. */
-  #end(client: Client, last: Uint8Array | null): void {
-    if (!this.#clients.delete(client)) return
+  private end(client: Client, last: Uint8Array | null): void {
+    if (!this.clients.delete(client)) return
     client.stopTimers()
     if (last) client.writer.write(last).catch(() => {})
     client.writer.close().catch(() => {})
   }
 
   /** Forgets a client that is gone or too slow; abort discards whatever it had queued. */
-  #drop(client: Client): void {
-    if (!this.#clients.delete(client)) return
+  private drop(client: Client): void {
+    if (!this.clients.delete(client)) return
     client.stopTimers()
     client.writer.abort().catch(() => {})
   }
