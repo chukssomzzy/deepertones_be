@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 import { AnthropicClient } from './anthropic.client'
 import {
@@ -217,6 +217,89 @@ describe('AnthropicClient.createMessage', () => {
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
     expect(error).not.toBeInstanceOf(AnthropicRequestError)
+  })
+})
+
+describe('AnthropicClient reply and environment hygiene', () => {
+  const SECRET = 'secret-output-5521'
+  afterEach(() => vi.restoreAllMocks())
+
+  const jsonHeaders = { 'Content-Type': 'application/json' }
+  const streamResponse = (body: ReadableStream<Uint8Array>) => new Response(body, { status: 200, headers: jsonHeaders })
+
+  it('reports unavailable, without the body text, for a 200 with truncated JSON', async () => {
+    const { fetch } = stubFetch(() => new Response(`{"id":"msg_1","content":[{"type":"text","text":"${SECRET}`, { status: 200, headers: jsonHeaders }))
+
+    const error = await caught(make(fetch).createMessage(BODY))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).not.toContain(SECRET)
+    expectNoLeak(error)
+  })
+
+  it('reports unavailable when the body stream errors mid-read', async () => {
+    const encoder = new TextEncoder()
+    const { fetch } = stubFetch(() =>
+      streamResponse(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode(`{"content":"${SECRET}`))
+            controller.error(new TypeError(`terminated ${SECRET}`))
+          },
+        }),
+      ),
+    )
+
+    const error = await caught(make(fetch).createMessage(BODY))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).not.toContain(SECRET)
+    expectNoLeak(error)
+  })
+
+  it('reports unavailable when the body stalls after headers, within timeoutMs', async () => {
+    const encoder = new TextEncoder()
+    // Like real fetch, the body stream errors when the request's signal aborts; the SDK's own timeout is gone by then.
+    const fetch = async (_input: RequestInfo | URL, init?: RequestInit) =>
+      streamResponse(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(encoder.encode('{"content":['))
+            init?.signal?.addEventListener('abort', () => controller.error(new DOMException('aborted', 'AbortError')))
+          },
+        }),
+      )
+
+    const error = await caught(make(fetch, { timeoutMs: 50 }).createMessage(BODY))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expectNoLeak(error)
+  })
+
+  it.each([
+    ['a success', ok()],
+    ['an HTTP 500', () => errorResponse(500, 'api_error', FREE_TEXT)],
+  ])('writes nothing to the console on %s', async (_label, respond) => {
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+    vi.stubEnv('ANTHROPIC_LOG', 'debug')
+    const { fetch } = stubFetch(respond)
+
+    await caught(make(fetch).createMessage(BODY)).catch(() => undefined)
+
+    for (const spy of spies) expect(spy).not.toHaveBeenCalled()
+    vi.unstubAllEnvs()
+  })
+
+  it('ignores ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN from the environment', async () => {
+    vi.stubEnv('ANTHROPIC_BASE_URL', 'https://evil.example')
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'env-token')
+    const { calls, fetch } = stubFetch(ok())
+
+    await make(fetch, { baseURL: undefined }).createMessage(BODY)
+    vi.unstubAllEnvs()
+
+    expect(calls[0]!.url).toBe(DEFAULT_API_URL)
+    expect(calls[0]!.headers.get('authorization')).toBeNull()
   })
 })
 

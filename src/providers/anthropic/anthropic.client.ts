@@ -1,4 +1,4 @@
-import Anthropic, { APIConnectionError, APIError } from '@anthropic-ai/sdk'
+import Anthropic, { APIConnectionError, APIError, APIUserAbortError } from '@anthropic-ai/sdk'
 import { z } from 'zod'
 import {
   AnthropicConfigError,
@@ -33,14 +33,27 @@ export class AnthropicClient {
   static readonly #REQUEST_ID_SHAPE = /^req_[A-Za-z0-9]{1,64}$/
 
   readonly #sdk: Anthropic
+  readonly #timeoutMs: number
   readonly #apiKey: string
   readonly #model: string
 
   constructor({ apiKey, model, timeoutMs = 60000, baseURL, fetch }: AnthropicClientConfig) {
     this.#apiKey = apiKey
     this.#model = model
+    this.#timeoutMs = timeoutMs
     // maxRetries 0 is load-bearing: the job dispatcher is the only retrier, and every request is billed once.
-    this.#sdk = new Anthropic({ apiKey, baseURL, timeout: timeoutMs, maxRetries: 0, fetch })
+    // The SDK would otherwise read ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN and ANTHROPIC_LOG (debug logs
+    // response bodies), so each is pinned here. It offers no switch for ANTHROPIC_CUSTOM_HEADERS, which a
+    // Worker never sets.
+    this.#sdk = new Anthropic({
+      apiKey,
+      authToken: null,
+      baseURL: baseURL ?? 'https://api.anthropic.com',
+      logLevel: 'off',
+      timeout: timeoutMs,
+      maxRetries: 0,
+      fetch,
+    })
   }
 
   /**
@@ -88,7 +101,11 @@ export class AnthropicClient {
     try {
       // MessageRequest keeps tools and content blocks loose (Record<string, unknown>), which the SDK's
       // strict union param types reject; the API validates them, so cast once here.
-      const reply = await this.#sdk.messages.create({ ...body, model: this.#model } as Anthropic.Messages.MessageCreateParamsNonStreaming)
+      const reply = await this.#sdk.messages.create(
+        { ...body, model: this.#model } as Anthropic.Messages.MessageCreateParamsNonStreaming,
+        // The SDK's own timeout stops covering the request once headers arrive; this bounds the body read too.
+        { signal: AbortSignal.timeout(this.#timeoutMs) },
+      )
       return AnthropicClient.#toMessage(reply)
     } catch (error) {
       throw AnthropicClient.#toError(error)
@@ -102,12 +119,14 @@ export class AnthropicClient {
     return { ...(body as object), role: 'assistant', content: content as ContentBlock[], stop_reason: typeof stop_reason === 'string' ? stop_reason : null }
   }
 
-  /** Maps an SDK error to ours, naming only the kind, status, error type and request id. Anything else is returned as is. */
+  /** Maps an SDK error to ours, naming only the kind, status, error type and request id. Anything unreadable is Unavailable by constructor name only. */
   static #toError(error: unknown): unknown {
     if (error instanceof AnthropicUnavailableError) return error
     // Includes APIConnectionTimeoutError; only the kind, never the cause text.
     if (error instanceof APIConnectionError) return new AnthropicUnavailableError(`Claude request failed before a response (${error.constructor.name})`)
-    if (!(error instanceof APIError)) return error
+    if (error instanceof APIUserAbortError) return new AnthropicUnavailableError('Claude request was aborted (timeout)')
+    // A body that is cut off or malformed surfaces as a raw SyntaxError or TypeError whose message can embed model output.
+    if (!(error instanceof APIError)) return new AnthropicUnavailableError(`Claude reply could not be read (${(error as object)?.constructor?.name})`)
 
     const body = error.error as { error?: { type?: unknown }; request_id?: unknown } | undefined
     const type = AnthropicClient.#shaped(body?.error?.type, AnthropicClient.#TYPE_SHAPE)

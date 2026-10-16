@@ -145,7 +145,8 @@ request. Queues deliver at least once, so the system is built around repeat-safe
 ### Outbound HTTP
 Provider adapters call vendors through `lib/http.ts` (`requestJson$`), built on rxjs `fromFetch`.
 It returns an Observable so an adapter can compose operators; the adapter converts at its own
-boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs.
+boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs. The one exception
+is Claude, which goes through its official SDK (see "Claude (Anthropic) providers").
 
 - **Every call has a timeout** (`timeoutMs`); on expiry the request is aborted and the stream
   errors with `HttpTimeoutError`. Other transport failures are `HttpNetworkError`. Any HTTP status
