@@ -11,7 +11,9 @@ dist/
 .idea/usage.statistics.xml
 .idea/shelf
 
-# agent worktrees
+# worktrees: one per change, at .worktree/<branch with / as +> (e.g. .worktree/feat+add-anthropic-client-support)
+.worktree/
+# worktrees the Claude app makes for its sessions
 .claude/worktrees/
 
 # deps
