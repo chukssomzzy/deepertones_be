@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm'
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { users } from '../users/users.table'
 import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
@@ -18,7 +19,12 @@ export const scans = sqliteTable(
     doneAt: integer('done_at', { mode: 'timestamp_ms' }),
   },
   // The IP index leads with ip_hash and ends in created_at, so the per-IP quota reads only the last day's scans.
-  (t) => [index('scans_user_id_idx').on(t.userId), index('scans_ip_hash_created_at_idx').on(t.ipHash, t.createdAt)],
+  // The partial one holds only scans still without a done time (a small, recent set), for the reaper's lost-done repair.
+  (t) => [
+    index('scans_user_id_idx').on(t.userId),
+    index('scans_ip_hash_created_at_idx').on(t.ipHash, t.createdAt),
+    index('scans_not_done_created_at_idx').on(t.createdAt).where(sql`${t.doneAt} IS NULL`),
+  ],
 )
 
 /** One photo of one product, and where it has got to. `product_id` and `formulation_id` point into the catalog, which is not this module's, so they carry no foreign key. */

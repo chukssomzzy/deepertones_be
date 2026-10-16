@@ -1,0 +1,1 @@
+CREATE INDEX `scans_not_done_created_at_idx` ON `scans` (`created_at`) WHERE "scans"."done_at" IS NULL;

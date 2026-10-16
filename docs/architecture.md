@@ -822,8 +822,9 @@ reaches the catalog only through `ProductCatalogService`, and never depends on `
 it, through a guest cleaner, so a dependency the other way would be a cycle). The routes are below; the live stream
 comes in a later PR.
 
-- **Tables** (migration 0009). `scans`: id, `user_id` (references users, cascade), `ip_hash`, `created_at`, `done_at`
-  (null until the scan's `done` event is claimed, see Events); indexed by `user_id` and `(ip_hash, created_at)`.
+- **Tables** (migrations 0009 and 0010). `scans`: id, `user_id` (references users, cascade), `ip_hash`, `created_at`, `done_at`
+  (null until the scan's `done` event is claimed, see Events); indexed by `user_id`, `(ip_hash, created_at)` and, for the
+  reaper's lost-`done` repair, `created_at` where `done_at IS NULL` (a partial index, so it holds only the scans still without a done time).
   `scan_items`, one per photo: id, `scan_id` (references scans, cascade), `user_id` (the scan's owner, copied so quotas and
   guest cleanup need no join), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
   once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_category` / `_confidence`, `product_id` and
@@ -952,10 +953,15 @@ comes in a later PR.
   queued again with `at` = that `updated_at`, the key of the message that first queued it: if that run is done the
   dispatcher acks the duplicate, if it was lost it runs. An item older than 2 hours is failed as `unavailable` with an event
   (and `done` if it was the scan's last). A failure on one item is logged `{ outcome: 'reap-failed', scanId, itemId }` and
-  does not stop the sweep. The same sweep also repairs a lost `done`: a scan with no `done_at` whose items are all final
-  and were all last updated over 5 minutes ago (`settledScansNotDone`, oldest first, at most 100) is marked done with
-  `markScanDone` and `done` is published, once, by the call whose update applies; the 5 minutes keep it from racing a publish
-  still on its way. A failure there is logged `{ outcome: 'reap-done-failed', scanId }`. `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
+  does not stop the sweep. The same sweep also repairs a lost `done`: a scan with no `done_at`, created within the last 3 hours
+  (`SCAN_POLICY.doneRepairWindowMs`), whose items are all final and were all last updated over 5 minutes ago
+  (`settledScansNotDone`, oldest first, at most 100) is marked done with `markScanDone` and `done` is published, once, by the
+  call whose update applies; the 5 minutes keep it from racing a publish still on its way. The 3 hours bound the read to the
+  partial index on `scans(created_at) WHERE done_at IS NULL` instead of the whole table every 10 minutes: a repair only
+  matters to a connected client, a connection lasts 10 minutes at most, and `watch` sends `done` to any client that connects
+  later. If the publish throws after the time was set, the time is cleared again (`clearScanDone`, which applies only while
+  the time is still the one this call set), so the next sweep tries again. A failure there is logged
+  `{ outcome: 'reap-done-failed', scanId }`. `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
   `*/10 * * * *` (reaper); `scheduled` is `createScheduledRouter` (`src/jobs/scheduled.ts`), which runs the job of
   `controller.cron` and, for any other, logs `unknown-cron` and throws, so Cloudflare records the run as failed (a cron in `wrangler.jsonc` this file does not know is a config mistake) and the nightly cleanup does not run every 10 minutes. The reaper
   reads no request context, so it runs without `runAs`; the cleanup handler it routes to stays in `dispatcher.ts` with its `runAs`.
@@ -963,7 +969,9 @@ comes in a later PR.
   `{ type: 'done' }` once when the item that just finished was the last non-final one. `done` is sent only by the call
   whose guarded `UPDATE scans SET done_at = ? WHERE id = ? AND done_at IS NULL` applies (`markScanDone`), so two items
   finishing together send it once. Only after the change is stored;
-  a publish that throws is logged as `{ outcome: 'publish-failed', scanId, itemId }` and never fails the step. The port
+  a publish that throws is logged as `{ outcome: 'publish-failed', scanId, itemId }` and never fails the step. If it was the
+  `done` publish that threw, the done time `markScanDone` set is cleared again (`clearScanDone`, guarded on that very time), so
+  `done` is still owed and the reaper finds the scan; without that the scan would look finished and no one would ever send it. The port
   is `ScanEvents` (`publish` and `subscribe`); `DurableObjectScanEvents` is the production adapter (see "Live updates"),
   and `MemoryScanEvents` records events and subscriptions for tests. The event's item is the service's `ScanItemView`; once
   serialised it is byte for byte the item `GET /scans/{scanId}` presents (`Date`s become the same ISO strings the presenter writes).
@@ -1036,6 +1044,8 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   and the reaper find the same object without a lookup. It holds the scan's open client streams in memory and stores nothing.
   It is a named export of `src/index.ts` (the class must be exported from the Worker's main module) and is reached only through
   `DurableObjectScanEvents`, which takes the class as a type-only import. The HTTP app lives in `src/app.ts` and `src/index.ts` re-exports it, because `npm run openapi` loads the app in plain Node and cannot load a module that imports `cloudflare:workers`. `ScanService` never sees it: it uses the `ScanEvents` port.
+- **Route overlap.** `/scans/{scanId}/events` and `/scans/photos/{token}` overlap only for the literal pair `photos`/`events`,
+  which can never be a real scan id (a UUID) or token; that is the Redocly `no-ambiguous-paths` warning, which is left as is.
 - **Opening.** `GET /scans/{scanId}/events` (bearer) calls `ScanService.watch`, which reads the scan (so another user's scan is
   404 `SCAN_NOT_FOUND`, as a normal JSON error before any stream), and `subscribe`s: the adapter POSTs the scan as JSON to the
   object's `fetch` and returns its streaming response, re-wrapped because a stub's response has immutable headers and CORS and
@@ -1046,11 +1056,18 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   response shows it) and `event: done` with data `{}` when every item is final, after which the object closes every stream of the scan.
   Photo links inside `image.url` are minted per view, so two views of the same item differ in that token only.
 - **Snapshot on reconnect.** There is no replay and no event ids: a client that reconnects gets a fresh snapshot, which is
-  the whole state. A change stored between the service reading the scan and the stream opening is not replayed, so the snapshot
-  can be a moment behind; a client that must be exact re-reads `GET /scans/{scanId}` when it sees `done`.
-- **Already finished.** If every item is `ready`, `rejected` or `failed` when a client connects, `watch` publishes `done` right
-  after subscribing: the client gets `snapshot`, `done`, and the stream ends. (The service decides this, not the object, which
-  never reads the snapshot.) This also covers a `done` that was lost while nobody was connected.
+  the whole state.
+- **Catching up after the snapshot.** The service reads the scan, then `subscribe`s, and a change stored in between was
+  published while nobody listened. So once `subscribe` returns, `watch` reads the scan's items once more and publishes an `item`
+  event (the same view the snapshot uses) for every item whose state or `updated_at` differs from the snapshot, then
+  `done` if every item is final. A change stored after that second read is published to an open stream as usual. The service
+  does this, not the object, which never reads the snapshot. A publish that fails here is logged with ids only
+  (`{ outcome: 'publish-failed', scanId, itemId? }`) and never fails the stream.
+- **Already finished.** The same step covers a scan that is final when a client connects: nothing differs, every item is final,
+  so `watch` marks the scan done if it was not (`markScanDone`, result ignored) and publishes `done` right after subscribing:
+  the client gets `snapshot`, `done`, and the stream ends. It publishes `done` even if `done_at` was already set, because this
+  client has not had it; that also covers a `done` that was lost while nobody was connected. If that `done` fails after
+  `watch` itself set the time, the time is cleared again, as for the steps and the reaper.
 - **Ping.** `: ping` every `SCAN_STREAM_TIMING.pingMs` (20 s) so proxies keep an idle stream open and a client that vanished fails a write.
 - **Maximum lifetime.** Each client's stream is closed `maxLifetimeMs` (10 minutes) after it connected, not after the scan's first
   client did. An abandoned phone cannot hold the object open, and reconnecting checks the token again. Both timings are read when a

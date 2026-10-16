@@ -28,6 +28,12 @@ export type ScanPolicy = {
   dailyPhotosPerIp: number
   /** A read below this confidence waits for the user to confirm it. */
   confirmBelowConfidence: number
+  /**
+   * The reaper repairs a lost `done` only for scans created within this long. A repair matters to a client that is connected,
+   * a connection lasts 10 minutes at most, and `watch` sends `done` to any client that connects later, so an older scan gains
+   * nothing and would only make every sweep read more.
+   */
+  doneRepairWindowMs: number
 }
 
 export const SCAN_POLICY: ScanPolicy = {
@@ -37,6 +43,7 @@ export const SCAN_POLICY: ScanPolicy = {
   dailyPhotosPerUser: 30,
   dailyPhotosPerIp: 100,
   confirmBelowConfidence: 0.6,
+  doneRepairWindowMs: 3 * 60 * 60 * 1000,
 }
 
 const MINUTE = 60 * 1000
@@ -191,26 +198,60 @@ export class ScanService {
 
   /** The scan as it now is. Another user's scan is SCAN_NOT_FOUND, with no hint that it exists. */
   async getScan(scanId: string): Promise<ScanView> {
-    const { userId } = requireUser()
-    const scan = await this.repository.findScan(scanId)
-    if (!scan || scan.userId !== userId) throw scanNotFound()
-    return this.scanView(scan, await this.repository.itemsOf(scanId), this.now())
+    const { scan, items } = await this.ownedScan(scanId)
+    return this.scanView(scan, items, this.now())
   }
 
   /**
    * Opens a live stream of the scan for its owner (another user's scan is SCAN_NOT_FOUND). The stream starts with the scan
-   * as it now is, then carries each item change and `done`. A scan whose items are all final has nothing left to say, so
-   * `done` follows the snapshot at once and the stream ends (which also covers a `done` that was lost when it was first due).
+   * as it now is, then carries each item change and `done`.
    *
-   * Changes made between reading the scan and the stream opening are not replayed; the snapshot is as old as the read.
+   * The snapshot is read before the stream opens, and a change stored in between would reach no one: it was published
+   * while nobody listened, and the snapshot predates it. So once the stream is open the items are read again, each one
+   * that differs from the snapshot (in state or time) is sent as an `item`, and if every item is final the scan is marked
+   * done (if it was not) and `done` is sent, which also ends the stream. `done` is sent whenever all are final, even for a
+   * scan already marked: this client has not had it. That covers a scan finished before the client came, and a `done` lost
+   * while nobody was connected. A failure to send any of this is logged and never fails the stream.
    */
   async watch(scanId: string): Promise<Response> {
-    const scan = await this.getScan(scanId)
-    const stream = await this.events.subscribe(scanId, scan)
-    if (scan.items.every((item) => isFinal(item.state))) {
-      await this.events.publish(scanId, { type: 'done' }).catch(() => console.error({ outcome: 'publish-failed', scanId }))
-    }
+    const { scan, items } = await this.ownedScan(scanId)
+    const stream = await this.events.subscribe(scanId, await this.scanView(scan, items, this.now()))
+    await this.catchUp(scanId, items)
     return stream
+  }
+
+  private async ownedScan(scanId: string): Promise<{ scan: Scan; items: ScanItem[] }> {
+    const { userId } = requireUser()
+    const scan = await this.repository.findScan(scanId)
+    if (!scan || scan.userId !== userId) throw scanNotFound()
+    return { scan, items: await this.repository.itemsOf(scanId) }
+  }
+
+  /** What `watch` owes a client that opened its stream on `snapshot`: every change stored since, then `done` if the scan is over. */
+  private async catchUp(scanId: string, snapshot: ScanItem[]): Promise<void> {
+    let items: ScanItem[]
+    try {
+      items = await this.repository.itemsOf(scanId)
+    } catch {
+      console.error({ outcome: 'publish-failed', scanId })
+      return
+    }
+    const seen = new Map(snapshot.map((item) => [item.id, item]))
+    for (const item of items) {
+      const before = seen.get(item.id)
+      if (before && before.state === item.state && before.updatedAt.getTime() === item.updatedAt.getTime()) continue
+      try {
+        await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now()) })
+      } catch {
+        console.error({ outcome: 'publish-failed', scanId, itemId: item.id })
+      }
+    }
+    if (!items.every((item) => isFinal(item.state))) return
+    try {
+      await this.sendDone(scanId, { always: true })
+    } catch {
+      console.error({ outcome: 'publish-failed', scanId })
+    }
   }
 
   /**
@@ -328,7 +369,7 @@ export class ScanService {
    * time it entered the state, which is the key of the message that first queued it: if that run already finished the
    * dispatcher acknowledges it, if not it runs. One older than 2 hours is failed as unavailable. An item waiting for the
    * user is never touched. A failure on one item is logged by id and does not stop the sweep. The sweep also sends the `done` of
-   * a scan whose items have all been final for over 5 minutes without one.
+   * a scan, created within `doneRepairWindowMs`, whose items have all been final for over 5 minutes without one.
    *
    * `now` is passed in so the cutoffs are fixed for the whole sweep; the changes it makes are stamped by the service's clock.
    */
@@ -356,17 +397,39 @@ export class ScanService {
 
   /**
    * A scan whose items are all final and whose done time is unset had its `done` lost: publishing failed after the last
-   * item's change was stored. It is marked and `done` sent, once, by the call whose guarded update sets the time. A failure
-   * on one scan is logged by id and does not stop the sweep.
+   * item's change was stored. It is marked and `done` sent, once, by the call whose guarded update sets the time; if the
+   * send fails the time is cleared again (see `sendDone`), so the next sweep tries again. Only scans created within
+   * `doneRepairWindowMs` are looked at. A failure on one scan is logged by id and does not stop the sweep.
    */
   private async sendMissingDone(now: Date): Promise<void> {
-    const settled = await this.repository.settledScansNotDone([...FINAL_STATES], new Date(now.getTime() - DONE_SETTLED_AFTER_MS), REAP_BATCH)
+    const createdSince = new Date(now.getTime() - this.policy.doneRepairWindowMs)
+    const settled = await this.repository.settledScansNotDone([...FINAL_STATES], new Date(now.getTime() - DONE_SETTLED_AFTER_MS), createdSince, REAP_BATCH)
     for (const scan of settled) {
       try {
-        if (await this.repository.markScanDone(scan.id, this.now())) await this.events.publish(scan.id, { type: 'done' })
+        await this.sendDone(scan.id, { always: false })
       } catch {
         console.error({ outcome: 'reap-done-failed', scanId: scan.id })
       }
+    }
+  }
+
+  /**
+   * Marks the scan done and publishes `done`. Normally only the call whose guarded update sets the time publishes; `always`
+   * publishes whether or not this call set it (for a client that has not had it yet).
+   *
+   * If the publish throws after this call set the time, the time is cleared again, so that `done` is still owed and the
+   * reaper finds the scan. The clear applies only while the time is still the one set here, so it never undoes another
+   * call's mark. The publish error is rethrown for the caller to log.
+   */
+  private async sendDone(scanId: string, { always }: { always: boolean }): Promise<void> {
+    const at = this.now()
+    const applied = await this.repository.markScanDone(scanId, at)
+    if (!applied && !always) return
+    try {
+      await this.events.publish(scanId, { type: 'done' })
+    } catch (error) {
+      if (applied) await this.repository.clearScanDone(scanId, at).catch(() => console.error({ outcome: 'done-undo-failed', scanId }))
+      throw error
     }
   }
 
@@ -639,8 +702,8 @@ export class ScanService {
 
   /**
    * Sends the item as it now is, then `done` if it was the last to finish. `done` goes out once: only the call whose
-   * guarded update sets the scan's done time sends it, so two items finishing together cannot both. A failure is logged,
-   * never thrown: the change is already stored.
+   * guarded update sets the scan's done time sends it, so two items finishing together cannot both. If `done` cannot be
+   * sent the time is cleared again, for the reaper. A failure is logged, never thrown: the change is already stored.
    */
   private async publish(scanId: string, itemId: string): Promise<void> {
     try {
@@ -648,9 +711,7 @@ export class ScanService {
       const item = items.find((i) => i.id === itemId)
       if (!item) return
       await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now()) })
-      if (isFinal(item.state) && items.every((i) => isFinal(i.state)) && (await this.repository.markScanDone(scanId, this.now()))) {
-        await this.events.publish(scanId, { type: 'done' })
-      }
+      if (isFinal(item.state) && items.every((i) => isFinal(i.state))) await this.sendDone(scanId, { always: false })
     } catch {
       console.error({ outcome: 'publish-failed', scanId, itemId })
     }

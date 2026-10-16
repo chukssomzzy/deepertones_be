@@ -36,7 +36,11 @@ const freshIp = () => `198.51.${Math.floor(counter / 250) % 250}.${(counter++ % 
 
 const users = new D1UsersRepository(createDb(env.DB))
 const tokens = new TokenService({ secret: env.JWT_SECRET })
-const container = buildContainer(env)
+// Steps are driven by hand below. The real local queue would deliver the service's own follow-on messages a moment
+// later, into whichever test is running then (with its fetch stub), so this file's Worker queues into nothing.
+const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue
+const testEnv = { ...env, SCAN_ITEMS_QUEUE: quietQueue }
+const container = buildContainer(testEnv)
 
 /** A guest, and the bearer token the app would hold for it. */
 const newGuest = async () => {
@@ -74,7 +78,7 @@ const watch = async (scanId: string, token: string) => {
 const runQueue = async (body: unknown) => {
   const batch = createMessageBatch(MAIN, [{ id: 'm', timestamp: new Date(), attempts: 1, body }])
   const ctx = createExecutionContext()
-  await worker.queue!(batch, env, ctx)
+  await worker.queue!(batch, testEnv, ctx)
   return (await getQueueResult(batch, ctx)).explicitAcks
 }
 const step = (itemId: string, name: 'recognise' | 'match') => runQueue({ itemId, step: name, at: Date.now() })

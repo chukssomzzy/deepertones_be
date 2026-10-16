@@ -227,6 +227,7 @@ describe('SCAN_POLICY', () => {
       dailyPhotosPerUser: 30,
       dailyPhotosPerIp: 100,
       confirmBelowConfidence: 0.6,
+      doneRepairWindowMs: 3 * HOUR,
     })
   })
 })
@@ -2476,6 +2477,149 @@ describe('ScanService.watch', () => {
     logged.mockRestore()
   })
 
+  describe('a change stored while the stream is opening', () => {
+    /**
+     * Behaves like the Durable Object around a connecting client: what is published before `subscribe` returns reaches no
+     * one, so it is not recorded. `meanwhile` runs at that moment, between the service's read of the scan and the stream
+     * being open.
+     */
+    class RacyEvents extends MemoryScanEvents {
+      meanwhile: (() => Promise<void>) | undefined
+      failWhen: ((event: Parameters<MemoryScanEvents['publish']>[1]) => boolean) | undefined
+      private connecting = false
+      override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+        if (this.connecting) return
+        if (this.failWhen?.(event)) throw new Error('stream is down')
+        return super.publish(scanId, event)
+      }
+      override async subscribe(scanId: string, snapshot: Parameters<MemoryScanEvents['subscribe']>[1]): Promise<Response> {
+        this.connecting = true
+        try {
+          await this.meanwhile?.()
+        } finally {
+          this.connecting = false
+        }
+        return super.subscribe(scanId, snapshot)
+      }
+    }
+    const racy = (photos = [markedJpeg(1)]) => {
+      let events!: RacyEvents
+      const ctx = setup({ events: () => (events = new RacyEvents()) })
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+      return { ctx, events, scan: create(ctx, photos) }
+    }
+    const finishDirectly = (ctx: Ctx, itemId: string) =>
+      ctx.repository.updateItem(itemId, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() }).then(() => undefined)
+
+    it('sends the final item and done, though the step published both before anyone was listening', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      events.meanwhile = () => run(ctx, scan.items[0].id, 'recognise')
+
+      await watch(ctx, scan.id)
+
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[0].id, state: 'rejected', reason: 'unreadable' } }, { type: 'done' }])
+    })
+
+    it('sends the changed item, and no done, while another item is still being worked on', async () => {
+      const { ctx, events, scan: pending } = racy([markedJpeg(1), markedJpeg(2)])
+      const scan = await pending
+      events.meanwhile = () => run(ctx, scan.items[0].id, 'recognise')
+
+      await watch(ctx, scan.id)
+
+      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[0].id, state: 'rejected' } }])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+    })
+
+    it('sends an item whose time changed though its state did not, and only that one', async () => {
+      const { ctx, events, scan: pending } = racy([markedJpeg(1), markedJpeg(2)])
+      const scan = await pending
+      events.meanwhile = async () => {
+        ctx.advance(MINUTE)
+        await ctx.repository.updateItem(scan.items[1].id, 'recognising', { state: 'recognising', updatedAt: ctx.now() })
+      }
+
+      await watch(ctx, scan.id)
+
+      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[1].id, state: 'recognising' } }])
+    })
+
+    it('marks the scan done and sends done when the last item went final without the scan being marked', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      events.meanwhile = () => finishDirectly(ctx, scan.items[0].id)
+
+      await watch(ctx, scan.id)
+
+      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[0].id, state: 'failed' } }, { type: 'done' }])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toEqual(ctx.now())
+    })
+
+    it('sends an item exactly as the snapshot would have shown it', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      events.meanwhile = () => run(ctx, scan.items[0].id, 'recognise')
+
+      await watch(ctx, scan.id)
+
+      const shown = await getScan(ctx, scan.id)
+      const sent = ctx.events.eventsFor(scan.id)[0]!
+      expect(JSON.parse(JSON.stringify(sent.type === 'item' ? sent.item : null))).toEqual(JSON.parse(JSON.stringify(toScanResponse(shown).items[0])))
+    })
+
+    it('still answers the stream, logging ids only, when a catch-up item cannot be published, and goes on to done', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      events.meanwhile = async () => {
+        await finishDirectly(ctx, scan.items[0].id)
+        events.failWhen = (event) => event.type === 'item'
+      }
+
+      const response = await watch(ctx, scan.id)
+
+      expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+      expect(logged).toHaveBeenCalledWith({ outcome: 'publish-failed', scanId: scan.id, itemId: scan.items[0].id })
+      expect(ctx.events.eventsFor(scan.id)).toEqual([{ type: 'done' }])
+      logged.mockRestore()
+    })
+
+    it('puts the done time back when the done it set could not be published, so the reaper sends it', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      events.meanwhile = async () => {
+        await finishDirectly(ctx, scan.items[0].id)
+        events.failWhen = (event) => event.type === 'done'
+      }
+
+      const response = await watch(ctx, scan.id)
+
+      expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+      expect(logged).toHaveBeenCalledWith({ outcome: 'publish-failed', scanId: scan.id })
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+      logged.mockRestore()
+    })
+
+    it('leaves the done time alone when done cannot be published for a scan that was marked before', async () => {
+      const { ctx, events, scan: pending } = racy()
+      const scan = await pending
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      events.meanwhile = async () => {
+        await run(ctx, scan.items[0].id, 'recognise')
+        events.failWhen = (event) => event.type === 'done'
+      }
+      const marked = ctx.now()
+
+      await watch(ctx, scan.id)
+
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toEqual(marked)
+      logged.mockRestore()
+    })
+  })
+
   it('lets a failure to open the stream reach the caller', async () => {
     class SubscribeFails extends MemoryScanEvents {
       override async subscribe(): Promise<Response> {
@@ -2575,5 +2719,115 @@ describe('ScanService.reap: a done that was lost', () => {
 
     expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'reap-done-failed', scanId }))
     logged.mockRestore()
+  })
+})
+
+describe('ScanService: a done that cannot be published stays repairable', () => {
+  const SETTLED = 5 * MINUTE
+  /** Fails to publish a `done` while `failing`; items go through. */
+  class DoneFlaky extends MemoryScanEvents {
+    failing = false
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (this.failing && event.type === 'done') throw new Error('stream is down')
+      return super.publish(scanId, event)
+    }
+  }
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+  const types = (ctx: Ctx, scanId: string) => ctx.events.eventsFor(scanId).map((e) => e.type)
+
+  const arrange = async () => {
+    let events!: DoneFlaky
+    const ctx = setup({ events: () => (events = new DoneFlaky()) })
+    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    const scan = await create(ctx)
+    return { ctx, events, scan }
+  }
+
+  it('clears the done time again when the step\'s done fails, logging ids only, and the reaper then sends it', async () => {
+    const { ctx, events, scan } = await arrange()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    events.failing = true
+
+    await run(ctx, scan.items[0].id, 'recognise')
+
+    expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+    expect(logged).toHaveBeenCalledWith({ outcome: 'publish-failed', scanId: scan.id, itemId: scan.items[0].id })
+    events.failing = false
+    ctx.advance(SETTLED + 1)
+    await reap(ctx)
+    expect(types(ctx, scan.id)).toEqual(['item', 'done'])
+    expect((await ctx.repository.findScan(scan.id))!.doneAt).toEqual(ctx.now())
+    logged.mockRestore()
+  })
+
+  it('clears the done time again when the reaper\'s done fails, logging ids only, and the next sweep sends it', async () => {
+    const { ctx, events, scan } = await arrange()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    events.failing = true
+    await run(ctx, scan.items[0].id, 'recognise')
+    ctx.advance(SETTLED + 1)
+
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+    expect(logged).toHaveBeenCalledWith({ outcome: 'reap-done-failed', scanId: scan.id })
+    events.failing = false
+    await reap(ctx)
+    expect(types(ctx, scan.id)).toEqual(['item', 'done'])
+    expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+    logged.mockRestore()
+  })
+
+  it('does not clear a done time somebody else set meanwhile', async () => {
+    const { ctx, events, scan } = await arrange()
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const other = new Date(T0.getTime() + HOUR)
+    // The failing publish is where a competing writer slips in: the scan is marked again, at another time.
+    const publishItem = events.publish.bind(events)
+    events.publish = async (scanId, event) => {
+      if (event.type !== 'done') return publishItem(scanId, event)
+      await ctx.repository.clearScanDone(scan.id, (await ctx.repository.findScan(scan.id))!.doneAt!)
+      await ctx.repository.markScanDone(scan.id, other)
+      throw new Error('stream is down')
+    }
+
+    await run(ctx, scan.items[0].id, 'recognise')
+
+    expect((await ctx.repository.findScan(scan.id))!.doneAt).toEqual(other)
+    logged.mockRestore()
+  })
+})
+
+describe('ScanService.reap: how far back it repairs a done', () => {
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+
+  const lostDone = async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    const scan = await create(ctx)
+    await run(ctx, scan.items[0].id, 'recognise')
+    // The step's done is taken back, as if it had been lost.
+    await ctx.repository.clearScanDone(scan.id, (await ctx.repository.findScan(scan.id))!.doneAt!)
+    return { ctx, scanId: scan.id as string }
+  }
+
+  it('sends the done of a scan made up to 3 hours ago', async () => {
+    const { ctx, scanId } = await lostDone()
+    ctx.advance(3 * HOUR)
+
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scanId))!.doneAt).not.toBeNull()
+  })
+
+  it('leaves a scan made over 3 hours ago alone: a client that connects later is sent done by watch', async () => {
+    const { ctx, scanId } = await lostDone()
+    ctx.advance(3 * HOUR + 1)
+    const sent = ctx.events.eventsFor(scanId).length
+
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
+    expect(ctx.events.eventsFor(scanId)).toHaveLength(sent)
   })
 })

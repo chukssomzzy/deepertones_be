@@ -71,6 +71,13 @@
       "when": 1792131080543,
       "tag": "0009_lumpy_norman_osborn",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1792136349435,
+      "tag": "0010_glamorous_la_nuit",
+      "breakpoints": true
     }
   ]
 }

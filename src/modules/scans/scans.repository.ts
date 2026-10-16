@@ -86,6 +86,19 @@ export class D1ScansRepository {
     return rows.length === 1
   }
 
+  /**
+   * Takes back the done time `at` that a caller set with markScanDone (one conditional UPDATE), and says whether it did. It
+   * applies only while the scan's done time is still exactly `at`, so it never undoes a mark another call made.
+   */
+  async clearScanDone(scanId: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(scans)
+      .set({ doneAt: null })
+      .where(and(eq(scans.id, scanId), eq(scans.doneAt, at)))
+      .returning({ id: scans.id })
+    return rows.length === 1
+  }
+
   /** Items in any of `states` last updated before `before` (not at it), oldest first, at most `limit`. */
   async staleItems(states: ItemState[], before: Date, limit: number): Promise<ScanItem[]> {
     if (states.length === 0) return []
@@ -98,10 +111,12 @@ export class D1ScansRepository {
   }
 
   /**
-   * Scans with no done time whose items are all in one of `states` and were all last updated before `before` (not at it),
-   * oldest scan first, at most `limit`. A scan with no items is never listed. These are the scans whose `done` was lost.
+   * Scans with no done time, created at or after `createdSince`, whose items are all in one of `states` and were all last
+   * updated before `before` (not at it), oldest scan first, at most `limit`. A scan with no items is never listed. These
+   * are the scans whose `done` was lost. `createdSince` keeps the read to recent scans, through the partial index on
+   * `created_at` for scans with no done time.
    */
-  async settledScansNotDone(states: ItemState[], before: Date, limit: number): Promise<Scan[]> {
+  async settledScansNotDone(states: ItemState[], before: Date, createdSince: Date, limit: number): Promise<Scan[]> {
     if (states.length === 0) return []
     const itemsOfScan = (...conditions: (SQL | undefined)[]) =>
       this.db
@@ -111,7 +126,7 @@ export class D1ScansRepository {
     return this.db
       .select()
       .from(scans)
-      .where(and(isNull(scans.doneAt), exists(itemsOfScan()), notExists(itemsOfScan(or(notInArray(scanItems.state, states), gte(scanItems.updatedAt, before))))))
+      .where(and(isNull(scans.doneAt), gte(scans.createdAt, createdSince), exists(itemsOfScan()), notExists(itemsOfScan(or(notInArray(scanItems.state, states), gte(scanItems.updatedAt, before))))))
       .orderBy(asc(scans.createdAt))
       .limit(limit)
   }

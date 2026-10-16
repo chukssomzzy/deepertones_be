@@ -86,6 +86,17 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
+   * Takes back the done time `at`, and says whether it did. Applies only while the scan's done time is exactly `at`: false
+   * when the scan has none, has a different one, or is unknown.
+   */
+  async clearScanDone(scanId: string, at: Date): Promise<boolean> {
+    const scan = this.scans.get(scanId)
+    if (!scan || scan.doneAt === null || scan.doneAt.getTime() !== at.getTime()) return false
+    scan.doneAt = null
+    return true
+  }
+
+  /**
    * Items in any of `states` last updated before `before` (an item updated exactly then is not included), oldest first,
    * at most `limit` of them.
    */
@@ -98,15 +109,15 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
-   * Scans with no done time whose items are all in one of `states` and were all last updated before `before` (not at it),
-   * oldest scan first, at most `limit`. A scan with no items is never listed.
+   * Scans with no done time, created at or after `createdSince`, whose items are all in one of `states` and were all last
+   * updated before `before` (not at it), oldest scan first, at most `limit`. A scan with no items is never listed.
    */
-  async settledScansNotDone(states: ItemState[], before: Date, limit: number): Promise<Scan[]> {
+  async settledScansNotDone(states: ItemState[], before: Date, createdSince: Date, limit: number): Promise<Scan[]> {
     const items = [...this.items.values()]
     return [...this.scans.values()]
       .filter((scan) => {
         const own = items.filter((i) => i.scanId === scan.id)
-        return scan.doneAt === null && own.length > 0 && own.every((i) => states.includes(i.state) && i.updatedAt.getTime() < before.getTime())
+        return scan.doneAt === null && scan.createdAt.getTime() >= createdSince.getTime() && own.length > 0 && own.every((i) => states.includes(i.state) && i.updatedAt.getTime() < before.getTime())
       })
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .slice(0, limit)
