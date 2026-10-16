@@ -13,7 +13,7 @@ import type { OtpChannel, OtpRecipient } from './otp.types'
 
 /** The WhatsApp template's code expiry must match ttlMinutes (set it in Meta's template editor). */
 export const OTP_POLICY = {
-  length: 6,
+  length: 4,
   ttlMinutes: 10,
   maxAttempts: 5,
   cooldownSeconds: 60,

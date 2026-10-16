@@ -11,8 +11,8 @@ import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../src/providers/otp-delivery/memory.otp-delivery'
 
 const T0 = new Date('2030-06-15T12:00:00.000Z')
-const CODE = '482913'
-const WRONG = '000000'
+const CODE = '4829'
+const WRONG = '0000'
 
 const fresh = {
   whatsapp: () => '+23480' + String(Math.floor(Math.random() * 1e8)).padStart(8, '0'),
