@@ -39,33 +39,6 @@ export const SCAN_POLICY: ScanPolicy = {
   confirmBelowConfidence: 0.6,
 }
 
-const MINUTE = 60 * 1000
-const HOUR = 60 * MINUTE
-const DAY = 24 * HOUR
-const MAX_TEXT_LENGTH = 120
-// Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
-const IP_HASH_INFO = 'deepertones/ip-hash/v1'
-const FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed']
-// A control character or an invisible format character (a right-to-left override, a zero-width space).
-const HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
-
-/** The step the system owes an item in each state it is working in. A state waiting for the user (confirming, a back photo) or a final one has none. */
-const STEP_OF_WORKING_STATE = {
-  recognising: 'recognise',
-  matching: 'match',
-  researching: 'research',
-  'reading-label': 'read-label',
-  analysing: 'analyse',
-} as const satisfies Partial<Record<ItemState, ScanStep>>
-const WORKING_STATES = Object.keys(STEP_OF_WORKING_STATE) as (keyof typeof STEP_OF_WORKING_STATE)[]
-/** The reaper queues a working item's step again once it has sat this long, and fails it as unavailable once it is older than the second. */
-const STUCK_AFTER_MS = 15 * MINUTE
-const GIVE_UP_AFTER_MS = 2 * HOUR
-/** One sweep looks at this many items at most, oldest first, which keeps its calls well inside a Worker's limit. */
-const REAP_BATCH = 100
-/** How long a step waits before it asks again whether work another call is doing has finished. */
-const WAIT_SECONDS = 30
-
 /** What the app shows for one item. Built by the service so a presenter, the stream and the events all say the same thing. */
 export type ScanItemView = {
   id: string
@@ -102,41 +75,70 @@ export type ScanServiceDeps = {
   policy?: ScanPolicy
 }
 
+// Spelled out because a type query cannot name a #private member.
+type WorkingState = 'recognising' | 'matching' | 'researching' | 'reading-label' | 'analysing'
 type ValidPhoto = { image: ProductImage; extension: 'jpg' | 'webp' }
 
-const scanNotFound = () => new NotFoundError('SCAN_NOT_FOUND', 'Scan not found')
-const photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
-const isFinal = (state: ItemState) => FINAL_STATES.includes(state)
-
 export class ScanService {
-  private readonly repository: ScansRepository
-  private readonly catalog: ProductCatalogService
-  private readonly recognizer: ProductRecognizer
-  private readonly labelReader: LabelReader
-  private readonly photos: PhotoStore
-  private readonly jobs: JobQueue
-  private readonly events: ScanEvents
-  private readonly photoLinkSecret: string
-  private readonly ipHashSecret: string
-  private readonly environment: PhotoEnvironment
-  private readonly now: () => Date
-  private readonly newId: () => string
-  private readonly policy: ScanPolicy
+  static readonly #MINUTE = 60 * 1000
+  static readonly #HOUR = 60 * ScanService.#MINUTE
+  static readonly #DAY = 24 * ScanService.#HOUR
+  static readonly #MAX_TEXT_LENGTH = 120
+  // Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
+  static readonly #IP_HASH_INFO = 'deepertones/ip-hash/v1'
+  static readonly #FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed']
+  // A control character or an invisible format character (a right-to-left override, a zero-width space).
+  static readonly #HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
+
+  /** The step the system owes an item in each state it is working in. A state waiting for the user (confirming, a back photo) or a final one has none. */
+  static readonly #STEP_OF_WORKING_STATE = {
+    recognising: 'recognise',
+    matching: 'match',
+    researching: 'research',
+    'reading-label': 'read-label',
+    analysing: 'analyse',
+  } as const satisfies Partial<Record<ItemState, ScanStep>>
+  static readonly #WORKING_STATES = Object.keys(ScanService.#STEP_OF_WORKING_STATE) as WorkingState[]
+  /** The reaper queues a working item's step again once it has sat this long, and fails it as unavailable once it is older than the second. */
+  static readonly #STUCK_AFTER_MS = 15 * ScanService.#MINUTE
+  static readonly #GIVE_UP_AFTER_MS = 2 * ScanService.#HOUR
+  /** One sweep looks at this many items at most, oldest first, which keeps its calls well inside a Worker's limit. */
+  static readonly #REAP_BATCH = 100
+  /** How long a step waits before it asks again whether work another call is doing has finished. */
+  static readonly #WAIT_SECONDS = 30
+
+  static #scanNotFound = () => new NotFoundError('SCAN_NOT_FOUND', 'Scan not found')
+  static #photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
+  static #isFinal = (state: ItemState) => ScanService.#FINAL_STATES.includes(state)
+
+  readonly #repository: ScansRepository
+  readonly #catalog: ProductCatalogService
+  readonly #recognizer: ProductRecognizer
+  readonly #labelReader: LabelReader
+  readonly #photos: PhotoStore
+  readonly #jobs: JobQueue
+  readonly #events: ScanEvents
+  readonly #photoLinkSecret: string
+  readonly #ipHashSecret: string
+  readonly #environment: PhotoEnvironment
+  readonly #now: () => Date
+  readonly #newId: () => string
+  readonly #policy: ScanPolicy
 
   constructor(deps: ScanServiceDeps) {
-    this.repository = deps.repository
-    this.catalog = deps.catalog
-    this.recognizer = deps.recognizer
-    this.labelReader = deps.labelReader
-    this.photos = deps.photos
-    this.jobs = deps.jobs
-    this.events = deps.events
-    this.photoLinkSecret = deps.photoLinkSecret
-    this.ipHashSecret = deps.ipHashSecret
-    this.environment = deps.environment
-    this.now = deps.now ?? (() => new Date())
-    this.newId = deps.newId ?? (() => crypto.randomUUID())
-    this.policy = deps.policy ?? SCAN_POLICY
+    this.#repository = deps.repository
+    this.#catalog = deps.catalog
+    this.#recognizer = deps.recognizer
+    this.#labelReader = deps.labelReader
+    this.#photos = deps.photos
+    this.#jobs = deps.jobs
+    this.#events = deps.events
+    this.#photoLinkSecret = deps.photoLinkSecret
+    this.#ipHashSecret = deps.ipHashSecret
+    this.#environment = deps.environment
+    this.#now = deps.now ?? (() => new Date())
+    this.#newId = deps.newId ?? (() => crypto.randomUUID())
+    this.#policy = deps.policy ?? SCAN_POLICY
   }
 
   /**
@@ -151,48 +153,48 @@ export class ScanService {
   async create(input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
     const { userId } = requireUser()
     if (input.photos.length === 0) throw new ValidationError('NO_IMAGES', 'Send at least one photo')
-    if (input.photos.length > this.policy.maxPhotosPerScan) {
-      throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${this.policy.maxPhotosPerScan} photos`)
+    if (input.photos.length > this.#policy.maxPhotosPerScan) {
+      throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${this.#policy.maxPhotosPerScan} photos`)
     }
-    const valid = input.photos.map((photo) => this.checkPhoto(photo))
-    const now = this.now()
-    const ipHash = await this.hashIp(input.clientIp)
-    await this.assertWithinQuota(userId, ipHash, valid.length, now)
+    const valid = input.photos.map((photo) => this.#checkPhoto(photo))
+    const now = this.#now()
+    const ipHash = await this.#hashIp(input.clientIp)
+    await this.#assertWithinQuota(userId, ipHash, valid.length, now)
 
-    const scanId = this.newId()
+    const scanId = this.#newId()
     const stored = valid.map((photo, position) => {
-      const id = this.newId()
-      const item: NewScanItem = { id, scanId, userId, position, photoKey: this.photoKey(userId, scanId, id, photo.extension), createdAt: now }
+      const id = this.#newId()
+      const item: NewScanItem = { id, scanId, userId, position, photoKey: this.#photoKey(userId, scanId, id, photo.extension), createdAt: now }
       return { item, image: photo.image }
     })
     try {
-      await Promise.all(stored.map(({ item, image }) => this.photos.put(item.photoKey, image)))
-      await this.repository.createScan({ id: scanId, userId, ipHash, createdAt: now }, stored.map(({ item }) => item))
+      await Promise.all(stored.map(({ item, image }) => this.#photos.put(item.photoKey, image)))
+      await this.#repository.createScan({ id: scanId, userId, ipHash, createdAt: now }, stored.map(({ item }) => item))
     } catch (error) {
-      await this.photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
+      await this.#photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
       throw error
     }
 
     for (const { item } of stored) {
       try {
-        await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: 'recognise', at: now.getTime() })
+        await this.#jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: 'recognise', at: now.getTime() })
       } catch {
         // Nothing will ever recognise this item, so say so instead of leaving it recognising for ever.
         console.error({ outcome: 'enqueue-failed', scanId, itemId: item.id })
-        await this.repository
-          .updateItem(item.id, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: this.now() })
+        await this.#repository
+          .updateItem(item.id, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: this.#now() })
           .catch(() => console.error({ outcome: 'mark-failed-failed', scanId, itemId: item.id }))
       }
     }
-    return this.scanView({ id: scanId, createdAt: now }, await this.repository.itemsOf(scanId), now)
+    return this.#scanView({ id: scanId, createdAt: now }, await this.#repository.itemsOf(scanId), now)
   }
 
   /** The scan as it now is. Another user's scan is SCAN_NOT_FOUND, with no hint that it exists. */
   async getScan(scanId: string): Promise<ScanView> {
     const { userId } = requireUser()
-    const scan = await this.repository.findScan(scanId)
-    if (!scan || scan.userId !== userId) throw scanNotFound()
-    return this.scanView(scan, await this.repository.itemsOf(scanId), this.now())
+    const scan = await this.#repository.findScan(scanId)
+    if (!scan || scan.userId !== userId) throw ScanService.#scanNotFound()
+    return this.#scanView(scan, await this.#repository.itemsOf(scanId), this.#now())
   }
 
   /**
@@ -200,10 +202,10 @@ export class ScanService {
    * ends up in the shared catalog must not carry a link, markup or a hidden character, nor be over 120 characters.
    */
   async confirm(scanId: string, itemId: string, fields: ConfirmedProduct): Promise<ScanItemView> {
-    const item = await this.ownedItem(scanId, itemId)
-    const variant = fields.variant === undefined ? '' : this.cleanText(fields.variant, 'variant', false)
-    const product = { brand: this.cleanText(fields.brand, 'brand', true), name: this.cleanText(fields.name, 'name', true), variant }
-    const moved = await this.transition(item, {
+    const item = await this.#ownedItem(scanId, itemId)
+    const variant = fields.variant === undefined ? '' : this.#cleanText(fields.variant, 'variant', false)
+    const product = { brand: this.#cleanText(fields.brand, 'brand', true), name: this.#cleanText(fields.name, 'name', true), variant }
+    const moved = await this.#transition(item, {
       from: 'needs-confirmation',
       change: {
         state: 'matching',
@@ -216,7 +218,7 @@ export class ScanService {
       next: 'match',
     })
     if (!moved) throw new ConflictError('ITEM_NOT_AWAITING_CONFIRMATION', 'This item is not waiting for confirmation')
-    return this.itemViewOf(itemId)
+    return this.#itemViewOf(itemId)
   }
 
   /**
@@ -225,35 +227,35 @@ export class ScanService {
    * item on), is checked like a front photo, and is kept next to the front one as `<item id>-back.<jpg|webp>`.
    */
   async addBackPhoto(scanId: string, itemId: string, photo: ProductImage, clientIp: string): Promise<ScanItemView> {
-    const item = await this.ownedItem(scanId, itemId)
+    const item = await this.#ownedItem(scanId, itemId)
     const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_BACK_PHOTO', 'This item is not waiting for a photo of the back')
     if (item.state !== 'needs-back-photo') throw notAwaiting()
-    const valid = this.checkPhoto(photo)
-    const now = this.now()
-    const ipHash = await this.hashIp(clientIp)
-    await this.assertWithinQuota(item.userId, ipHash, 1, now)
+    const valid = this.#checkPhoto(photo)
+    const now = this.#now()
+    const ipHash = await this.#hashIp(clientIp)
+    await this.#assertWithinQuota(item.userId, ipHash, 1, now)
 
-    const key = this.photoKey(item.userId, scanId, `${itemId}-back`, valid.extension)
-    await this.photos.put(key, valid.image)
+    const key = this.#photoKey(item.userId, scanId, `${itemId}-back`, valid.extension)
+    await this.#photos.put(key, valid.image)
     let moved = false
     try {
-      moved = await this.transition(item, {
+      moved = await this.#transition(item, {
         from: 'needs-back-photo',
         change: { state: 'reading-label', reason: null, backPhotoKey: key },
         next: 'read-label',
         undo: { backPhotoKey: null },
-        backPhoto: { id: this.newId(), itemId, userId: item.userId, ipHash, uploadedAt: now },
+        backPhoto: { id: this.#newId(), itemId, userId: item.userId, ipHash, uploadedAt: now },
       })
     } catch (error) {
-      await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId, itemId }))
+      await this.#photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId, itemId }))
       throw error
     }
     if (!moved) {
       // Lost a race with another upload. When both wrote the same key the winner owns it, so only a different key is ours to remove.
-      if ((await this.repository.findItem(itemId))?.backPhotoKey !== key) await this.photos.delete(key)
+      if ((await this.#repository.findItem(itemId))?.backPhotoKey !== key) await this.#photos.delete(key)
       throw notAwaiting()
     }
-    return this.itemViewOf(itemId)
+    return this.#itemViewOf(itemId)
   }
 
   /**
@@ -263,10 +265,10 @@ export class ScanService {
    * deleted, are all PHOTO_NOT_FOUND.
    */
   async photoForLink(token: string): Promise<ProductImage> {
-    const link = await verifyPhotoLink(token, this.photoLinkSecret, this.now())
-    if (!link) throw photoNotFound()
-    const photo = await this.photos.get(link.key)
-    if (!photo) throw photoNotFound()
+    const link = await verifyPhotoLink(token, this.#photoLinkSecret, this.#now())
+    if (!link) throw ScanService.#photoNotFound()
+    const photo = await this.#photos.get(link.key)
+    if (!photo) throw ScanService.#photoNotFound()
     return photo
   }
 
@@ -276,19 +278,19 @@ export class ScanService {
    * leaves the item where it was, for the queue to retry.
    */
   async advance(itemId: string, step: ScanStep): Promise<void> {
-    const item = await this.repository.findItem(itemId)
+    const item = await this.#repository.findItem(itemId)
     if (!item) return
     switch (step) {
       case 'recognise':
-        return this.recognise(item)
+        return this.#recognise(item)
       case 'match':
-        return this.match(item)
+        return this.#match(item)
       case 'research':
-        return this.research(item)
+        return this.#research(item)
       case 'read-label':
-        return this.readLabel(item)
+        return this.#readLabel(item)
       case 'analyse':
-        return this.analyse(item)
+        return this.#analyse(item)
     }
   }
 
@@ -298,9 +300,9 @@ export class ScanService {
    * for it is a stale message from an earlier state, and a finished one has nothing left to fail.
    */
   async markItemFailed(itemId: string): Promise<void> {
-    const item = await this.repository.findItem(itemId)
-    if (!item || !(WORKING_STATES as readonly ItemState[]).includes(item.state)) return
-    await this.transition(item, { from: item.state, change: { state: 'failed', reason: 'unavailable' } })
+    const item = await this.#repository.findItem(itemId)
+    if (!item || !(ScanService.#WORKING_STATES as readonly ItemState[]).includes(item.state)) return
+    await this.#transition(item, { from: item.state, change: { state: 'failed', reason: 'unavailable' } })
   }
 
   /**
@@ -314,17 +316,17 @@ export class ScanService {
    * `now` is passed in so the cutoffs are fixed for the whole sweep; the changes it makes are stamped by the service's clock.
    */
   async reap(now: Date): Promise<{ requeued: number; failed: number }> {
-    const stale = await this.repository.staleItems(WORKING_STATES, new Date(now.getTime() - STUCK_AFTER_MS), REAP_BATCH)
+    const stale = await this.#repository.staleItems(ScanService.#WORKING_STATES, new Date(now.getTime() - ScanService.#STUCK_AFTER_MS), ScanService.#REAP_BATCH)
     let requeued = 0
     let failed = 0
     for (const item of stale) {
-      const step = (STEP_OF_WORKING_STATE as Partial<Record<ItemState, ScanStep>>)[item.state]
+      const step = (ScanService.#STEP_OF_WORKING_STATE as Partial<Record<ItemState, ScanStep>>)[item.state]
       if (!step) continue
       try {
-        if (item.updatedAt.getTime() < now.getTime() - GIVE_UP_AFTER_MS) {
-          if (await this.transition(item, { from: item.state, change: { state: 'failed', reason: 'unavailable' } })) failed++
+        if (item.updatedAt.getTime() < now.getTime() - ScanService.#GIVE_UP_AFTER_MS) {
+          if (await this.#transition(item, { from: item.state, change: { state: 'failed', reason: 'unavailable' } })) failed++
         } else {
-          await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: item.updatedAt.getTime() })
+          await this.#jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: item.updatedAt.getTime() })
           requeued++
         }
       } catch {
@@ -334,27 +336,27 @@ export class ScanService {
     return { requeued, failed }
   }
 
-  private async recognise(item: ScanItem): Promise<void> {
+  async #recognise(item: ScanItem): Promise<void> {
     if (item.state !== 'recognising') return
-    let seen = this.earlierRead(item)
+    let seen = this.#earlierRead(item)
     if (!seen) {
-      const photo = item.photoKey === null ? null : await this.photos.get(item.photoKey)
+      const photo = item.photoKey === null ? null : await this.#photos.get(item.photoKey)
       if (item.photoKey === null || !photo) {
-        await this.fail(item, 'recognising', 'photo-missing')
+        await this.#fail(item, 'recognising', 'photo-missing')
         return
       }
       try {
-        seen = await this.recognizer.recognize(photo)
+        seen = await this.#recognizer.recognize(photo)
       } catch (error) {
         if (error instanceof AiBudgetExceededError) {
-          await this.fail(item, 'recognising', 'research-busy')
+          await this.#fail(item, 'recognising', 'research-busy')
           return
         }
         // The model declined to look at the photo: a photo nothing can be read from.
         if (!(error instanceof AnthropicRefusalError)) {
           if (error instanceof AnthropicRequestError) {
             // The same photo would get the same answer, so a retry would only pay again.
-            await this.fail(item, 'recognising', 'unavailable')
+            await this.#fail(item, 'recognising', 'unavailable')
             throw new PermanentJobError('The model gave no usable answer for this photo', { cause: error })
           }
           throw error
@@ -364,8 +366,8 @@ export class ScanService {
     }
 
     if (seen.classification === 'beauty-product') {
-      const sure = seen.confidence >= this.policy.confirmBelowConfidence
-      await this.transition(item, {
+      const sure = seen.confidence >= this.#policy.confirmBelowConfidence
+      await this.#transition(item, {
         from: 'recognising',
         change: {
           state: sure ? 'matching' : 'needs-confirmation',
@@ -381,16 +383,16 @@ export class ScanService {
     }
 
     // A photo we will not use is deleted at once, before the row says so: a failure here is retried while the item is still recognising.
-    if (item.photoKey !== null) await this.photos.delete(item.photoKey)
+    if (item.photoKey !== null) await this.#photos.delete(item.photoKey)
     const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product', unreadable: 'unreadable' } as const
-    await this.transition(item, { from: 'recognising', change: { state: 'rejected', reason: reason[seen.classification], photoKey: null } })
+    await this.#transition(item, { from: 'recognising', change: { state: 'rejected', reason: reason[seen.classification], photoKey: null } })
   }
 
   /**
    * What an earlier attempt already got from the model for this photo. Its answer is stored with the move out of
    * `recognising`; when that move was undone (the next step could not be queued) the answer stays, and asking again would pay twice.
    */
-  private earlierRead(item: ScanItem): Recognition | undefined {
+  #earlierRead(item: ScanItem): Recognition | undefined {
     if (item.recognisedBrand === null || item.recognisedName === null || item.recognisedCategory === null || item.recognisedConfidence === null) return undefined
     return {
       classification: 'beauty-product',
@@ -402,15 +404,15 @@ export class ScanService {
     }
   }
 
-  private async match(item: ScanItem): Promise<void> {
+  async #match(item: ScanItem): Promise<void> {
     if (item.state !== 'matching') return
     if (item.recognisedBrand === null || item.recognisedName === null || item.recognisedCategory === null) {
-      await this.fail(item, 'matching', 'unavailable')
+      await this.#fail(item, 'matching', 'unavailable')
       return
     }
     let resolved
     try {
-      resolved = await this.catalog.resolve({
+      resolved = await this.#catalog.resolve({
         brand: item.recognisedBrand,
         name: item.recognisedName,
         category: item.recognisedCategory,
@@ -418,79 +420,79 @@ export class ScanService {
       })
     } catch (error) {
       if (!(error instanceof CatalogBusyError)) throw error
-      await this.fail(item, 'matching', 'research-busy')
+      await this.#fail(item, 'matching', 'research-busy')
       return
     }
 
     switch (resolved.kind) {
       case 'ready':
-        await this.transition(item, { from: 'matching', change: { state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId } })
+        await this.#transition(item, { from: 'matching', change: { state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId } })
         return
       case 'needs-analysis':
-        await this.transition(item, {
+        await this.#transition(item, {
           from: 'matching',
           change: { state: 'analysing', productId: resolved.productId, formulationId: resolved.formulationId },
           next: 'analyse',
         })
         return
       case 'analysis-failed':
-        await this.transition(item, {
+        await this.#transition(item, {
           from: 'matching',
           change: { state: 'failed', reason: 'analysis-failed', productId: resolved.productId, formulationId: resolved.formulationId },
         })
         return
       case 'needs-research':
-        await this.transition(item, { from: 'matching', change: { state: 'researching', productId: resolved.productId }, next: 'research' })
+        await this.#transition(item, { from: 'matching', change: { state: 'researching', productId: resolved.productId }, next: 'research' })
         return
     }
   }
 
-  private async research(item: ScanItem): Promise<void> {
+  async #research(item: ScanItem): Promise<void> {
     if (item.state !== 'researching') return
     if (item.productId === null) {
-      await this.fail(item, 'researching', 'unavailable')
+      await this.#fail(item, 'researching', 'unavailable')
       return
     }
     let result
     try {
-      result = await this.catalog.research(item.productId)
+      result = await this.#catalog.research(item.productId)
     } catch (error) {
       if (!(error instanceof ResearchInProgressError)) throw error
-      await this.waitFor(item, 'research')
+      await this.#waitFor(item, 'research')
       return
     }
     if (result.kind === 'found') {
-      await this.transition(item, { from: 'researching', change: { state: 'analysing', formulationId: result.formulationId }, next: 'analyse' })
+      await this.#transition(item, { from: 'researching', change: { state: 'analysing', formulationId: result.formulationId }, next: 'analyse' })
     } else if (result.fallbackFormulationId !== undefined) {
       // New ingredients could not be had, but an earlier analysed list can still be shown.
-      await this.transition(item, { from: 'researching', change: { state: 'ready', formulationId: result.fallbackFormulationId } })
+      await this.#transition(item, { from: 'researching', change: { state: 'ready', formulationId: result.fallbackFormulationId } })
     } else if (result.kind === 'not-found') {
-      await this.transition(item, { from: 'researching', change: { state: 'needs-back-photo' } })
+      await this.#transition(item, { from: 'researching', change: { state: 'needs-back-photo' } })
     } else {
-      await this.fail(item, 'researching', 'research-busy')
+      await this.#fail(item, 'researching', 'research-busy')
     }
   }
 
-  private async readLabel(item: ScanItem): Promise<void> {
+  async #readLabel(item: ScanItem): Promise<void> {
     if (item.state !== 'reading-label') return
     if (item.productId === null) {
-      await this.fail(item, 'reading-label', 'unavailable')
+      await this.#fail(item, 'reading-label', 'unavailable')
       return
     }
     const key = item.backPhotoKey
-    const photo = key === null ? null : await this.photos.get(key)
+    const photo = key === null ? null : await this.#photos.get(key)
     if (key === null || !photo) {
       // Nothing to read, and no way to know what the label said: ask for the photo again.
-      await this.transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
+      await this.#transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
       return
     }
 
     let reading: LabelReading
     try {
-      reading = await this.labelReader.read(photo)
+      reading = await this.#labelReader.read(photo)
     } catch (error) {
       if (error instanceof AiBudgetExceededError) {
-        await this.fail(item, 'reading-label', 'research-busy')
+        await this.#fail(item, 'reading-label', 'research-busy')
         return
       }
       // A refusal, or an answer that cannot be used, is the same as a label that cannot be read: another photo may do better.
@@ -500,7 +502,7 @@ export class ScanService {
     let formulationId: string | null = null
     if (reading.readable) {
       try {
-        formulationId = await this.catalog.addLabelIngredients(item.productId, reading.ingredients)
+        formulationId = await this.#catalog.addLabelIngredients(item.productId, reading.ingredients)
       } catch (error) {
         // The catalog refuses a list that is empty, over its bounds, or carries a link or markup: the same as unreadable.
         if (!(error instanceof ValidationError && error.code === 'LABEL_UNREADABLE')) throw error
@@ -508,48 +510,48 @@ export class ScanService {
     }
     if (formulationId === null) {
       // The back photo is deleted; the upload stays counted against the daily quota in its own record.
-      await this.photos.delete(key)
-      await this.transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
+      await this.#photos.delete(key)
+      await this.#transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
       return
     }
     // The photo is deleted after the move, not before: if the next step cannot be queued the move is undone, and the retry needs it.
-    const moved = await this.transition(item, {
+    const moved = await this.#transition(item, {
       from: 'reading-label',
       change: { state: 'analysing', formulationId, backPhotoKey: null },
       next: 'analyse',
       undo: { backPhotoKey: key },
     })
-    if (moved) await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId: item.scanId, itemId: item.id }))
+    if (moved) await this.#photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId: item.scanId, itemId: item.id }))
   }
 
-  private async analyse(item: ScanItem): Promise<void> {
+  async #analyse(item: ScanItem): Promise<void> {
     if (item.state !== 'analysing') return
     if (item.formulationId === null) {
-      await this.fail(item, 'analysing', 'unavailable')
+      await this.#fail(item, 'analysing', 'unavailable')
       return
     }
     try {
-      await this.catalog.analyse(item.formulationId)
+      await this.#catalog.analyse(item.formulationId)
     } catch (error) {
       if (error instanceof AnalysisInProgressError) {
-        await this.waitFor(item, 'analyse')
+        await this.#waitFor(item, 'analyse')
         return
       }
       if (error instanceof CatalogBusyError) {
-        await this.fail(item, 'analysing', 'research-busy')
+        await this.#fail(item, 'analysing', 'research-busy')
         return
       }
       if (error instanceof PermanentJobError) {
         // The catalog has given up on this formulation. Failing the item and rethrowing lets the job runner record the run as failed.
-        await this.fail(item, 'analysing', 'analysis-failed')
+        await this.#fail(item, 'analysing', 'analysis-failed')
       }
       throw error
     }
-    await this.transition(item, { from: 'analysing', change: { state: 'ready' } })
+    await this.#transition(item, { from: 'analysing', change: { state: 'ready' } })
   }
 
-  private async fail(item: ScanItem, from: ItemState, reason: ItemReason): Promise<void> {
-    await this.transition(item, { from, change: { state: 'failed', reason } })
+  async #fail(item: ScanItem, from: ItemState, reason: ItemReason): Promise<void> {
+    await this.#transition(item, { from, change: { state: 'failed', reason } })
   }
 
   /**
@@ -557,8 +559,8 @@ export class ScanService {
    * is queued again 30 seconds on, under a key of its own, so waiting uses none of the message's retries; the reaper's
    * 2 hour limit bounds it. A throw (the message cannot be queued) is left to the queue, which retries this step.
    */
-  private async waitFor(item: ScanItem, step: ScanStep): Promise<void> {
-    await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: this.now().getTime() }, { delaySeconds: WAIT_SECONDS })
+  async #waitFor(item: ScanItem, step: ScanStep): Promise<void> {
+    await this.#jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: this.#now().getTime() }, { delaySeconds: ScanService.#WAIT_SECONDS })
   }
 
   /**
@@ -573,7 +575,7 @@ export class ScanService {
    * `backPhoto` is the upload this move records for the daily quotas, written with the update. It is not undone: the
    * photo was stored and sent, and the quota counts what was sent.
    */
-  private async transition(
+  async #transition(
     item: ScanItem,
     { from, change, next, undo = {}, backPhoto }: {
       from: ItemState
@@ -584,20 +586,20 @@ export class ScanService {
     },
   ): Promise<boolean> {
     // One reading of the clock for both: the reaper repeats the step with the stored updatedAt, which must be this very key.
-    const at = this.now()
-    const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto)
+    const at = this.#now()
+    const applied = await this.#repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto)
     if (!applied) return false
     if (next) {
       try {
-        await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: next, at: at.getTime() })
+        await this.#jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: next, at: at.getTime() })
       } catch (error) {
-        await this.repository
-          .updateItem(item.id, change.state, { reason: item.reason, ...undo, state: from, updatedAt: this.now() })
+        await this.#repository
+          .updateItem(item.id, change.state, { reason: item.reason, ...undo, state: from, updatedAt: this.#now() })
           .catch(() => console.error({ outcome: 'undo-failed', scanId: item.scanId, itemId: item.id }))
         throw error
       }
     }
-    await this.publish(item.scanId, item.id)
+    await this.#publish(item.scanId, item.id)
     return true
   }
 
@@ -606,46 +608,46 @@ export class ScanService {
    * guarded update sets the scan's done time sends it, so two items finishing together cannot both. A failure is logged,
    * never thrown: the change is already stored.
    */
-  private async publish(scanId: string, itemId: string): Promise<void> {
+  async #publish(scanId: string, itemId: string): Promise<void> {
     try {
-      const items = await this.repository.itemsOf(scanId)
+      const items = await this.#repository.itemsOf(scanId)
       const item = items.find((i) => i.id === itemId)
       if (!item) return
-      await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now()) })
-      if (isFinal(item.state) && items.every((i) => isFinal(i.state)) && (await this.repository.markScanDone(scanId, this.now()))) {
-        await this.events.publish(scanId, { type: 'done' })
+      await this.#events.publish(scanId, { type: 'item', item: await this.#itemView(item, this.#now()) })
+      if (ScanService.#isFinal(item.state) && items.every((i) => ScanService.#isFinal(i.state)) && (await this.#repository.markScanDone(scanId, this.#now()))) {
+        await this.#events.publish(scanId, { type: 'done' })
       }
     } catch {
       console.error({ outcome: 'publish-failed', scanId, itemId })
     }
   }
 
-  private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
+  async #ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
     const { userId } = requireUser()
-    const item = await this.repository.findItem(itemId)
-    if (!item || item.scanId !== scanId || item.userId !== userId) throw scanNotFound()
+    const item = await this.#repository.findItem(itemId)
+    if (!item || item.scanId !== scanId || item.userId !== userId) throw ScanService.#scanNotFound()
     return item
   }
 
-  private async itemViewOf(itemId: string): Promise<ScanItemView> {
-    const item = await this.repository.findItem(itemId)
-    if (!item) throw scanNotFound()
-    return this.itemView(item, this.now())
+  async #itemViewOf(itemId: string): Promise<ScanItemView> {
+    const item = await this.#repository.findItem(itemId)
+    if (!item) throw ScanService.#scanNotFound()
+    return this.#itemView(item, this.#now())
   }
 
-  private async scanView(scan: Pick<Scan, 'id' | 'createdAt'>, items: ScanItem[], now: Date): Promise<ScanView> {
-    return { id: scan.id, createdAt: scan.createdAt, items: await Promise.all(items.map((item) => this.itemView(item, now))) }
+  async #scanView(scan: Pick<Scan, 'id' | 'createdAt'>, items: ScanItem[], now: Date): Promise<ScanView> {
+    return { id: scan.id, createdAt: scan.createdAt, items: await Promise.all(items.map((item) => this.#itemView(item, now))) }
   }
 
-  private async itemView(item: ScanItem, now: Date): Promise<ScanItemView> {
-    const product = item.state === 'ready' && item.formulationId !== null ? await this.catalog.productView(item.formulationId) : undefined
+  async #itemView(item: ScanItem, now: Date): Promise<ScanItemView> {
+    const product = item.state === 'ready' && item.formulationId !== null ? await this.#catalog.productView(item.formulationId) : undefined
     const stock = product?.product.imageUrl ?? null
     let image: ScanItemView['image'] = null
     if (stock !== null) {
       image = { kind: 'stock', url: stock }
     } else if (item.photoKey !== null) {
       const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
-      const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.photoLinkSecret, now)
+      const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
       image = { kind: 'user', url: `/scans/photos/${token}` }
     }
     return {
@@ -662,51 +664,51 @@ export class ScanService {
   }
 
   /** Decides the type from the bytes, never from what the caller claims: only JPEG and WebP, within the size and edge limits. */
-  private checkPhoto(photo: ProductImage): ValidPhoto {
-    if (photo.bytes.length > this.policy.maxPhotoBytes) {
-      throw new ValidationError('IMAGE_TOO_LARGE', `A photo is at most ${this.policy.maxPhotoBytes} bytes`)
+  #checkPhoto(photo: ProductImage): ValidPhoto {
+    if (photo.bytes.length > this.#policy.maxPhotoBytes) {
+      throw new ValidationError('IMAGE_TOO_LARGE', `A photo is at most ${this.#policy.maxPhotoBytes} bytes`)
     }
     const header = readImageHeader(photo.bytes)
     if (!header || header.mediaType === 'image/png') {
       throw new ValidationError('UNSUPPORTED_IMAGE', 'Photos must be JPEG or WebP')
     }
-    if (Math.max(header.width, header.height) > this.policy.maxPhotoEdge) {
-      throw new ValidationError('IMAGE_TOO_LARGE', `A photo is at most ${this.policy.maxPhotoEdge} pixels on its longest side`)
+    if (Math.max(header.width, header.height) > this.#policy.maxPhotoEdge) {
+      throw new ValidationError('IMAGE_TOO_LARGE', `A photo is at most ${this.#policy.maxPhotoEdge} pixels on its longest side`)
     }
     return { image: { bytes: photo.bytes, mediaType: header.mediaType }, extension: header.mediaType === 'image/webp' ? 'webp' : 'jpg' }
   }
 
-  private cleanText(text: string, field: 'brand' | 'name' | 'variant', required: boolean): string {
+  #cleanText(text: string, field: 'brand' | 'name' | 'variant', required: boolean): string {
     const trimmed = text.trim()
-    if ((required && trimmed === '') || trimmed.length > MAX_TEXT_LENGTH || hasLinkOrMarkup(trimmed) || HIDDEN_CHARACTER.test(trimmed)) {
+    if ((required && trimmed === '') || trimmed.length > ScanService.#MAX_TEXT_LENGTH || hasLinkOrMarkup(trimmed) || ScanService.#HIDDEN_CHARACTER.test(trimmed)) {
       throw new ValidationError('INVALID_PRODUCT_TEXT', `The ${field} is not valid`, { field })
     }
     return trimmed
   }
 
-  private photoKey(userId: string, scanId: string, itemId: string, extension: string): string {
-    return `photos/${this.environment}/${userId}/${scanId}/${itemId}.${extension}`
+  #photoKey(userId: string, scanId: string, itemId: string, extension: string): string {
+    return `photos/${this.#environment}/${userId}/${scanId}/${itemId}.${extension}`
   }
 
   /** HMAC-SHA-256 of the address under a key derived from ipHashSecret. The raw address is never stored or logged. */
-  private async hashIp(ip: string): Promise<string> {
-    return hmacSha256Hex(await hmacSha256Hex(this.ipHashSecret, IP_HASH_INFO), ip)
+  async #hashIp(ip: string): Promise<string> {
+    return hmacSha256Hex(await hmacSha256Hex(this.#ipHashSecret, ScanService.#IP_HASH_INFO), ip)
   }
 
   /**
    * Refuses when `adding` more photos would pass the user's or the address's quota over the last 24 hours (a photo taken
    * exactly 24 hours ago still counts). The wait is until the oldest counted photo leaves the window.
    */
-  private async assertWithinQuota(userId: string, ipHash: string, adding: number, now: Date): Promise<void> {
-    const since = new Date(now.getTime() - DAY)
-    const [mine, theirs] = await Promise.all([this.repository.photosSince(userId, since), this.repository.photosSinceIp(ipHash, since)])
+  async #assertWithinQuota(userId: string, ipHash: string, adding: number, now: Date): Promise<void> {
+    const since = new Date(now.getTime() - ScanService.#DAY)
+    const [mine, theirs] = await Promise.all([this.#repository.photosSince(userId, since), this.#repository.photosSinceIp(ipHash, since)])
     const waits: number[] = []
     for (const [taken, limit] of [
-      [mine, this.policy.dailyPhotosPerUser],
-      [theirs, this.policy.dailyPhotosPerIp],
+      [mine, this.#policy.dailyPhotosPerUser],
+      [theirs, this.#policy.dailyPhotosPerIp],
     ] as const) {
       if (taken.count + adding <= limit) continue
-      waits.push(taken.oldest ? Math.max(1, Math.ceil((taken.oldest.getTime() + DAY - now.getTime()) / 1000)) : 60)
+      waits.push(taken.oldest ? Math.max(1, Math.ceil((taken.oldest.getTime() + ScanService.#DAY - now.getTime()) / 1000)) : 60)
     }
     if (waits.length > 0) {
       throw new RateLimitedError('SCAN_DAILY_LIMIT', 'You have reached the daily limit for product photos', { retryAfterSeconds: Math.max(...waits) })

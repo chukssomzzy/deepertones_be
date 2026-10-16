@@ -1,10 +1,9 @@
-import { vi } from 'vitest'
 import type { AiJob } from './ai-spend.provider'
 
 /*
  * Test support for everything that talks to the Claude Messages API through fetch: realistic
  * response bodies (shapes from platform.claude.com/docs/en/api/errors and the web search tool
- * docs) and a fetch stub that records requests. No secrets, no network.
+ * docs) and a fetch function that records requests. No secrets, no network.
  */
 
 export const API_KEY = 'sk-ant-test-super-secret-key'
@@ -122,12 +121,13 @@ export const errorResponse = (
 export type Call = { url: string; init: RequestInit; headers: Headers; body: any }
 
 /**
- * Stubs global fetch. Each request gets the next responder; the last responder repeats once the list
- * runs out. Responders are factories because a Response body can be read only once.
+ * A fetch function to inject into AnthropicClient (nothing global is stubbed). Each request gets the
+ * next responder; the last responder repeats once the list runs out. Responders are factories
+ * because a Response body can be read only once. `calls` records every request the client sent.
  */
 export const stubFetch = (...responders: (() => Response | Promise<Response>)[]) => {
   const calls: Call[] = []
-  const stub = async (input: RequestInfo | URL, init?: RequestInit) => {
+  const fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
     const requestInit = init ?? {}
     calls.push({
       url: String(input),
@@ -138,8 +138,18 @@ export const stubFetch = (...responders: (() => Response | Promise<Response>)[])
     const responder = responders[Math.min(calls.length, responders.length) - 1]!
     return responder()
   }
-  vi.stubGlobal('fetch', stub)
-  return calls
+  return { calls, fetch }
+}
+
+/** A fetch that never answers; it rejects with an AbortError only when the request's signal aborts. */
+export const hangingFetch = () => {
+  const state: { signal: AbortSignal | null | undefined } = { signal: undefined }
+  const fetch = (_input: RequestInfo | URL, init?: RequestInit) =>
+    new Promise<Response>((_resolve, reject) => {
+      state.signal = init?.signal
+      init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+    })
+  return { state, fetch }
 }
 
 /** Rejects with the error the promise rejected with; fails if it resolved. */
