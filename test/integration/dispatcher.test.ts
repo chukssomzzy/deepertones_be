@@ -334,7 +334,8 @@ describe('queue handler: dead-letter queue', () => {
     await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }])
 
     expect(deadLettered).toEqual([{ id }])
-    expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered: meta down' })
+    // The last retry's error is kept, as recorded: only its name, never its message (see describeError).
+    expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered: Error' })
   })
 
   it('keeps the last retry error in D1 but never writes it to the dead-letter log line', async () => {

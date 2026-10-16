@@ -128,7 +128,7 @@ const codeFor = async (): Promise<string> => {
   await worker.queue!(batch, WORKER_ENV, ctx)
   expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual(['m'])
   vi.unstubAllGlobals()
-  const code = /\b(\d{4})\b/.exec(sent[0]!.textbody)?.[1]
+  const code = /\b(\d{6})\b/.exec(sent[0]!.textbody)?.[1]
   if (!code) throw new Error('no code in the email')
   return code
 }
