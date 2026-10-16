@@ -4,11 +4,11 @@ import type { OtpDelivery } from './otp-delivery.provider'
 /** Records what would have been sent. For tests. */
 export class MemoryOtpDelivery implements OtpDelivery {
   readonly sent: { to: PhoneNumber; code: string }[] = []
-  #failure: Error | undefined
+  private failure: Error | undefined
 
   /** The next send() rejects with `error` and records nothing. */
   failNextWith(error: Error) {
-    this.#failure = error
+    this.failure = error
   }
 
   lastCodeFor(to: PhoneNumber): string | undefined {
@@ -16,9 +16,9 @@ export class MemoryOtpDelivery implements OtpDelivery {
   }
 
   async send(to: PhoneNumber, code: string): Promise<void> {
-    if (this.#failure) {
-      const failure = this.#failure
-      this.#failure = undefined
+    if (this.failure) {
+      const failure = this.failure
+      this.failure = undefined
       throw failure
     }
     this.sent.push({ to, code })
