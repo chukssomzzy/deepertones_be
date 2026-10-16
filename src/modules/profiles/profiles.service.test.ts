@@ -1,5 +1,4 @@
-import { describe, expect, it } from 'vitest'
-import { NotFoundError } from '../../lib/errors'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { FakeProfilesRepository } from './profiles.repository.fake'
 import { ProfilesService } from './profiles.service'
 import type { Profile } from './profiles.types'
@@ -27,6 +26,10 @@ const errorOf = async (promise: Promise<unknown>) => {
   throw new Error('expected the promise to reject')
 }
 
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
 /** Ada has a default and a second profile; Bo has just a default. */
 const setup = async () => {
   const repository = new FakeProfilesRepository()
@@ -34,7 +37,9 @@ const setup = async () => {
   const adaSecond = profile('p-ada-2', 'u-ada', { displayName: 'Ada Jr', createdAt: at(MINUTE) })
   const boDefault = profile('p-bo', 'u-bo', { isDefault: true })
   for (const p of [adaSecond, boDefault, adaDefault]) await repository.insert(p)
-  return { service: new ProfilesService({ repository }), adaDefault, adaSecond, boDefault }
+  let n = 0
+  const service = new ProfilesService({ repository, newId: () => `p-new-${++n}`, now: () => at(5 * MINUTE) })
+  return { service, repository, adaDefault, adaSecond, boDefault }
 }
 
 describe('ProfilesService.defaultFor', () => {
@@ -44,13 +49,53 @@ describe('ProfilesService.defaultFor', () => {
     expect(await service.defaultFor('u-ada')).toEqual(adaDefault)
   })
 
-  it('answers PROFILE_NOT_FOUND, as a NotFoundError, for a user with no profile', async () => {
+  it('creates the missing default for a user with no profile, and returns it', async () => {
+    const { service, repository } = await setup()
+
+    const created = await service.defaultFor('u-nobody')
+
+    expect(created).toEqual({ id: 'p-new-1', userId: 'u-nobody', displayName: null, isDefault: true, createdAt: at(5 * MINUTE) })
+    expect(await repository.defaultFor('u-nobody')).toEqual(created)
+  })
+
+  it('creates it once: the next call returns the same profile', async () => {
+    const { service, repository } = await setup()
+
+    const first = await service.defaultFor('u-nobody')
+    const second = await service.defaultFor('u-nobody')
+
+    expect(second).toEqual(first)
+    expect(await repository.ofUser('u-nobody')).toHaveLength(1)
+  })
+
+  it('logs the creation once, with ids only, and logs nothing for a default that exists', async () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const { service } = await setup()
 
-    const error = await errorOf(service.defaultFor('u-nobody'))
+    await service.defaultFor('u-ada')
+    expect(logged).not.toHaveBeenCalled()
+    await service.defaultFor('u-nobody')
+    await service.defaultFor('u-nobody')
 
-    expect(error).toBeInstanceOf(NotFoundError)
-    expect(error.code).toBe('PROFILE_NOT_FOUND')
+    expect(logged.mock.calls).toEqual([[{ outcome: 'default-profile-created', userId: 'u-nobody' }]])
+  })
+
+  it('answers one profile to two simultaneous calls: the loser of the unique index reads the winner', async () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const { service, repository } = await setup()
+
+    const [a, b] = await Promise.all([service.defaultFor('u-nobody'), service.defaultFor('u-nobody')])
+
+    expect(a.id).toBe(b.id)
+    expect(await repository.ofUser('u-nobody')).toEqual([a])
+    expect(logged).toHaveBeenCalledTimes(1)
+  })
+
+  it('lets the error surface when the profile cannot be stored and none exists (an unknown user, in D1)', async () => {
+    const { service, repository } = await setup()
+    vi.spyOn(repository, 'insert').mockRejectedValue(new Error('FOREIGN KEY constraint failed'))
+
+    await expect(service.defaultFor('u-nobody')).rejects.toThrow('FOREIGN KEY constraint failed')
   })
 })
 

@@ -20,6 +20,7 @@ import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
 import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
 import { FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
+import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-specs'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
 import { toScanResponse } from './scans.presenter'
@@ -2844,6 +2845,80 @@ describe('ScanService.reap: how far back it repairs a done', () => {
 
     expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
     expect(ctx.events.eventsFor(scanId)).toHaveLength(sent)
+  })
+})
+
+describe('ScanService.reap: scans the old Worker left without a profile', () => {
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+
+  /** A repository that reads defaults from `profiles`, and one scan with no profile, as the old Worker wrote it during the rollout window. */
+  const withOrphan = async (owner = USER) => {
+    const profiles = new FakeProfilesRepository()
+    const ctx = setup({ repository: new FakeScansRepository({ profiles }) })
+    const scanId = 'orphan-scan'
+    await ctx.repository.createScan({ id: scanId, userId: owner, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
+      { id: 'orphan-item', scanId, userId: owner, position: 0, photoKey: 'photos/test/orphan.jpg', createdAt: ctx.now() },
+    ])
+    return { ctx, profiles, scanId }
+  }
+  const giveDefault = (profiles: FakeProfilesRepository, userId = USER) =>
+    profiles.insert({ id: PROFILE, userId, displayName: null, isDefault: true, createdAt: T0 })
+
+  it('gives such a scan its owner\'s default profile, and says how many in the log', async () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const { ctx, profiles, scanId } = await withOrphan()
+    await giveDefault(profiles)
+
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scanId))!.profileId).toBe(PROFILE)
+    expect(logged).toHaveBeenCalledWith({ outcome: 'orphan-scans-adopted', count: 1 })
+    logged.mockRestore()
+  })
+
+  it('leaves it as it is while the owner has no default profile, without logging', async () => {
+    const logged = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const { ctx, scanId } = await withOrphan()
+
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scanId))!.profileId).toBeNull()
+    expect(logged).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: 'orphan-scans-adopted' }))
+    logged.mockRestore()
+  })
+
+  it('adopts it on a later sweep, once the owner has a default profile', async () => {
+    const { ctx, profiles, scanId } = await withOrphan()
+    await reap(ctx)
+
+    await giveDefault(profiles)
+    await reap(ctx)
+
+    expect((await ctx.repository.findScan(scanId))!.profileId).toBe(PROFILE)
+  })
+
+  it('asks for at most 500 scans a sweep', async () => {
+    const { ctx } = await withOrphan()
+    const adopt = vi.spyOn(ctx.repository, 'adoptOrphanScans')
+
+    await reap(ctx)
+
+    expect(adopt).toHaveBeenCalledWith(500)
+  })
+
+  it('logs a failure without ids and goes on with the rest of the sweep, whose answer is unchanged', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const ctx = setup()
+    await scanOne(ctx)
+    ctx.advance(15 * MINUTE + 1)
+    vi.spyOn(ctx.repository, 'adoptOrphanScans').mockRejectedValue(new Error('D1 is down'))
+    const before = ctx.jobs.enqueued.length
+
+    await expect(reap(ctx)).resolves.toEqual({ requeued: 1, failed: 0 })
+
+    expect(ctx.jobs.enqueued).toHaveLength(before + 1)
+    expect(logged).toHaveBeenCalledWith({ outcome: 'orphan-adopt-failed', error: 'Error' })
+    logged.mockRestore()
   })
 })
 

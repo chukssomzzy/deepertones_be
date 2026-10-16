@@ -340,7 +340,7 @@ It is identity only: later features (skin analysis, goals) keep their own tables
   inside it. Anything about a person belongs to a profile; sign-in, token version and quotas belong to the account.
 - **The default is created with the user.** `createGuestForDevice`, the only place a user row is written, also writes the
   default profile (`is_default`, no name, `created_at` = the user's) in the same `db.batch` (user, profile, device), so a
-  user never exists without one and a profile id that is taken rolls everything back. A partial unique index on `(user_id)
+  user never exists without one (but see "Rollout") and a profile id that is taken rolls everything back. A partial unique index on `(user_id)
   WHERE is_default = 1` keeps it to one default per user. Profiles go with their user (cascade), so guest cleanup needs no
   cleaner of its own. Migration 0011 backfilled one default per existing user.
 - **The `pid` claim.** Both tokens carry the active profile's id, and the auth middleware puts it in the actor
@@ -358,6 +358,26 @@ It is identity only: later features (skin analysis, goals) keep their own tables
   read the scan, its items, its photo links (minted only inside an owned view) and its event stream; anyone else gets the
   404 `SCAN_NOT_FOUND` another user would get. A link already minted works until it expires (5 minutes).
 - **Quotas stay per account.** The daily photo quotas count by `user_id` (and by IP), so extra profiles cannot multiply AI spend.
+- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
+  show.
+- **Rollout.** Deploys apply migrations (0011 profiles, 0012 `scans.profile_id`) before the new Worker goes live, and if a
+  deploy fails after migrating the window lasts until one succeeds. In it the OLD Worker still creates users with no profile
+  and scans with `profile_id` NULL, and the backfills have already run. The new code takes both over:
+  - **Self-healing default.** `ProfilesService.defaultFor` creates the default (new id, no name, `is_default`, `created_at` =
+    now) when the user has none, and logs `{ outcome: 'default-profile-created', userId }`. So bootstrap, refresh and signing in
+    to a profile-less account work and make the profile on the spot. Two simultaneous callers race on the partial unique
+    index; the loser reads the winner's profile. For a user that does not exist the foreign key refuses the insert and that
+    error surfaces (the auth paths read the user first).
+  - **Orphan scans.** The 10-minute reaper (`ScanService.reap`) first runs `ScansRepository.adoptOrphanScans(500)`: one UPDATE
+    that gives each scan with `profile_id IS NULL` (read through `(profile_id, created_at)`, oldest first) the default profile
+    of its owner, and logs `{ outcome: 'orphan-scans-adopted', count }` when it changed any. A scan whose owner has no
+    default is not a candidate, so it does not use up the 500; it stays NULL, and so unreadable, until a later sweep after the
+    owner's next session has made the default. A failure is logged `{ outcome: 'orphan-adopt-failed' }` and the rest of the
+    sweep runs. The repository reads `profiles`, another module's table, because no service call can say which scans these are.
+  - **Tokens without `pid`.** Tokens the old Worker issued carry no `pid`: the access token is `expired` and the refresh token
+    is accepted, so one refresh upgrades the session (see "Transition rule"). Nobody is signed out.
+  - **`GET /me` changed shape**: the user's fields moved under `user`, next to `profile` and `profiles`. The app ships with
+    the change, so an app build from before it misreads `/me` from this deploy on; release them together.
 - **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
   show.
 
@@ -1011,7 +1031,7 @@ comes in a later PR.
   matters to a connected client, a connection lasts 10 minutes at most, and `watch` sends `done` to any client that connects
   later. If the publish throws after the time was set, the time is cleared again (`clearScanDone`, which applies only while
   the time is still the one this call set), so the next sweep tries again. A failure there is logged
-  `{ outcome: 'reap-done-failed', scanId }`. `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
+  `{ outcome: 'reap-done-failed', scanId }`. Each sweep also gives the scans that have no profile their owner's default (`adoptOrphanScans`, see "Profiles" → Rollout). `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
   `*/10 * * * *` (reaper); `scheduled` is `createScheduledRouter` (`src/jobs/scheduled.ts`), which runs the job of
   `controller.cron` and, for any other, logs `unknown-cron` and throws, so Cloudflare records the run as failed (a cron in `wrangler.jsonc` this file does not know is a config mistake) and the nightly cleanup does not run every 10 minutes. The reaper
   reads no request context, so it runs without `runAs`; the cleanup handler it routes to stays in `dispatcher.ts` with its `runAs`.

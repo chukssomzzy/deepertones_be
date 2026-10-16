@@ -4,6 +4,7 @@ import { hmacSha256Hex } from '../../lib/crypto'
 import { ConflictError, NotFoundError, RateLimitedError, ValidationError } from '../../lib/errors'
 import { readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
+import { describeUnexpectedError } from '../../lib/safe-error'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { AnthropicRefusalError, AnthropicRequestError } from '../../providers/anthropic/anthropic.provider'
@@ -113,6 +114,8 @@ export class ScanService {
   private static readonly DONE_SETTLED_AFTER_MS = 5 * ScanService.MINUTE
   /** One sweep looks at this many items at most, oldest first, which keeps its calls well inside a Worker's limit. */
   private static readonly REAP_BATCH = 100
+  /** One sweep gives a profile to this many scans that have none, oldest first. */
+  private static readonly ADOPT_BATCH = 500
   /** How long a step waits before it asks again whether work another call is doing has finished. */
   private static readonly WAIT_SECONDS = 30
 
@@ -374,9 +377,12 @@ export class ScanService {
    * user is never touched. A failure on one item is logged by id and does not stop the sweep. The sweep also sends the `done` of
    * a scan, created within `doneRepairWindowMs`, whose items have all been final for over 5 minutes without one.
    *
+   * The sweep first gives the scans that have no profile their owner's default (see `adoptOrphanScans`).
+   *
    * `now` is passed in so the cutoffs are fixed for the whole sweep; the changes it makes are stamped by the service's clock.
    */
   async reap(now: Date): Promise<{ requeued: number; failed: number }> {
+    await this.adoptOrphanScans()
     const stale = await this.repository.staleItems(ScanService.WORKING_STATES, new Date(now.getTime() - ScanService.STUCK_AFTER_MS), ScanService.REAP_BATCH)
     let requeued = 0
     let failed = 0
@@ -396,6 +402,21 @@ export class ScanService {
     }
     await this.sendMissingDone(now)
     return { requeued, failed }
+  }
+
+  /**
+   * Scans written without a profile (by the old Worker, between the profiles migrations and the new Worker going live) can
+   * be read by nobody: `ownedScan` needs the actor's profile. This gives each its owner's default; a scan whose owner has
+   * none yet waits for a later sweep, after the owner's next session makes one. A failure is logged and never stops the rest
+   * of the sweep.
+   */
+  private async adoptOrphanScans(): Promise<void> {
+    try {
+      const count = await this.repository.adoptOrphanScans(ScanService.ADOPT_BATCH)
+      if (count > 0) console.log({ outcome: 'orphan-scans-adopted', count })
+    } catch (error) {
+      console.error({ outcome: 'orphan-adopt-failed', error: describeUnexpectedError(error) })
+    }
   }
 
   /**

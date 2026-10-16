@@ -29,7 +29,7 @@ export class D1ProfilesRepository {
       .orderBy(desc(profiles.isDefault), asc(profiles.createdAt))
   }
 
-  /** Rejects an id that is taken, and a second default for the same user. The default of a new guest is written by the users repository instead, in the guest's own batch. */
+  /** Rejects an id that is taken, and a second default for the same user. The default of a new guest is written by the users repository instead, in the guest's own batch; this writes one for a user who has none (see ProfilesService.defaultFor). */
   async insert(profile: Profile): Promise<void> {
     await this.db.insert(profiles).values(profile)
   }

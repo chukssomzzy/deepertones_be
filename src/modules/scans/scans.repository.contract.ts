@@ -14,8 +14,17 @@ let counter = 0
 const fresh = (label: string) => `${label}-${runSalt}-${counter++}`
 const freshId = () => crypto.randomUUID()
 
-/** What a contract run needs: the repository, and a way to get a user id that exists (D1 enforces scans.user_id -> users.id). */
-export type ScansContractSetup = { repository: ScansRepository; newUser: () => Promise<string> }
+/**
+ * What a contract run needs: the repository, and a way to get a user id that exists (D1 enforces scans.user_id -> users.id).
+ * For adoptOrphanScans, which reads the owner's default profile: a user the way the old Worker left one, with no profile,
+ * and a way to give any user a default profile afterwards.
+ */
+export type ScansContractSetup = {
+  repository: ScansRepository
+  newUser: () => Promise<string>
+  newUserWithoutProfile: () => Promise<string>
+  giveDefaultProfile: (userId: string) => Promise<string>
+}
 
 // scans.profile_id has no foreign key (profiles die with their user, and the user's scans with it), so any id will do.
 const newScan = (userId: string, over: Partial<NewScan> = {}): NewScan => ({ id: freshId(), userId, profileId: freshId(), ipHash: fresh('iphash'), createdAt: BASE, ...over })
@@ -38,6 +47,9 @@ const newItem = (scan: NewScan, position: number, over: Partial<NewScanItem> = {
   createdAt: scan.createdAt,
   ...over,
 })
+
+/** The row the old Worker wrote while migrations 0011 and 0012 had run and the new Worker had not gone live: no profile. */
+const orphan = (userId: string, over: Partial<NewScan> = {}): NewScan => newScan(userId, { profileId: null as unknown as string, ...over })
 
 /**
  * Behaviour every ScansRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier).
@@ -588,6 +600,140 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         await repository.clearScanDone(scan.id, at(MINUTE))
 
         expect((await repository.findScan(other.id))!.doneAt!.getTime()).toBe(at(MINUTE).getTime())
+      })
+    })
+
+    describe('adoptOrphanScans', () => {
+      it('sets the owner\'s default profile on a scan that has none, and says how many it adopted', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        const profileId = await giveDefaultProfile(userId)
+        const scan = orphan(userId)
+        await repository.createScan(scan, [newItem(scan, 0)])
+        expect((await repository.findScan(scan.id))!.profileId).toBeNull()
+
+        const adopted = await repository.adoptOrphanScans(10)
+
+        expect(adopted).toBe(1)
+        expect((await repository.findScan(scan.id))!.profileId).toBe(profileId)
+      })
+
+      it('gives each scan its own owner\'s default, and leaves the rest of the scan as it was', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const ada = await newUserWithoutProfile()
+        const bo = await newUserWithoutProfile()
+        const adaProfile = await giveDefaultProfile(ada)
+        const boProfile = await giveDefaultProfile(bo)
+        const adaScan = orphan(ada, { createdAt: at(MINUTE) })
+        const boScan = orphan(bo)
+        await repository.createScan(adaScan, [newItem(adaScan, 0)])
+        await repository.createScan(boScan, [newItem(boScan, 0)])
+        await repository.markScanDone(adaScan.id, at(2 * MINUTE))
+
+        await repository.adoptOrphanScans(10)
+
+        expect(await repository.findScan(adaScan.id)).toEqual({ ...adaScan, profileId: adaProfile, doneAt: at(2 * MINUTE) })
+        expect(await repository.findScan(boScan.id)).toEqual({ ...boScan, profileId: boProfile, doneAt: null })
+        expect(await repository.itemsOf(adaScan.id)).toHaveLength(1)
+      })
+
+      it('adopts to the default, not to another profile of the owner', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        const profileId = await giveDefaultProfile(userId)
+        const scan = orphan(userId)
+        await repository.createScan(scan, [newItem(scan, 0)])
+
+        await repository.adoptOrphanScans(10)
+
+        expect((await repository.findScan(scan.id))!.profileId).toBe(profileId)
+      })
+
+      it('leaves a scan whose owner has no default profile without one, and does not count it', async () => {
+        const { repository, newUserWithoutProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        const scan = orphan(userId)
+        await repository.createScan(scan, [newItem(scan, 0)])
+
+        expect(await repository.adoptOrphanScans(10)).toBe(0)
+
+        expect((await repository.findScan(scan.id))!.profileId).toBeNull()
+      })
+
+      it('adopts it on a later call, once its owner has a default profile', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        const scan = orphan(userId)
+        await repository.createScan(scan, [newItem(scan, 0)])
+        await repository.adoptOrphanScans(10)
+
+        const profileId = await giveDefaultProfile(userId)
+        await repository.adoptOrphanScans(10)
+
+        expect((await repository.findScan(scan.id))!.profileId).toBe(profileId)
+      })
+
+      it('never changes a scan that already has a profile, whatever the owner\'s default is', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        await giveDefaultProfile(userId)
+        const scan = newScan(userId, { profileId: 'some-other-profile' })
+        await repository.createScan(scan, [newItem(scan, 0)])
+
+        await repository.adoptOrphanScans(10)
+
+        expect((await repository.findScan(scan.id))!.profileId).toBe('some-other-profile')
+      })
+
+      it('adopts at most `limit` scans, oldest first, and the next call takes the rest', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        const profileId = await giveDefaultProfile(userId)
+        const scans = [orphan(userId, { createdAt: at(2 * MINUTE) }), orphan(userId, { createdAt: at(0) }), orphan(userId, { createdAt: at(MINUTE) })]
+        for (const scan of scans) await repository.createScan(scan, [newItem(scan, 0)])
+        const profileOf = async (scan: NewScan) => (await repository.findScan(scan.id))!.profileId
+
+        expect(await repository.adoptOrphanScans(1)).toBe(1)
+        expect(await Promise.all(scans.map(profileOf))).toEqual([null, profileId, null])
+
+        expect(await repository.adoptOrphanScans(1)).toBe(1)
+        expect(await Promise.all(scans.map(profileOf))).toEqual([null, profileId, profileId])
+
+        expect(await repository.adoptOrphanScans(1)).toBe(1)
+        expect(await repository.adoptOrphanScans(1)).toBe(0)
+        expect(await Promise.all(scans.map(profileOf))).toEqual([profileId, profileId, profileId])
+      })
+
+      it('counts only what it adopted: scans that cannot be adopted do not use up the limit', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const homeless = await newUserWithoutProfile()
+        const settled = await newUserWithoutProfile()
+        const profileId = await giveDefaultProfile(settled)
+        // The homeless user's scans are older, so a limit applied before the owner check would be spent on them.
+        for (let i = 0; i < 3; i++) {
+          const scan = orphan(homeless, { createdAt: at(-HOUR - i * MINUTE) })
+          await repository.createScan(scan, [newItem(scan, 0)])
+        }
+        const wanted = orphan(settled, { createdAt: at(HOUR) })
+        await repository.createScan(wanted, [newItem(wanted, 0)])
+
+        expect(await repository.adoptOrphanScans(1)).toBe(1)
+
+        expect((await repository.findScan(wanted.id))!.profileId).toBe(profileId)
+      })
+
+      it('says 0 and changes nothing when there is nothing to adopt', async () => {
+        const { repository, newUserWithoutProfile, giveDefaultProfile } = await make()
+        const userId = await newUserWithoutProfile()
+        await giveDefaultProfile(userId)
+        const scan = newScan(userId)
+        await repository.createScan(scan, [newItem(scan, 0)])
+        await repository.adoptOrphanScans(1000)
+
+        const again = await repository.adoptOrphanScans(1000)
+
+        expect(again).toBe(0)
+        expect((await repository.findScan(scan.id))!.profileId).toBe(scan.profileId)
       })
     })
 
