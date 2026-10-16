@@ -334,7 +334,21 @@ describe('queue handler: dead-letter queue', () => {
     await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }])
 
     expect(deadLettered).toEqual([{ id }])
-    expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered' })
+    expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered: meta down' })
+  })
+
+  it('keeps the last retry error in D1 but never writes it to the dead-letter log line', async () => {
+    const id = freshId()
+    behaviour.set(id, async () => {
+      throw new Error('meta down')
+    })
+    await dispatch(MAIN, [{ id: 'first', body: { id } }])
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }])
+
+    expect(log).toHaveBeenCalledWith({ job: 'test-job', key: id, attempt: 5, outcome: 'dead-lettered' })
+    expect(JSON.stringify(log.mock.calls)).not.toContain('meta down')
   })
 })
 

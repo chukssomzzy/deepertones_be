@@ -157,7 +157,8 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   claimed within its lease (`dead-letter-in-progress`, e.g. a duplicate of an item another delivery is
   working on), both with no hook and no write. Otherwise
   `onDeadLetter` updates domain state (e.g. marks a challenge failed), then the run is recorded as
-  failed (`dead-lettered`).
+  failed with `last_error` = `dead-lettered: <last retry's error>` (just `dead-lettered` if no
+  attempt recorded one), so the cause survives.
 - **Bookkeeping failures** (D1 down, a hook that throws) are logged as `dispatcher-error` and the
   message is retried with backoff; they do not lose it. The purge failing is logged only.
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body, { delaySeconds? })`, typed by the job's

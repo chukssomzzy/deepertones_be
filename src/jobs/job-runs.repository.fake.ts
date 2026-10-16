@@ -45,6 +45,17 @@ export class FakeJobRunsRepository implements JobRunsRepository {
     else this.runs.set(id, { job, key, status: 'failed', leaseUntil: null, updatedAt: at, attempts: 0, lastError: error })
   }
 
+  async markDeadLettered(job: string, key: string, at: Date): Promise<void> {
+    const id = FakeJobRunsRepository.id(job, key)
+    const run = this.runs.get(id)
+    if (run) {
+      const lastError = run.lastError === null ? 'dead-lettered' : `dead-lettered: ${run.lastError}`
+      Object.assign(run, { status: 'failed', leaseUntil: null, updatedAt: at, lastError })
+    } else {
+      this.runs.set(id, { job, key, status: 'failed', leaseUntil: null, updatedAt: at, attempts: 0, lastError: 'dead-lettered' })
+    }
+  }
+
   async release(job: string, key: string, token: number, error: string, at: Date): Promise<boolean> {
     const run = this.owned(job, key, token)
     if (!run) return false
