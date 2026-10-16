@@ -105,7 +105,10 @@ export const researchAttempts = sqliteTable(
   (t) => [index('research_attempts_attempted_at_idx').on(t.attemptedAt)],
 )
 
-/** Every analysis attempt, counted against the daily analysis cap, and the rejections that stop a formulation being retried for ever. */
+/**
+ * Every analysis attempt, counted against the daily analysis cap (a failed one is not), and the rejections that stop a
+ * formulation being retried for ever. Written as 'started' before the analyst is called and settled afterwards, like a research attempt.
+ */
 export const analysisAttempts = sqliteTable(
   'analysis_attempts',
   {
@@ -114,7 +117,7 @@ export const analysisAttempts = sqliteTable(
       .notNull()
       .references(() => formulations.id, { onDelete: 'cascade' }),
     attemptedAt: integer('attempted_at', { mode: 'timestamp_ms' }).notNull(),
-    outcome: text('outcome', { enum: ['ok', 'rejected', 'failed'] }).notNull(),
+    outcome: text('outcome', { enum: ['started', 'ok', 'rejected', 'failed'] }).notNull(),
     analysisVersion: integer('analysis_version').notNull(),
     referenceVersion: text('reference_version').notNull(),
   },

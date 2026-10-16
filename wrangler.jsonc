@@ -41,13 +41,18 @@
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
   "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
 
-  // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+  // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
   //   npx wrangler queues create deepertones-otp-delivery-development
   //   npx wrangler queues create deepertones-otp-delivery-dlq-development
+  //   npx wrangler queues create deepertones-scan-items-development
+  //   npx wrangler queues create deepertones-scan-items-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
-    "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" }],
+    "producers": [
+      { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" },
+      { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-development" }
+    ],
     "consumers": [
       {
         "queue": "deepertones-otp-delivery-development",
@@ -58,7 +63,17 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-otp-delivery-dlq-development"
       },
-      { "queue": "deepertones-otp-delivery-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-otp-delivery-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-scan-items-development",
+        "max_batch_size": 10,
+        // A person is watching the scan: do not hold a partial batch.
+        "max_batch_timeout": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-scan-items-dlq-development"
+      },
+      { "queue": "deepertones-scan-items-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -72,9 +87,11 @@
     { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } }
   ],
 
-  // Daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
-  // Env blocks do not inherit triggers, so each deployed environment restates it.
-  "triggers": { "crons": ["17 3 * * *"] },
+  // Two crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
+  // is a change there too. Env blocks do not inherit triggers, so each deployed environment restates both.
+  //   17 3 * * *      daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
+  //   */10 * * * *    scan reaper (ScanService.reap): queues scan steps that were lost again and fails items stuck for over 2 hours.
+  "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
 
   "observability": {
     "enabled": true
@@ -155,13 +172,18 @@
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
       "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
-      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
       //   npx wrangler queues create deepertones-otp-delivery-dlq-staging
+      //   npx wrangler queues create deepertones-scan-items-staging
+      //   npx wrangler queues create deepertones-scan-items-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
-        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" }],
+        "producers": [
+          { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" },
+          { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-staging" }
+        ],
         "consumers": [
           {
             "queue": "deepertones-otp-delivery-staging",
@@ -172,7 +194,17 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-otp-delivery-dlq-staging"
           },
-          { "queue": "deepertones-otp-delivery-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-otp-delivery-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-scan-items-staging",
+            "max_batch_size": 10,
+            // A person is watching the scan: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-scan-items-dlq-staging"
+          },
+          { "queue": "deepertones-scan-items-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -184,8 +216,8 @@
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "2005", "simple": { "limit": 30, "period": 60 } }
       ],
-      // Daily guest cleanup, 03:17 UTC (see the top level).
-      "triggers": { "crons": ["17 3 * * *"] },
+      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -241,13 +273,18 @@
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
       "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
-      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production
       //   npx wrangler queues create deepertones-otp-delivery-dlq-production
+      //   npx wrangler queues create deepertones-scan-items-production
+      //   npx wrangler queues create deepertones-scan-items-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
-        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" }],
+        "producers": [
+          { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" },
+          { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-production" }
+        ],
         "consumers": [
           {
             "queue": "deepertones-otp-delivery-production",
@@ -258,7 +295,17 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-otp-delivery-dlq-production"
           },
-          { "queue": "deepertones-otp-delivery-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-otp-delivery-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-scan-items-production",
+            "max_batch_size": 10,
+            // A person is watching the scan: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-scan-items-dlq-production"
+          },
+          { "queue": "deepertones-scan-items-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -270,8 +317,8 @@
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "3004", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "3005", "simple": { "limit": 30, "period": 60 } }
       ],
-      // Daily guest cleanup, 03:17 UTC (see the top level).
-      "triggers": { "crons": ["17 3 * * *"] },
+      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
       "d1_databases": [
         {
           "binding": "DB",

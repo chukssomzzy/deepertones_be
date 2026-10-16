@@ -1,8 +1,9 @@
 import { logger } from 'hono/logger'
 import { requestId } from 'hono/request-id'
 import { secureHeaders } from 'hono/secure-headers'
-import { createQueueHandler, createScheduledHandler } from './jobs/dispatcher'
+import { createQueueHandler } from './jobs/dispatcher'
 import { jobs } from './jobs/registry'
+import { createScheduledRouter } from './jobs/scheduled'
 import { mountDocs } from './docs'
 import { errorHandler, notFoundHandler } from './lib/errors'
 import { openapiApp } from './lib/openapi'
@@ -35,5 +36,5 @@ export type AppType = typeof routes
 export default {
   fetch: app.fetch,
   queue: createQueueHandler(jobs),
-  scheduled: createScheduledHandler(),
+  scheduled: createScheduledRouter(),
 } satisfies ExportedHandler<CloudflareBindings>

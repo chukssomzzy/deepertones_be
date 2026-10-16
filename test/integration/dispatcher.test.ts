@@ -1,12 +1,14 @@
 import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DrizzleQueryError } from 'drizzle-orm/errors'
 import { z } from 'zod'
-import { createQueueHandler } from '../../src/jobs/dispatcher'
+import { createQueueHandler, createScheduledHandler } from '../../src/jobs/dispatcher'
 import { defineJob, jobSpec, PermanentJobError, queueNames } from '../../src/jobs/job'
 import { D1JobRunsRepository } from '../../src/jobs/job-runs.repository'
 import { createDb } from '../../src/lib/db'
 import { type Actor, currentActor } from '../../src/lib/context'
+import { D1UsersRepository } from '../../src/modules/users/users.repository'
 
 const NOW = new Date('2030-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -196,7 +198,7 @@ describe('queue handler: main queue', () => {
     expect(result.retryMessages).toEqual([{ msgId: 'm' }])
     expect(result.explicitAcks).toEqual([])
     const run = (await runs.get('test-job', id))!
-    expect(run).toMatchObject({ status: 'running', attempts: 1, lastError: 'meta timed out' })
+    expect(run).toMatchObject({ status: 'running', attempts: 1, lastError: 'Error' })
     expect(run.leaseUntil!.getTime()).toBeLessThanOrEqual(NOW.getTime())
   })
 
@@ -279,7 +281,7 @@ describe('queue handler: main queue', () => {
 describe('queue handler: dead-letter queue', () => {
   it('runs the dead-letter hook, marks the run failed as dead-lettered and acks without running the handler', async () => {
     const id = freshId()
-    await runs.claim('test-job', id, NOW, LEASE_MS)
+    await runs.claim('test-job', id, new Date(NOW.getTime() - LEASE_MS - SECOND), LEASE_MS)
 
     const { result } = await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }])
 
@@ -333,6 +335,113 @@ describe('queue handler: dead-letter queue', () => {
 
     expect(deadLettered).toEqual([{ id }])
     expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered' })
+  })
+})
+
+describe('queue handler: dead letter for a run being worked on', () => {
+  it('acks without the hook or a write while the run is claimed within its lease', async () => {
+    const id = freshId()
+    await runs.claim('test-job', id, NOW, LEASE_MS)
+
+    const { result } = await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }], {
+      now: () => new Date(NOW.getTime() + 30 * SECOND),
+    })
+
+    expect(deadLettered).toEqual([])
+    expect(result.explicitAcks).toEqual(['dl'])
+    expect(await runs.get('test-job', id)).toMatchObject({
+      status: 'running',
+      lastError: null,
+      leaseUntil: new Date(NOW.getTime() + LEASE_MS),
+    })
+  })
+
+  it('runs the hook once the lease has run out, because nobody is working on it any more', async () => {
+    const id = freshId()
+    await runs.claim('test-job', id, NOW, LEASE_MS)
+
+    await dispatch(DEAD_LETTER, [{ id: 'dl', attempts: 5, body: { id } }], {
+      now: () => new Date(NOW.getTime() + LEASE_MS),
+    })
+
+    expect(deadLettered).toEqual([{ id }])
+    expect(await runs.get('test-job', id)).toMatchObject({ status: 'failed', lastError: 'dead-lettered' })
+  })
+})
+
+describe('queue handler: errors never reach a job record or a log with their message', () => {
+  const SECRET = 'param-secret-7f3a'
+  const leaky = () =>
+    new DrizzleQueryError('insert into t (a) values (?)', [SECRET], new TypeError(`constraint failed: ${SECRET}`))
+
+  const spyOnConsole = () => {
+    const spies = [vi.spyOn(console, 'log'), vi.spyOn(console, 'error')]
+    for (const spy of spies) spy.mockImplementation(() => {})
+    return () => JSON.stringify(spies.flatMap((spy) => spy.mock.calls))
+  }
+
+  it('records and logs a handler error by name only', async () => {
+    const logged = spyOnConsole()
+    const id = freshId()
+    behaviour.set(id, async () => {
+      throw leaky()
+    })
+
+    await dispatch(MAIN, [{ body: { id } }])
+
+    const run = (await runs.get('test-job', id))!
+    expect(run.lastError).toBe('DrizzleQueryError (cause: TypeError)')
+    expect(JSON.stringify(run)).not.toContain(SECRET)
+    expect(logged()).not.toContain(SECRET)
+  })
+
+  it('logs a bookkeeping failure by name only', async () => {
+    const logged = spyOnConsole()
+    vi.spyOn(D1JobRunsRepository.prototype, 'claim').mockRejectedValueOnce(leaky())
+
+    await dispatch(MAIN, [{ body: { id: freshId() } }])
+
+    expect(logged()).toContain('DrizzleQueryError (cause: TypeError)')
+    expect(logged()).not.toContain(SECRET)
+  })
+
+  it('logs a dead-letter hook failure by name only', async () => {
+    const logged = spyOnConsole()
+    const failing = defineJob(testSpec, {
+      handle: async () => {},
+      onDeadLetter: async () => {
+        throw leaky()
+      },
+    })
+    const batch = createMessageBatch(DEAD_LETTER, [{ id: 'dl', timestamp: NOW, attempts: 5, body: { id: freshId() } }])
+    const ctx = createExecutionContext()
+
+    await createQueueHandler([failing], { now: () => NOW })(batch, env, ctx)
+    await getQueueResult(batch, ctx)
+
+    expect(logged()).toContain('dispatcher-error')
+    expect(logged()).not.toContain(SECRET)
+  })
+
+  it('logs a purge failure by name only', async () => {
+    const logged = spyOnConsole()
+    vi.spyOn(D1JobRunsRepository.prototype, 'purgeOlderThan').mockRejectedValueOnce(leaky())
+
+    await dispatch(MAIN, [{ body: { id: freshId() } }])
+
+    expect(logged()).toContain('purge-failed')
+    expect(logged()).not.toContain(SECRET)
+  })
+
+  it('logs a failed scheduled run by name only, and still rethrows it', async () => {
+    const logged = spyOnConsole()
+    const error = leaky()
+    vi.spyOn(D1UsersRepository.prototype, 'unreachableGuestIds').mockRejectedValueOnce(error)
+
+    await expect(createScheduledHandler()({} as ScheduledController, env)).rejects.toBe(error)
+
+    expect(logged()).toContain('DrizzleQueryError (cause: TypeError)')
+    expect(logged()).not.toContain(SECRET)
   })
 })
 

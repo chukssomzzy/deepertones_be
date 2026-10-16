@@ -1,0 +1,598 @@
+import { describe, expect, it } from 'vitest'
+import type { ScansRepository } from './scans.repository'
+import type { ItemState, NewBackPhoto, NewScan, NewScanItem } from './scans.types'
+
+const BASE = new Date('2030-06-15T12:00:00.000Z')
+const SECOND = 1000
+const MINUTE = 60 * SECOND
+const HOUR = 60 * MINUTE
+const at = (offsetMs: number) => new Date(BASE.getTime() + offsetMs)
+
+// Each call yields a value no other test (or earlier run against a shared D1) uses.
+const runSalt = String(Math.floor(Math.random() * 1e5)).padStart(5, '0')
+let counter = 0
+const fresh = (label: string) => `${label}-${runSalt}-${counter++}`
+const freshId = () => crypto.randomUUID()
+
+/** What a contract run needs: the repository, and a way to get a user id that exists (D1 enforces scans.user_id -> users.id). */
+export type ScansContractSetup = { repository: ScansRepository; newUser: () => Promise<string> }
+
+const newScan = (userId: string, over: Partial<NewScan> = {}): NewScan => ({ id: freshId(), userId, ipHash: fresh('iphash'), createdAt: BASE, ...over })
+
+const newUpload = (itemId: string, userId: string, uploadedAt: Date, over: Partial<NewBackPhoto> = {}): NewBackPhoto => ({
+  id: freshId(),
+  itemId,
+  userId,
+  ipHash: fresh('upload-ip'),
+  uploadedAt,
+  ...over,
+})
+
+const newItem = (scan: NewScan, position: number, over: Partial<NewScanItem> = {}): NewScanItem => ({
+  id: freshId(),
+  scanId: scan.id,
+  userId: scan.userId,
+  position,
+  photoKey: `photos/test/${scan.userId}/${scan.id}/${position}.jpg`,
+  createdAt: scan.createdAt,
+  ...over,
+})
+
+/**
+ * Behaviour every ScansRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier).
+ * Assumptions the D1 table must meet: scans.user_id references users (so `newUser` makes real users), scan_items.scan_id
+ * references scans, and product_id / formulation_id are plain text with no foreign key (the catalog is not this module's).
+ */
+export const scansRepositoryContract = (name: string, make: () => ScansContractSetup | Promise<ScansContractSetup>) => {
+  describe(`ScansRepository contract: ${name}`, () => {
+    const seeded = async (itemCount = 2, scanOver: Partial<NewScan> = {}) => {
+      const { repository, newUser } = await make()
+      const userId = await newUser()
+      const scan = newScan(userId, scanOver)
+      const items = Array.from({ length: itemCount }, (_, i) => newItem(scan, i))
+      await repository.createScan(scan, items)
+      return { repository, newUser, userId, scan, items }
+    }
+
+    describe('createScan and reading back', () => {
+      it('stores the scan with its owner, IP hash and time', async () => {
+        const { repository, scan } = await seeded()
+
+        const stored = await repository.findScan(scan.id)
+
+        expect(stored).toMatchObject({ id: scan.id, userId: scan.userId, ipHash: scan.ipHash, doneAt: null })
+        expect(stored!.createdAt.getTime()).toBe(BASE.getTime())
+      })
+
+      it('stores every item recognising, with no reason, recognised fields, product or back photo, and updatedAt equal to createdAt', async () => {
+        const { repository, scan, items } = await seeded(1, { createdAt: at(3 * MINUTE) })
+
+        const item = await repository.findItem(items[0]!.id)
+
+        expect(item).toMatchObject({
+          id: items[0]!.id,
+          scanId: scan.id,
+          userId: scan.userId,
+          position: 0,
+          state: 'recognising',
+          reason: null,
+          photoKey: items[0]!.photoKey,
+          backPhotoKey: null,
+          recognisedBrand: null,
+          recognisedName: null,
+          recognisedVariant: null,
+          recognisedCategory: null,
+          recognisedConfidence: null,
+          productId: null,
+          formulationId: null,
+        })
+        expect(item!.createdAt.getTime()).toBe(at(3 * MINUTE).getTime())
+        expect(item!.updatedAt.getTime()).toBe(at(3 * MINUTE).getTime())
+      })
+
+      it('itemsOf returns the scan\'s items in position order, whatever order they were given in', async () => {
+        const { repository, newUser } = await make()
+        const scan = newScan(await newUser())
+        const [first, second, third] = [newItem(scan, 0), newItem(scan, 1), newItem(scan, 2)]
+        await repository.createScan(scan, [third!, first!, second!])
+
+        const items = await repository.itemsOf(scan.id)
+
+        expect(items.map((i) => i.id)).toEqual([first!.id, second!.id, third!.id])
+        expect(items.map((i) => i.position)).toEqual([0, 1, 2])
+      })
+
+      it('itemsOf holds only that scan\'s items', async () => {
+        const { repository, userId, scan, items } = await seeded(2)
+        const other = newScan(userId)
+        await repository.createScan(other, [newItem(other, 0)])
+
+        expect((await repository.itemsOf(scan.id)).map((i) => i.id)).toEqual(items.map((i) => i.id))
+        expect(await repository.itemsOf(freshId())).toEqual([])
+      })
+
+      it('finds nothing for an unknown scan or item', async () => {
+        const { repository } = await make()
+
+        expect(await repository.findScan(freshId())).toBeNull()
+        expect(await repository.findItem(freshId())).toBeNull()
+      })
+
+      it('stores nothing at all when one of the items cannot be stored: the scan and the good items are not left behind', async () => {
+        const { repository, newUser } = await make()
+        const scan = newScan(await newUser())
+        const good = newItem(scan, 0)
+        const clash = newItem(scan, 1, { id: good.id })
+
+        await expect(repository.createScan(scan, [good, clash])).rejects.toThrow()
+
+        expect(await repository.findScan(scan.id)).toBeNull()
+        expect(await repository.findItem(good.id)).toBeNull()
+      })
+    })
+
+    describe('updateItem', () => {
+      it('applies the patch, with the new time, while the item is in the expected state, and says so', async () => {
+        const { repository, items } = await seeded(1)
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', {
+          state: 'needs-confirmation',
+          recognisedBrand: 'Glow Co',
+          recognisedName: 'Bright Tone Serum',
+          recognisedVariant: 'Extra Strength',
+          recognisedCategory: 'skin',
+          recognisedConfidence: 0.55,
+          updatedAt: at(5 * MINUTE),
+        })
+
+        expect(applied).toBe(true)
+        const item = await repository.findItem(items[0]!.id)
+        expect(item).toMatchObject({
+          state: 'needs-confirmation',
+          recognisedBrand: 'Glow Co',
+          recognisedName: 'Bright Tone Serum',
+          recognisedVariant: 'Extra Strength',
+          recognisedCategory: 'skin',
+          recognisedConfidence: 0.55,
+        })
+        expect(item!.updatedAt.getTime()).toBe(at(5 * MINUTE).getTime())
+        expect(item!.createdAt.getTime()).toBe(BASE.getTime())
+      })
+
+      it('leaves a field the patch does not mention as it was, and clears one the patch sets to null', async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', {
+          state: 'rejected',
+          reason: 'face-or-person',
+          productId: 'product-1',
+          formulationId: 'formulation-1',
+          updatedAt: at(MINUTE),
+        })
+
+        const applied = await repository.updateItem(id, 'rejected', { photoKey: null, productId: null, updatedAt: at(2 * MINUTE) })
+
+        expect(applied).toBe(true)
+        expect(await repository.findItem(id)).toMatchObject({
+          state: 'rejected',
+          reason: 'face-or-person',
+          photoKey: null,
+          productId: null,
+          formulationId: 'formulation-1',
+        })
+      })
+
+      it('refuses, changing nothing, when the item is in another state', async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+        const before = await repository.findItem(id)
+
+        const applied = await repository.updateItem(id, 'matching', { state: 'ready', productId: 'product-1', updatedAt: at(MINUTE) })
+
+        expect(applied).toBe(false)
+        expect(await repository.findItem(id)).toEqual(before)
+      })
+
+      it('says false for an unknown item', async () => {
+        const { repository } = await make()
+
+        expect(await repository.updateItem(freshId(), 'recognising', { state: 'matching', updatedAt: at(MINUTE) })).toBe(false)
+      })
+
+      it('lets exactly one of two simultaneous updates from the same state win', async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+
+        const results = await Promise.all([
+          repository.updateItem(id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) }),
+          repository.updateItem(id, 'recognising', { state: 'rejected', reason: 'unreadable', updatedAt: at(MINUTE) }),
+        ])
+
+        expect(results.filter(Boolean)).toHaveLength(1)
+        const item = await repository.findItem(id)
+        expect(item!.state).toBe(results[0] ? 'matching' : 'rejected')
+      })
+
+      it('only touches the item it was asked about', async () => {
+        const { repository, items } = await seeded(2)
+
+        await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
+
+        expect((await repository.findItem(items[1]!.id))!.state).toBe('recognising')
+      })
+    })
+
+    describe('photo counts for the daily quotas', () => {
+      const since = at(HOUR)
+
+      it('counts one photo per item created at or after the cutoff, and not one made a millisecond before it', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const before = newScan(userId, { createdAt: new Date(since.getTime() - 1) })
+        const exactly = newScan(userId, { createdAt: since })
+        await repository.createScan(before, [newItem(before, 0), newItem(before, 1)])
+        await repository.createScan(exactly, [newItem(exactly, 0), newItem(exactly, 1), newItem(exactly, 2)])
+
+        const counted = await repository.photosSince(userId, since)
+
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(since.getTime())
+      })
+
+      it('says none, with no oldest time, for a user with no photos in the window', async () => {
+        const { repository, newUser } = await make()
+
+        expect(await repository.photosSince(await newUser(), since)).toEqual({ count: 0, oldest: null })
+      })
+
+      it('counts only that user\'s photos, and reports the oldest of those in the window', async () => {
+        const { repository, newUser } = await make()
+        const [alice, bob] = [await newUser(), await newUser()]
+        const [a1, a2, b1] = [newScan(alice, { createdAt: at(3 * HOUR) }), newScan(alice, { createdAt: at(2 * HOUR) }), newScan(bob, { createdAt: at(HOUR) })]
+        await repository.createScan(a1, [newItem(a1, 0)])
+        await repository.createScan(a2, [newItem(a2, 0), newItem(a2, 1)])
+        await repository.createScan(b1, [newItem(b1, 0)])
+
+        const counted = await repository.photosSince(alice, since)
+
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('still counts the photo of an item whose photo was deleted (a rejected item)', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: since })
+        await repository.updateItem(items[0]!.id, 'recognising', { state: 'rejected', reason: 'face-or-person', photoKey: null, updatedAt: at(2 * HOUR) })
+
+        expect((await repository.photosSince(userId, since)).count).toBe(1)
+      })
+
+      it('counts a back photo as one more photo, at the time it was uploaded, and keeps counting it after the back photo is deleted', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+        expect((await repository.photosSince(userId, since)).count).toBe(0)
+
+        await repository.updateItem(
+          id,
+          'needs-back-photo',
+          { state: 'reading-label', backPhotoKey: 'photos/test/user/scan/item-back.jpg', updatedAt: at(2 * HOUR) },
+          newUpload(id, userId, at(2 * HOUR)),
+        )
+        const stored = await repository.photosSince(userId, since)
+        expect(stored.count).toBe(1)
+        expect(stored.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+
+        await repository.updateItem(id, 'reading-label', { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null, updatedAt: at(3 * HOUR) })
+        expect((await repository.photosSince(userId, since)).count).toBe(1)
+      })
+
+      it('counts every back photo an item is sent: three uploads in a row are three photos, not one', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+
+        for (const [n, hours] of [1, 2, 3].entries()) {
+          const applied = await repository.updateItem(
+            id,
+            'needs-back-photo',
+            { state: 'reading-label', backPhotoKey: `back-${n}.jpg`, updatedAt: at(hours * HOUR) },
+            newUpload(id, userId, at(hours * HOUR)),
+          )
+          expect(applied).toBe(true)
+          await repository.updateItem(id, 'reading-label', { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null, updatedAt: at(hours * HOUR + MINUTE) })
+        }
+
+        const counted = await repository.photosSince(userId, since)
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(at(HOUR).getTime())
+      })
+
+      it('counts a back photo only from the cutoff on, inclusive', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(-3 * HOUR) }, newUpload(id, userId, new Date(since.getTime() - 1)))
+        await repository.updateItem(id, 'reading-label', { state: 'needs-back-photo', updatedAt: at(-2 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(-HOUR) }, newUpload(id, userId, since))
+
+        const counted = await repository.photosSince(userId, since)
+
+        expect(counted.count).toBe(1)
+        expect(counted.oldest!.getTime()).toBe(since.getTime())
+      })
+
+      it('reports the oldest over front photos and back photos together', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(3 * HOUR) })
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(3 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(4 * HOUR) }, newUpload(id, userId, at(2 * HOUR)))
+
+        const counted = await repository.photosSince(userId, since)
+
+        expect(counted.count).toBe(2)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('records a back photo only when the update applies: an item in another state, or an unknown one, counts nothing', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+
+        const wrongState = await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(2 * HOUR) }, newUpload(id, userId, at(2 * HOUR)))
+        const unknown = await repository.updateItem(freshId(), 'needs-back-photo', { state: 'reading-label', updatedAt: at(2 * HOUR) }, newUpload(id, userId, at(2 * HOUR)))
+
+        expect(wrongState).toBe(false)
+        expect(unknown).toBe(false)
+        expect((await repository.findItem(id))!.state).toBe('recognising')
+        expect((await repository.photosSince(userId, since)).count).toBe(0)
+      })
+
+      it('counts a back photo for the address it was uploaded from, not the one the scan was made from', async () => {
+        const { repository, userId, scan, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+        const uploadIp = fresh('upload-from')
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(2 * HOUR) }, newUpload(id, userId, at(2 * HOUR), { ipHash: uploadIp }))
+
+        expect((await repository.photosSinceIp(uploadIp, since)).count).toBe(1)
+        expect(await repository.photosSinceIp(scan.ipHash, since)).toEqual({ count: 0, oldest: null })
+      })
+
+      it('counts by IP hash across users, and only for that hash', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('shared-ip')
+        const [alice, bob, carol] = [await newUser(), await newUser(), await newUser()]
+        const [a, b, c] = [
+          newScan(alice, { ipHash, createdAt: at(2 * HOUR) }),
+          newScan(bob, { ipHash, createdAt: at(3 * HOUR) }),
+          newScan(carol, { createdAt: at(2 * HOUR) }),
+        ]
+        await repository.createScan(a, [newItem(a, 0), newItem(a, 1)])
+        await repository.createScan(b, [newItem(b, 0)])
+        await repository.createScan(c, [newItem(c, 0)])
+
+        const counted = await repository.photosSinceIp(ipHash, since)
+
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+        expect(await repository.photosSinceIp(fresh('unused-ip'), since)).toEqual({ count: 0, oldest: null })
+      })
+
+      it('adds the back photos uploaded from the address to its count, and takes the oldest over both', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('mixed-ip')
+        const [alice, bob] = [await newUser(), await newUser()]
+        const a = newScan(alice, { ipHash, createdAt: at(3 * HOUR) })
+        const b = newScan(bob, { createdAt: at(-5 * HOUR) })
+        const aItem = newItem(a, 0)
+        const bItem = newItem(b, 0)
+        await repository.createScan(a, [aItem])
+        await repository.createScan(b, [bItem])
+        await repository.updateItem(bItem.id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+        await repository.updateItem(bItem.id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(2 * HOUR) }, newUpload(bItem.id, bob, at(2 * HOUR), { ipHash }))
+
+        const counted = await repository.photosSinceIp(ipHash, since)
+
+        expect(counted.count).toBe(2)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('leaves out the photos of scans made from the address before the cutoff, however many there are', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('old-ip')
+        const userId = await newUser()
+        for (let i = 0; i < 3; i++) {
+          const old = newScan(userId, { ipHash, createdAt: at(-(i + 2) * HOUR) })
+          await repository.createScan(old, [newItem(old, 0)])
+        }
+        const recent = newScan(userId, { ipHash, createdAt: at(2 * HOUR) })
+        await repository.createScan(recent, [newItem(recent, 0)])
+
+        const counted = await repository.photosSinceIp(ipHash, since)
+
+        expect(counted.count).toBe(1)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('applies the same inclusive cutoff to the IP count', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('edge-ip')
+        const userId = await newUser()
+        const before = newScan(userId, { ipHash, createdAt: new Date(since.getTime() - 1) })
+        const exactly = newScan(userId, { ipHash, createdAt: since })
+        await repository.createScan(before, [newItem(before, 0)])
+        await repository.createScan(exactly, [newItem(exactly, 0)])
+
+        expect((await repository.photosSinceIp(ipHash, since)).count).toBe(1)
+      })
+    })
+
+    describe('guest cleanup', () => {
+      it('photoKeysForUsers lists the photo and back-photo keys of those users\' items, leaving out deleted photos and other users', async () => {
+        const { repository, newUser } = await make()
+        const [alice, bob, carol] = [await newUser(), await newUser(), await newUser()]
+        const [a, b, c] = [newScan(alice), newScan(bob), newScan(carol)]
+        const aItems = [newItem(a, 0), newItem(a, 1)]
+        await repository.createScan(a, aItems)
+        await repository.createScan(b, [newItem(b, 0)])
+        await repository.createScan(c, [newItem(c, 0)])
+        await repository.updateItem(aItems[0]!.id, 'recognising', { state: 'needs-back-photo', updatedAt: at(MINUTE) })
+        await repository.updateItem(aItems[0]!.id, 'needs-back-photo', { state: 'reading-label', backPhotoKey: `photos/test/${alice}/${a.id}/back.jpg`, updatedAt: at(2 * MINUTE) }, newUpload(aItems[0]!.id, alice, at(2 * MINUTE)))
+        await repository.updateItem(aItems[1]!.id, 'recognising', { state: 'rejected', reason: 'unreadable', photoKey: null, updatedAt: at(MINUTE) })
+
+        const keys = await repository.photoKeysForUsers([alice, bob])
+
+        expect(keys.sort()).toEqual([aItems[0]!.photoKey!, `photos/test/${alice}/${a.id}/back.jpg`, (await repository.itemsOf(b.id))[0]!.photoKey!].sort())
+      })
+
+      it('photoKeysForUsers answers nothing for no users, and for users with no scans', async () => {
+        const { repository, newUser } = await make()
+
+        expect(await repository.photoKeysForUsers([])).toEqual([])
+        expect(await repository.photoKeysForUsers([await newUser()])).toEqual([])
+      })
+
+      it('deleteForUsers removes those users\' scans and items, and nobody else\'s', async () => {
+        const { repository, newUser } = await make()
+        const [alice, bob, carol] = [await newUser(), await newUser(), await newUser()]
+        const [a, b, c] = [newScan(alice), newScan(bob), newScan(carol)]
+        const [aItem, bItem, cItem] = [newItem(a, 0), newItem(b, 0), newItem(c, 0)]
+        await repository.createScan(a, [aItem])
+        await repository.createScan(b, [bItem])
+        await repository.createScan(c, [cItem])
+
+        await repository.deleteForUsers([alice, bob])
+
+        expect(await repository.findScan(a.id)).toBeNull()
+        expect(await repository.findScan(b.id)).toBeNull()
+        expect(await repository.findItem(aItem.id)).toBeNull()
+        expect(await repository.findItem(bItem.id)).toBeNull()
+        expect(await repository.findScan(c.id)).not.toBeNull()
+        expect(await repository.findItem(cItem.id)).not.toBeNull()
+        expect(await repository.photosSince(alice, new Date(0))).toEqual({ count: 0, oldest: null })
+      })
+
+      it('deleteForUsers removes those users\' back-photo records too, so their uploads stop counting, and keeps everybody else\'s', async () => {
+        const { repository, newUser } = await make()
+        const [alice, bob] = [await newUser(), await newUser()]
+        const [a, b] = [newScan(alice, { createdAt: at(-5 * HOUR) }), newScan(bob, { createdAt: at(-5 * HOUR) })]
+        const [aItem, bItem] = [newItem(a, 0), newItem(b, 0)]
+        await repository.createScan(a, [aItem])
+        await repository.createScan(b, [bItem])
+        for (const [item, userId] of [[aItem, alice], [bItem, bob]] as const) {
+          await repository.updateItem(item.id, 'recognising', { state: 'needs-back-photo', updatedAt: at(-4 * HOUR) })
+          await repository.updateItem(item.id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(2 * HOUR) }, newUpload(item.id, userId, at(2 * HOUR)))
+        }
+
+        await repository.deleteForUsers([alice])
+
+        expect(await repository.photosSince(alice, at(HOUR))).toEqual({ count: 0, oldest: null })
+        expect((await repository.photosSince(bob, at(HOUR))).count).toBe(1)
+      })
+
+      it('deleteForUsers is safe to repeat, and does nothing for an empty list or for users with no scans', async () => {
+        const { repository, userId, scan } = await seeded(1)
+
+        await expect(repository.deleteForUsers([])).resolves.toBeUndefined()
+        expect(await repository.findScan(scan.id)).not.toBeNull()
+
+        await repository.deleteForUsers([userId])
+        await expect(repository.deleteForUsers([userId])).resolves.toBeUndefined()
+        expect(await repository.findScan(scan.id)).toBeNull()
+      })
+    })
+
+    describe('markScanDone', () => {
+      it('applies once: true the first time, false every time after, and keeps the first time it was set', async () => {
+        const { repository, scan } = await seeded(1)
+
+        expect(await repository.markScanDone(scan.id, at(MINUTE))).toBe(true)
+        expect(await repository.markScanDone(scan.id, at(2 * MINUTE))).toBe(false)
+
+        expect((await repository.findScan(scan.id))!.doneAt!.getTime()).toBe(at(MINUTE).getTime())
+      })
+
+      it('lets exactly one of two simultaneous calls win', async () => {
+        const { repository, scan } = await seeded(1)
+
+        const results = await Promise.all([repository.markScanDone(scan.id, at(MINUTE)), repository.markScanDone(scan.id, at(MINUTE))])
+
+        expect(results.filter(Boolean)).toHaveLength(1)
+      })
+
+      it('says false for an unknown scan, and touches only the scan it was asked about', async () => {
+        const { repository, userId, scan } = await seeded(1)
+        const other = newScan(userId)
+        await repository.createScan(other, [newItem(other, 0)])
+
+        expect(await repository.markScanDone(freshId(), at(MINUTE))).toBe(false)
+        expect(await repository.markScanDone(scan.id, at(MINUTE))).toBe(true)
+
+        expect((await repository.findScan(other.id))!.doneAt).toBeNull()
+      })
+    })
+
+    describe('staleItems', () => {
+      const WORKING: ItemState[] = ['recognising', 'matching']
+
+      /** One item per entry, each moved to its state at its time; returns their ids in the same order. */
+      const itemsIn = async (repository: ScansRepository, userId: string, wanted: [ItemState, number][]) => {
+        const scan = newScan(userId, { createdAt: at(-DAY_MS) })
+        const items = wanted.map((_, position) => newItem(scan, position))
+        await repository.createScan(scan, items)
+        for (const [i, [state, updatedAt]] of wanted.entries()) await repository.updateItem(items[i]!.id, 'recognising', { state, updatedAt: at(updatedAt) })
+        return items.map((i) => i.id)
+      }
+      const DAY_MS = 24 * HOUR
+      const freshUser = async () => {
+        const { repository, newUser } = await make()
+        return { repository, userId: await newUser() }
+      }
+
+      it('lists the items in the given states last updated before the cutoff, oldest first', async () => {
+        const { repository, userId } = await freshUser()
+        const [newest, oldest, middle] = await itemsIn(repository, userId, [['matching', -10 * MINUTE], ['recognising', -50 * MINUTE], ['matching', -30 * MINUTE]])
+
+        const stale = await repository.staleItems(WORKING, at(0), 100)
+
+        expect(stale.map((i) => i.id).filter((id) => [newest, oldest, middle].includes(id))).toEqual([oldest, middle, newest])
+      })
+
+      it('leaves out items in other states, and items updated at the cutoff or later', async () => {
+        const { repository, userId } = await freshUser()
+        const [atCutoff, after, otherState, justBefore] = await itemsIn(repository, userId, [
+          ['matching', 0],
+          ['matching', MINUTE],
+          ['needs-back-photo', -HOUR],
+          ['matching', -1],
+        ])
+
+        const ids = (await repository.staleItems(WORKING, at(0), 100)).map((i) => i.id)
+
+        expect(ids).toContain(justBefore)
+        expect(ids).not.toContain(atCutoff)
+        expect(ids).not.toContain(after)
+        expect(ids).not.toContain(otherState)
+      })
+
+      it('returns whole items, and at most the limit, taking the oldest', async () => {
+        const { repository, userId } = await freshUser()
+        const [a, b, c] = await itemsIn(repository, userId, [['matching', -3 * HOUR], ['matching', -2 * HOUR], ['matching', -HOUR]])
+        const everything = await repository.staleItems(['matching'], at(0), 1000)
+        const oldestFirst = everything.map((i) => i.id)
+
+        const limited = await repository.staleItems(['matching'], at(0), 2)
+
+        expect(limited).toHaveLength(2)
+        expect(limited.map((i) => i.id)).toEqual(oldestFirst.slice(0, 2))
+        expect(everything.find((i) => i.id === c)).toMatchObject({ id: c, state: 'matching', userId })
+        expect([a!, b!, c!].every((id) => oldestFirst.includes(id))).toBe(true)
+      })
+
+      it('answers nothing for no states', async () => {
+        const { repository } = await seeded(1)
+
+        expect(await repository.staleItems([], at(HOUR), 100)).toEqual([])
+      })
+    })
+  })
+}

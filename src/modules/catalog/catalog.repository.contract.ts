@@ -689,13 +689,13 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
     })
 
     describe('analysis attempts', () => {
-      type Outcome = 'ok' | 'rejected' | 'failed'
+      type Outcome = 'started' | 'ok' | 'rejected' | 'failed'
       const withFormulation = async (repo: CatalogRepository) => {
         const product = newProduct()
         await repo.createProduct(product)
         return repo.createFormulation(newFormulation(product.id))
       }
-      const attempt = (formulationId: string, over: { attemptedAt?: Date; outcome?: Outcome; analysisVersion?: number; referenceVersion?: string } = {}) => ({
+      const attempt = (formulationId: string, over: { id?: string; attemptedAt?: Date; outcome?: Outcome; analysisVersion?: number; referenceVersion?: string } = {}) => ({
         id: freshId(),
         formulationId,
         attemptedAt: BASE,
@@ -705,7 +705,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         ...over,
       })
 
-      it('analysisAttemptsSince counts an attempt of any outcome made exactly at the cutoff and later, not one a millisecond before', async () => {
+      it('analysisAttemptsSince counts a started, ok or rejected attempt made exactly at the cutoff and later, not one a millisecond before, and never a failed one', async () => {
         const repo = await make()
         const formulation = await withFormulation(repo)
         const since = at(4000 * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
@@ -714,10 +714,80 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: new Date(since.getTime() - 1) }))
         expect(await repo.analysisAttemptsSince(since)).toBe(before)
 
-        for (const outcome of ['ok', 'rejected', 'failed'] as const) {
+        for (const outcome of ['started', 'ok', 'rejected'] as const) {
           await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: since, outcome }))
         }
         expect(await repo.analysisAttemptsSince(since)).toBe(before + 3)
+
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: since, outcome: 'failed' }))
+        expect(await repo.analysisAttemptsSince(since)).toBe(before + 3)
+      })
+
+      it('settleAnalysisAttempt turns a started attempt into its outcome: a failed one stops counting, an ok or rejected one keeps counting', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const since = at(5000 * HOUR + Number(runSalt) * HOUR + counter++ * 10 * MINUTE)
+        const before = await repo.analysisAttemptsSince(since)
+        const [toFail, toPass, toReject] = [freshId(), freshId(), freshId()]
+        for (const id of [toFail, toPass, toReject]) {
+          await repo.recordAnalysisAttempt(attempt(formulation.id, { id, attemptedAt: since, outcome: 'started' }))
+        }
+        expect(await repo.analysisAttemptsSince(since)).toBe(before + 3)
+
+        await repo.settleAnalysisAttempt(toFail, 'failed')
+        expect(await repo.analysisAttemptsSince(since)).toBe(before + 2)
+
+        await repo.settleAnalysisAttempt(toPass, 'ok')
+        await repo.settleAnalysisAttempt(toReject, 'rejected')
+        expect(await repo.analysisAttemptsSince(since)).toBe(before + 2)
+      })
+
+      it('settling a rejected attempt makes it count as a rejection under its versions', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const id = freshId()
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { id, outcome: 'started' }))
+        expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(0)
+
+        await repo.settleAnalysisAttempt(id, 'rejected')
+
+        expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(1)
+      })
+
+      it('lastAnalysisAttempt is null for a formulation that has had no attempt', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+
+        expect(await repo.lastAnalysisAttempt(formulation.id)).toBeNull()
+        expect(await repo.lastAnalysisAttempt(freshId())).toBeNull()
+      })
+
+      it('lastAnalysisAttempt returns the formulation\'s most recent attempt by time, whatever order they were recorded in, and only that formulation\'s', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const other = await withFormulation(repo)
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: at(2 * HOUR), outcome: 'rejected' }))
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { attemptedAt: at(HOUR), outcome: 'failed' }))
+        await repo.recordAnalysisAttempt(attempt(other.id, { attemptedAt: at(5 * HOUR), outcome: 'ok' }))
+
+        const last = await repo.lastAnalysisAttempt(formulation.id)
+
+        expect(last!.outcome).toBe('rejected')
+        expect(last!.attemptedAt.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('lastAnalysisAttempt follows a settled attempt to its outcome and keeps the time it started', async () => {
+        const repo = await make()
+        const formulation = await withFormulation(repo)
+        const id = freshId()
+        await repo.recordAnalysisAttempt(attempt(formulation.id, { id, attemptedAt: at(HOUR), outcome: 'started' }))
+        expect((await repo.lastAnalysisAttempt(formulation.id))!.outcome).toBe('started')
+
+        await repo.settleAnalysisAttempt(id, 'ok')
+
+        const last = await repo.lastAnalysisAttempt(formulation.id)
+        expect(last!.outcome).toBe('ok')
+        expect(last!.attemptedAt.getTime()).toBe(at(HOUR).getTime())
       })
 
       it('rejectedAnalyses counts only the rejections of that formulation under exactly those versions', async () => {

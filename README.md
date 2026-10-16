@@ -329,6 +329,7 @@ In `wrangler.jsonc`, the top level is local development. Deployed Workers come o
 `env.staging` and `env.production` (named `deepertones-be-staging` / `deepertones-be-production`).
 Env blocks do not inherit `vars`, bindings or `triggers`, so add each one to both.
 The daily guest-cleanup cron (`triggers.crons`, 03:17 UTC) is deployed with the Worker; see Guest cleanup in `docs/architecture.md`.
+The scan reaper cron (`*/10 * * * *`, same `triggers.crons`) is deployed with the Worker too and needs no setup: no queue, binding or secret to create. It queues scan steps that were lost again and fails items stuck for over 2 hours; see Scan module in `docs/architecture.md`.
 
 Each deploy applies D1 migrations first, then deploys the Worker: the schema leads the code. A
 migration that drops a column or table must therefore ship one release *after* the code that
@@ -346,14 +347,18 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the job queues (two per environment: the delivery queue and its dead-letter queue). A
-   deploy that binds a missing queue fails:
+3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery and
+   the scan items). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
    npx wrangler queues create deepertones-otp-delivery-dlq-staging
    npx wrangler queues create deepertones-otp-delivery-production
    npx wrangler queues create deepertones-otp-delivery-dlq-production
+   npx wrangler queues create deepertones-scan-items-staging
+   npx wrangler queues create deepertones-scan-items-dlq-staging
+   npx wrangler queues create deepertones-scan-items-production
+   npx wrangler queues create deepertones-scan-items-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

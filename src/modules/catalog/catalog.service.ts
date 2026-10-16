@@ -25,7 +25,7 @@ export type CatalogPolicy = {
 export const CATALOG_POLICY: CatalogPolicy = {
   /** New-product research attempts allowed in any rolling 24 hours, whatever their outcome. */
   dailyResearchBudget: 200,
-  /** Analysis attempts allowed in any rolling 24 hours, whatever their outcome. */
+  /** Analysis attempts allowed in any rolling 24 hours, whatever their outcome except failed. */
   dailyAnalysisBudget: 300,
   /** How many of a brand's newest products are compared with a new label. */
   brandScanLimit: 50,
@@ -42,6 +42,8 @@ const CONTROL_CHARACTER = /\p{Cc}/u
 const IMAGE_EXTENSIONS = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' } as const
 
 const WEEK = 7 * DAY
+/** An attempt still 'started' this long after it began is taken to have been lost to a crash, and no longer shields the work from a retry. */
+const IN_FLIGHT_FOR = 5 * 60 * 1000
 /** Rejections at the same analysis and reference versions after which a formulation is given up on until a version changes. */
 const MAX_REJECTIONS = 3
 
@@ -49,6 +51,20 @@ const MAX_REJECTIONS = 3
 export class AnalysisRejectedError extends UnavailableError {
   constructor(reason: AnalysisProblem) {
     super('ANALYSIS_REJECTED', `The analysis was rejected: ${reason}`)
+  }
+}
+
+/** Another call is already researching this product. Nothing was called; the queue retries later, by when the first call has stored its result. */
+export class ResearchInProgressError extends UnavailableError {
+  constructor() {
+    super('RESEARCH_IN_PROGRESS', 'This product is already being researched; try again later')
+  }
+}
+
+/** Another call is already analysing this formulation. Nothing was called, and it is not a rejection; the queue retries later. */
+export class AnalysisInProgressError extends UnavailableError {
+  constructor() {
+    super('ANALYSIS_IN_PROGRESS', 'This formulation is already being analysed; try again later')
   }
 }
 
@@ -185,9 +201,13 @@ export class ProductCatalogService {
    * 7 days ago (so a product nobody can find is not paid for on every scan) or the daily budget is spent. A refusal
    * carries the product's stale formulation as a fallback when it was analysed by the current versions.
    *
-   * An attempt is recorded as started BEFORE the researcher is called and settled after, so a crash in between still
-   * counts against the budget; if that cannot be recorded, nothing is called. A failed attempt (an outage) stops
-   * counting, and so does one the AI spend cap stopped, which answers budget-exhausted. Failing to settle never hides what the researcher did or threw.
+   * An attempt is recorded as started BEFORE the researcher is called and settled after the ingredients are stored, so a
+   * crash in between still counts against the budget; if that cannot be recorded, nothing is called. A failed attempt (an
+   * outage, or a store that failed) stops counting, and so does one the AI spend cap stopped, which answers
+   * budget-exhausted. Failing to settle never hides what the researcher did or threw.
+   *
+   * While the product's last attempt is still 'started' and began less than 5 minutes ago, another call is taken to be
+   * researching it: this one throws ResearchInProgressError without calling the researcher, and the queue retries it.
    */
   async research(productId: string): Promise<ResearchResult> {
     const product = await this.requireProduct(productId)
@@ -197,6 +217,7 @@ export class ProductCatalogService {
     if (latest && !this.isStale(latest, now)) return { kind: 'found', formulationId: latest.id }
 
     const last = await this.repository.lastResearchOutcome(productId)
+    if (last?.outcome === 'started' && this.isInFlight(last.attemptedAt, now)) throw new ResearchInProgressError()
     if (last?.outcome === 'not-found' && now.getTime() - last.attemptedAt.getTime() < WEEK) {
       return { kind: 'not-found', ...this.fallbackFor(latest) }
     }
@@ -221,9 +242,16 @@ export class ProductCatalogService {
       await this.settleAttempt(attemptId, 'not-found')
       return { kind: 'not-found', ...this.fallbackFor(latest) }
     }
-    await this.settleAttempt(attemptId, 'found')
 
-    const formulationId = await this.storeFormulation(productId, result.ingredients, 'web', result.sourceUrl, now)
+    // Settled only once the ingredients are stored: until then the 'started' row keeps shielding the product from a concurrent call.
+    let formulationId: string
+    try {
+      formulationId = await this.storeFormulation(productId, result.ingredients, 'web', result.sourceUrl, now)
+    } catch (error) {
+      await this.settleAttempt(attemptId, 'failed')
+      throw error
+    }
+    await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
     await this.importStockImage(product, result.imageUrl, now)
     return { kind: 'found', formulationId }
@@ -245,10 +273,15 @@ export class ProductCatalogService {
    * Has the model explain the formulation, checks the answer (see checkAnalysis) and stores it in one write.
    *
    * Does nothing when the formulation is already analysed by the current versions, so a repeated job costs nothing.
-   * Refused without calling the model, and without recording an attempt, when the daily budget is spent or the AI
-   * spend cap is reached (CatalogBusyError), or the analysis has been rejected 3 times at these versions (PermanentJobError). Every
-   * other call records one attempt, whatever its outcome. A rejected answer leaves any earlier analysis as it was
-   * and throws AnalysisRejectedError, or PermanentJobError when it was the 3rd rejection.
+   * Refused without calling the model, and without recording an attempt, when the daily budget is spent
+   * (CatalogBusyError), the analysis has been rejected 3 times at these versions (PermanentJobError), or the formulation's
+   * last attempt is still 'started' and began less than 5 minutes ago (AnalysisInProgressError, which is not a rejection).
+   * Every other call records one attempt as started BEFORE the model is called, so a crash in between still counts, and
+   * settles it afterwards to ok, rejected or failed; if the started attempt cannot be recorded, the model is not called.
+   * An answer that passed the check is ok (and counts) even if storing it failed; only a call the model never answered
+   * is failed and stops counting: an outage, or one the AI spend cap stopped, which throws CatalogBusyError.
+   * Failing to settle never changes the result or the error. A rejected answer leaves any
+   * earlier analysis as it was and throws AnalysisRejectedError, or PermanentJobError when it was the 3rd rejection.
    */
   async analyse(formulationId: string): Promise<void> {
     const formulation = await this.repository.findFormulation(formulationId)
@@ -258,14 +291,25 @@ export class ProductCatalogService {
     const rejections = await this.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)
     if (rejections >= MAX_REJECTIONS) throw new PermanentJobError('The analysis was rejected too often at these versions')
     const now = this.now()
+    const last = await this.repository.lastAnalysisAttempt(formulationId)
+    if (last?.outcome === 'started' && this.isInFlight(last.attemptedAt, now)) throw new AnalysisInProgressError()
     const attempts = await this.repository.analysisAttemptsSince(new Date(now.getTime() - DAY))
     if (attempts >= this.policy.dailyAnalysisBudget) throw new CatalogBusyError()
 
     const product = await this.requireProduct(formulation.productId)
     const flaggedFacts = flagFacts(formulation.ingredients)
+    const attemptId = this.newId()
+    await this.repository.recordAnalysisAttempt({
+      id: attemptId,
+      formulationId,
+      attemptedAt: now,
+      outcome: 'started',
+      analysisVersion: ANALYSIS_VERSION,
+      referenceVersion: REFERENCE_VERSION,
+    })
+
     let outcome: 'ok' | 'rejected' | 'failed' = 'failed'
     let problem: AnalysisProblem | undefined
-    let refusedByCap = false
     try {
       const drafts = await this.analyst.analyse({
         product: identityOf(product),
@@ -277,35 +321,24 @@ export class ProductCatalogService {
       })
       const checked = checkAnalysis(drafts, formulation.ingredients, flaggedFacts)
       if (checked.ok) {
+        // The model answered and was paid for, so this counts even if storing the answer fails below.
+        outcome = 'ok'
         await this.repository.saveAnalysis(formulationId, {
           concerns: checked.concerns,
           analysisVersion: ANALYSIS_VERSION,
           referenceVersion: REFERENCE_VERSION,
           analysedAt: this.now(),
         })
-        outcome = 'ok'
       } else {
         outcome = 'rejected'
         problem = checked.reason
       }
     } catch (error) {
       if (!(error instanceof AiBudgetExceededError)) throw error
-      refusedByCap = true
       throw new CatalogBusyError()
     } finally {
-      // A refusal records nothing: the model was not called, so it is neither a failure nor a spent attempt.
-      if (!refusedByCap) {
-        await this.bookkeeping(() =>
-          this.repository.recordAnalysisAttempt({
-            id: this.newId(),
-            formulationId,
-            attemptedAt: now,
-            outcome,
-            analysisVersion: ANALYSIS_VERSION,
-            referenceVersion: REFERENCE_VERSION,
-          }),
-        )
-      }
+      // Still 'failed' when the model did not answer (an outage, or a refusal by the spend cap, which did not run it), so that does not use up the day's budget.
+      await this.bookkeeping(() => this.repository.settleAnalysisAttempt(attemptId, outcome))
     }
     if (problem) {
       const error = new AnalysisRejectedError(problem)
@@ -376,6 +409,11 @@ export class ProductCatalogService {
     if (this.isAnalysed(latest)) return { kind: 'ready', ...ids }
     const rejections = await this.repository.rejectedAnalyses(latest.id, ANALYSIS_VERSION, REFERENCE_VERSION)
     return { kind: rejections >= MAX_REJECTIONS ? 'analysis-failed' : 'needs-analysis', ...ids }
+  }
+
+  /** A 'started' attempt this young is still running somewhere; exactly IN_FLIGHT_FOR old is taken as lost. */
+  private isInFlight(startedAt: Date, now: Date): boolean {
+    return now.getTime() - startedAt.getTime() < IN_FLIGHT_FOR
   }
 
   private isStale(formulation: Formulation, now: Date): boolean {

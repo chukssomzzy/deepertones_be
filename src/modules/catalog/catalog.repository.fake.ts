@@ -6,7 +6,8 @@ export type AnalysisAttemptInput = {
   id: string
   formulationId: string
   attemptedAt: Date
-  outcome: 'ok' | 'rejected' | 'failed'
+  /** 'started' is written before the analyst is called and settled after, like a research attempt. */
+  outcome: 'started' | 'ok' | 'rejected' | 'failed'
   analysisVersion: number
   referenceVersion: string
 }
@@ -163,9 +164,24 @@ export class FakeCatalogRepository implements CatalogRepository {
     this.analysisAttempts.push({ ...attempt })
   }
 
-  /** How many analysis attempts, of any outcome, were made at or after `since`. */
+  /** Moves a recorded attempt to its final outcome, keeping the time it started. An unknown id is ignored. */
+  async settleAnalysisAttempt(id: string, outcome: Exclude<AnalysisAttemptInput['outcome'], 'started'>): Promise<void> {
+    const attempt = this.analysisAttempts.find((a) => a.id === id)
+    if (attempt) attempt.outcome = outcome
+  }
+
+  /** The formulation's most recent attempt of any outcome (the later insert wins a tie), or null if it has none. */
+  async lastAnalysisAttempt(formulationId: string): Promise<{ outcome: AnalysisAttemptInput['outcome']; attemptedAt: Date } | null> {
+    let last: AnalysisAttemptInput | null = null
+    for (const a of this.analysisAttempts) {
+      if (a.formulationId === formulationId && (!last || a.attemptedAt.getTime() >= last.attemptedAt.getTime())) last = a
+    }
+    return last ? { outcome: last.outcome, attemptedAt: last.attemptedAt } : null
+  }
+
+  /** How many analysis attempts made at or after `since` count against the budget: started, ok and rejected ones; a failed one (an outage) costs nothing. */
   async analysisAttemptsSince(since: Date): Promise<number> {
-    return this.analysisAttempts.filter((a) => a.attemptedAt.getTime() >= since.getTime()).length
+    return this.analysisAttempts.filter((a) => a.attemptedAt.getTime() >= since.getTime() && a.outcome !== 'failed').length
   }
 
   /** How many analyses of this formulation were rejected under exactly these versions. */

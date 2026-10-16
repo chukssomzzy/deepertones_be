@@ -8,8 +8,11 @@ const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wran
   env: Record<string, { triggers?: { crons?: string[] } }>
 }
 
-// minute hour * * *  (fixed time, every day)
-const DAILY = /^\d{1,2} \d{1,2} \* \* \*$/
+// The Worker's `scheduled` handler picks the job by the cron that fired, so a cron here that the code does not know does
+// nothing, and a job whose cron is missing here never runs. Both are pinned: the daily guest cleanup at 03:17 UTC (off the
+// hour, to dodge the top-of-hour rush) and the scan reaper every 10 minutes.
+const GUEST_CLEANUP_CRON = '17 3 * * *'
+const SCAN_REAPER_CRON = '*/10 * * * *'
 
 describe('wrangler.jsonc cron triggers', () => {
   const places: [string, string[] | undefined][] = [
@@ -18,9 +21,8 @@ describe('wrangler.jsonc cron triggers', () => {
     ['env.production', config.env.production?.triggers?.crons],
   ]
 
-  it.each(places)('%s has exactly one daily schedule', (_, crons) => {
-    expect(crons).toHaveLength(1)
-    expect(crons![0]).toMatch(DAILY)
+  it.each(places)('%s has exactly the daily guest cleanup and the 10 minute scan reaper', (_, crons) => {
+    expect([...(crons ?? [])].sort()).toEqual([GUEST_CLEANUP_CRON, SCAN_REAPER_CRON].sort())
   })
 })
 
@@ -78,5 +80,70 @@ describe('wrangler.jsonc private photo storage', () => {
   it.each(blocks)('%s keeps the public CATALOG_IMAGES binding next to it, as the only other R2 binding', (_, block) => {
     const buckets = Object.fromEntries((block?.r2_buckets ?? []).map((b) => [b.binding, b.bucket_name]))
     expect(buckets).toEqual({ CATALOG_IMAGES: 'deepertones-assets', PRIVATE_PHOTOS: 'deepertones-private' })
+  })
+})
+
+// The scan flow's background work: one queue (and its dead-letter queue) per environment, like OTP delivery.
+// Env blocks do not inherit queues or rate limits, so each block restates them.
+type QueueConsumer = { queue: string; max_batch_size?: number; max_batch_timeout?: number; max_retries?: number; dead_letter_queue?: string }
+type QueueBlock = {
+  queues?: { producers?: { binding: string; queue: string }[]; consumers?: QueueConsumer[] }
+  ratelimits?: { name: string; namespace_id: string }[]
+}
+const queueConfig = config as unknown as QueueBlock & { env: Record<string, QueueBlock> }
+
+const scanBlocks: [string, QueueBlock | undefined, string][] = [
+  ['top level', queueConfig, 'development'],
+  ['env.staging', queueConfig.env.staging, 'staging'],
+  ['env.production', queueConfig.env.production, 'production'],
+]
+
+describe('wrangler.jsonc scan queues', () => {
+  it.each(scanBlocks)('%s produces to the scan-items queue as SCAN_ITEMS_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'SCAN_ITEMS_QUEUE')?.queue).toBe(`deepertones-scan-items-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the scan-items queue in batches of 10 with a 1 second wait, 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-scan-items-${environment}`)
+
+    expect(consumer).toMatchObject({
+      max_batch_size: 10,
+      max_batch_timeout: 1,
+      max_retries: 4,
+      dead_letter_queue: `deepertones-scan-items-dlq-${environment}`,
+    })
+  })
+
+  it.each(scanBlocks)('%s consumes the scan-items dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-scan-items-dlq-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 10 })
+  })
+
+  it.each(scanBlocks)('%s keeps the OTP delivery queue it already had', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'OTP_DELIVERY_QUEUE')?.queue).toBe(`deepertones-otp-delivery-${environment}`)
+    expect(block?.queues?.consumers?.map((c) => c.queue)).toContain(`deepertones-otp-delivery-${environment}`)
+  })
+})
+
+// A namespace_id is an account-wide counter: two bindings that share one share their counts, across environments too.
+describe('wrangler.jsonc rate limits', () => {
+  const all = scanBlocks.flatMap(([place, block]) => (block?.ratelimits ?? []).map((limit) => ({ place, ...limit })))
+
+  it('has rate limits to check', () => {
+    expect(all.length).toBeGreaterThan(0)
+  })
+
+  it('gives every rate limit in the whole file its own namespace_id', () => {
+    const ids = all.map((limit) => limit.namespace_id)
+    const repeated = ids.filter((id, i) => ids.indexOf(id) !== i)
+
+    expect(repeated).toEqual([])
+  })
+
+  it.each(scanBlocks)('%s names each of its rate limits once', (_, block) => {
+    const names = (block?.ratelimits ?? []).map((limit) => limit.name)
+
+    expect(new Set(names).size).toBe(names.length)
   })
 })

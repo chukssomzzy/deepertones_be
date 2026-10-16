@@ -230,9 +230,28 @@ export class D1CatalogRepository {
     await this.db.insert(analysisAttempts).values(attempt)
   }
 
-  /** How many analysis attempts, of any outcome, were made at or after `since`. */
+  /** Turns a started attempt into its outcome. The time it started is kept. */
+  async settleAnalysisAttempt(id: string, outcome: Exclude<AnalysisAttempt['outcome'], 'started'>): Promise<void> {
+    await this.db.update(analysisAttempts).set({ outcome }).where(eq(analysisAttempts.id, id))
+  }
+
+  /** The formulation's most recent attempt of any outcome (the later insert wins a tie), or null if it has none. */
+  async lastAnalysisAttempt(formulationId: string): Promise<{ outcome: AnalysisAttempt['outcome']; attemptedAt: Date } | null> {
+    const [row] = await this.db
+      .select({ outcome: analysisAttempts.outcome, attemptedAt: analysisAttempts.attemptedAt })
+      .from(analysisAttempts)
+      .where(eq(analysisAttempts.formulationId, formulationId))
+      .orderBy(desc(analysisAttempts.attemptedAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
+  /** How many analysis attempts were made at or after `since`: started, ok and rejected ones. A failed attempt (an outage) costs nothing. */
   async analysisAttemptsSince(since: Date): Promise<number> {
-    const [row] = await this.db.select({ n: count() }).from(analysisAttempts).where(gte(analysisAttempts.attemptedAt, since))
+    const [row] = await this.db
+      .select({ n: count() })
+      .from(analysisAttempts)
+      .where(and(gte(analysisAttempts.attemptedAt, since), ne(analysisAttempts.outcome, 'failed')))
     return row?.n ?? 0
   }
 

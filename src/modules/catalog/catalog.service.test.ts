@@ -1112,6 +1112,72 @@ describe('ProductCatalogService.research attempt accounting', () => {
     expect(await ctx.repository.researchAttemptsSince(T0)).toBe(0)
   })
 
+  describe('while the formulation is being stored', () => {
+    class StoreProbe extends FakeCatalogRepository {
+      duringStore: unknown
+      watched = ''
+      failStore = false
+      override async createFormulation(input: Parameters<FakeCatalogRepository['createFormulation']>[0]) {
+        this.duringStore = await this.lastResearchOutcome(this.watched)
+        if (this.failStore) throw new Error('database is down')
+        return super.createFormulation(input)
+      }
+    }
+    const probed = async () => {
+      const repository = new StoreProbe()
+      const ctx = setup({ repository })
+      repository.watched = await productFor(ctx)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      return { ctx, repository }
+    }
+
+    it('keeps the attempt started, so it still shields the product from a concurrent call, and settles it found after', async () => {
+      const { ctx, repository } = await probed()
+
+      await ctx.service.research(repository.watched)
+
+      expect(repository.duringStore).toEqual({ outcome: 'started', attemptedAt: T0 })
+      expect(await repository.lastResearchOutcome(repository.watched)).toEqual({ outcome: 'found', attemptedAt: T0 })
+    })
+
+    it('settles the attempt as failed, so it does not count, and rethrows when the formulation cannot be stored', async () => {
+      const { ctx, repository } = await probed()
+      repository.failStore = true
+
+      await expect(ctx.service.research(repository.watched)).rejects.toThrow('database is down')
+
+      expect(await repository.lastResearchOutcome(repository.watched)).toEqual({ outcome: 'failed', attemptedAt: T0 })
+      expect(await repository.researchAttemptsSince(T0)).toBe(0)
+    })
+
+    it('rethrows the store error and logs only the bookkeeping outcome when settling fails too', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const { ctx, repository } = await probed()
+      repository.failStore = true
+      repository.settleResearchAttempt = async () => {
+        throw new Error('settle is down')
+      }
+
+      await expect(ctx.service.research(repository.watched)).rejects.toThrow('database is down')
+
+      expect(log).toHaveBeenCalledWith({ outcome: 'attempt-bookkeeping-failed' })
+      log.mockRestore()
+    })
+
+    it('still reports found when settling it fails after a successful store', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const { ctx, repository } = await probed()
+      repository.settleResearchAttempt = async () => {
+        throw new Error('settle is down')
+      }
+
+      expect(await ctx.service.research(repository.watched)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+
+      expect(log).toHaveBeenCalledWith({ outcome: 'attempt-bookkeeping-failed' })
+      log.mockRestore()
+    })
+  })
+
   it('rethrows the researcher\'s own error even when settling the attempt fails too', async () => {
     class SettleFails extends FakeCatalogRepository {
       override async settleResearchAttempt(): Promise<void> {
@@ -1477,18 +1543,20 @@ describe('ProductCatalogService.analyse attempts', () => {
   const rejections = (ctx: Ctx, formulationId: string) => ctx.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)
   const another = (ctx: Ctx, n: number) => researched(ctx, { who: identity({ name: `Cleanser ${'abcdefgh'[n]}${'zyxwvuts'[n]}` }), ingredients: WITH_MERCURY })
 
+  // N2: a failed attempt (an outage) costs nothing, so it is recorded but no longer counted against the daily budget.
   it.each([
-    ['accepted', 0, (ctx: Ctx) => ctx.analyst.analyseWith(() => [draft()])],
-    ['rejected', 1, (ctx: Ctx) => ctx.analyst.analyseWith(() => REJECTING)],
-    ['failed', 0, (ctx: Ctx) => ctx.analyst.failNextWith(new Error('model is down'))],
-  ] as const)('records one attempt for an analysis that was %s', async (_outcome, rejected, arrange) => {
+    ['accepted', 'ok', 1, 0, (ctx: Ctx) => ctx.analyst.analyseWith(() => [draft()])],
+    ['rejected', 'rejected', 1, 1, (ctx: Ctx) => ctx.analyst.analyseWith(() => REJECTING)],
+    ['failed', 'failed', 0, 0, (ctx: Ctx) => ctx.analyst.failNextWith(new Error('model is down'))],
+  ] as const)('records one attempt for an analysis that was %s, settled as %s', async (_outcome, settled, counted, rejected, arrange) => {
     const ctx = setup()
     const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
     arrange(ctx)
 
     await ctx.service.analyse(formulationId).catch(() => undefined)
 
-    expect(await allAttempts(ctx)).toBe(1)
+    expect(await ctx.repository.lastAnalysisAttempt(formulationId)).toEqual({ outcome: settled, attemptedAt: T0 })
+    expect(await allAttempts(ctx)).toBe(counted)
     expect(await rejections(ctx, formulationId)).toBe(rejected)
   })
 
@@ -1623,7 +1691,6 @@ describe('ProductCatalogService.analyse attempts', () => {
     it.each([
       ['accepted', (ctx: Ctx) => ctx.analyst.analyseWith(() => [draft()])],
       ['rejected', (ctx: Ctx) => ctx.analyst.analyseWith(() => REJECTING)],
-      ['failed', (ctx: Ctx) => ctx.analyst.failNextWith(new Error('model is down'))],
     ] as const)('counts an analysis that was %s', async (_outcome, arrange) => {
       const ctx = setup({ policy: { dailyAnalysisBudget: 1 } })
       const first = await another(ctx, 0)
@@ -1632,6 +1699,19 @@ describe('ProductCatalogService.analyse attempts', () => {
       await ctx.service.analyse(first.formulationId).catch(() => undefined)
 
       await expect(ctx.service.analyse(second.formulationId)).rejects.toBeInstanceOf(CatalogBusyError)
+    })
+
+    // N2: like a failed research, a failed analysis (an outage) costs nothing, so it does not use up the day's budget.
+    it('does not count an analysis that failed, since an outage costs nothing', async () => {
+      const ctx = setup({ policy: { dailyAnalysisBudget: 1 } })
+      const first = await another(ctx, 0)
+      const second = await another(ctx, 1)
+      ctx.analyst.failNextWith(new Error('model is down'))
+      await ctx.service.analyse(first.formulationId).catch(() => undefined)
+      ctx.analyst.analyseWith(() => [draft()])
+
+      await expect(ctx.service.analyse(second.formulationId)).resolves.toBeUndefined()
+      expect(ctx.analyst.calls.analyse).toHaveLength(1)
     })
 
     it.each([
@@ -1649,6 +1729,349 @@ describe('ProductCatalogService.analyse attempts', () => {
 
       if (busy) await expect(outcome).rejects.toBeInstanceOf(CatalogBusyError)
       else await expect(outcome).resolves.toBeUndefined()
+    })
+  })
+})
+
+/**
+ * A service built around a given analyst and repository, for tests that need to hold or watch an analyst call. It has its
+ * own clock, and its researcher finds the mercury formulation, so analysing it needs a concern for the banned substance.
+ */
+const buildAround = (analyst: MemoryProductAnalyst, repository: FakeCatalogRepository = new FakeCatalogRepository()) => {
+  let clock = T0
+  let n = 0
+  const researcher = new MemoryProductResearcher()
+  researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
+  const service = new ProductCatalogService({
+    repository,
+    researcher,
+    analyst,
+    images: new MemoryCatalogImageStore(),
+    imageKeyPrefix: IMAGE_KEY_PREFIX,
+    now: () => clock,
+    newId: () => `id-${++n}`,
+  })
+  return { service, repository, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
+}
+/** Resolves and researches the CeraVe product, returning its formulation id. */
+const formulationOf = async (service: ProductCatalogService) => {
+  const resolved = await service.resolve(identity())
+  if (resolved.kind !== 'needs-research') throw new Error('expected needs-research')
+  const found = await service.research(resolved.productId)
+  if (found.kind !== 'found') throw new Error('expected found')
+  return found.formulationId
+}
+
+// N1: a call already in flight for the same work is shared, not repeated. The queue retries the refused call later.
+describe('ProductCatalogService in-flight sharing', () => {
+  const FIVE_MINUTES = 5 * MINUTE
+
+  /** The first call waits at the gate until opened, so a second call can be made while it is "in flight". */
+  const gate = () => {
+    let release!: () => void
+    let entered!: () => void
+    return { started: new Promise<void>((resolve) => (entered = resolve)), opened: new Promise<void>((resolve) => (release = resolve)), release: () => release(), enter: () => entered() }
+  }
+  class HoldFirstResearcher extends MemoryProductResearcher {
+    readonly gate = gate()
+    private held = false
+    override async research(product: ProductIdentity) {
+      if (!this.held) {
+        this.held = true
+        this.gate.enter()
+        await this.gate.opened
+      }
+      return super.research(product)
+    }
+  }
+  class HoldFirstAnalyst extends MemoryProductAnalyst {
+    readonly gate = gate()
+    private held = false
+    override async analyse(input: Parameters<MemoryProductAnalyst['analyse']>[0]) {
+      if (!this.held) {
+        this.held = true
+        this.gate.enter()
+        await this.gate.opened
+      }
+      return super.analyse(input)
+    }
+  }
+  /** A crash between "started" and the outcome: the call fails and so does settling it, so the attempt stays "started". */
+  class SettleResearchFails extends FakeCatalogRepository {
+    override async settleResearchAttempt(): Promise<void> {
+      throw new Error('database is down')
+    }
+  }
+  class SettleAnalysisFails extends FakeCatalogRepository {
+    override async settleAnalysisAttempt(): Promise<void> {
+      throw new Error('database is down')
+    }
+  }
+
+  describe('research', () => {
+    it('refuses a second research of a product whose research is in flight with RESEARCH_IN_PROGRESS, without calling the researcher again', async () => {
+      const researcher = new HoldFirstResearcher()
+      researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      const ctx = setup({ researcher })
+      const { productId } = await ctx.service.resolve(identity())
+      const first = ctx.service.research(productId)
+      await researcher.gate.started
+
+      const error = await errorOf(ctx.service.research(productId))
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error.code).toBe('RESEARCH_IN_PROGRESS')
+      researcher.gate.release()
+      expect(await first).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(researcher.calls).toHaveLength(1)
+    })
+
+    it('does not hold up the research of a different product', async () => {
+      const researcher = new HoldFirstResearcher()
+      researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      const ctx = setup({ researcher })
+      const { productId } = await ctx.service.resolve(identity())
+      const other = await ctx.service.resolve(identity({ name: 'Foaming Cleanser' }))
+      const first = ctx.service.research(productId)
+      await researcher.gate.started
+
+      await expect(ctx.service.research(other.productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+
+      researcher.gate.release()
+      await first
+    })
+
+    it.each([
+      ['4 minutes 59.999 seconds ago', 'still in flight, so is refused', FIVE_MINUTES - 1, true],
+      ['exactly 5 minutes ago', 'no longer in flight, so research goes ahead', FIVE_MINUTES, false],
+    ] as const)('a research attempt that started %s is %s', async (_label, _meaning, elapsed, inProgress) => {
+      const ctx = setup({ repository: new SettleResearchFails() })
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const { productId } = await ctx.service.resolve(identity())
+      ctx.researcher.failNextWith(new Error('the worker crashed'))
+      await ctx.service.research(productId).catch(() => undefined)
+      expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'started', attemptedAt: T0 })
+      ctx.advance(elapsed)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+
+      const attempt = ctx.service.research(productId)
+
+      if (inProgress) {
+        await expect(attempt).rejects.toMatchObject({ code: 'RESEARCH_IN_PROGRESS' })
+        expect(ctx.researcher.calls).toHaveLength(0)
+      } else {
+        await expect(attempt).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+        expect(ctx.researcher.calls).toHaveLength(1)
+      }
+      log.mockRestore()
+    })
+
+    it('does not refuse a product whose last attempt has finished, whatever its outcome', async () => {
+      const ctx = setup()
+      const { productId } = await ctx.service.resolve(identity())
+      ctx.researcher.failNextWith(new Error('search is down'))
+      await ctx.service.research(productId).catch(() => undefined)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+
+      await expect(ctx.service.research(productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+    })
+  })
+
+  describe('analyse', () => {
+    it('refuses a second analysis of a formulation whose analysis is in flight with ANALYSIS_IN_PROGRESS, without calling the analyst again', async () => {
+      const analyst = new HoldFirstAnalyst()
+      analyst.analyseWith(() => [draft()])
+      const { service } = buildAround(analyst)
+      const formulationId = await formulationOf(service)
+      const first = service.analyse(formulationId)
+      await analyst.gate.started
+
+      const error = await errorOf(service.analyse(formulationId))
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error.code).toBe('ANALYSIS_IN_PROGRESS')
+      analyst.gate.release()
+      await first
+      expect(analyst.calls.analyse).toHaveLength(1)
+    })
+
+    it('is not a rejection: an analysis refused as in progress does not count towards the three strikes', async () => {
+      const analyst = new HoldFirstAnalyst()
+      analyst.analyseWith(() => [draft()])
+      const { service, repository } = buildAround(analyst)
+      const formulationId = await formulationOf(service)
+      const first = service.analyse(formulationId)
+      await analyst.gate.started
+      for (let i = 0; i < 4; i++) await errorOf(service.analyse(formulationId))
+
+      analyst.gate.release()
+      await first
+
+      expect(await repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)).toBe(0)
+      expect(await repository.analysisAttemptsSince(new Date(0))).toBe(1)
+    })
+
+    it.each([
+      ['4 minutes 59.999 seconds ago', 'still in flight, so is refused', FIVE_MINUTES - 1, true],
+      ['exactly 5 minutes ago', 'no longer in flight, so analysis goes ahead', FIVE_MINUTES, false],
+    ] as const)('an analysis attempt that started %s is %s', async (_label, _meaning, elapsed, inProgress) => {
+      const analyst = new MemoryProductAnalyst()
+      const { service, repository, advance } = buildAround(analyst, new SettleAnalysisFails())
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const formulationId = await formulationOf(service)
+      analyst.failNextWith(new Error('the worker crashed'))
+      await service.analyse(formulationId).catch(() => undefined)
+      expect(await repository.lastAnalysisAttempt(formulationId)).toEqual({ outcome: 'started', attemptedAt: T0 })
+      advance(elapsed)
+      analyst.analyseWith(() => [draft()])
+
+      const attempt = service.analyse(formulationId)
+
+      if (inProgress) {
+        await expect(attempt).rejects.toMatchObject({ code: 'ANALYSIS_IN_PROGRESS' })
+        expect(analyst.calls.analyse).toHaveLength(0)
+      } else {
+        await expect(attempt).resolves.toBeUndefined()
+        expect(analyst.calls.analyse).toHaveLength(1)
+      }
+      log.mockRestore()
+    })
+
+    it('does not refuse a formulation whose last attempt has finished', async () => {
+      const analyst = new MemoryProductAnalyst()
+      const { service } = buildAround(analyst)
+      const formulationId = await formulationOf(service)
+      analyst.failNextWith(new Error('model is down'))
+      await service.analyse(formulationId).catch(() => undefined)
+      analyst.analyseWith(() => [draft()])
+
+      await expect(service.analyse(formulationId)).resolves.toBeUndefined()
+    })
+  })
+})
+
+// N2: analysis is accounted for like research: started before the model is called, settled after.
+describe('ProductCatalogService.analyse attempt accounting', () => {
+  const analysing = async (ctx: Ctx) => (await researched(ctx, { ingredients: WITH_MERCURY })).formulationId
+
+  it('records the attempt as started, and counted, before it calls the analyst, and the outcome after', async () => {
+    const repository = new FakeCatalogRepository()
+    const during: { last?: unknown; counted?: number } = {}
+    let watched = ''
+    class Probe extends MemoryProductAnalyst {
+      override async analyse(input: Parameters<MemoryProductAnalyst['analyse']>[0]) {
+        during.last = await repository.lastAnalysisAttempt(watched)
+        during.counted = await repository.analysisAttemptsSince(T0)
+        return super.analyse(input)
+      }
+    }
+    const probe = new Probe()
+    probe.analyseWith(() => [draft()])
+    const { service } = buildAround(probe, repository)
+    watched = await formulationOf(service)
+
+    await service.analyse(watched)
+
+    expect(during.last).toEqual({ outcome: 'started', attemptedAt: T0 })
+    expect(during.counted).toBe(1)
+    expect(await repository.lastAnalysisAttempt(watched)).toEqual({ outcome: 'ok', attemptedAt: T0 })
+  })
+
+  it('settles the attempt as failed, so it does not count, when the AI spend cap refuses the call', async () => {
+    const ctx = setup()
+    const formulationId = await analysing(ctx)
+    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+
+    await errorOf(ctx.service.analyse(formulationId))
+
+    expect(await ctx.repository.lastAnalysisAttempt(formulationId)).toEqual({ outcome: 'failed', attemptedAt: T0 })
+    expect(await ctx.repository.analysisAttemptsSince(T0)).toBe(0)
+  })
+
+  it('settles the attempt as ok, so it counts, when the model answered and the gate passed but the analysis could not be saved', async () => {
+    class SaveFails extends FakeCatalogRepository {
+      override async saveAnalysis(): Promise<void> {
+        throw new Error('database is down')
+      }
+    }
+    const ctx = setup({ repository: new SaveFails() })
+    const formulationId = await analysing(ctx)
+    ctx.analyst.analyseWith(() => [draft()])
+
+    await expect(ctx.service.analyse(formulationId)).rejects.toThrow('database is down')
+
+    expect(await ctx.repository.lastAnalysisAttempt(formulationId)).toEqual({ outcome: 'ok', attemptedAt: T0 })
+    expect(await ctx.repository.analysisAttemptsSince(T0)).toBe(1)
+  })
+
+  it('still counts rejections towards the three strikes, and a failure in between does not reset them', async () => {
+    const ctx = setup()
+    const formulationId = await analysing(ctx)
+    ctx.analyst.analyseWith(() => [])
+    await expect(ctx.service.analyse(formulationId)).rejects.toBeInstanceOf(AnalysisRejectedError)
+    ctx.analyst.failNextWith(new Error('model is down'))
+    await ctx.service.analyse(formulationId).catch(() => undefined)
+    await expect(ctx.service.analyse(formulationId)).rejects.toBeInstanceOf(AnalysisRejectedError)
+
+    const third = await errorOf(ctx.service.analyse(formulationId))
+
+    expect(third).toBeInstanceOf(PermanentJobError)
+  })
+
+  it('does not call the analyst when the started attempt cannot be recorded', async () => {
+    class StartFails extends FakeCatalogRepository {
+      override async recordAnalysisAttempt(): Promise<void> {
+        throw new Error('database is down')
+      }
+    }
+    const ctx = setup({ repository: new StartFails() })
+    const formulationId = await analysing(ctx)
+
+    await expect(ctx.service.analyse(formulationId)).rejects.toThrow('database is down')
+
+    expect(ctx.analyst.calls.analyse).toHaveLength(0)
+  })
+
+  describe('when settling the attempt fails', () => {
+    class SettleFails extends FakeCatalogRepository {
+      override async settleAnalysisAttempt(): Promise<void> {
+        throw new Error('database is down')
+      }
+    }
+    const quietly = async <T>(fn: () => Promise<T>) => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      try {
+        return await fn()
+      } finally {
+        log.mockRestore()
+      }
+    }
+
+    it('rethrows the analyst\'s own error', async () => {
+      const ctx = setup({ repository: new SettleFails() })
+      const formulationId = await analysing(ctx)
+      const original = new Error('model is down')
+      ctx.analyst.failNextWith(original)
+
+      await quietly(async () => expect(ctx.service.analyse(formulationId)).rejects.toBe(original))
+    })
+
+    it('still stores an accepted analysis', async () => {
+      const ctx = setup({ repository: new SettleFails() })
+      const formulationId = await analysing(ctx)
+      ctx.analyst.analyseWith(() => [draft()])
+
+      await quietly(() => ctx.service.analyse(formulationId))
+
+      expect((await ctx.service.productView(formulationId)).concerns).toHaveLength(1)
+    })
+
+    it('still reports a rejection as a rejection', async () => {
+      const ctx = setup({ repository: new SettleFails() })
+      const formulationId = await analysing(ctx)
+      ctx.analyst.analyseWith(() => [])
+
+      await quietly(async () => expect(ctx.service.analyse(formulationId)).rejects.toBeInstanceOf(AnalysisRejectedError))
     })
   })
 })
