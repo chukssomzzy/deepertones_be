@@ -4,25 +4,25 @@ import type { ProductRecognizer, Recognition } from './product-recognizer.provid
 /** Answers from a function you set ("unreadable" until then), and records the images it was shown. For tests. */
 export class MemoryProductRecognizer implements ProductRecognizer {
   readonly calls: ProductImage[] = []
-  #answer: (image: ProductImage) => Recognition = () => ({ classification: 'unreadable' })
-  #failure: Error | undefined
+  private answer: (image: ProductImage) => Recognition = () => ({ classification: 'unreadable' })
+  private failure: Error | undefined
 
   respondWith(answer: (image: ProductImage) => Recognition) {
-    this.#answer = answer
+    this.answer = answer
   }
 
   /** The next recognize() rejects with `error` and records nothing. */
   failNextWith(error: Error) {
-    this.#failure = error
+    this.failure = error
   }
 
   async recognize(image: ProductImage): Promise<Recognition> {
-    if (this.#failure) {
-      const failure = this.#failure
-      this.#failure = undefined
+    if (this.failure) {
+      const failure = this.failure
+      this.failure = undefined
       throw failure
     }
     this.calls.push(image)
-    return this.#answer(image)
+    return this.answer(image)
   }
 }
