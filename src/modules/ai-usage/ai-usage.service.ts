@@ -14,43 +14,43 @@ export type AiUsageServiceDeps = {
  * settled (then its real cost) or released. The day a call belongs to is the day it was reserved.
  */
 export class AiUsageService implements AiSpendLedger {
-  readonly #repository: AiUsageRepository
-  readonly #capMicros: number
-  readonly #now: () => Date
-  readonly #newId: () => string
+  private readonly repository: AiUsageRepository
+  private readonly capMicros: number
+  private readonly now: () => Date
+  private readonly newId: () => string
 
   constructor(deps: AiUsageServiceDeps) {
-    this.#repository = deps.repository
-    this.#capMicros = deps.capMicros
-    this.#now = deps.now ?? (() => new Date())
-    this.#newId = deps.newId ?? (() => crypto.randomUUID())
+    this.repository = deps.repository
+    this.capMicros = deps.capMicros
+    this.now = deps.now ?? (() => new Date())
+    this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
 
   async reserve(input: { job: AiJob; model: string; estimateMicros: number }): Promise<string> {
-    const createdAt = this.#now()
-    const id = this.#newId()
+    const createdAt = this.now()
+    const id = this.newId()
     // The repository decides against the cap in the same statement that stores the row. Its own errors pass through:
     // a database that cannot be reached is not a spent budget.
-    const reserved = await this.#repository.insertReservation({
+    const reserved = await this.repository.insertReservation({
       id,
       ...input,
       createdAt,
-      capMicros: this.#capMicros,
-      since: AiUsageService.#startOfUtcDay(createdAt),
+      capMicros: this.capMicros,
+      since: AiUsageService.startOfUtcDay(createdAt),
     })
     if (!reserved) throw new AiBudgetExceededError('The daily AI spend cap would be exceeded')
     return id
   }
 
   async settle(reservationId: string, input: { usage: AiUsage; costMicros: number }): Promise<void> {
-    await this.#repository.settle(reservationId, { ...input, settledAt: this.#now() })
+    await this.repository.settle(reservationId, { ...input, settledAt: this.now() })
   }
 
   async release(reservationId: string): Promise<void> {
-    await this.#repository.release(reservationId)
+    await this.repository.release(reservationId)
   }
 
-  static #startOfUtcDay(at: Date): Date {
+  private static startOfUtcDay(at: Date): Date {
     return new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
   }
 }
