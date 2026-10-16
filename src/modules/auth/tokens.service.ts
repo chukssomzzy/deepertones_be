@@ -32,13 +32,14 @@ export type RefreshVerification = { ok: true; userId: string; version: number } 
  * always signed with `secret`.
  */
 export class TokenService {
-  private readonly secret: string
-  private readonly secrets: string[]
+  // `#`, not `private`: they are the signing secrets, and a runtime-private field stays out of spreads and JSON.stringify.
+  readonly #secret: string
+  readonly #secrets: string[]
   private readonly now: () => Date
 
   constructor(options: { secret: string; previousSecret?: string; now?: () => Date }) {
-    this.secret = options.secret
-    this.secrets = options.previousSecret ? [options.secret, options.previousSecret] : [options.secret]
+    this.#secret = options.secret
+    this.#secrets = options.previousSecret ? [options.secret, options.previousSecret] : [options.secret]
     this.now = options.now ?? (() => new Date())
   }
 
@@ -46,8 +47,8 @@ export class TokenService {
     const now = this.now()
     const base = { sub: user.id, ver: user.tokenVersion }
     const [accessToken, refreshToken] = await Promise.all([
-      signJwt({ ...base, st: user.status, typ: 'access' }, { secret: this.secret, expiresInSeconds: ACCESS_TTL_SECONDS, now }),
-      signJwt({ ...base, typ: 'refresh' }, { secret: this.secret, expiresInSeconds: REFRESH_TTL_SECONDS, now }),
+      signJwt({ ...base, st: user.status, typ: 'access' }, { secret: this.#secret, expiresInSeconds: ACCESS_TTL_SECONDS, now }),
+      signJwt({ ...base, typ: 'refresh' }, { secret: this.#secret, expiresInSeconds: REFRESH_TTL_SECONDS, now }),
     ])
     return {
       accessToken,
@@ -58,7 +59,7 @@ export class TokenService {
   }
 
   async verifyAccess(token: string): Promise<AccessVerification> {
-    const result = await verifyJwt(token, { secrets: this.secrets, now: this.now() })
+    const result = await verifyJwt(token, { secrets: this.#secrets, now: this.now() })
     if (!result.ok) return { ok: false, problem: result.reason }
     const { sub, st, ver, typ } = result.claims
     if (typ !== 'access' || typeof sub !== 'string' || !isVersion(ver) || (st !== 'anonymous' && st !== 'verified')) {
@@ -68,7 +69,7 @@ export class TokenService {
   }
 
   async verifyRefresh(token: string): Promise<RefreshVerification> {
-    const result = await verifyJwt(token, { secrets: this.secrets, now: this.now() })
+    const result = await verifyJwt(token, { secrets: this.#secrets, now: this.now() })
     if (!result.ok) return { ok: false, problem: result.reason }
     const { sub, ver, typ } = result.claims
     if (typ !== 'refresh' || typeof sub !== 'string' || !isVersion(ver)) return { ok: false, problem: 'invalid' }

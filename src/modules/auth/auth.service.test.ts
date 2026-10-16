@@ -67,6 +67,16 @@ beforeEach(() => {
 
 let auth: AuthService
 
+describe('AuthService secrets', () => {
+  it('keeps the device id key out of the service when it is spread or listed', () => {
+    const { auth } = buildAuth()
+
+    const spread = { ...auth }
+    expect(Object.keys(spread)).toContain('tokens')
+    expect(Object.values(spread)).not.toContain(DEVICE_KEY)
+  })
+})
+
 describe('AuthService.bootstrap', () => {
   it('gives the same guest to the same device and a different one to another device', async () => {
     const first = await auth.bootstrap('device-1', 'ios')

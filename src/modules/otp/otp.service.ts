@@ -62,7 +62,8 @@ export class OtpService {
   private readonly email: EmailSender
   private readonly channels: readonly OtpChannel[]
   private readonly jobs: JobQueue
-  private readonly pepper: string
+  // `#`, not `private`: it is the OTP pepper, and a runtime-private field stays out of spreads and JSON.stringify.
+  readonly #pepper: string
   private readonly now: () => Date
   private readonly generateCode: () => string
   private readonly newId: () => string
@@ -73,7 +74,7 @@ export class OtpService {
     this.email = deps.email
     this.channels = deps.channels
     this.jobs = deps.jobs
-    this.pepper = deps.pepper
+    this.#pepper = deps.pepper
     this.now = deps.now ?? (() => new Date())
     this.generateCode = deps.generateCode ?? (() => randomDigits(OTP_POLICY.length))
     this.newId = deps.newId ?? (() => crypto.randomUUID())
@@ -123,7 +124,7 @@ export class OtpService {
 
     try {
       // Bound to the challenge: a sealed code copied into another message cannot be opened.
-      const sealedCode = await sealText(this.pepper, QUEUE_SEAL_INFO, code, challengeId)
+      const sealedCode = await sealText(this.#pepper, QUEUE_SEAL_INFO, code, challengeId)
       await this.jobs.enqueue(deliverOtpSpec, { challengeId, sealedCode })
     } catch (error) {
       // Never log the code or the sealed code.
@@ -149,7 +150,7 @@ export class OtpService {
 
     let code: string
     try {
-      code = await openText(this.pepper, QUEUE_SEAL_INFO, message.sealedCode, challenge.id)
+      code = await openText(this.#pepper, QUEUE_SEAL_INFO, message.sealedCode, challenge.id)
     } catch (error) {
       await this.repository.markFailed(challenge.id, 'unavailable')
       throw new PermanentJobError('The sealed code could not be opened', { cause: error })
@@ -220,7 +221,7 @@ export class OtpService {
 
   // Bound to the channel and address, so a code sent to one never verifies for another.
   private hash(recipient: OtpRecipient, code: string) {
-    return hmacSha256Hex(this.pepper, `${recipient.channel}:${recipient.address}:${code}`)
+    return hmacSha256Hex(this.#pepper, `${recipient.channel}:${recipient.address}:${code}`)
   }
 }
 
