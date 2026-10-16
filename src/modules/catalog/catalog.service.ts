@@ -1,47 +1,25 @@
-import { PermanentJobError } from "../../jobs/job";
-import {
-  NotFoundError,
-  UnavailableError,
-  ValidationError,
-} from "../../lib/errors";
-import { AiBudgetExceededError } from "../../providers/anthropic/ai-spend.provider";
-import type { CatalogImageStore } from "../../providers/catalog-images/catalog-image-store.provider";
-import type { ProductAnalyst } from "../../providers/product-analysis/product-analyst.provider";
-import type {
-  ProductIdentity,
-  ProductResearcher,
-} from "../../providers/product-research/product-researcher.provider";
-import {
-  type AnalysisProblem,
-  checkAnalysis,
-  hasLinkOrMarkup,
-} from "./catalog.analysis";
-import {
-  brandKey,
-  identityKey,
-  nearMissCandidates,
-  normaliseText,
-} from "./catalog.identity";
-import { ingredientsKey } from "./catalog.ingredients";
-import { REFERENCE_COVERAGE, REFERENCE_VERSION } from "./catalog.reference";
-import type { CatalogRepository } from "./catalog.repository";
-import { flagFacts } from "./catalog.rules";
-import type { Formulation, Product } from "./catalog.types";
-import {
-  ANALYSIS_VERSION,
-  CONCERN_KINDS,
-  FRESH_FOR_DAYS,
-  SEVERITIES,
-  TRAITS,
-} from "./catalog.vocabulary";
+import { PermanentJobError } from '../../jobs/job'
+import { NotFoundError, UnavailableError, ValidationError } from '../../lib/errors'
+import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
+import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
+import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
+import type { ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
+import { type AnalysisProblem, checkAnalysis, hasLinkOrMarkup } from './catalog.analysis'
+import { brandKey, identityKey, nearMissCandidates, normaliseText } from './catalog.identity'
+import { ingredientsKey } from './catalog.ingredients'
+import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
+import type { CatalogRepository } from './catalog.repository'
+import { flagFacts } from './catalog.rules'
+import type { Formulation, Product } from './catalog.types'
+import { ANALYSIS_VERSION, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 export type CatalogPolicy = {
-  dailyResearchBudget: number;
-  dailyAnalysisBudget: number;
-  brandScanLimit: number;
-  nearMissThreshold: number;
-  nearMissLimit: number;
-};
+  dailyResearchBudget: number
+  dailyAnalysisBudget: number
+  brandScanLimit: number
+  nearMissThreshold: number
+  nearMissLimit: number
+}
 
 export const CATALOG_POLICY: CatalogPolicy = {
   /** New-product research attempts allowed in any rolling 24 hours, whatever their outcome. */
@@ -54,131 +32,125 @@ export const CATALOG_POLICY: CatalogPolicy = {
   nearMissThreshold: 0.6,
   /** How many such candidates are put to the model. */
   nearMissLimit: 3,
-};
+}
 
 /** The model's analysis broke a rule, so nothing was stored. A later attempt may do better, so it is retryable. `reason` is a fixed code. */
 export class AnalysisRejectedError extends UnavailableError {
   constructor(reason: AnalysisProblem) {
-    super("ANALYSIS_REJECTED", `The analysis was rejected: ${reason}`);
+    super('ANALYSIS_REJECTED', `The analysis was rejected: ${reason}`)
   }
 }
 
 /** The day's budget for model calls is spent, or the AI spend cap was reached. Nothing was called; try again later. */
 export class CatalogBusyError extends UnavailableError {
   constructor() {
-    super(
-      "CATALOG_BUSY",
-      "The catalog has reached its daily limit; try again later",
-    );
+    super('CATALOG_BUSY', 'The catalog has reached its daily limit; try again later')
   }
 }
 
 export type ProductCatalogServiceDeps = {
-  repository: CatalogRepository;
-  researcher: ProductResearcher;
-  analyst: ProductAnalyst;
-  images: CatalogImageStore;
+  repository: CatalogRepository
+  researcher: ProductResearcher
+  analyst: ProductAnalyst
+  images: CatalogImageStore
   /** Where stock images go in the shared public bucket, e.g. `catalog/staging`: the Worker's own corner, apart from the CI-synced assets. */
-  imageKeyPrefix: string;
-  now?: () => Date;
-  newId?: () => string;
-  policy?: CatalogPolicy;
-};
+  imageKeyPrefix: string
+  now?: () => Date
+  newId?: () => string
+  policy?: CatalogPolicy
+}
 
 /** What a scan of this product needs next. */
 export type ResolveResult =
-  | { kind: "ready"; productId: string; formulationId: string }
-  | { kind: "needs-analysis"; productId: string; formulationId: string }
+  | { kind: 'ready'; productId: string; formulationId: string }
+  | { kind: 'needs-analysis'; productId: string; formulationId: string }
   /** Analysis was rejected too often at the current versions; it is not tried again until one of them changes. */
-  | { kind: "analysis-failed"; productId: string; formulationId: string }
-  | { kind: "needs-research"; productId: string };
+  | { kind: 'analysis-failed'; productId: string; formulationId: string }
+  | { kind: 'needs-research'; productId: string }
 
 /**
  * `fallbackFormulationId` is the product's stale formulation, when it was analysed by the current versions, so a
  * caller that cannot get fresh ingredients can still show an answer.
  */
 export type ResearchResult =
-  | { kind: "found"; formulationId: string }
-  | { kind: "not-found"; fallbackFormulationId?: string }
-  | { kind: "budget-exhausted"; fallbackFormulationId?: string };
+  | { kind: 'found'; formulationId: string }
+  | { kind: 'not-found'; fallbackFormulationId?: string }
+  | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
 export type ProductView = {
   product: {
-    id: string;
-    brand: string;
-    name: string;
-    variant: string | null;
-    category: Product["category"];
-    imageUrl: string | null;
-  };
+    id: string
+    brand: string
+    name: string
+    variant: string | null
+    category: Product['category']
+    imageUrl: string | null
+  }
   formulation: {
-    id: string;
-    ingredients: string[];
-    source: { kind: Formulation["sourceKind"]; url: string | null };
-    foundAt: Date;
-    analysedAt: Date | null;
-  };
+    id: string
+    ingredients: string[]
+    source: { kind: Formulation['sourceKind']; url: string | null }
+    foundAt: Date
+    analysedAt: Date | null
+  }
   concerns: {
-    kind: string;
-    severity: string;
-    ingredients: string[];
-    why: string;
-    whoShouldTakeCare: string;
-    traits: string[];
-    sources: string[];
-  }[];
+    kind: string
+    severity: string
+    ingredients: string[]
+    why: string
+    whoShouldTakeCare: string
+    traits: string[]
+    sources: string[]
+  }[]
   /** How much of the regulatory lists the rule checks cover, so a result with no flags is never read as an all-clear. */
-  reference: { version: string; coverage: typeof REFERENCE_COVERAGE };
-};
+  reference: { version: string; coverage: typeof REFERENCE_COVERAGE }
+}
 
 export class ProductCatalogService {
-  static readonly #DAY = 24 * 60 * 60 * 1000;
-  static readonly #MAX_LABEL_INGREDIENTS = 150;
-  static readonly #MAX_LABEL_INGREDIENT_LENGTH = 120;
-  static readonly #CONTROL_CHARACTER = /\p{Cc}/u;
+  static readonly #DAY = 24 * 60 * 60 * 1000
+  static readonly #MAX_LABEL_INGREDIENTS = 150
+  static readonly #MAX_LABEL_INGREDIENT_LENGTH = 120
+  static readonly #CONTROL_CHARACTER = /\p{Cc}/u
   static readonly #IMAGE_EXTENSIONS = {
-    "image/jpeg": "jpg",
-    "image/png": "png",
-    "image/webp": "webp",
-  } as const;
+    'image/jpeg': 'jpg',
+    'image/png': 'png',
+    'image/webp': 'webp',
+  } as const
 
-  static readonly #WEEK = 7 * ProductCatalogService.#DAY;
+  static readonly #WEEK = 7 * ProductCatalogService.#DAY
   /** Rejections at the same analysis and reference versions after which a formulation is given up on until a version changes. */
-  static readonly #MAX_REJECTIONS = 3;
+  static readonly #MAX_REJECTIONS = 3
 
   static #identityOf = (product: Product): ProductIdentity => ({
     brand: product.brand,
     name: product.name,
     category: product.category,
     ...(product.variant === null ? {} : { variant: product.variant }),
-  });
+  })
 
-  static #variantsConflict = (
-    a: string | null | undefined,
-    b: string | null | undefined,
-  ): boolean => {
-    const [x, y] = [normaliseText(a ?? ""), normaliseText(b ?? "")];
-    return x !== "" && y !== "" && x !== y;
-  };
+  static #variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
+    const [x, y] = [normaliseText(a ?? ''), normaliseText(b ?? '')]
+    return x !== '' && y !== '' && x !== y
+  }
 
-  readonly #repository: CatalogRepository;
-  readonly #researcher: ProductResearcher;
-  readonly #analyst: ProductAnalyst;
-  readonly #images: CatalogImageStore;
-  readonly #imageKeyPrefix: string;
-  readonly #now: () => Date;
-  readonly #newId: () => string;
-  readonly #policy: CatalogPolicy;
+  readonly #repository: CatalogRepository
+  readonly #researcher: ProductResearcher
+  readonly #analyst: ProductAnalyst
+  readonly #images: CatalogImageStore
+  readonly #imageKeyPrefix: string
+  readonly #now: () => Date
+  readonly #newId: () => string
+  readonly #policy: CatalogPolicy
 
   constructor(deps: ProductCatalogServiceDeps) {
-    this.#repository = deps.repository;
-    this.#researcher = deps.researcher;
-    this.#analyst = deps.analyst;
-    this.#images = deps.images;
-    this.#imageKeyPrefix = deps.imageKeyPrefix;
-    this.#now = deps.now ?? (() => new Date());
-    this.#newId = deps.newId ?? (() => crypto.randomUUID());
-    this.#policy = deps.policy ?? CATALOG_POLICY;
+    this.#repository = deps.repository
+    this.#researcher = deps.researcher
+    this.#analyst = deps.analyst
+    this.#images = deps.images
+    this.#imageKeyPrefix = deps.imageKeyPrefix
+    this.#now = deps.now ?? (() => new Date())
+    this.#newId = deps.newId ?? (() => crypto.randomUUID())
+    this.#policy = deps.policy ?? CATALOG_POLICY
   }
 
   /**
@@ -186,28 +158,23 @@ export class ProductCatalogService {
    * is put to the model against the brand's most similar products; a "same product" answer is remembered as an alias.
    */
   async resolve(identity: ProductIdentity): Promise<ResolveResult> {
-    const key = identityKey(identity);
-    const known = await this.#repository.findProductByKey(key);
-    if (known) return this.#nextStep(known);
+    const key = identityKey(identity)
+    const known = await this.#repository.findProductByKey(key)
+    if (known) return this.#nextStep(known)
 
-    const brandProducts = await this.#repository.productsByBrandKey(
-      brandKey(identity.brand),
-      this.#policy.brandScanLimit,
-    );
+    const brandProducts = await this.#repository.productsByBrandKey(brandKey(identity.brand), this.#policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
-      (p) =>
-        p.category === identity.category &&
-        !ProductCatalogService.#variantsConflict(p.variant, identity.variant),
-    );
+      (p) => p.category === identity.category && !ProductCatalogService.#variantsConflict(p.variant, identity.variant),
+    )
     const candidates = nearMissCandidates(identity, comparable, {
       threshold: this.#policy.nearMissThreshold,
       limit: this.#policy.nearMissLimit,
-    });
+    })
     for (const candidate of candidates) {
       if (await this.#isSameProduct(identity, candidate)) {
-        await this.#repository.addAlias(key, candidate.id);
-        return this.#nextStep(candidate);
+        await this.#repository.addAlias(key, candidate.id)
+        return this.#nextStep(candidate)
       }
     }
 
@@ -221,8 +188,8 @@ export class ProductCatalogService {
       variant: identity.variant ?? null,
       category: identity.category,
       createdAt: this.#now(),
-    });
-    return this.#nextStep(created);
+    })
+    return this.#nextStep(created)
   }
 
   /**
@@ -238,95 +205,66 @@ export class ProductCatalogService {
    * counting, and so does one the AI spend cap stopped, which answers budget-exhausted. Failing to settle never hides what the researcher did or threw.
    */
   async research(productId: string): Promise<ResearchResult> {
-    const product = await this.#requireProduct(productId);
-    const now = this.#now();
+    const product = await this.#requireProduct(productId)
+    const now = this.#now()
 
-    const latest = await this.#repository.latestFormulation(productId);
-    if (latest && !this.#isStale(latest, now))
-      return { kind: "found", formulationId: latest.id };
+    const latest = await this.#repository.latestFormulation(productId)
+    if (latest && !this.#isStale(latest, now)) return { kind: 'found', formulationId: latest.id }
 
-    const last = await this.#repository.lastResearchOutcome(productId);
-    if (
-      last?.outcome === "not-found" &&
-      now.getTime() - last.attemptedAt.getTime() < ProductCatalogService.#WEEK
-    ) {
-      return { kind: "not-found", ...this.#fallbackFor(latest) };
+    const last = await this.#repository.lastResearchOutcome(productId)
+    if (last?.outcome === 'not-found' && now.getTime() - last.attemptedAt.getTime() < ProductCatalogService.#WEEK) {
+      return { kind: 'not-found', ...this.#fallbackFor(latest) }
     }
 
-    const attempts = await this.#repository.researchAttemptsSince(
-      new Date(now.getTime() - ProductCatalogService.#DAY),
-    );
-    if (attempts >= this.#policy.dailyResearchBudget)
-      return { kind: "budget-exhausted", ...this.#fallbackFor(latest) };
+    const attempts = await this.#repository.researchAttemptsSince(new Date(now.getTime() - ProductCatalogService.#DAY))
+    if (attempts >= this.#policy.dailyResearchBudget) return { kind: 'budget-exhausted', ...this.#fallbackFor(latest) }
 
-    const attemptId = this.#newId();
+    const attemptId = this.#newId()
     await this.#repository.recordResearchAttempt({
       id: attemptId,
       productId,
       attemptedAt: now,
-      outcome: "started",
-    });
+      outcome: 'started',
+    })
 
-    let result: Awaited<ReturnType<ProductResearcher["research"]>>;
+    let result: Awaited<ReturnType<ProductResearcher['research']>>
     try {
-      result = await this.#researcher.research(
-        ProductCatalogService.#identityOf(product),
-      );
+      result = await this.#researcher.research(ProductCatalogService.#identityOf(product))
     } catch (error) {
       // The AI spend cap stopped the research: like an outage it settles as failed, so it is not cached as not-found and the next scan may try again.
-      await this.#settleAttempt(attemptId, "failed");
-      if (error instanceof AiBudgetExceededError)
-        return { kind: "budget-exhausted", ...this.#fallbackFor(latest) };
-      throw error;
+      await this.#settleAttempt(attemptId, 'failed')
+      if (error instanceof AiBudgetExceededError) return { kind: 'budget-exhausted', ...this.#fallbackFor(latest) }
+      throw error
     }
     // The list comes from a web page, so it is not stored if any entry carries a link or markup.
     if (!result.found || result.ingredients.some(hasLinkOrMarkup)) {
-      await this.#settleAttempt(attemptId, "not-found");
-      return { kind: "not-found", ...this.#fallbackFor(latest) };
+      await this.#settleAttempt(attemptId, 'not-found')
+      return { kind: 'not-found', ...this.#fallbackFor(latest) }
     }
-    await this.#settleAttempt(attemptId, "found");
+    await this.#settleAttempt(attemptId, 'found')
 
-    const formulationId = await this.#storeFormulation(
-      productId,
-      result.ingredients,
-      "web",
-      result.sourceUrl,
-      now,
-    );
+    const formulationId = await this.#storeFormulation(productId, result.ingredients, 'web', result.sourceUrl, now)
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    await this.#importStockImage(product, result.imageUrl, now);
-    return { kind: "found", formulationId };
+    await this.#importStockImage(product, result.imageUrl, now)
+    return { kind: 'found', formulationId }
   }
 
   /** Stores the ingredient list read from a back-label photo; an identical list the product already has is reused. */
-  async addLabelIngredients(
-    productId: string,
-    ingredients: string[],
-  ): Promise<string> {
-    await this.#requireProduct(productId);
-    const trimmed = ingredients.map((name) => name.trim());
+  async addLabelIngredients(productId: string, ingredients: string[]): Promise<string> {
+    await this.#requireProduct(productId)
+    const trimmed = ingredients.map((name) => name.trim())
     const readable =
       trimmed.length > 0 &&
       trimmed.length <= ProductCatalogService.#MAX_LABEL_INGREDIENTS &&
       trimmed.every(
         (name) =>
-          name !== "" &&
+          name !== '' &&
           name.length <= ProductCatalogService.#MAX_LABEL_INGREDIENT_LENGTH &&
           !ProductCatalogService.#CONTROL_CHARACTER.test(name) &&
           !hasLinkOrMarkup(name),
-      );
-    if (!readable)
-      throw new ValidationError(
-        "LABEL_UNREADABLE",
-        "The ingredient list on the label could not be read",
-      );
-    return this.#storeFormulation(
-      productId,
-      trimmed,
-      "label",
-      null,
-      this.#now(),
-    );
+      )
+    if (!readable) throw new ValidationError('LABEL_UNREADABLE', 'The ingredient list on the label could not be read')
+    return this.#storeFormulation(productId, trimmed, 'label', null, this.#now())
   }
 
   /**
@@ -339,32 +277,21 @@ export class ProductCatalogService {
    * and throws AnalysisRejectedError, or PermanentJobError when it was the 3rd rejection.
    */
   async analyse(formulationId: string): Promise<void> {
-    const formulation = await this.#repository.findFormulation(formulationId);
-    if (!formulation)
-      throw new NotFoundError("FORMULATION_NOT_FOUND", "Formulation not found");
-    if (this.#isAnalysed(formulation)) return;
+    const formulation = await this.#repository.findFormulation(formulationId)
+    if (!formulation) throw new NotFoundError('FORMULATION_NOT_FOUND', 'Formulation not found')
+    if (this.#isAnalysed(formulation)) return
 
-    const rejections = await this.#repository.rejectedAnalyses(
-      formulationId,
-      ANALYSIS_VERSION,
-      REFERENCE_VERSION,
-    );
-    if (rejections >= ProductCatalogService.#MAX_REJECTIONS)
-      throw new PermanentJobError(
-        "The analysis was rejected too often at these versions",
-      );
-    const now = this.#now();
-    const attempts = await this.#repository.analysisAttemptsSince(
-      new Date(now.getTime() - ProductCatalogService.#DAY),
-    );
-    if (attempts >= this.#policy.dailyAnalysisBudget)
-      throw new CatalogBusyError();
+    const rejections = await this.#repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)
+    if (rejections >= ProductCatalogService.#MAX_REJECTIONS) throw new PermanentJobError('The analysis was rejected too often at these versions')
+    const now = this.#now()
+    const attempts = await this.#repository.analysisAttemptsSince(new Date(now.getTime() - ProductCatalogService.#DAY))
+    if (attempts >= this.#policy.dailyAnalysisBudget) throw new CatalogBusyError()
 
-    const product = await this.#requireProduct(formulation.productId);
-    const flaggedFacts = flagFacts(formulation.ingredients);
-    let outcome: "ok" | "rejected" | "failed" = "failed";
-    let problem: AnalysisProblem | undefined;
-    let refusedByCap = false;
+    const product = await this.#requireProduct(formulation.productId)
+    const flaggedFacts = flagFacts(formulation.ingredients)
+    let outcome: 'ok' | 'rejected' | 'failed' = 'failed'
+    let problem: AnalysisProblem | undefined
+    let refusedByCap = false
     try {
       const drafts = await this.#analyst.analyse({
         product: ProductCatalogService.#identityOf(product),
@@ -373,28 +300,24 @@ export class ProductCatalogService {
         kinds: CONCERN_KINDS,
         severities: SEVERITIES,
         traits: TRAITS,
-      });
-      const checked = checkAnalysis(
-        drafts,
-        formulation.ingredients,
-        flaggedFacts,
-      );
+      })
+      const checked = checkAnalysis(drafts, formulation.ingredients, flaggedFacts)
       if (checked.ok) {
         await this.#repository.saveAnalysis(formulationId, {
           concerns: checked.concerns,
           analysisVersion: ANALYSIS_VERSION,
           referenceVersion: REFERENCE_VERSION,
           analysedAt: this.#now(),
-        });
-        outcome = "ok";
+        })
+        outcome = 'ok'
       } else {
-        outcome = "rejected";
-        problem = checked.reason;
+        outcome = 'rejected'
+        problem = checked.reason
       }
     } catch (error) {
-      if (!(error instanceof AiBudgetExceededError)) throw error;
-      refusedByCap = true;
-      throw new CatalogBusyError();
+      if (!(error instanceof AiBudgetExceededError)) throw error
+      refusedByCap = true
+      throw new CatalogBusyError()
     } finally {
       // A refusal records nothing: the model was not called, so it is neither a failure nor a spent attempt.
       if (!refusedByCap) {
@@ -407,24 +330,21 @@ export class ProductCatalogService {
             analysisVersion: ANALYSIS_VERSION,
             referenceVersion: REFERENCE_VERSION,
           }),
-        );
+        )
       }
     }
     if (problem) {
-      const error = new AnalysisRejectedError(problem);
-      throw rejections + 1 >= ProductCatalogService.#MAX_REJECTIONS
-        ? new PermanentJobError(error.message, { cause: error })
-        : error;
+      const error = new AnalysisRejectedError(problem)
+      throw rejections + 1 >= ProductCatalogService.#MAX_REJECTIONS ? new PermanentJobError(error.message, { cause: error }) : error
     }
   }
 
   /** Everything a result screen shows for a formulation: the product, its ingredients and source, the concerns and the reference coverage. */
   async productView(formulationId: string): Promise<ProductView> {
-    const formulation = await this.#repository.findFormulation(formulationId);
-    if (!formulation)
-      throw new NotFoundError("PRODUCT_NOT_FOUND", "Product not found");
-    const product = await this.#requireProduct(formulation.productId);
-    const concerns = await this.#repository.concernsFor(formulationId);
+    const formulation = await this.#repository.findFormulation(formulationId)
+    if (!formulation) throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    const product = await this.#requireProduct(formulation.productId)
+    const concerns = await this.#repository.concernsFor(formulationId)
 
     return {
       product: {
@@ -433,10 +353,7 @@ export class ProductCatalogService {
         name: product.name,
         variant: product.variant,
         category: product.category,
-        imageUrl:
-          product.imageKey === null
-            ? null
-            : this.#images.publicUrl(product.imageKey),
+        imageUrl: product.imageKey === null ? null : this.#images.publicUrl(product.imageKey),
       },
       formulation: {
         id: formulation.id,
@@ -455,30 +372,23 @@ export class ProductCatalogService {
         sources: c.sources,
       })),
       reference: { version: REFERENCE_VERSION, coverage: REFERENCE_COVERAGE },
-    };
+    }
   }
 
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
-  async #isSameProduct(
-    identity: ProductIdentity,
-    candidate: Product,
-  ): Promise<boolean> {
+  async #isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
     try {
-      return await this.#analyst.sameProduct(
-        identity,
-        ProductCatalogService.#identityOf(candidate),
-      );
+      return await this.#analyst.sameProduct(identity, ProductCatalogService.#identityOf(candidate))
     } catch (error) {
-      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError();
-      throw error;
+      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
+      throw error
     }
   }
 
   async #requireProduct(productId: string): Promise<Product> {
-    const product = await this.#repository.findProductById(productId);
-    if (!product)
-      throw new NotFoundError("PRODUCT_NOT_FOUND", "Product not found");
-    return product;
+    const product = await this.#repository.findProductById(productId)
+    if (!product) throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    return product
   }
 
   /**
@@ -486,74 +396,53 @@ export class ProductCatalogService {
    * scanned, so nothing is paid for products nobody scans again. Exactly FRESH_FOR_DAYS old is still fresh.
    */
   async #nextStep(product: Product): Promise<ResolveResult> {
-    const latest = await this.#repository.latestFormulation(product.id);
-    if (!latest || this.#isStale(latest, this.#now()))
-      return { kind: "needs-research", productId: product.id };
-    const ids = { productId: product.id, formulationId: latest.id };
-    if (this.#isAnalysed(latest)) return { kind: "ready", ...ids };
-    const rejections = await this.#repository.rejectedAnalyses(
-      latest.id,
-      ANALYSIS_VERSION,
-      REFERENCE_VERSION,
-    );
+    const latest = await this.#repository.latestFormulation(product.id)
+    if (!latest || this.#isStale(latest, this.#now())) return { kind: 'needs-research', productId: product.id }
+    const ids = { productId: product.id, formulationId: latest.id }
+    if (this.#isAnalysed(latest)) return { kind: 'ready', ...ids }
+    const rejections = await this.#repository.rejectedAnalyses(latest.id, ANALYSIS_VERSION, REFERENCE_VERSION)
     return {
-      kind:
-        rejections >= ProductCatalogService.#MAX_REJECTIONS
-          ? "analysis-failed"
-          : "needs-analysis",
+      kind: rejections >= ProductCatalogService.#MAX_REJECTIONS ? 'analysis-failed' : 'needs-analysis',
       ...ids,
-    };
+    }
   }
 
   #isStale(formulation: Formulation, now: Date): boolean {
-    return (
-      now.getTime() - formulation.foundAt.getTime() >
-      FRESH_FOR_DAYS * ProductCatalogService.#DAY
-    );
+    return now.getTime() - formulation.foundAt.getTime() > FRESH_FOR_DAYS * ProductCatalogService.#DAY
   }
 
   #isAnalysed(formulation: Formulation): boolean {
-    return (
-      formulation.analysisVersion === ANALYSIS_VERSION &&
-      formulation.referenceVersion === REFERENCE_VERSION
-    );
+    return formulation.analysisVersion === ANALYSIS_VERSION && formulation.referenceVersion === REFERENCE_VERSION
   }
 
   /** The stale formulation to show when fresh research is not possible, if it is worth showing: analysed by the current versions. */
   #fallbackFor(latest: Formulation | null): { fallbackFormulationId?: string } {
-    return latest && this.#isAnalysed(latest)
-      ? { fallbackFormulationId: latest.id }
-      : {};
+    return latest && this.#isAnalysed(latest) ? { fallbackFormulationId: latest.id } : {}
   }
 
-  async #settleAttempt(
-    attemptId: string,
-    outcome: "found" | "not-found" | "failed",
-  ): Promise<void> {
-    await this.#bookkeeping(() =>
-      this.#repository.settleResearchAttempt(attemptId, outcome),
-    );
+  async #settleAttempt(attemptId: string, outcome: 'found' | 'not-found' | 'failed'): Promise<void> {
+    await this.#bookkeeping(() => this.#repository.settleResearchAttempt(attemptId, outcome))
   }
 
   /** Attempt records are accounting, not the work itself: a failure to write one must not hide the work's result or error. The log has no detail. */
   async #bookkeeping(write: () => Promise<void>): Promise<void> {
     try {
-      await write();
+      await write()
     } catch {
-      console.error({ outcome: "attempt-bookkeeping-failed" });
+      console.error({ outcome: 'attempt-bookkeeping-failed' })
     }
   }
 
   async #storeFormulation(
     productId: string,
     ingredients: string[],
-    sourceKind: Formulation["sourceKind"],
+    sourceKind: Formulation['sourceKind'],
     sourceUrl: string | null,
     foundAt: Date,
   ): Promise<string> {
     // The repository returns the product's existing formulation for this list (an earlier scan, or a concurrent one), so
     // two writers converge on one row.
-    const id = this.#newId();
+    const id = this.#newId()
     const stored = await this.#repository.createFormulation({
       id,
       productId,
@@ -562,10 +451,9 @@ export class ProductCatalogService {
       sourceKind,
       sourceUrl,
       foundAt,
-    });
-    if (stored.id !== id)
-      await this.#repository.touchFormulation(stored.id, foundAt);
-    return stored.id;
+    })
+    if (stored.id !== id) await this.#repository.touchFormulation(stored.id, foundAt)
+    return stored.id
   }
 
   /**
@@ -574,41 +462,25 @@ export class ProductCatalogService {
    * may fail the research: the ingredients are already stored, and a missing image is normal. The log carries the
    * product id only, never a URL, which came from a web page.
    */
-  async #importStockImage(
-    product: Product,
-    imageUrl: string | undefined,
-    now: Date,
-  ): Promise<void> {
-    const checkedAt = product.imageCheckedAt;
-    if (
-      product.imageKey !== null ||
-      (checkedAt !== null &&
-        now.getTime() - checkedAt.getTime() <=
-          FRESH_FOR_DAYS * ProductCatalogService.#DAY)
-    )
-      return;
+  async #importStockImage(product: Product, imageUrl: string | undefined, now: Date): Promise<void> {
+    const checkedAt = product.imageCheckedAt
+    if (product.imageKey !== null || (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.#DAY))
+      return
     try {
-      const image = imageUrl ? await this.#images.fetchImage(imageUrl) : null;
-      if (
-        !imageUrl ||
-        !image ||
-        !(await this.#analyst.imageShowsProduct(
-          image,
-          ProductCatalogService.#identityOf(product),
-        ))
-      ) {
-        await this.#repository.markImageChecked(product.id, now);
-        return;
+      const image = imageUrl ? await this.#images.fetchImage(imageUrl) : null
+      if (!imageUrl || !image || !(await this.#analyst.imageShowsProduct(image, ProductCatalogService.#identityOf(product)))) {
+        await this.#repository.markImageChecked(product.id, now)
+        return
       }
-      const key = `${this.#imageKeyPrefix}/products/${product.id}.${ProductCatalogService.#IMAGE_EXTENSIONS[image.mediaType]}`;
-      await this.#images.put(key, image);
+      const key = `${this.#imageKeyPrefix}/products/${product.id}.${ProductCatalogService.#IMAGE_EXTENSIONS[image.mediaType]}`
+      await this.#images.put(key, image)
       await this.#repository.setProductImage(product.id, {
         key,
         sourceUrl: imageUrl,
         checkedAt: now,
-      });
+      })
     } catch {
-      console.error({ outcome: "image-import-failed", productId: product.id });
+      console.error({ outcome: 'image-import-failed', productId: product.id })
     }
   }
 }
