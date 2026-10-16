@@ -54,6 +54,13 @@ describe('MetaWhatsAppOtpDelivery.send', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps the access token out of the delivery when it is serialised or spread', () => {
+    const { delivery } = make(() => json(SUCCESS_BODY))
+
+    expect(JSON.stringify(delivery)).not.toContain(ACCESS_TOKEN)
+    expect(JSON.stringify({ ...delivery })).not.toContain(ACCESS_TOKEN)
+  })
+
   it('posts the authentication template to the Graph API with the code in body and button', async () => {
     const { delivery, calls } = make(() => json(SUCCESS_BODY))
 

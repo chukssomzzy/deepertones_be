@@ -72,6 +72,13 @@ describe('ZeptoMailEmailSender.send', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps the API key out of the sender when it is serialised or spread', () => {
+    const { sender } = make(() => json(SUCCESS_BODY))
+
+    expect(JSON.stringify(sender)).not.toContain(API_KEY)
+    expect(JSON.stringify({ ...sender })).not.toContain(API_KEY)
+  })
+
   it('posts the message to the ZeptoMail API with the expected headers and body', async () => {
     const { sender, calls } = make(() => json(SUCCESS_BODY))
 
