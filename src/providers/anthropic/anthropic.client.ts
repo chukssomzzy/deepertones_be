@@ -158,15 +158,16 @@ export class AnthropicClient {
       throw AnthropicClient.#toError(error)
     }
 
+    // Usage is read first: a 200 that carries a usage block was billed even if it turns out not to be a message.
+    const usage = AnthropicClient.#usageOf(reply)
     let message: Message
     try {
       message = AnthropicClient.#toMessage(reply)
     } catch (error) {
-      await this.#settle(reservationId, { usage: AnthropicClient.#NO_USAGE, costMicros: estimate })
+      await this.#settle(reservationId, usage ? { usage, costMicros: costMicros(model, usage) } : { usage: AnthropicClient.#NO_USAGE, costMicros: estimate })
       throw error
     }
     // Without a usage block the call cannot be measured, so it is counted at the most it could have cost.
-    const usage = AnthropicClient.#usageOf(reply)
     await this.#settle(reservationId, usage ? { usage, costMicros: costMicros(model, usage) } : { usage: AnthropicClient.#NO_USAGE, costMicros: estimate })
     return message
   }
