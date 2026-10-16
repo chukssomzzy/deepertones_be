@@ -147,7 +147,7 @@ Sign-in codes go out by email through ZeptoMail (Zoho). The code is in `src/modu
 the setup below. Tests never call ZeptoMail and need no secrets.
 
 1. Create a ZeptoMail account and a **Mail Agent**.
-2. Add and verify the sending domain `mail.deepertones.com`. ZeptoMail shows a DKIM TXT record and a
+2. Add and verify the sending domain `deepertones.com` (the sender is `no-reply@deepertones.com`). ZeptoMail shows a DKIM TXT record and a
    bounce (return-path) CNAME record; add both in Cloudflare DNS for `deepertones.com`, set to
    **DNS only** (not proxied).
 3. New accounts are reviewed by Zoho before they can send without limits (until then there is a

@@ -15,8 +15,8 @@
     "DOCS_ENABLED": "true",
     // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
     "OTP_CHANNELS": "email",
-    // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
-    "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+    // Transactional email sender. Must be on a domain verified in ZeptoMail (deepertones.com is; mail.deepertones.com is not).
+    "EMAIL_FROM_ADDRESS": "no-reply@deepertones.com",
     "EMAIL_FROM_NAME": "Deeper Tones",
     // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
     "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",
@@ -110,8 +110,8 @@
         "DOCS_ENABLED": "true",
         // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
         "OTP_CHANNELS": "email",
-        // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
-        "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+        // Transactional email sender. Must be on a domain verified in ZeptoMail (deepertones.com is; mail.deepertones.com is not).
+        "EMAIL_FROM_ADDRESS": "no-reply@deepertones.com",
         "EMAIL_FROM_NAME": "Deeper Tones",
         // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
         "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",
@@ -178,8 +178,8 @@
         "DOCS_ENABLED": "false",
         // Comma-separated channels people can sign in with. Add whatsapp once Meta approves the authentication template.
         "OTP_CHANNELS": "email",
-        // Transactional email sender. The mail. subdomain keeps app-mail reputation apart from the main domain.
-        "EMAIL_FROM_ADDRESS": "no-reply@mail.deepertones.com",
+        // Transactional email sender. Must be on a domain verified in ZeptoMail (deepertones.com is; mail.deepertones.com is not).
+        "EMAIL_FROM_ADDRESS": "no-reply@deepertones.com",
         "EMAIL_FROM_NAME": "Deeper Tones",
         // The host depends on the ZeptoMail data centre: copy the exact URL from Mail Agent → Setup Info → API.
         "ZEPTOMAIL_API_URL": "https://api.zeptomail.com/v1.1/email",

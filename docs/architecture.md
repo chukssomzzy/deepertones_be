@@ -413,8 +413,9 @@ because later modules will send email too.
   change with the feature, so it is typed code the compiler checks, instead of living in a vendor
   dashboard. `html` escapes every interpolated value by default and the shared layout is the one
   header and footer, so a template cannot forget to escape or drift from the brand.
-- **Sender `no-reply@mail.deepertones.com`.** The subdomain keeps the reputation of app mail apart
-  from anything sent from the main domain.
+- **Sender `no-reply@deepertones.com`.** It must be on a domain verified in ZeptoMail, and only the
+  root domain is. Moving app mail to a `mail.` subdomain (to keep its reputation apart) means
+  verifying that subdomain in ZeptoMail first; sends fail with `SM_111` until then.
 - **Tracking is off** (no open or click tracking): sign-in mail needs neither, and rewritten links
   hurt trust in a message that carries a code.
 - **No retries in the adapter.** A retry is the caller's decision: the `deliver-otp` job already
