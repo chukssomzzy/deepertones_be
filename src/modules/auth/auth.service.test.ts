@@ -17,7 +17,7 @@ const SECOND = 1000
 const DAY = 24 * 60 * 60 * SECOND
 
 const DEVICE_KEY = 'device-key-a'
-const CODE = '4829'
+const CODE = '482913'
 const PEPPER = 'test-pepper'
 const JWT_SECRET = 'test-jwt-secret'
 

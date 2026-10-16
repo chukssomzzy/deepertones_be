@@ -30,7 +30,7 @@ describe('html tagged template', () => {
   })
 
   it('renders numbers', () => {
-    expect(html`<b>${4829}</b>`.value).toBe('<b>4829</b>')
+    expect(html`<b>${482913}</b>`.value).toBe('<b>482913</b>')
   })
 
   it('inserts SafeHtml raw so nested templates compose without double escaping', () => {
