@@ -8,6 +8,7 @@ type UserStatus = Extract<Actor, { kind: 'user' }>['status']
 export type TokenFailure = 'expired' | 'invalid'
 
 const isVersion = (value: unknown): value is number => Number.isInteger(value) && (value as number) >= 0
+const isProfileId = (value: unknown): value is string => typeof value === 'string' && value !== ''
 
 export type IssuedTokens = {
   accessToken: string
@@ -17,15 +18,18 @@ export type IssuedTokens = {
 }
 
 export type AccessVerification =
-  | { ok: true; userId: string; status: UserStatus; version: number }
+  | { ok: true; userId: string; status: UserStatus; version: number; profileId: string }
   | { ok: false; problem: TokenFailure }
 
-export type RefreshVerification = { ok: true; userId: string; version: number } | { ok: false; problem: TokenFailure }
+/** `profileId` is null for a refresh token issued before profiles, or whose claim is unusable: the caller falls back to the default. */
+export type RefreshVerification =
+  | { ok: true; userId: string; version: number; profileId: string | null }
+  | { ok: false; problem: TokenFailure }
 
 /**
  * Issues and verifies the access and refresh JWTs. It has no database access: it only proves a
- * token is ours, unexpired and of the right type. The refresh flow (next PR) is what compares
- * `version` with the user's current token_version.
+ * token is ours, unexpired and of the right type. The refresh flow is what compares `version`
+ * with the user's current token_version, and checks that the `pid` (the active profile) still belongs to the user.
  *
  * The `typ` claim keeps the two kinds apart, so a refresh token cannot be used as a bearer and
  * an access token cannot be used to refresh. `previousSecret` verifies only; new tokens are
@@ -43,9 +47,9 @@ export class TokenService {
     this.now = options.now ?? (() => new Date())
   }
 
-  async issue(user: { id: string; status: UserStatus; tokenVersion: number }): Promise<IssuedTokens> {
+  async issue(user: { id: string; status: UserStatus; tokenVersion: number }, profileId: string): Promise<IssuedTokens> {
     const now = this.now()
-    const base = { sub: user.id, ver: user.tokenVersion }
+    const base = { sub: user.id, ver: user.tokenVersion, pid: profileId }
     const [accessToken, refreshToken] = await Promise.all([
       signJwt({ ...base, st: user.status, typ: 'access' }, { secret: this.#secret, expiresInSeconds: ACCESS_TTL_SECONDS, now }),
       signJwt({ ...base, typ: 'refresh' }, { secret: this.#secret, expiresInSeconds: REFRESH_TTL_SECONDS, now }),
@@ -61,18 +65,21 @@ export class TokenService {
   async verifyAccess(token: string): Promise<AccessVerification> {
     const result = await verifyJwt(token, { secrets: this.#secrets, now: this.now() })
     if (!result.ok) return { ok: false, problem: result.reason }
-    const { sub, st, ver, typ } = result.claims
+    const { sub, st, ver, typ, pid } = result.claims
     if (typ !== 'access' || typeof sub !== 'string' || !isVersion(ver) || (st !== 'anonymous' && st !== 'verified')) {
       return { ok: false, problem: 'invalid' }
     }
-    return { ok: true, userId: sub, status: st, version: ver }
+    // A token from before profiles has no pid at all: expired, so the app refreshes and gets one. Any other pid is wrong.
+    if (pid === undefined) return { ok: false, problem: 'expired' }
+    if (!isProfileId(pid)) return { ok: false, problem: 'invalid' }
+    return { ok: true, userId: sub, status: st, version: ver, profileId: pid }
   }
 
   async verifyRefresh(token: string): Promise<RefreshVerification> {
     const result = await verifyJwt(token, { secrets: this.#secrets, now: this.now() })
     if (!result.ok) return { ok: false, problem: result.reason }
-    const { sub, ver, typ } = result.claims
+    const { sub, ver, typ, pid } = result.claims
     if (typ !== 'refresh' || typeof sub !== 'string' || !isVersion(ver)) return { ok: false, problem: 'invalid' }
-    return { ok: true, userId: sub, version: ver }
+    return { ok: true, userId: sub, version: ver, profileId: isProfileId(pid) ? pid : null }
   }
 }

@@ -47,6 +47,7 @@ export class UsersService {
     return this.repository.createGuestForDevice({
       user: { id: this.newId(), createdAt: at },
       device: { deviceHash, platform },
+      profile: { id: this.newId() },
     })
   }
 

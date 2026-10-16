@@ -1,7 +1,7 @@
 import { defineRoute, errorResponses, ok, openapiApp, success, jsonBody } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
-import { toOtpChallengeResponse, toSessionResponse, toUserResponse } from './auth.presenter'
-import { DeviceBody, OtpChallengeResponse, RefreshBody, SendOtpBody, SessionResponse, UserResponse, VerifyOtpBody } from './auth.schemas'
+import { toMeResponse, toOtpChallengeResponse, toSessionResponse } from './auth.presenter'
+import { DeviceBody, MeResponse, OtpChallengeResponse, RefreshBody, SendOtpBody, SessionResponse, VerifyOtpBody } from './auth.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -77,9 +77,9 @@ const getMe = defineRoute({
   path: '/',
   operationId: 'getMe',
   tags: ['Auth'],
-  summary: 'The signed-in user',
+  summary: 'The signed-in user, the profile this session is on, and every profile of the account',
   security: bearer,
-  responses: { 200: success(UserResponse, 'The user'), ...errorResponses(401, 404) },
+  responses: { 200: success(MeResponse, 'The user and their profiles'), ...errorResponses(401, 404) },
 })
 
 export const authRoutes = openapiApp()
@@ -105,5 +105,5 @@ export const authRoutes = openapiApp()
   })
 
 export const meRoutes = openapiApp().openapi(getMe, async (c) =>
-  ok(c, toUserResponse(await c.var.services.auth.me()), 'User found'),
+  ok(c, toMeResponse(await c.var.services.auth.me()), 'User found'),
 )

@@ -1,3 +1,4 @@
+import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
 import type { ItemPatch, ItemState, NewBackPhoto, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
 
@@ -11,6 +12,12 @@ export class FakeScansRepository implements ScansRepository {
   private scans = new Map<string, Scan>()
   private items = new Map<string, ScanItem>()
   private backPhotos = new Map<string, NewBackPhoto>()
+  private readonly profiles: FakeProfilesRepository
+
+  /** Pass the fake profiles repository a test writes defaults into: `adoptOrphanScans` reads each owner's default from it, as D1 reads the profiles table. */
+  constructor(options: { profiles?: FakeProfilesRepository } = {}) {
+    this.profiles = options.profiles ?? new FakeProfilesRepository()
+  }
 
   /**
    * Stores the scan and all its items, or nothing. Every item starts `recognising` with no reason, no recognised
@@ -149,6 +156,23 @@ export class FakeScansRepository implements ScansRepository {
       if (item.backPhotoKey !== null) keys.push(item.backPhotoKey)
     }
     return keys
+  }
+
+  /**
+   * Gives each scan that has no profile its owner's default profile, oldest scan first, and says how many it changed. At most
+   * `limit` scans are changed: a scan whose owner has no default is skipped and does not use up the limit, so it can never starve
+   * the ones that can be adopted. It stays without a profile until a later call finds its owner has one.
+   */
+  async adoptOrphanScans(limit: number): Promise<number> {
+    const adoptable = await Promise.all(
+      [...this.scans.values()].filter((scan) => scan.profileId === null).map(async (scan) => ({ scan, profile: await this.profiles.defaultFor(scan.userId) })),
+    )
+    const chosen = adoptable
+      .filter((a) => a.profile !== null)
+      .sort((a, b) => a.scan.createdAt.getTime() - b.scan.createdAt.getTime())
+      .slice(0, limit)
+    for (const { scan, profile } of chosen) scan.profileId = profile!.id
+    return chosen.length
   }
 
   /** Deletes the users' scans, items and back-photo records. Safe to repeat; an empty list or unknown users delete nothing. */

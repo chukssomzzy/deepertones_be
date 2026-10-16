@@ -43,6 +43,23 @@ export const UserResponse = z
   })
   .openapi('User')
 
+export const ProfileResponse = z
+  .object({
+    id: z.string(),
+    displayName: z.string().nullable().openapi({ description: 'Unset for now.' }),
+    isDefault: z.boolean(),
+    createdAt: z.iso.datetime(),
+  })
+  .openapi('Profile')
+
+export const MeResponse = z
+  .object({
+    user: UserResponse,
+    profile: ProfileResponse.openapi({ description: 'The profile this session is on.' }),
+    profiles: z.array(ProfileResponse).openapi({ description: 'Every profile of the account, the default first.' }),
+  })
+  .openapi('Me')
+
 export const SessionResponse = z
   .object({
     tokens: z.object({

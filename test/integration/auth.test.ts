@@ -6,6 +6,8 @@ import { createDb } from '../../src/lib/db'
 import type { EmailAddress } from '../../src/lib/email-address'
 import worker, { type AppType } from '../../src/index'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
+import { ProfilesService } from '../../src/modules/profiles/profiles.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
 
@@ -145,7 +147,9 @@ const seedVerifiedUser = async (email: string) => {
   const { user } = await users.promote(guest.id, { kind: 'email', email: canonical(email) as EmailAddress })
   return user
 }
-const tokensFor = (user: Awaited<ReturnType<typeof seedVerifiedUser>>) => tokenService.issue(user)
+const profiles = new ProfilesService({ repository: new D1ProfilesRepository(createDb(env.DB)) })
+// Tokens for the user's own default profile, so they work against routes that read the profile.
+const tokensFor = async (user: Awaited<ReturnType<typeof seedVerifiedUser>>) => tokenService.issue(user, (await profiles.defaultFor(user.id)).id)
 
 describe('POST /auth/anonymous', () => {
   it('returns the same guest for the same device id, and a different guest for another device', async () => {
@@ -193,7 +197,7 @@ describe('GET /me', () => {
 
     expect(res.status).toBe(200)
     const { body } = await read<PublicUser>(res)
-    expect(body).toMatchObject({ success: true, data: { id: session.user.id, status: 'anonymous', email: null, phone: null } })
+    expect(body).toMatchObject({ success: true, data: { user: { id: session.user.id, status: 'anonymous', email: null, phone: null } } })
   })
 
   it('answers 401 AUTH_REQUIRED without a token', async () => {
@@ -213,11 +217,14 @@ describe('GET /me', () => {
   it('answers 401 TOKEN_EXPIRED for an access token past its 15 minutes', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
-    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({
-      id: session.user.id,
-      status: 'anonymous',
-      tokenVersion: 0,
-    })
+    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue(
+      {
+        id: session.user.id,
+        status: 'anonymous',
+        tokenVersion: 0,
+      },
+      (await profiles.defaultFor(session.user.id)).id,
+    )
 
     const res = await device.me(old.accessToken)
 
@@ -248,7 +255,7 @@ describe('promoting a guest by OTP', () => {
     const verified = await sessionOf(res)
     expect(verified.user).toEqual({ id: guest.user.id, status: 'verified', email: canonical(address), phone: null })
     const me = await read<PublicUser>(await device.me(verified.tokens.accessToken))
-    expect(me.body).toMatchObject({ success: true, data: { id: guest.user.id, status: 'verified' } })
+    expect(me.body).toMatchObject({ success: true, data: { user: { id: guest.user.id, status: 'verified' } } })
 
     const stale = await device.refresh(guest.tokens.refreshToken)
     expect(stale.status).toBe(401)
@@ -271,7 +278,7 @@ describe('promoting a guest by OTP', () => {
     expect(session.user).toEqual({ id: owner.id, status: 'verified', email: owner.email, phone: null })
 
     const guestStill = await read<PublicUser>(await device.me(guest.tokens.accessToken))
-    expect(guestStill.body).toMatchObject({ success: true, data: { id: guest.user.id, status: 'anonymous' } })
+    expect(guestStill.body).toMatchObject({ success: true, data: { user: { id: guest.user.id, status: 'anonymous' } } })
 
     const afterwards = await sessionOf(await device.bootstrap())
     expect(afterwards.user.id).not.toBe(guest.user.id)
@@ -335,17 +342,20 @@ describe('POST /auth/refresh', () => {
     expect(refreshed.user.id).toBe(session.user.id)
     expect(refreshed.tokens.accessToken).toEqual(expect.any(String))
     const me = await read<PublicUser>(await device.me(refreshed.tokens.accessToken))
-    expect(me.body).toMatchObject({ success: true, data: { id: session.user.id } })
+    expect(me.body).toMatchObject({ success: true, data: { user: { id: session.user.id } } })
   })
 
   it('is not blocked by an expired or garbage Authorization header', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
-    const expired = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - DAY) }).issue({
-      id: session.user.id,
-      status: 'anonymous',
-      tokenVersion: 0,
-    })
+    const expired = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - DAY) }).issue(
+      {
+        id: session.user.id,
+        status: 'anonymous',
+        tokenVersion: 0,
+      },
+      (await profiles.defaultFor(session.user.id)).id,
+    )
 
     const withExpired = await device.refresh(session.tokens.refreshToken, expired.accessToken)
     const withGarbage = await device.refresh(session.tokens.refreshToken, 'garbage')
@@ -357,7 +367,7 @@ describe('POST /auth/refresh', () => {
   it('answers 401 TOKEN_INVALID for garbage, for an access token, and for an unknown user', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
-    const ghost = await tokenService.issue({ id: crypto.randomUUID(), status: 'anonymous', tokenVersion: 0 })
+    const ghost = await tokenService.issue({ id: crypto.randomUUID(), status: 'anonymous', tokenVersion: 0 }, 'any-profile')
 
     for (const token of ['not.a.jwt', session.tokens.accessToken, ghost.refreshToken]) {
       const res = await device.refresh(token)
@@ -369,11 +379,14 @@ describe('POST /auth/refresh', () => {
   it('answers 401 TOKEN_EXPIRED for a refresh token past its 60 days', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
-    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 61 * DAY) }).issue({
-      id: session.user.id,
-      status: 'anonymous',
-      tokenVersion: 0,
-    })
+    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 61 * DAY) }).issue(
+      {
+        id: session.user.id,
+        status: 'anonymous',
+        tokenVersion: 0,
+      },
+      (await profiles.defaultFor(session.user.id)).id,
+    )
 
     const res = await device.refresh(old.refreshToken)
 
@@ -398,7 +411,7 @@ describe('POST /auth/logout', () => {
     expect(fresh.user.id).not.toBe(owner.id)
     expect(fresh.user).toMatchObject({ status: 'anonymous', email: null, phone: null })
     const me = await read<PublicUser>(await device1.me(fresh.tokens.accessToken))
-    expect(me.body).toMatchObject({ success: true, data: { id: fresh.user.id } })
+    expect(me.body).toMatchObject({ success: true, data: { user: { id: fresh.user.id } } })
 
     for (const refreshToken of [onDevice1.tokens.refreshToken, onDevice2.refreshToken]) {
       const stale = await device1.refresh(refreshToken)

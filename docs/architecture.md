@@ -303,7 +303,7 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
 - **Only services read it.** Repositories and providers receive values as plain arguments.
 - **Reading it outside a context throws.** Queue/cron handlers and tests wrap work in
   `runAs(actor, fn)`; a forgotten wrapper fails loudly instead of acting as "anonymous".
-- **`Actor` is a tagged union**: `public | user { userId, status } | system`. Every request has one, and
+- **`Actor` is a tagged union**: `public | user { userId, status, profileId } | system`. Every request has one, and
   services narrow on `kind`. `public` means no usable token; a guest is a `user` with status
   `anonymous`. `RequestContext` also carries a `tokenProblem` (`missing | expired | invalid`) for
   `public` actors, which the guards turn into the right 401.
@@ -331,6 +331,56 @@ ever seeing Hono's `c`. Limits that keep the implicitness contained:
 - **Accepted:** two simultaneous first bootstraps from one device can create two guests. The last write
   wins the device row; the loser is an unreachable guest, cleaned up later.
 
+### Profiles
+`modules/profiles` holds `profiles` (`id`, `user_id` with cascade, `display_name` null for now, `is_default`, `created_at`),
+`D1ProfilesRepository` (`findById`, `defaultFor`, `ofUser`, `insert`) and `ProfilesService` (`defaultFor`, `ownedBy`, `of`).
+It is identity only: later features (skin analysis, goals) keep their own tables keyed by `profile_id`.
+
+- **Account vs profile.** The account is the `users` row (a guest or a verified user); a profile is one person's face
+  inside it. Anything about a person belongs to a profile; sign-in, token version and quotas belong to the account.
+- **The default is created with the user.** `createGuestForDevice`, the only place a user row is written, also writes the
+  default profile (`is_default`, no name, `created_at` = the user's) in the same `db.batch` (user, profile, device), so a
+  user never exists without one (but see "Rollout") and a profile id that is taken rolls everything back. A partial unique index on `(user_id)
+  WHERE is_default = 1` keeps it to one default per user. Profiles go with their user (cascade), so guest cleanup needs no
+  cleaner of its own. Migration 0011 backfilled one default per existing user.
+- **The `pid` claim.** Both tokens carry the active profile's id, and the auth middleware puts it in the actor
+  (`actor.profileId`), so services read the profile as they read the user and no route passes it around. Bootstrap, logout
+  and signing in as an existing account issue the user's default; a promoted guest keeps the profile it was on.
+- **Transition rule.** An access token that passes every other check but has no `pid` at all is `expired` (401
+  `TOKEN_EXPIRED`), which the app already answers by refreshing; a `pid` that is present but is not a non-empty string is
+  `invalid`. A refresh token without a `pid`, or with an unusable one, is accepted and gets the default profile. Nobody is
+  signed out, and after one refresh every token carries a `pid`.
+- **Refresh fallback.** `AuthService.refresh` keeps the refresh token's profile when `ProfilesService.ownedBy(user, pid)`
+  finds it, and otherwise uses the user's default, so a deleted or foreign profile can never wedge a session.
+- **Ownership.** `scans.profile_id` (migration 0012) is the profile that made the scan. Nullable in SQL with no foreign key,
+  because adding a NOT NULL or REFERENCES column to `scans` would take a table rebuild, which can cascade-delete `scan_items`;
+  the code always sets it (`NewScan.profileId`) and 0012 backfilled it from each user's default profile. Only that profile may
+  read the scan, its items, its photo links (minted only inside an owned view) and its event stream; anyone else gets the
+  404 `SCAN_NOT_FOUND` another user would get. A link already minted works until it expires (5 minutes).
+- **Quotas stay per account.** The daily photo quotas count by `user_id` (and by IP), so extra profiles cannot multiply AI spend.
+- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
+  show.
+- **Rollout.** Deploys apply migrations (0011 profiles, 0012 `scans.profile_id`) before the new Worker goes live, and if a
+  deploy fails after migrating the window lasts until one succeeds. In it the OLD Worker still creates users with no profile
+  and scans with `profile_id` NULL, and the backfills have already run. The new code takes both over:
+  - **Self-healing default.** `ProfilesService.defaultFor` creates the default (new id, no name, `is_default`, `created_at` =
+    now) when the user has none, and logs `{ outcome: 'default-profile-created', userId }`. So bootstrap, refresh and signing in
+    to a profile-less account work and make the profile on the spot. Two simultaneous callers race on the partial unique
+    index; the loser reads the winner's profile. For a user that does not exist the foreign key refuses the insert and that
+    error surfaces (the auth paths read the user first).
+  - **Orphan scans.** The 10-minute reaper (`ScanService.reap`) first runs `ScansRepository.adoptOrphanScans(500)`: one UPDATE
+    that gives each scan with `profile_id IS NULL` (read through `(profile_id, created_at)`, oldest first) the default profile
+    of its owner, and logs `{ outcome: 'orphan-scans-adopted', count }` when it changed any. A scan whose owner has no
+    default is not a candidate, so it does not use up the 500; it stays NULL, and so unreadable, until a later sweep after the
+    owner's next session has made the default. A failure is logged `{ outcome: 'orphan-adopt-failed' }` and the rest of the
+    sweep runs. The repository reads `profiles`, another module's table, because no service call can say which scans these are.
+  - **Tokens without `pid`.** Tokens the old Worker issued carry no `pid`: the access token is `expired` and the refresh token
+    is accepted, so one refresh upgrades the session (see "Transition rule"). Nobody is signed out.
+  - **`GET /me` changed shape**: the user's fields moved under `user`, next to `profile` and `profiles`. The app ships with
+    the change, so an app build from before it misreads `/me` from this deploy on; release them together.
+- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
+  show.
+
 ### Guest cleanup
 A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each env block) runs
 `UsersService.purgeUnreachableGuests` through the Worker's `scheduled` export (routed by `createScheduledRouter` to `createScheduledHandler` in
@@ -354,9 +404,9 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 `lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`
 (`TokenService`) issues and verifies the two kinds. The `auth` middleware turns a bearer token into the actor.
 
-- **Two tokens**: a 15-minute access token (`sub`, `st` status, `ver` token version, `typ: access`) and a 60-day
-  refresh token (`sub`, `ver`, `typ: refresh`). `typ` keeps them apart: a refresh token as a bearer, or an access
-  token at refresh, is `invalid`.
+- **Two tokens**: a 15-minute access token (`sub`, `st` status, `ver` token version, `pid` active profile, `typ: access`)
+  and a 60-day refresh token (`sub`, `ver`, `pid`, `typ: refresh`). `typ` keeps them apart: a refresh token as a bearer,
+  or an access token at refresh, is `invalid`. `pid` is covered in "Profiles".
 - **HS256 with a key id.** The header carries `kid` (first 16 hex of SHA-256 of the secret), so verification picks
   the secret by `kid`. `JWT_SECRET` signs; `JWT_SECRET_PREVIOUS`, when set, verifies only. Rotating therefore signs
   nobody out. The algorithm is checked strictly, the signature in constant time, and `expired` is reported only
@@ -388,8 +438,10 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `POST /auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
 | `GET /me` | bearer | none |
 
-- **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`. Refreshing
-  slides the refresh token's 60 days.
+- **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
+  profile (the app reads it from `GET /me`). Refreshing slides the refresh token's 60 days.
+- **`GET /me`** answers `{ user, profile, profiles }`: the user, the profile the session is on, and every profile of the
+  account (default first). A session whose `pid` is not among the user's profiles gets 401 `TOKEN_EXPIRED`.
 - **Device ids are HMAC'd** with `DEVICE_ID_KEY` before they reach the database; the raw id is never stored.
 - **Verify and logout unlink the user's devices**, so the device's next bootstrap creates a new guest rather than
   returning data that belonged to the pre-login (or just logged-out) identity.
@@ -839,11 +891,11 @@ reaches the catalog only through `ProductCatalogService`, and never depends on `
 it, through a guest cleaner, so a dependency the other way would be a cycle). The routes are below; the live stream
 comes in a later PR.
 
-- **Tables** (migrations 0009 and 0010). `scans`: id, `user_id` (references users, cascade), `ip_hash`, `created_at`, `done_at`
-  (null until the scan's `done` event is claimed, see Events); indexed by `user_id`, `(ip_hash, created_at)` and, for the
+- **Tables** (migrations 0009 and 0010). `scans`: id, `user_id` (references users, cascade), `profile_id` (migration 0012; see "Profiles"), `ip_hash`, `created_at`, `done_at`
+  (null until the scan's `done` event is claimed, see Events); indexed by `user_id`, `(profile_id, created_at)`, `(ip_hash, created_at)` and, for the
   reaper's lost-`done` repair, `created_at` where `done_at IS NULL` (a partial index, so it holds only the scans still without a done time).
   `scan_items`, one per photo: id, `scan_id` (references scans, cascade), `user_id` (the scan's owner, copied so quotas and
-  guest cleanup need no join), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
+  guest cleanup need no join; an item is owned through its scan, not through this column), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
   once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_category` / `_confidence`, `product_id` and
   `formulation_id` (plain text, no foreign key: the catalog is not this module's), `created_at`, `updated_at`; indexed by
   `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
@@ -948,8 +1000,9 @@ comes in a later PR.
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
   of an item in `needs-back-photo` (same photo rules and quotas as a front photo) and queues `read-label`. A wrong state is
-  409 `ITEM_NOT_AWAITING_CONFIRMATION` or `ITEM_NOT_AWAITING_BACK_PHOTO`. Another user's scan, item or scan/item mismatch is
-  404 `SCAN_NOT_FOUND`, with no hint that it exists.
+  409 `ITEM_NOT_AWAITING_CONFIRMATION` or `ITEM_NOT_AWAITING_BACK_PHOTO`. A scan or item made by another profile (of the same
+  account or another), or a scan/item mismatch, is 404 `SCAN_NOT_FOUND`, with no hint that it exists. The rule is on the
+  scan: `ownedScan` needs `scan.userId` and `scan.profileId` to equal the actor's, and `ownedItem` is the item of an owned scan.
 - **Repeat-safe.** Queues deliver at least once. Every step starts only while the item is in its own start state and moves
   it with `updateItem(id, expectedState, patch)`, one conditional UPDATE that says whether it applied, so a repeated or
   late message finds the item moved on and does nothing (no vendor call, no job, no event). Of two simultaneous moves
@@ -978,7 +1031,7 @@ comes in a later PR.
   matters to a connected client, a connection lasts 10 minutes at most, and `watch` sends `done` to any client that connects
   later. If the publish throws after the time was set, the time is cleared again (`clearScanDone`, which applies only while
   the time is still the one this call set), so the next sweep tries again. A failure there is logged
-  `{ outcome: 'reap-done-failed', scanId }`. `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
+  `{ outcome: 'reap-done-failed', scanId }`. Each sweep also gives the scans that have no profile their owner's default (`adoptOrphanScans`, see "Profiles" → Rollout). `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
   `*/10 * * * *` (reaper); `scheduled` is `createScheduledRouter` (`src/jobs/scheduled.ts`), which runs the job of
   `controller.cron` and, for any other, logs `unknown-cron` and throws, so Cloudflare records the run as failed (a cron in `wrangler.jsonc` this file does not know is a config mistake) and the nightly cleanup does not run every 10 minutes. The reaper
   reads no request context, so it runs without `runAs`; the cleanup handler it routes to stays in `dispatcher.ts` with its `runAs`.
@@ -1063,7 +1116,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `DurableObjectScanEvents`, which takes the class as a type-only import. The HTTP app lives in `src/app.ts` and `src/index.ts` re-exports it, because `npm run openapi` loads the app in plain Node and cannot load a module that imports `cloudflare:workers`. `ScanService` never sees it: it uses the `ScanEvents` port.
 - **Route overlap.** `/scans/{scanId}/events` and `/scans/photos/{token}` overlap only for the literal pair `photos`/`events`,
   which can never be a real scan id (a UUID) or token; that is the Redocly `no-ambiguous-paths` warning, which is left as is.
-- **Opening.** `GET /scans/{scanId}/events` (bearer) calls `ScanService.watch`, which reads the scan (so another user's scan is
+- **Opening.** `GET /scans/{scanId}/events` (bearer) calls `ScanService.watch`, which reads the scan (so another profile's scan is
   404 `SCAN_NOT_FOUND`, as a normal JSON error before any stream), and `subscribe`s: the adapter POSTs the scan as JSON to the
   object's `fetch` and returns its streaming response, re-wrapped because a stub's response has immutable headers and CORS and
   secure-headers middleware still run after the route. The route is documented with `sseResponse`, so the compiler does not

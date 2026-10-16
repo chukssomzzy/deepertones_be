@@ -2,12 +2,16 @@ import { describe, expect, it } from 'vitest'
 import type { EmailAddress } from '../../lib/email-address'
 import { ConflictError, NotFoundError } from '../../lib/errors'
 import type { PhoneNumber } from '../../lib/phone'
+import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import { FakeUsersRepository } from './users.repository.fake'
 import { usersRepositoryContract } from './users.repository.contract'
 import { UsersService } from './users.service'
 import type { UserIdentifier } from './users.types'
 
-usersRepositoryContract('fake', () => new FakeUsersRepository())
+usersRepositoryContract('fake', () => {
+  const profiles = new FakeProfilesRepository()
+  return { repository: new FakeUsersRepository({ profiles }), profiles }
+})
 
 const T0 = new Date('2030-06-15T12:00:00.000Z')
 const MINUTE = 60 * 1000
@@ -15,11 +19,13 @@ const MINUTE = 60 * 1000
 const email = (local: string): UserIdentifier => ({ kind: 'email', email: `${local}@example.com` as EmailAddress })
 const phone = (n: string): UserIdentifier => ({ kind: 'phone', phone: `+23480312${n}` as PhoneNumber })
 
-const setup = (repository = new FakeUsersRepository()) => {
+const setup = (custom?: FakeUsersRepository) => {
+  const profiles = new FakeProfilesRepository()
+  const repository = custom ?? new FakeUsersRepository({ profiles })
   let clock = T0
   let n = 0
   const service = new UsersService({ repository, now: () => clock, newId: () => `user-${++n}` })
-  return { repository, service, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
+  return { repository, profiles, service, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
 }
 
 const errorOf = async (promise: Promise<unknown>) => {
@@ -38,6 +44,36 @@ describe('UsersService.guestForDevice', () => {
     const user = await service.guestForDevice('dev-1', 'ios')
 
     expect(user).toMatchObject({ status: 'anonymous', email: null, phone: null, tokenVersion: 0 })
+  })
+
+  it('gives a new guest a default profile of its own, made when the guest was', async () => {
+    const { service, profiles } = setup()
+
+    const user = await service.guestForDevice('dev-1', 'ios')
+
+    const owned = await profiles.ofUser(user.id)
+    expect(owned).toHaveLength(1)
+    expect(owned[0]).toMatchObject({ userId: user.id, displayName: null, isDefault: true })
+    expect(owned[0]!.id).not.toBe(user.id)
+    expect(owned[0]!.createdAt.getTime()).toBe(T0.getTime())
+  })
+
+  it('gives two new guests two different profiles', async () => {
+    const { service, profiles } = setup()
+
+    const a = await service.guestForDevice('dev-1', 'ios')
+    const b = await service.guestForDevice('dev-2', 'ios')
+
+    expect((await profiles.defaultFor(a.id))!.id).not.toBe((await profiles.defaultFor(b.id))!.id)
+  })
+
+  it('makes no second profile when the same device asks again', async () => {
+    const { service, profiles } = setup()
+    const first = await service.guestForDevice('dev-1', 'ios')
+
+    await service.guestForDevice('dev-1', 'ios')
+
+    expect(await profiles.ofUser(first.id)).toHaveLength(1)
   })
 
   it('returns the same guest when the same device asks twice, and records the time seen', async () => {
@@ -221,7 +257,7 @@ describe('UsersService.purgeUnreachableGuests', () => {
 
   // A guest last seen at `seenAt`, with its device unlinked unless `linked`.
   const seed = async (repository: FakeUsersRepository, id: string, seenAt: Date, linked = false) => {
-    await repository.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `dev-${id}`, platform: 'ios' } })
+    await repository.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `dev-${id}`, platform: 'ios' }, profile: { id: `profile-${id}` } })
     if (!linked) await repository.unlinkDevices(id)
   }
 

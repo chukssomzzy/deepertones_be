@@ -31,7 +31,7 @@ const twoUsers = async (ctx: Ctx) => {
       photoKey: `photos/test/${userId}/${scanId}/item-${userId}-${position}.jpg`,
       createdAt: T0,
     }))
-    await ctx.repository.createScan({ id: scanId, userId, ipHash: `ip-${userId}`, createdAt: T0 }, items)
+    await ctx.repository.createScan({ id: scanId, userId, profileId: `profile-${userId}`, ipHash: `ip-${userId}`, createdAt: T0 }, items)
     for (const item of items) await ctx.photos.put(item.photoKey, markedJpeg(item.position))
     const backKey = `photos/test/${userId}/${scanId}/${items[0]!.id}-back.jpg`
     await ctx.photos.put(backKey, markedJpeg(9))

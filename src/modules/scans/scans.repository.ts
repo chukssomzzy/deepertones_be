@@ -3,6 +3,7 @@ import type { SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import { profiles } from '../profiles/profiles.table'
 import { scanBackPhotos, scanItems, scans } from './scans.table'
 import type { ItemPatch, ItemState, NewBackPhoto, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
 
@@ -166,6 +167,32 @@ export class D1ScansRepository {
       }
     }
     return keys
+  }
+
+  /**
+   * Gives each scan that has no profile its owner's default profile, oldest scan first, and says how many it changed (one UPDATE).
+   * At most `limit` scans are changed. A scan whose owner has no default is not a candidate, so it does not use up the limit and
+   * stays without a profile until a later call finds its owner has one. The candidates are read as `profile_id IS NULL` through
+   * the `(profile_id, created_at)` index, so a sweep never reads the scans that have a profile.
+   *
+   * Reads `profiles`, another module's table: the scans written by the old Worker before the profiles rollout have no profile, and
+   * no service call can say which scans those are.
+   */
+  async adoptOrphanScans(limit: number): Promise<number> {
+    const defaultOfOwner = () =>
+      this.db.select({ id: profiles.id }).from(profiles).where(and(eq(profiles.userId, scans.userId), eq(profiles.isDefault, true)))
+    const candidates = this.db
+      .select({ id: scans.id })
+      .from(scans)
+      .where(and(isNull(scans.profileId), exists(defaultOfOwner())))
+      .orderBy(asc(scans.createdAt))
+      .limit(limit)
+    const rows = await this.db
+      .update(scans)
+      .set({ profileId: sql`(${defaultOfOwner()})` })
+      .where(and(isNull(scans.profileId), inArray(scans.id, candidates)))
+      .returning({ id: scans.id })
+    return rows.length
   }
 
   /** Deletes the users' back-photo records, items and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */

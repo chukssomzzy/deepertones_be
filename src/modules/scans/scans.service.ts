@@ -4,6 +4,7 @@ import { hmacSha256Hex } from '../../lib/crypto'
 import { ConflictError, NotFoundError, RateLimitedError, ValidationError } from '../../lib/errors'
 import { readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
+import { describeUnexpectedError } from '../../lib/safe-error'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { AnthropicRefusalError, AnthropicRequestError } from '../../providers/anthropic/anthropic.provider'
@@ -113,6 +114,8 @@ export class ScanService {
   private static readonly DONE_SETTLED_AFTER_MS = 5 * ScanService.MINUTE
   /** One sweep looks at this many items at most, oldest first, which keeps its calls well inside a Worker's limit. */
   private static readonly REAP_BATCH = 100
+  /** One sweep gives a profile to this many scans that have none, oldest first. */
+  private static readonly ADOPT_BATCH = 500
   /** How long a step waits before it asks again whether work another call is doing has finished. */
   private static readonly WAIT_SECONDS = 30
 
@@ -160,7 +163,7 @@ export class ScanService {
    * burst limits on the route bound that.
    */
   async create(input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
-    const { userId } = requireUser()
+    const { userId, profileId } = requireUser()
     if (input.photos.length === 0) throw new ValidationError('NO_IMAGES', 'Send at least one photo')
     if (input.photos.length > this.policy.maxPhotosPerScan) {
       throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${this.policy.maxPhotosPerScan} photos`)
@@ -178,7 +181,7 @@ export class ScanService {
     })
     try {
       await Promise.all(stored.map(({ item, image }) => this.photos.put(item.photoKey, image)))
-      await this.repository.createScan({ id: scanId, userId, ipHash, createdAt: now }, stored.map(({ item }) => item))
+      await this.repository.createScan({ id: scanId, userId, profileId, ipHash, createdAt: now }, stored.map(({ item }) => item))
     } catch (error) {
       await this.photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
       throw error
@@ -198,14 +201,14 @@ export class ScanService {
     return this.scanView({ id: scanId, createdAt: now }, await this.repository.itemsOf(scanId), now)
   }
 
-  /** The scan as it now is. Another user's scan is SCAN_NOT_FOUND, with no hint that it exists. */
+  /** The scan as it now is. A scan made by another profile, of this account or any other, is SCAN_NOT_FOUND, with no hint that it exists. */
   async getScan(scanId: string): Promise<ScanView> {
     const { scan, items } = await this.ownedScan(scanId)
     return this.scanView(scan, items, this.now())
   }
 
   /**
-   * Opens a live stream of the scan for its owner (another user's scan is SCAN_NOT_FOUND). The stream starts with the scan
+   * Opens a live stream of the scan for the profile that made it (anyone else's scan is SCAN_NOT_FOUND). The stream starts with the scan
    * as it now is, then carries each item change and `done`.
    *
    * The snapshot is read before the stream opens, and a change stored in between would reach no one: it was published
@@ -222,10 +225,11 @@ export class ScanService {
     return stream
   }
 
+  /** A scan is readable only by the profile that made it; another profile of the same account gets the same 404 as another user. */
   private async ownedScan(scanId: string): Promise<{ scan: Scan; items: ScanItem[] }> {
-    const { userId } = requireUser()
+    const { userId, profileId } = requireUser()
     const scan = await this.repository.findScan(scanId)
-    if (!scan || scan.userId !== userId) throw ScanService.scanNotFound()
+    if (!scan || scan.userId !== userId || scan.profileId !== profileId) throw ScanService.scanNotFound()
     return { scan, items: await this.repository.itemsOf(scanId) }
   }
 
@@ -373,9 +377,12 @@ export class ScanService {
    * user is never touched. A failure on one item is logged by id and does not stop the sweep. The sweep also sends the `done` of
    * a scan, created within `doneRepairWindowMs`, whose items have all been final for over 5 minutes without one.
    *
+   * The sweep first gives the scans that have no profile their owner's default (see `adoptOrphanScans`).
+   *
    * `now` is passed in so the cutoffs are fixed for the whole sweep; the changes it makes are stamped by the service's clock.
    */
   async reap(now: Date): Promise<{ requeued: number; failed: number }> {
+    await this.adoptOrphanScans()
     const stale = await this.repository.staleItems(ScanService.WORKING_STATES, new Date(now.getTime() - ScanService.STUCK_AFTER_MS), ScanService.REAP_BATCH)
     let requeued = 0
     let failed = 0
@@ -395,6 +402,21 @@ export class ScanService {
     }
     await this.sendMissingDone(now)
     return { requeued, failed }
+  }
+
+  /**
+   * Scans written without a profile (by the old Worker, between the profiles migrations and the new Worker going live) can
+   * be read by nobody: `ownedScan` needs the actor's profile. This gives each its owner's default; a scan whose owner has
+   * none yet waits for a later sweep, after the owner's next session makes one. A failure is logged and never stops the rest
+   * of the sweep.
+   */
+  private async adoptOrphanScans(): Promise<void> {
+    try {
+      const count = await this.repository.adoptOrphanScans(ScanService.ADOPT_BATCH)
+      if (count > 0) console.log({ outcome: 'orphan-scans-adopted', count })
+    } catch (error) {
+      console.error({ outcome: 'orphan-adopt-failed', error: describeUnexpectedError(error) })
+    }
   }
 
   /**
@@ -724,10 +746,11 @@ export class ScanService {
     }
   }
 
+  /** An item is owned through its scan: the scan's profile decides, not the item's own user_id, which only feeds the quotas. */
   private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
-    const { userId } = requireUser()
-    const item = await this.repository.findItem(itemId)
-    if (!item || item.scanId !== scanId || item.userId !== userId) throw ScanService.scanNotFound()
+    const { items } = await this.ownedScan(scanId)
+    const item = items.find((candidate) => candidate.id === itemId)
+    if (!item) throw ScanService.scanNotFound()
     return item
   }
 

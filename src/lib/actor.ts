@@ -11,7 +11,7 @@ import { UnauthorizedError } from './errors'
  */
 export type Actor =
   | { kind: 'public' }
-  | { kind: 'user'; userId: string; status: 'anonymous' | 'verified' }
+  | { kind: 'user'; userId: string; status: 'anonymous' | 'verified'; profileId: string }
   | { kind: 'system'; job: string } // queue consumers, cron triggers
 
 /** Why a `public` actor has no identity: no token was sent, or the one sent was expired or unusable. */

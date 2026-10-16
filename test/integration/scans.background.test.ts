@@ -41,7 +41,7 @@ const freshBrand = () => `Brand${runSalt}x${counter++}`
 const users = new D1UsersRepository(createDb(env.DB))
 const guest = async () => {
   const id = crypto.randomUUID()
-  await users.createGuestForDevice({ user: { id, createdAt: new Date() }, device: { deviceHash: `scans-bg-${id}`, platform: 'ios' } })
+  await users.createGuestForDevice({ user: { id, createdAt: new Date() }, device: { deviceHash: `scans-bg-${id}`, platform: 'ios' }, profile: { id: `profile-${id}` } })
   return id
 }
 
@@ -50,7 +50,7 @@ const guest = async () => {
 const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue
 const testEnv = { ...env, SCAN_ITEMS_QUEUE: quietQueue }
 const container = buildContainer(testEnv)
-const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous' }, fn)
+const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous', profileId: `profile-${userId}` }, fn)
 
 /** A one-photo scan, made through the real service (so the photo is in the real bucket and the rows are in D1). */
 const startScan = async () => {

@@ -11,6 +11,8 @@ import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
+import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
+import { ProfilesService } from './modules/profiles/profiles.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
 import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
@@ -162,10 +164,12 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const profiles = once(() => new ProfilesService({ repository: new D1ProfilesRepository(db()) }))
+
   const tokens = once(() => new TokenService({ secret: env.JWT_SECRET, previousSecret: env.JWT_SECRET_PREVIOUS || undefined }))
 
   const auth = once(
-    () => new AuthService({ users: users(), otp: otp(), tokens: tokens(), deviceIdKey: env.DEVICE_ID_KEY }),
+    () => new AuthService({ users: users(), profiles: profiles(), otp: otp(), tokens: tokens(), deviceIdKey: env.DEVICE_ID_KEY }),
   )
 
   return {
@@ -183,6 +187,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get otp() {
       return otp()
+    },
+    get profiles() {
+      return profiles()
     },
     get scans() {
       return scans()

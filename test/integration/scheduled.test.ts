@@ -27,7 +27,7 @@ afterEach(() => {
 const abandonedGuest = async () => {
   const id = crypto.randomUUID()
   const longAgo = new Date(NOW - 120 * DAY)
-  await users.createGuestForDevice({ user: { id, createdAt: longAgo }, device: { deviceHash: `scheduled-${id}`, platform: 'ios' } })
+  await users.createGuestForDevice({ user: { id, createdAt: longAgo }, device: { deviceHash: `scheduled-${id}`, platform: 'ios' }, profile: { id: crypto.randomUUID() } })
   await users.touch(id, longAgo)
   await users.unlinkDevices(id)
   return id
@@ -36,11 +36,12 @@ const abandonedGuest = async () => {
 /** A guest with a one-item scan that has sat `recognising` for `ageMs`: stuck, as far as the reaper can tell. */
 const stuckItem = async (ageMs: number) => {
   const userId = crypto.randomUUID()
-  await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' } })
+  const profileId = crypto.randomUUID()
+  await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' }, profile: { id: profileId } })
   const scanId = crypto.randomUUID()
   const itemId = crypto.randomUUID()
   const createdAt = new Date(NOW - ageMs)
-  await scans.createScan({ id: scanId, userId, ipHash: `ip-${scanId}`, createdAt }, [
+  await scans.createScan({ id: scanId, userId, profileId, ipHash: `ip-${scanId}`, createdAt }, [
     { id: itemId, scanId, userId, position: 0, photoKey: `photos/${env.ENVIRONMENT}/${userId}/${scanId}/${itemId}.jpg`, createdAt },
   ])
   return itemId

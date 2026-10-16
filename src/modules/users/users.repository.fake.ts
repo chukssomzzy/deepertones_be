@@ -1,3 +1,4 @@
+import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { UsersRepository } from './users.repository'
 import type { Device, User, UserIdentifier } from './users.types'
 
@@ -9,11 +10,21 @@ const clash = (users: Map<string, User>, userId: string, identifier: UserIdentif
 export class FakeUsersRepository implements UsersRepository {
   private users = new Map<string, User>()
   private devices = new Map<string, Device>()
+  private readonly profiles: FakeProfilesRepository
+
+  /** Pass the fake profiles repository a test reads from: this one writes each guest's default profile into it, and deleting users removes theirs. */
+  constructor(options: { profiles?: FakeProfilesRepository } = {}) {
+    this.profiles = options.profiles ?? new FakeProfilesRepository()
+  }
 
   async createGuestForDevice(input: {
     user: { id: string; createdAt: Date }
     device: { deviceHash: string; platform: Device['platform'] }
+    profile: { id: string }
   }): Promise<User> {
+    const profile = { id: input.profile.id, userId: input.user.id, displayName: null, isDefault: true, createdAt: input.user.createdAt }
+    // All or nothing, like the D1 batch: a profile that cannot be stored leaves no user and no device change behind.
+    this.profiles.assertInsertable(profile)
     const user: User = {
       id: input.user.id,
       status: 'anonymous',
@@ -24,6 +35,7 @@ export class FakeUsersRepository implements UsersRepository {
       lastSeenAt: input.user.createdAt,
     }
     this.users.set(user.id, user)
+    await this.profiles.insert(profile)
     const existing = this.devices.get(input.device.deviceHash)
     this.devices.set(input.device.deviceHash, {
       deviceHash: input.device.deviceHash,
@@ -109,6 +121,7 @@ export class FakeUsersRepository implements UsersRepository {
     for (const id of ids) {
       if (this.users.get(id)?.status !== 'anonymous') continue
       this.users.delete(id)
+      this.profiles.deleteForUsers([id])
       for (const [hash, device] of this.devices) if (device.userId === id) this.devices.delete(hash)
       count++
     }

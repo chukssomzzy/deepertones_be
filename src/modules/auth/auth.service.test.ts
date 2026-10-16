@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { hmacSha256Hex } from '../../lib/crypto'
 import { runAs } from '../../lib/context'
+import { signJwt } from '../../lib/jwt'
 import { MemoryEmailSender } from '../../providers/email/memory.email'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../providers/otp-delivery/memory.otp-delivery'
 import { FakeOtpRepository } from '../otp/otp.repository.fake'
 import { OtpService } from '../otp/otp.service'
+import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
+import { ProfilesService } from '../profiles/profiles.service'
 import { FakeUsersRepository } from '../users/users.repository.fake'
 import { UsersService } from '../users/users.service'
-import { AuthService } from './auth.service'
+import { AuthService, type Session } from './auth.service'
 import { REFRESH_TTL_SECONDS, TokenService } from './tokens.service'
 
 // The one clock every test hangs off; fixtures are offsets from it.
@@ -32,6 +35,7 @@ const errorOf = async (promise: Promise<unknown>) => {
 
 let clock: Date
 let users: FakeUsersRepository
+let profilesRepo: FakeProfilesRepository
 let usersService: UsersService
 let tokens: TokenService
 let n: number
@@ -52,13 +56,15 @@ const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users) => {
     now: () => clock,
     generateCode: () => CODE,
   })
-  return { auth: new AuthService({ users: usersSvc, otp, tokens, deviceIdKey, now: () => clock }), usersSvc }
+  const profiles = new ProfilesService({ repository: profilesRepo })
+  return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, deviceIdKey, now: () => clock }), usersSvc }
 }
 
 beforeEach(() => {
   clock = T0
   n = 0
-  users = new FakeUsersRepository()
+  profilesRepo = new FakeProfilesRepository()
+  users = new FakeUsersRepository({ profiles: profilesRepo })
   tokens = new TokenService({ secret: JWT_SECRET, now: () => clock })
   const built = buildAuth()
   auth = built.auth
@@ -76,6 +82,24 @@ describe('AuthService secrets', () => {
     expect(Object.values(spread)).not.toContain(DEVICE_KEY)
   })
 })
+
+// The id of the profile a guest got when it was created: the one its tokens should name.
+const defaultOf = async (userId: string) => (await profilesRepo.defaultFor(userId))!.id
+/** A second profile for the user, as a later feature will make one (there is no way to make one yet). */
+const addProfile = async (userId: string, id: string) => {
+  await profilesRepo.insert({ id, userId, displayName: null, isDefault: false, createdAt: new Date(T0.getTime() + SECOND) })
+  return id
+}
+/** The signed-in actor a request carries: the user, and the profile the request's access token named (the default unless given). */
+const actorOf = async (userId: string, status: 'anonymous' | 'verified' = 'anonymous', profileId?: string) =>
+  ({ kind: 'user', userId, status, profileId: profileId ?? (await defaultOf(userId)) }) as const
+/** The profile ids named by the two tokens of a session. */
+const profilesOf = async (session: Session) => {
+  const access = await tokens.verifyAccess(session.tokens.accessToken)
+  const refresh = await tokens.verifyRefresh(session.tokens.refreshToken)
+  if (!access.ok || !refresh.ok) throw new Error('session tokens did not verify')
+  return { access: access.profileId, refresh: refresh.profileId }
+}
 
 describe('AuthService.bootstrap', () => {
   it('gives the same guest to the same device and a different one to another device', async () => {
@@ -118,6 +142,30 @@ describe('AuthService.bootstrap', () => {
   })
 })
 
+describe('AuthService.bootstrap: the profile', () => {
+  it('names the guest\'s default profile in both tokens', async () => {
+    const session = await auth.bootstrap('device-1', 'ios')
+
+    const profile = await profilesRepo.defaultFor(session.user.id)
+    expect(profile).not.toBeNull()
+    expect(await profilesOf(session)).toEqual({ access: profile!.id, refresh: profile!.id })
+  })
+
+  it('names the same profile each time the same device comes back', async () => {
+    const first = await auth.bootstrap('device-1', 'ios')
+    const again = await auth.bootstrap('device-1', 'ios')
+
+    expect((await profilesOf(again)).access).toBe((await profilesOf(first)).access)
+  })
+
+  it('names a different profile for a different device', async () => {
+    const first = await auth.bootstrap('device-1', 'ios')
+    const other = await auth.bootstrap('device-2', 'ios')
+
+    expect((await profilesOf(other)).access).not.toBe((await profilesOf(first)).access)
+  })
+})
+
 describe('AuthService.refresh', () => {
   it('returns a new token pair for the same user, with a refresh token good for another 60 days from now (sliding)', async () => {
     const session = await auth.bootstrap('device-1', 'ios')
@@ -151,7 +199,7 @@ describe('AuthService.refresh', () => {
   })
 
   it('answers TOKEN_INVALID for a token whose user does not exist', async () => {
-    const ghost = await tokens.issue({ id: 'no-such-user', status: 'anonymous', tokenVersion: 0 })
+    const ghost = await tokens.issue({ id: 'no-such-user', status: 'anonymous', tokenVersion: 0 }, 'no-such-profile')
 
     expect(await errorOf(auth.refresh(ghost.refreshToken))).toMatchObject({ code: 'TOKEN_INVALID' })
   })
@@ -164,10 +212,50 @@ describe('AuthService.refresh', () => {
   })
 })
 
+describe('AuthService.refresh: the profile', () => {
+  const refreshTokenWith = (userId: string, pid: string | undefined) =>
+    signJwt({ sub: userId, ver: 0, typ: 'refresh', ...(pid === undefined ? {} : { pid }) }, { secret: JWT_SECRET, expiresInSeconds: REFRESH_TTL_SECONDS, now: clock })
+
+  it('keeps the profile the refresh token names, in both new tokens, when it is one of the user\'s', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const second = await addProfile(guest.user.id, 'profile-second')
+    const issued = await tokens.issue(guest.user, second)
+
+    const refreshed = await auth.refresh(issued.refreshToken)
+
+    expect(await profilesOf(refreshed)).toEqual({ access: second, refresh: second })
+  })
+
+  it('keeps the default profile for a session that is on the default', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    await addProfile(guest.user.id, 'profile-second')
+
+    const refreshed = await auth.refresh(guest.tokens.refreshToken)
+
+    expect(await profilesOf(refreshed)).toEqual({ access: await defaultOf(guest.user.id), refresh: await defaultOf(guest.user.id) })
+  })
+
+  it.each([
+    ['has no profile (a token from before profiles)', (_other: string) => undefined],
+    ['names a profile that does not exist', (_other: string) => 'no-such-profile'],
+    ['names another user\'s profile', (other: string) => other],
+  ])('gives the default profile when the refresh token %s', async (_label, pidFor) => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const stranger = await auth.bootstrap('device-2', 'android')
+    const token = await refreshTokenWith(guest.user.id, pidFor(await defaultOf(stranger.user.id)))
+
+    const refreshed = await auth.refresh(token)
+
+    expect(refreshed.user.id).toBe(guest.user.id)
+    const expected = await defaultOf(guest.user.id)
+    expect(await profilesOf(refreshed)).toEqual({ access: expected, refresh: expected })
+  })
+})
+
 describe('AuthService.verifyOtp', () => {
   it('promotes the calling guest in place, and its earlier refresh token stops working', async () => {
     const guest = await auth.bootstrap('device-1', 'ios')
-    const actor = { kind: 'user', userId: guest.user.id, status: 'anonymous' } as const
+    const actor = await actorOf(guest.user.id)
 
     const session = await runAs(actor, async () => {
       await auth.sendOtp({ channel: 'email', address: 'Ada@Example.com' })
@@ -180,10 +268,44 @@ describe('AuthService.verifyOtp', () => {
   })
 })
 
+describe('AuthService.verifyOtp: the profile', () => {
+  it('keeps the profile the caller was on when a guest is promoted, even when it is not the default', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const second = await addProfile(guest.user.id, 'profile-second')
+    const actor = await actorOf(guest.user.id, 'anonymous', second)
+
+    const session = await runAs(actor, async () => {
+      await auth.sendOtp({ channel: 'email', address: 'ada@example.com' })
+      return auth.verifyOtp({ channel: 'email', address: 'ada@example.com' }, CODE)
+    })
+
+    expect(session.user.id).toBe(guest.user.id)
+    expect(await profilesOf(session)).toEqual({ access: second, refresh: second })
+  })
+
+  it('signs a guest that switches to an existing account in on that account\'s default profile, not the guest\'s', async () => {
+    const owner = await auth.bootstrap('device-owner', 'ios')
+    await usersService.promote(owner.user.id, { kind: 'email', email: 'ada@example.com' as never })
+    await addProfile(owner.user.id, 'profile-owner-second')
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+
+    const session = await runAs(actor, async () => {
+      await auth.sendOtp({ channel: 'email', address: 'ada@example.com' })
+      return auth.verifyOtp({ channel: 'email', address: 'ada@example.com' }, CODE)
+    })
+
+    const ownerDefault = await defaultOf(owner.user.id)
+    expect(session.user.id).toBe(owner.user.id)
+    expect(ownerDefault).not.toBe(actor.profileId)
+    expect(await profilesOf(session)).toEqual({ access: ownerDefault, refresh: ownerDefault })
+  })
+})
+
 describe('AuthService.logout', () => {
   it('invalidates the user\'s refresh tokens and returns a fresh guest for the device', async () => {
     const guest = await auth.bootstrap('device-1', 'ios')
-    const actor = { kind: 'user', userId: guest.user.id, status: 'anonymous' } as const
+    const actor = await actorOf(guest.user.id)
 
     const fresh = await runAs(actor, () => auth.logout('device-1', 'ios'))
 
@@ -193,13 +315,57 @@ describe('AuthService.logout', () => {
   })
 })
 
+describe('AuthService.logout: the profile', () => {
+  it('hands the device a fresh guest with a default profile of its own, named in the new tokens', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+
+    const fresh = await runAs(actor, () => auth.logout('device-1', 'ios'))
+
+    const freshDefault = await profilesRepo.defaultFor(fresh.user.id)
+    expect(freshDefault).not.toBeNull()
+    expect(freshDefault!.id).not.toBe(actor.profileId)
+    expect(await profilesOf(fresh)).toEqual({ access: freshDefault!.id, refresh: freshDefault!.id })
+  })
+})
+
+describe('AuthService.me', () => {
+  it('returns the user, the profile the session is on, and all the user\'s profiles with the default first', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const first = await defaultOf(guest.user.id)
+    const second = await addProfile(guest.user.id, 'profile-second')
+
+    const onDefault = await runAs(await actorOf(guest.user.id), () => auth.me())
+    const onSecond = await runAs(await actorOf(guest.user.id, 'anonymous', second), () => auth.me())
+
+    expect(onDefault.user).toMatchObject({ id: guest.user.id, status: 'anonymous' })
+    expect(onDefault.profile).toMatchObject({ id: first, userId: guest.user.id, isDefault: true, displayName: null })
+    expect(onDefault.profiles.map((p) => p.id)).toEqual([first, second])
+    expect(onSecond.profile).toMatchObject({ id: second, isDefault: false })
+    expect(onSecond.profiles.map((p) => p.id)).toEqual([first, second])
+  })
+
+  it.each([
+    ['does not exist', async (_stranger: string) => 'no-such-profile'],
+    ['belongs to another user', async (stranger: string) => defaultOf(stranger)],
+  ])('answers TOKEN_EXPIRED, so the app refreshes, when the session\'s profile %s', async (_label, profileFor) => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const stranger = await auth.bootstrap('device-2', 'android')
+    const actor = await actorOf(guest.user.id, 'anonymous', await profileFor(stranger.user.id))
+
+    const error = await errorOf(runAs(actor, () => auth.me()))
+
+    expect(error).toMatchObject({ code: 'TOKEN_EXPIRED' })
+  })
+})
+
 describe('AuthService account linking and switching', () => {
   const email = (address: string) => ({ channel: 'email', address }) as const
 
   it('refuses a verified caller an unowned address in sendOtp and verifyOtp, with no code consumed', async () => {
     const guest = await auth.bootstrap('device-1', 'ios')
     await usersService.promote(guest.user.id, { kind: 'email', email: 'ada@example.com' as never })
-    const actor = { kind: 'user', userId: guest.user.id, status: 'anonymous' } as const // stale token: still says guest
+    const actor = await actorOf(guest.user.id) // stale token: still says guest
 
     const sendError = await errorOf(runAs(actor, () => auth.sendOtp(email('new@example.com'))))
     const verifyError = await errorOf(runAs(actor, () => auth.verifyOtp(email('new@example.com'), CODE)))
@@ -211,7 +377,7 @@ describe('AuthService account linking and switching', () => {
   it('lets a verified caller sign in again with their own address', async () => {
     const guest = await auth.bootstrap('device-1', 'ios')
     await usersService.promote(guest.user.id, { kind: 'email', email: 'ada@example.com' as never })
-    const actor = { kind: 'user', userId: guest.user.id, status: 'verified' } as const
+    const actor = await actorOf(guest.user.id, 'verified')
 
     const session = await runAs(actor, async () => {
       await auth.sendOtp(email('ada@example.com'))
@@ -225,7 +391,7 @@ describe('AuthService account linking and switching', () => {
     const owner = await auth.bootstrap('device-owner', 'ios')
     await usersService.promote(owner.user.id, { kind: 'email', email: 'ada@example.com' as never })
     const guest = await auth.bootstrap('device-1', 'ios')
-    const actor = { kind: 'user', userId: guest.user.id, status: 'anonymous' } as const
+    const actor = await actorOf(guest.user.id)
 
     const session = await runAs(actor, async () => {
       await auth.sendOtp(email('ada@example.com'))

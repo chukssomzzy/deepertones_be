@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { signJwt } from '../../lib/jwt'
+import { signJwt, verifyJwt } from '../../lib/jwt'
 import { ACCESS_TTL_SECONDS, REFRESH_TTL_SECONDS, TokenService } from './tokens.service'
 
 // The one clock every test hangs off; fixtures are offsets from it.
@@ -8,11 +8,12 @@ const after = (seconds: number) => new Date(ISSUED.getTime() + seconds * 1000)
 const DAY = 24 * 3600
 
 const USER = { id: 'u_1', status: 'anonymous', tokenVersion: 3 } as const
+const PID = 'p_1'
 
 const serviceAt = (when: Date, secrets: { secret: string; previousSecret?: string } = { secret: 'secret-a' }) =>
   new TokenService({ ...secrets, now: () => when })
 
-const issued = () => serviceAt(ISSUED).issue(USER)
+const issued = () => serviceAt(ISSUED).issue(USER, PID)
 
 describe('TokenService constants', () => {
   it('gives access tokens 15 minutes and refresh tokens 60 days', () => {
@@ -39,10 +40,22 @@ describe('TokenService.issue', () => {
     expect(tokens.accessExpiresAt).toEqual(after(900))
     expect(tokens.refreshExpiresAt).toEqual(after(60 * DAY))
   })
+
+  it('puts the profile id in both tokens as the pid claim, beside the user, version, status and type', async () => {
+    const tokens = await issued()
+    const read = async (token: string) => {
+      const result = await verifyJwt(token, { secrets: ['secret-a'], now: after(1) })
+      if (!result.ok) throw new Error('token did not verify')
+      return result.claims
+    }
+
+    expect(await read(tokens.accessToken)).toMatchObject({ sub: 'u_1', ver: 3, st: 'anonymous', pid: 'p_1', typ: 'access' })
+    expect(await read(tokens.refreshToken)).toMatchObject({ sub: 'u_1', ver: 3, pid: 'p_1', typ: 'refresh' })
+  })
 })
 
 describe('TokenService.verifyAccess', () => {
-  it('returns the user id, status and token version of a fresh access token', async () => {
+  it('returns the user id, status, token version and profile id of a fresh access token', async () => {
     const { accessToken } = await issued()
 
     expect(await serviceAt(after(1)).verifyAccess(accessToken)).toEqual({
@@ -50,11 +63,12 @@ describe('TokenService.verifyAccess', () => {
       userId: 'u_1',
       status: 'anonymous',
       version: 3,
+      profileId: 'p_1',
     })
   })
 
   it('carries a verified status through', async () => {
-    const { accessToken } = await serviceAt(ISSUED).issue({ id: 'u_2', status: 'verified', tokenVersion: 0 })
+    const { accessToken } = await serviceAt(ISSUED).issue({ id: 'u_2', status: 'verified', tokenVersion: 0 }, PID)
 
     expect(await serviceAt(after(1)).verifyAccess(accessToken)).toMatchObject({ ok: true, userId: 'u_2', status: 'verified', version: 0 })
   })
@@ -78,10 +92,10 @@ describe('TokenService.verifyAccess', () => {
 })
 
 describe('TokenService.verifyRefresh', () => {
-  it('returns the user id and token version of a fresh refresh token', async () => {
+  it('returns the user id, token version and profile id of a fresh refresh token', async () => {
     const { refreshToken } = await issued()
 
-    expect(await serviceAt(after(1)).verifyRefresh(refreshToken)).toEqual({ ok: true, userId: 'u_1', version: 3 })
+    expect(await serviceAt(after(1)).verifyRefresh(refreshToken)).toEqual({ ok: true, userId: 'u_1', version: 3, profileId: 'p_1' })
   })
 
   it('is valid one second before 60 days and expired at 60 days plus one second', async () => {
@@ -98,6 +112,48 @@ describe('TokenService.verifyRefresh', () => {
   })
 })
 
+describe('TokenService profile id (the pid claim)', () => {
+  const access = (claims: Record<string, unknown>) =>
+    signJwt({ sub: 'u_1', st: 'anonymous', ver: 3, typ: 'access', ...claims }, { secret: 'secret-a', expiresInSeconds: 900, now: ISSUED })
+  const refresh = (claims: Record<string, unknown>) =>
+    signJwt({ sub: 'u_1', ver: 3, typ: 'refresh', ...claims }, { secret: 'secret-a', expiresInSeconds: REFRESH_TTL_SECONDS, now: ISSUED })
+
+  it('treats an access token with no pid as expired, so the app refreshes', async () => {
+    const token = await access({}) // every claim a token had before profiles, none of them missing but pid
+
+    expect(await serviceAt(after(1)).verifyAccess(token)).toEqual({ ok: false, problem: 'expired' })
+  })
+
+  it('still reports a token with no pid and a bad version as invalid: the other checks come first', async () => {
+    expect(await serviceAt(after(1)).verifyAccess(await access({ ver: -1 }))).toEqual({ ok: false, problem: 'invalid' })
+  })
+
+  it('still reports a refresh token with no pid, presented as a bearer, as invalid: the type check comes first', async () => {
+    expect(await serviceAt(after(1)).verifyAccess(await refresh({}))).toEqual({ ok: false, problem: 'invalid' })
+  })
+
+  it('reports a token with no pid that has expired as expired', async () => {
+    expect(await serviceAt(after(901)).verifyAccess(await access({}))).toEqual({ ok: false, problem: 'expired' })
+  })
+
+  it.each([['an empty string', ''], ['a number', 42], ['null', null], ['an object', { id: 'p_1' }], ['a list', ['p_1']]])(
+    'rejects an access token whose pid is %s as invalid',
+    async (_label, pid) => {
+      expect(await serviceAt(after(1)).verifyAccess(await access({ pid }))).toEqual({ ok: false, problem: 'invalid' })
+    },
+  )
+
+  it('accepts a refresh token with no pid, giving a null profile id: tokens issued before profiles stay good', async () => {
+    const token = await refresh({})
+
+    expect(await serviceAt(after(1)).verifyRefresh(token)).toEqual({ ok: true, userId: 'u_1', version: 3, profileId: null })
+  })
+
+  it('returns the pid of a refresh token that has one', async () => {
+    expect(await serviceAt(after(1)).verifyRefresh(await refresh({ pid: 'p_9' }))).toMatchObject({ ok: true, profileId: 'p_9' })
+  })
+})
+
 describe('TokenService token version', () => {
   const claimsWith = (ver: unknown) =>
     signJwt({ sub: 'u_1', st: 'anonymous', ver, typ: 'access' }, { secret: 'secret-a', expiresInSeconds: 900, now: ISSUED })
@@ -109,7 +165,7 @@ describe('TokenService token version', () => {
 
 describe('TokenService secret rotation', () => {
   it('still verifies tokens signed with the previous secret', async () => {
-    const { accessToken, refreshToken } = await serviceAt(ISSUED, { secret: 'secret-a' }).issue(USER)
+    const { accessToken, refreshToken } = await serviceAt(ISSUED, { secret: 'secret-a' }).issue(USER, PID)
     const rotated = serviceAt(after(1), { secret: 'secret-b', previousSecret: 'secret-a' })
 
     expect(await rotated.verifyAccess(accessToken)).toMatchObject({ ok: true, userId: 'u_1' })
@@ -118,19 +174,19 @@ describe('TokenService secret rotation', () => {
 
   it('works when the previous secret equals the current one', async () => {
     const same = serviceAt(ISSUED, { secret: 'secret-a', previousSecret: 'secret-a' })
-    const { accessToken } = await same.issue(USER)
+    const { accessToken } = await same.issue(USER, PID)
 
     expect(await same.verifyAccess(accessToken)).toMatchObject({ ok: true })
   })
 
   it('rejects tokens signed with a secret that is no longer configured', async () => {
-    const { accessToken } = await serviceAt(ISSUED, { secret: 'secret-a' }).issue(USER)
+    const { accessToken } = await serviceAt(ISSUED, { secret: 'secret-a' }).issue(USER, PID)
 
     expect(await serviceAt(after(1), { secret: 'secret-b' }).verifyAccess(accessToken)).toEqual({ ok: false, problem: 'invalid' })
   })
 
   it('signs new tokens with the current secret, not the previous one', async () => {
-    const { accessToken } = await serviceAt(ISSUED, { secret: 'secret-b', previousSecret: 'secret-a' }).issue(USER)
+    const { accessToken } = await serviceAt(ISSUED, { secret: 'secret-b', previousSecret: 'secret-a' }).issue(USER, PID)
 
     expect(await serviceAt(after(1), { secret: 'secret-b' }).verifyAccess(accessToken)).toMatchObject({ ok: true })
     expect(await serviceAt(after(1), { secret: 'secret-a' }).verifyAccess(accessToken)).toEqual({ ok: false, problem: 'invalid' })

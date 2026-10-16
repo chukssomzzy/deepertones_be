@@ -16,7 +16,7 @@ describe('the daily guest cleanup (scheduled handler)', () => {
     const salt = crypto.randomUUID()
     const seed = async (label: string, seenAt: Date) => {
       const id = crypto.randomUUID()
-      await repo.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `${label}-${salt}`, platform: 'ios' } })
+      await repo.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `${label}-${salt}`, platform: 'ios' }, profile: { id: crypto.randomUUID() } })
       await repo.touch(id, seenAt)
       return id
     }

@@ -78,6 +78,20 @@
       "when": 1792136349435,
       "tag": "0010_glamorous_la_nuit",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "6",
+      "when": 1792158114699,
+      "tag": "0011_mean_hiroim",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1792158138104,
+      "tag": "0012_aberrant_forge",
+      "breakpoints": true
     }
   ]
 }
