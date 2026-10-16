@@ -459,8 +459,9 @@ Product research and analysis call Claude through one `AnthropicClient`, and two
   which turns `enum` into description text) and checks the reply with `safeParse`. Schemas use none of
   the keywords the API rejects (length, range and count limits); enums come from vocabularies the
   caller passes in. `max_tokens` leaves room for adaptive thinking, which counts against it.
-- **Internals are `#private`.** Constants and helpers in the client and adapters are class members,
-  not module-level names; only what other files import (the errors, types and helpers in
+- **Internals are TypeScript `private`.** `#` is only for fields that hold a secret (the API key and
+  the SDK instance that carries it). Constants and helpers in the client and adapters are private class
+  members, not module-level names; only what other files import (the errors, types and helpers in
   `anthropic.provider.ts`) is exported.
 - **Web search returns JSON text, checked against the search.** The researcher cannot use structured
   outputs with the search tool, so its prompt demands a JSON-only final answer. The last object in the
