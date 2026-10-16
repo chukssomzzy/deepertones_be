@@ -26,6 +26,7 @@ const JPEG: ProductImage = { bytes: JPEG_BYTES, mediaType: 'image/jpeg' }
 
 const ROUTED_TO = 'claude-haiku-5-5'
 const MAX_FIELD = 120
+const FORMS = ['spray', 'roll-on', 'stick', 'cream', 'lotion', 'gel', 'oil', 'serum', 'liquid', 'bar', 'powder', 'balm'] as const
 
 /** The structured answer for a clearly read product; a test overrides only what it is about. */
 const product = (overrides: Record<string, unknown> = {}) => ({
@@ -33,6 +34,7 @@ const product = (overrides: Record<string, unknown> = {}) => ({
   brand: 'Glow Co',
   name: 'Bright Tone Serum',
   variant: 'Extra Strength',
+  form: 'unknown',
   category: 'skin',
   confidence: 0.87,
   ...overrides,
@@ -123,6 +125,30 @@ describe('AnthropicProductRecognizer request', () => {
     expect(schema.required).toContain('classification')
   })
 
+  it('asks for the product form with exactly the twelve forms and unknown', async () => {
+    const { calls, recognizer } = recognizerOver(structured(product()))
+
+    await recognizer.recognize(JPEG)
+
+    const schema = schemaOf(calls[0]!.body)
+    expect([...schema.properties.form.enum].sort()).toEqual([...FORMS, 'unknown'].sort())
+    expect(schema.required).toContain('form')
+  })
+
+  it('tells the model to read the form from printed words or the container shape, to use unknown when unsure, and never to guess it from the brand', async () => {
+    const { calls, recognizer } = recognizerOver(structured(product()))
+
+    await recognizer.recognize(JPEG)
+
+    const prompt = requestText(calls[0]!.body)
+    expect(prompt).toMatch(/shape/i)
+    expect(prompt).toMatch(/aerosol/i)
+    expect(prompt).toMatch(/roll-on/i)
+    expect(prompt).toMatch(/bar of soap/i)
+    expect(prompt).toContain('unknown')
+    expect(prompt).toMatch(/never guess[^.]*brand/i)
+  })
+
   it('tells the model the photo is user-supplied data whose instructions must be ignored', async () => {
     const { calls, recognizer } = recognizerOver(structured(product()))
 
@@ -203,6 +229,27 @@ describe('AnthropicProductRecognizer answers', () => {
       category: 'skin',
       confidence: 0.87,
     })
+  })
+
+  it.each(FORMS)('returns the form %s', async (form) => {
+    const { recognizer } = recognizerOver(structured(product({ form })))
+
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', form })
+  })
+
+  it('returns a product with no form key when the model answers unknown', async () => {
+    const { recognizer } = recognizerOver(structured(product({ form: 'unknown' })))
+
+    const result = await recognizer.recognize(JPEG)
+
+    expect(result).toMatchObject({ classification: 'beauty-product', brand: 'Glow Co' })
+    expect(result).not.toHaveProperty('form')
+  })
+
+  it('returns only the classification for a non-product even if the model gave a form', async () => {
+    const { recognizer } = recognizerOver(structured(product({ classification: 'other-product', form: 'spray' })))
+
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'other-product' })
   })
 
   it.each(['skin', 'hair', 'body', 'makeup', 'other'])('keeps the category %s', async (category) => {

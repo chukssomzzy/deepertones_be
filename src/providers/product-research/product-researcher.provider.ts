@@ -1,10 +1,14 @@
 export type ProductCategory = 'skin' | 'hair' | 'body' | 'makeup' | 'other'
 
+export const PRODUCT_FORMS = ['spray', 'roll-on', 'stick', 'cream', 'lotion', 'gel', 'oil', 'serum', 'liquid', 'bar', 'powder', 'balm'] as const
+export type ProductForm = (typeof PRODUCT_FORMS)[number]
+
 /** Who a product is, as read from its label. */
 export type ProductIdentity = {
   brand: string
   name: string
   variant?: string
+  form?: ProductForm
   category: ProductCategory
 }
 

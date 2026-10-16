@@ -297,6 +297,15 @@ describe('AnthropicProductAnalyst.sameProduct', () => {
     }
   })
 
+  it('tells the model that a different form, such as a spray and a roll-on, makes two products different, alongside the variant', async () => {
+    const { calls, analyst } = analystOver(structured({ same: true }))
+
+    await analyst.sameProduct(PRODUCT, OTHER)
+
+    const system = requestText({ system: calls[0]!.body.system })
+    expect(system).toMatch(/variant[^.]*\bform\b|\bform\b[^.]*variant/i)
+  })
+
   it('throws AnthropicRefusalError when the model refuses', async () => {
     const { analyst } = analystOver(() => messageResponse({ content: [textBlock('No.')], stop_reason: 'refusal' }))
 

@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { PRODUCT_FORMS } from '../../providers/product-research/product-researcher.provider'
 import { SCAN_POLICY } from './scans.service'
 
 const Category = z.enum(['skin', 'hair', 'body', 'makeup', 'other'])
@@ -41,6 +42,7 @@ export const ConfirmProductBody = z
     brand: z.string().min(1),
     name: z.string().min(1),
     variant: z.string().optional(),
+    form: z.enum(PRODUCT_FORMS).optional(),
     category: Category,
   })
   .openapi('ConfirmProductBody')
@@ -52,6 +54,7 @@ const ProductResult = z
       brand: z.string(),
       name: z.string(),
       variant: z.string().nullable(),
+      form: z.enum(PRODUCT_FORMS).nullable(),
       category: Category,
       imageUrl: z.string().nullable(),
     }),
@@ -95,7 +98,7 @@ export const ScanItemResponse = z
       .nullable()
       .openapi({ description: 'Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`).' }),
     recognised: z
-      .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), category: Category })
+      .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), form: z.enum(PRODUCT_FORMS).nullable(), category: Category })
       .optional()
       .openapi({ description: 'What the photo was read as, or what the user corrected it to. Absent until it has been read.' }),
     product: ProductResult.optional().openapi({ description: 'Only on a `ready` item.' }),

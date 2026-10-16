@@ -706,6 +706,93 @@ describe('ScanService.advance: recognise', () => {
   })
 })
 
+describe('ScanService product form', () => {
+  const sprayKey = identityKey({ ...CERAVE, form: 'spray' })
+
+  it('stores the recognised form on the item and shows it, and shows null when the photo gave none', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? seen({ form: 'spray' }) : seen()))
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    const [a, b] = scan.items
+
+    await run(ctx, a.id, 'recognise')
+    await run(ctx, b.id, 'recognise')
+
+    expect((await itemOf(ctx, scan.id, a.id)).recognised).toMatchObject({ form: 'spray' })
+    expect((await itemOf(ctx, scan.id, b.id)).recognised).toMatchObject({ form: null })
+  })
+
+  it('hands the recognised form to the catalog when it matches the item', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => seen({ form: 'spray' }))
+    const { itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+    await run(ctx, itemId, 'match')
+
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ brand: CERAVE.brand, name: CERAVE.name, form: 'spray' }))
+    expect(await ctx.catalogRepository.findProductByKey(sprayKey)).not.toBeNull()
+    expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).toBeNull()
+  })
+
+  it('hands the catalog no form when none was recognised', async () => {
+    const ctx = setup()
+    const { itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+    await run(ctx, itemId, 'match')
+
+    expect(resolve.mock.calls[0]![0]).not.toHaveProperty('form')
+  })
+
+  it('keeps the form of an earlier read when the recognise step runs again, without asking the recogniser', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await scanOne(ctx)
+    await ctx.repository.updateItem(itemId, 'recognising', {
+      recognisedBrand: CERAVE.brand,
+      recognisedName: CERAVE.name,
+      recognisedVariant: null,
+      recognisedForm: 'spray',
+      recognisedCategory: 'skin',
+      recognisedConfidence: 0.9,
+      updatedAt: ctx.now(),
+    })
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.calls).toEqual([])
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'matching', recognised: { form: 'spray' } })
+  })
+
+  it('confirm stores the form the user gave, and the corrected product is looked up with it', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+    await asUser(() => ctx.service.confirm(scanId, itemId, { ...CERAVE, form: 'roll-on' }))
+    await drain(ctx)
+
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'roll-on' })
+    expect(await ctx.catalogRepository.findProductByKey(identityKey({ ...CERAVE, form: 'roll-on' }))).not.toBeNull()
+  })
+
+  it('confirm without a form clears the form that was read to null', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => seen({ confidence: 0.3, form: 'spray' }))
+    const { scanId, itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'spray' })
+
+    await asUser(() => ctx.service.confirm(scanId, itemId, { ...CERAVE }))
+    await drain(ctx)
+
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: null })
+    expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).not.toBeNull()
+    expect(await ctx.catalogRepository.findProductByKey(sprayKey)).toBeNull()
+  })
+})
+
 describe('ScanService.advance: match', () => {
   it('makes an item ready, with the product the catalog already holds, when that product is analysed', async () => {
     const ctx = setup()
