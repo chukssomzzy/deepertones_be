@@ -110,7 +110,7 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    on every device (their other devices' refresh then fails with `TOKEN_INVALID`) and returns a fresh guest session
    to store.
 
-`deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
+`deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 4 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
 
 Error codes to handle (in `error.code`):

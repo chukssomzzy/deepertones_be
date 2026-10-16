@@ -10,7 +10,7 @@ import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../src/providers/otp-delivery/memory.otp-delivery'
 import worker from '../../src/index'
 
-const CODE = '482913'
+const CODE = '4829'
 const MAIN = 'deepertones-otp-delivery-development'
 const DEAD_LETTER = 'deepertones-otp-delivery-dlq-development'
 const ZEPTO_URL = 'https://zeptomail.test/v1.1/email'

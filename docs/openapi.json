@@ -253,8 +253,8 @@
             "properties": {
               "code": {
                 "type": "string",
-                "pattern": "^\\d{6}$",
-                "example": "482913"
+                "pattern": "^\\d{4}$",
+                "example": "4829"
               }
             },
             "required": [

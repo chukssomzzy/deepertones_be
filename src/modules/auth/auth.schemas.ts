@@ -20,7 +20,7 @@ export const SendOtpBody = z
   .openapi('SendOtpBody')
 
 export const VerifyOtpBody = SendOtpBody.extend({
-  code: z.string().regex(new RegExp(`^\\d{${OTP_POLICY.length}}$`)).openapi({ example: '482913' }),
+  code: z.string().regex(new RegExp(`^\\d{${OTP_POLICY.length}}$`)).openapi({ example: '4829' }),
 }).openapi('VerifyOtpBody')
 
 export const RefreshBody = z
