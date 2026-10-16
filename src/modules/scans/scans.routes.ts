@@ -1,0 +1,112 @@
+import { bodyLimit } from 'hono/body-limit'
+import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, success } from '../../lib/openapi'
+import { rateLimit } from '../../middleware/rate-limit'
+import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
+import { BackPhotoBody, ConfirmProductBody, CreateScanBody, ItemParams, PhotoLinkParams, ScanItemResponse, ScanParams, ScanResponse } from './scans.schemas'
+import { SCAN_POLICY } from './scans.service'
+
+const bearer = [{ bearerAuth: [] }]
+
+// Room for the multipart framing around the photos. The limit runs before the form is read, so an oversized upload is never buffered.
+const FRAMING_BYTES = 1_000_000
+const MAX_SCAN_BODY_BYTES = SCAN_POLICY.maxPhotosPerScan * SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+const MAX_BACK_PHOTO_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+
+const createScan = defineRoute({
+  method: 'post',
+  path: '/',
+  operationId: 'createScan',
+  tags: ['Scans'],
+  summary: 'Start a scan from 1 to 10 photos',
+  description:
+    'Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /scans/{scanId}` for progress. ' +
+    'One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).',
+  security: bearer,
+  middleware: [
+    bodyLimit({ maxSize: MAX_SCAN_BODY_BYTES }),
+    rateLimit('SCAN_CREATE_IP_LIMITER', 'ip'),
+    rateLimit('SCAN_CREATE_USER_LIMITER', 'user'),
+  ],
+  request: { body: multipartBody(CreateScanBody) },
+  responses: { 202: success(ScanResponse, 'The scan, with every item recognising'), ...errorResponses(401, 413, 429) },
+})
+
+const getScan = defineRoute({
+  method: 'get',
+  path: '/{scanId}',
+  operationId: 'getScan',
+  tags: ['Scans'],
+  summary: 'A scan and where each of its items has got to',
+  description: 'Another user\'s scan is 404, the same as one that does not exist.',
+  security: bearer,
+  request: { params: ScanParams },
+  responses: { 200: success(ScanResponse, 'The scan'), ...errorResponses(401, 404) },
+})
+
+const confirmItem = defineRoute({
+  method: 'post',
+  path: '/{scanId}/items/{itemId}/confirmation',
+  operationId: 'confirmScanItem',
+  tags: ['Scans'],
+  summary: 'Correct what a doubtful photo was read as',
+  description: 'For an item in `needs-confirmation`. The item goes on to matching with the product given.',
+  security: bearer,
+  request: { params: ItemParams, body: jsonBody(ConfirmProductBody) },
+  responses: { 202: success(ScanItemResponse, 'The item, now matching'), ...errorResponses(401, 404, 409) },
+})
+
+const addBackPhoto = defineRoute({
+  method: 'post',
+  path: '/{scanId}/items/{itemId}/back-photo',
+  operationId: 'addScanItemBackPhoto',
+  tags: ['Scans'],
+  summary: 'Send a photo of the ingredient list',
+  description: 'For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.',
+  security: bearer,
+  middleware: [bodyLimit({ maxSize: MAX_BACK_PHOTO_BODY_BYTES }), rateLimit('SCAN_BACK_PHOTO_USER_LIMITER', 'user')],
+  request: { params: ItemParams, body: multipartBody(BackPhotoBody) },
+  responses: { 202: success(ScanItemResponse, 'The item, now reading the label'), ...errorResponses(401, 404, 409, 413, 429) },
+})
+
+const getPhoto = defineRoute({
+  method: 'get',
+  path: '/photos/{token}',
+  operationId: 'getScanPhoto',
+  tags: ['Scans'],
+  summary: 'The photo a link from a scan opens',
+  description:
+    'Public: the signed link is the credential, and it works for 5 minutes for whoever holds it. Any Authorization header is ignored. ' +
+    'A link that is malformed, tampered with, expired or to a photo since deleted is 404 PHOTO_NOT_FOUND.',
+  security: [],
+  request: { params: PhotoLinkParams },
+  responses: { 200: imageResponse('The photo'), ...errorResponses(404) },
+})
+
+// The client address is Cloudflare's own header, as in rateLimit. The service hashes it for the daily per-address quota.
+const FALLBACK_IP = 'unknown'
+
+export const scanRoutes = openapiApp()
+  .openapi(createScan, async (c) => {
+    const { photos } = c.req.valid('form')
+    const scan = await c.var.services.scans.create({
+      photos: await Promise.all(photos.map(toProductImage)),
+      clientIp: c.req.header('cf-connecting-ip') ?? FALLBACK_IP,
+    })
+    return ok(c, toScanResponse(scan), 'Scan started', 202)
+  })
+  .openapi(getScan, async (c) => ok(c, toScanResponse(await c.var.services.scans.getScan(c.req.valid('param').scanId)), 'Scan found'))
+  .openapi(confirmItem, async (c) => {
+    const { scanId, itemId } = c.req.valid('param')
+    const item = await c.var.services.scans.confirm(scanId, itemId, c.req.valid('json'))
+    return ok(c, toScanItemResponse(item), 'Product confirmed', 202)
+  })
+  .openapi(addBackPhoto, async (c) => {
+    const { scanId, itemId } = c.req.valid('param')
+    const photo = await toProductImage(c.req.valid('form').photo)
+    const item = await c.var.services.scans.addBackPhoto(scanId, itemId, photo, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
+    return ok(c, toScanItemResponse(item), 'Back photo received', 202)
+  })
+  .openapi(getPhoto, async (c) => {
+    const photo = await c.var.services.scans.photoForLink(c.req.valid('param').token)
+    return new Response(photo.bytes, { headers: { 'Content-Type': photo.mediaType, 'Cache-Control': 'private, no-store' } })
+  })

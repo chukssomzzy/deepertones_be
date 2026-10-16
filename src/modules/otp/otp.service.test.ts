@@ -65,6 +65,14 @@ class DownQueue extends MemoryJobQueue {
   }
 }
 
+const QUEUE_SECRET = 'queued-body-secret-81d2'
+
+class SecretLeakingQueue extends MemoryJobQueue {
+  override async enqueue(): Promise<void> {
+    throw new TypeError(`rejected body ${QUEUE_SECRET}`)
+  }
+}
+
 describe('OTP_POLICY', () => {
   it('is the agreed policy', () => {
     expect(OTP_POLICY).toEqual({ length: 4, ttlMinutes: 10, maxAttempts: 3, cooldownSeconds: 60, maxSendsPerHour: 5 })
@@ -199,6 +207,18 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
       expect(log).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'enqueue-failed' }))
       expect(JSON.stringify(log.mock.calls)).not.toContain(CODE)
+      log.mockRestore()
+    })
+
+    it('logs an enqueue failure by the error\'s name, never its message, which may carry what was queued', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+      jobs = new SecretLeakingQueue()
+      service = build()
+
+      await errorOf(send())
+
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'enqueue-failed', error: 'TypeError' }))
+      expect(JSON.stringify(log.mock.calls)).not.toContain(QUEUE_SECRET)
       log.mockRestore()
     })
 

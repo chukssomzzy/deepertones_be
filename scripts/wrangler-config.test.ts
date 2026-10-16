@@ -147,3 +147,24 @@ describe('wrangler.jsonc rate limits', () => {
     expect(new Set(names).size).toBe(names.length)
   })
 })
+
+// The scan routes' rate limits (60 s windows). Env blocks do not inherit `ratelimits`, so each block restates them; the
+// uniqueness of every namespace_id across the whole file is checked in "wrangler.jsonc rate limits" above.
+type SimpleLimit = { name: string; namespace_id: string; simple?: { limit: number; period: number } }
+const scanLimitBlocks = scanBlocks as unknown as [string, { ratelimits?: SimpleLimit[] } | undefined, string][]
+
+describe('wrangler.jsonc scan route rate limits', () => {
+  const limiters: [string, number][] = [
+    ['SCAN_CREATE_IP_LIMITER', 20],
+    ['SCAN_CREATE_USER_LIMITER', 10],
+    ['SCAN_BACK_PHOTO_USER_LIMITER', 10],
+  ]
+  const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
+
+  it.each(cases)('$place has $name allowing $limit requests per 60 seconds', ({ block, name, limit }) => {
+    const found = block?.ratelimits?.find((l) => l.name === name)
+
+    expect(found?.simple).toEqual({ limit, period: 60 })
+    expect(found?.namespace_id).toEqual(expect.stringMatching(/^\d+$/))
+  })
+})

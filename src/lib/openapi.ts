@@ -34,8 +34,8 @@ export const ErrorResponse = z
   .openapi('ErrorResponse') satisfies z.ZodType<ErrorBody>
 
 /**
- * The statuses errorHandler can produce: statusByKind in errors.ts, plus 415, which
- * @hono/zod-openapi throws (as an HTTPException) for a body with the wrong Content-Type.
+ * The statuses errorHandler can produce: statusByKind in errors.ts, plus 413 (bodyLimit) and 415
+ * (@hono/zod-openapi), which are thrown as HTTPExceptions.
  */
 const errorDescriptions = {
   400: 'Invalid input (code VALIDATION_FAILED) or a broken business rule',
@@ -43,7 +43,8 @@ const errorDescriptions = {
   403: 'Signed in, but not allowed to do this',
   404: 'Not found',
   409: 'Conflicts with the current state',
-  415: 'The body is not JSON (Content-Type must be application/json)',
+  413: 'Request body too large',
+  415: 'The Content-Type of the body is not supported by this route',
   429: 'Too many requests; wait for the Retry-After header (seconds) when present',
   500: 'Unexpected server error',
   503: 'A dependency is down; retry later',
@@ -95,6 +96,35 @@ export const jsonBody = <Schema extends z.ZodType>(schema: Schema) => ({
   content: { 'application/json': { schema } },
 })
 
+/**
+ * A required multipart/form-data body: `request: { body: multipartBody(CreateScanBody) }`. Read it with
+ * `c.req.valid('form')`. `required: true` for the same reason as jsonBody. A file field is
+ * `z.instanceof(File).openapi({ type: 'string', format: 'binary' })`: the generator cannot describe a File
+ * on its own. Pair it with `bodyLimit` in the route's `middleware`, which runs before the form is read.
+ */
+export const multipartBody = <Schema extends z.ZodType>(schema: Schema) => ({
+  required: true,
+  content: { 'multipart/form-data': { schema } },
+})
+
+const binary = () => z.string().openapi({ type: 'string', format: 'binary' })
+
+/**
+ * A 200 that is an image, not the envelope: `200: imageResponse('The photo')`. The handler sends the bytes with
+ * its own Content-Type and Cache-Control. Any status with a non-JSON body makes the compiler accept any return from
+ * that route's handler, so the integration tests are what checks it.
+ */
+export const imageResponse = (description: string) => ({
+  description,
+  content: { 'image/jpeg': { schema: binary() }, 'image/webp': { schema: binary() } },
+})
+
+/** A 200 that is a server-sent event stream, not the envelope: `200: sseResponse('Progress, as it happens')`. Same compiler caveat as imageResponse. */
+export const sseResponse = (description: string) => ({
+  description,
+  content: { 'text/event-stream': { schema: z.string().openapi({ description: 'Frames of `event:` and `data:` lines.' }) } },
+})
+
 type ErrorResponses<S extends ErrorStatus> = { [K in S]: ReturnType<typeof json<typeof ErrorResponse>> }
 
 /** The error statuses a route can produce, besides the ones defineRoute adds: `...errorResponses(401, 404)`. */
@@ -106,7 +136,7 @@ export const errorResponses = <S extends ErrorStatus>(...statuses: S[]) =>
 /** What every route must say about itself. operationId names the method in generated clients. */
 type DocumentedRoute = RouteConfig & { operationId: string; tags: [string, ...string[]] }
 
-/** 500 on every route, 400 on any route that validates input, 415 on any route that takes a body. */
+/** 500 on every route, 400 on any route that validates input, 415 on any route that takes a body (JSON or multipart). */
 type DefaultErrors<R extends RouteConfig> = R extends { request: { body: object } }
   ? ErrorResponses<400 | 415 | 500>
   : R extends { request: object }

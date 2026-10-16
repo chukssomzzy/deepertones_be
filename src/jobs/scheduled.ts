@@ -37,8 +37,9 @@ export const createScheduledRouter = (): ScheduledHandler => {
   return async (controller, env, ctx) => {
     const job = jobs.get(controller.cron)
     if (!job) {
+      // Thrown, not just logged, so Cloudflare records the run as failed: a cron wrangler.jsonc gives the Worker that this file does not know is a config mistake.
       console.error({ outcome: 'unknown-cron', cron: controller.cron })
-      return
+      throw new Error(`No job for the cron ${controller.cron}`)
     }
     await job(controller, env, ctx)
   }

@@ -3,6 +3,7 @@ import type { HTTPResponseError } from 'hono/types'
 import { HTTPException } from 'hono/http-exception'
 import type { ContentfulStatusCode } from 'hono/utils/http-status'
 import type { BaseEnv } from './env'
+import { describeUnexpectedError } from './safe-error'
 
 /**
  * Base for every error a service throws on purpose. Carries a stable `code` for
@@ -126,8 +127,8 @@ export const errorHandler = <E extends BaseEnv>(err: Error | HTTPResponseError, 
     )
   }
 
-  // Anything else is a bug: log the details, never leak them to the client.
-  console.error({ requestId: c.var.requestId, error: err })
+  // Anything else is a bug: log what it is, never what it says (a failed query's message carries its SQL parameters), and never send it to the client.
+  console.error({ requestId: c.var.requestId, error: describeUnexpectedError(err) })
   return renderError(c, 500, { code: 'INTERNAL_ERROR', message: 'Something went wrong' })
 }
 

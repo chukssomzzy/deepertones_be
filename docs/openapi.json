@@ -275,6 +275,379 @@
         "required": [
           "refreshToken"
         ]
+      },
+      "Scan": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScanItem"
+            },
+            "description": "One per photo, in photo order."
+          }
+        },
+        "required": [
+          "id",
+          "createdAt",
+          "items"
+        ]
+      },
+      "ScanItem": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "description": "The photo's place in the upload, from 0."
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "recognising",
+              "needs-confirmation",
+              "matching",
+              "researching",
+              "needs-back-photo",
+              "reading-label",
+              "analysing",
+              "ready",
+              "rejected",
+              "failed"
+            ],
+            "description": "`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product and `needs-back-photo` for a photo of the ingredient list; the others are being worked on."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "face-or-person",
+              "not-a-beauty-product",
+              "unreadable",
+              "photo-missing",
+              "analysis-failed",
+              "research-busy",
+              "unavailable",
+              "label-unreadable",
+              null
+            ],
+            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`)."
+          },
+          "recognised": {
+            "type": "object",
+            "properties": {
+              "brand": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "variant": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "skin",
+                  "hair",
+                  "body",
+                  "makeup",
+                  "other"
+                ]
+              }
+            },
+            "required": [
+              "brand",
+              "name",
+              "variant",
+              "category"
+            ],
+            "description": "What the photo was read as, or what the user corrected it to. Absent until it has been read."
+          },
+          "product": {
+            "$ref": "#/components/schemas/ProductResult"
+          },
+          "image": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stock",
+                  "user"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "A path on this API, or an absolute URL for a stock image. A `user` link works for 5 minutes and needs no Authorization header."
+              }
+            },
+            "required": [
+              "kind",
+              "url"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "state",
+          "reason",
+          "image"
+        ]
+      },
+      "ProductResult": {
+        "type": "object",
+        "properties": {
+          "product": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "brand": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "variant": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "category": {
+                "type": "string",
+                "enum": [
+                  "skin",
+                  "hair",
+                  "body",
+                  "makeup",
+                  "other"
+                ]
+              },
+              "imageUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "brand",
+              "name",
+              "variant",
+              "category",
+              "imageUrl"
+            ]
+          },
+          "formulation": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "ingredients": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "In label (INCI) order."
+              },
+              "source": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "web",
+                      "label"
+                    ]
+                  },
+                  "url": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "url"
+                ]
+              },
+              "foundAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "analysedAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            },
+            "required": [
+              "id",
+              "ingredients",
+              "source",
+              "foundAt",
+              "analysedAt"
+            ]
+          },
+          "concerns": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string"
+                },
+                "severity": {
+                  "type": "string"
+                },
+                "ingredients": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "why": {
+                  "type": "string"
+                },
+                "whoShouldTakeCare": {
+                  "type": "string"
+                },
+                "traits": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "sources": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "required": [
+                "kind",
+                "severity",
+                "ingredients",
+                "why",
+                "whoShouldTakeCare",
+                "traits",
+                "sources"
+              ]
+            }
+          },
+          "reference": {
+            "type": "object",
+            "properties": {
+              "version": {
+                "type": "string"
+              },
+              "coverage": {
+                "type": "string",
+                "description": "How much of the regulatory lists the checks cover. A result with no concerns is not an all-clear unless this says so."
+              }
+            },
+            "required": [
+              "version",
+              "coverage"
+            ]
+          }
+        },
+        "required": [
+          "product",
+          "formulation",
+          "concerns",
+          "reference"
+        ],
+        "description": "Only on a `ready` item."
+      },
+      "CreateScanBody": {
+        "type": "object",
+        "properties": {
+          "photos": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "minItems": 1,
+            "maxItems": 10,
+            "description": "One `photos` part per photo, in the order the items should appear."
+          }
+        },
+        "required": [
+          "photos"
+        ]
+      },
+      "ConfirmProductBody": {
+        "type": "object",
+        "properties": {
+          "brand": {
+            "type": "string",
+            "minLength": 1
+          },
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "variant": {
+            "type": "string"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "skin",
+              "hair",
+              "body",
+              "makeup",
+              "other"
+            ]
+          }
+        },
+        "required": [
+          "brand",
+          "name",
+          "category"
+        ]
+      },
+      "BackPhotoBody": {
+        "type": "object",
+        "properties": {
+          "photo": {
+            "type": "string",
+            "format": "binary",
+            "description": "A JPEG or WebP photo, at most 2,000,000 bytes and 1600 pixels on the longest side."
+          }
+        },
+        "required": [
+          "photo"
+        ]
       }
     },
     "parameters": {}
@@ -416,7 +789,7 @@
             }
           },
           "415": {
-            "description": "The body is not JSON (Content-Type must be application/json)",
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
@@ -549,7 +922,7 @@
             }
           },
           "415": {
-            "description": "The body is not JSON (Content-Type must be application/json)",
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
@@ -682,7 +1055,7 @@
             }
           },
           "415": {
-            "description": "The body is not JSON (Content-Type must be application/json)",
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
@@ -791,7 +1164,7 @@
             }
           },
           "415": {
-            "description": "The body is not JSON (Content-Type must be application/json)",
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
@@ -914,7 +1287,7 @@
             }
           },
           "415": {
-            "description": "The body is not JSON (Content-Type must be application/json)",
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
@@ -997,6 +1370,604 @@
           },
           "401": {
             "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans": {
+      "post": {
+        "operationId": "createScan",
+        "tags": [
+          "Scans"
+        ],
+        "summary": "Start a scan from 1 to 10 photos",
+        "description": "Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /scans/{scanId}` for progress. One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateScanBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The scan, with every item recognising",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Scan"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/{scanId}": {
+      "get": {
+        "operationId": "getScan",
+        "tags": [
+          "Scans"
+        ],
+        "summary": "A scan and where each of its items has got to",
+        "description": "Another user's scan is 404, the same as one that does not exist.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The scan",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Scan"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/{scanId}/items/{itemId}/confirmation": {
+      "post": {
+        "operationId": "confirmScanItem",
+        "tags": [
+          "Scans"
+        ],
+        "summary": "Correct what a doubtful photo was read as",
+        "description": "For an item in `needs-confirmation`. The item goes on to matching with the product given.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "itemId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmProductBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The item, now matching",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ScanItem"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/{scanId}/items/{itemId}/back-photo": {
+      "post": {
+        "operationId": "addScanItemBackPhoto",
+        "tags": [
+          "Scans"
+        ],
+        "summary": "Send a photo of the ingredient list",
+        "description": "For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "itemId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/BackPhotoBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The item, now reading the label",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ScanItem"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/scans/photos/{token}": {
+      "get": {
+        "operationId": "getScanPhoto",
+        "tags": [
+          "Scans"
+        ],
+        "summary": "The photo a link from a scan opens",
+        "description": "Public: the signed link is the credential, and it works for 5 minutes for whoever holds it. Any Authorization header is ignored. A link that is malformed, tampered with, expired or to a photo since deleted is 404 PHOTO_NOT_FOUND.",
+        "security": [],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "token",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The photo",
+            "content": {
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
             "content": {
               "application/json": {
                 "schema": {

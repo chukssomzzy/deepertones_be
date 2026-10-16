@@ -1,4 +1,5 @@
 import { env } from 'cloudflare:workers'
+import { DrizzleQueryError } from 'drizzle-orm/errors'
 import { HTTPException } from 'hono/http-exception'
 import { requestId } from 'hono/request-id'
 import { describe, expect, it, vi } from 'vitest'
@@ -14,6 +15,8 @@ import {
   ValidationError,
 } from './errors'
 import { factory } from './factory'
+
+const PARAM_SECRET = 'ip-hash-param-5c1e'
 
 // A throwaway app exercising the shared error plumbing.
 const app = factory
@@ -66,6 +69,9 @@ const app = factory
   })
   .get('/boom', () => {
     throw new Error('database password is hunter2')
+  })
+  .get('/query-failed', () => {
+    throw new DrizzleQueryError('insert into scans (ip_hash) values (?)', [PARAM_SECRET], new Error(`constraint failed: ${PARAM_SECRET}`))
   })
 
 app.onError(errorHandler)
@@ -148,6 +154,17 @@ describe('errorHandler', () => {
     })
     expect(text).not.toContain('hunter2')
     expect(log).toHaveBeenCalled()
+    log.mockRestore()
+  })
+
+  it('logs an unexpected error by name and request id, never its message: a failed query carries its SQL parameters', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const res = await app.request('/query-failed', {}, env)
+
+    expect(res.status).toBe(500)
+    const { error } = (await res.json()) as { error: { requestId: string } }
+    expect(log).toHaveBeenCalledWith({ requestId: error.requestId, error: 'DrizzleQueryError (cause: Error)' })
+    expect(JSON.stringify(log.mock.calls)).not.toContain(PARAM_SECRET)
     log.mockRestore()
   })
 

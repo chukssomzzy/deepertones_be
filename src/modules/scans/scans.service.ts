@@ -292,10 +292,14 @@ export class ScanService {
     }
   }
 
-  /** The dead-letter hook: an item whose step ran out of retries is failed as unavailable, unless it already finished. */
+  /**
+   * The dead-letter hook: an item whose step ran out of retries is failed as unavailable, but only while it is in a state the
+   * system is working in. One waiting for the user (confirming, a back photo) has no message of ours in flight, so a dead letter
+   * for it is a stale message from an earlier state, and a finished one has nothing left to fail.
+   */
   async markItemFailed(itemId: string): Promise<void> {
     const item = await this.repository.findItem(itemId)
-    if (!item || isFinal(item.state)) return
+    if (!item || !(WORKING_STATES as readonly ItemState[]).includes(item.state)) return
     await this.transition(item, { from: item.state, change: { state: 'failed', reason: 'unavailable' } })
   }
 

@@ -1282,9 +1282,10 @@ describe('ScanService.advance: whole scans through the queue', () => {
 describe('ScanService.markItemFailed', () => {
   it.each([
     ['recognising', async (ctx: Ctx) => scanOne(ctx)],
-    ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
     ['researching', (ctx: Ctx) => reach(ctx, 'researching')],
     ['reading-label', (ctx: Ctx) => reach(ctx, 'reading-label')],
+    ['analysing', (ctx: Ctx) => analysingItem(ctx)],
   ])('marks an item that is still %s as failed, unavailable, and publishes it', async (_state, arrange) => {
     const ctx = setup()
     const { scanId, itemId } = await arrange(ctx)
@@ -1295,6 +1296,22 @@ describe('ScanService.markItemFailed', () => {
     expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
     const items = ctx.events.published.slice(events).filter((p) => p.event.type === 'item')
     expect(items.map((p) => p.event)).toEqual([{ type: 'item', item: await itemOf(ctx, scanId, itemId) }])
+  })
+
+  it.each([
+    ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+  ])('leaves an item waiting for the user (%s) exactly as it was, and publishes nothing: no message of ours is owed', async (state, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await arrange(ctx)
+    const before = await itemOf(ctx, scanId, itemId)
+    const events = ctx.events.published.length
+
+    await asJob(() => ctx.service.markItemFailed(itemId))
+
+    expect(await itemOf(ctx, scanId, itemId)).toEqual(before)
+    expect(before).toMatchObject({ state })
+    expect(ctx.events.published).toHaveLength(events)
   })
 
   it('leaves an item that is already ready, rejected or failed exactly as it was, and publishes nothing', async () => {

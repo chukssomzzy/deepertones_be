@@ -123,7 +123,11 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   model-written text, user-typed text or hashes. drizzle leaves that error's `name` as `Error`, so the
   class name is used when the name is the generic one. This covers the `dispatcher-error`,
   `purge-failed` and scheduled `failed` log lines too. So a message you write for a domain error or
-  `PermanentJobError` must not interpolate user or model text.
+  `PermanentJobError` must not interpolate user or model text. **The same holds for the whole app**, not only jobs: the
+  name-only half is `describeUnexpectedError` (`src/lib/safe-error.ts`, a leaf so `lib/errors.ts` can use it without a cycle;
+  `describeError` adds the two kinds of error the app writes). `errorHandler` logs a 500 as `{ requestId, error }` with that
+  description, and the OTP `enqueue-failed` and the health check's failed-database log lines use it too. No log line is given a
+  raw error object or `String(error)`.
 - **Full-jitter exponential backoff**: delay = random in [0, min(cap, base * factor^(attempt-1))),
   per job (`retry`), so retries spread out instead of stampeding a recovering vendor. The delay is
   always passed to `message.retry`, even when 0.
@@ -257,7 +261,17 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
   handler returns `ok(c, data, message, status?)`. The handler's return type is checked against
   that declaration, so a bare object cannot be returned.
 - **Bodies** use `jsonBody(schema)`: it sets `required: true`, without which a request sent
-  without a JSON Content-Type would skip validation.
+  without a JSON Content-Type would skip validation. An upload uses `multipartBody(schema)` (same reason), read with
+  `c.req.valid('form')`. A file field is `z.instanceof(File).openapi({ type: 'string', format: 'binary' })` (the generator cannot
+  describe a `File`; `z.file()` would not type `name` or `arrayBuffer()` under workers-types), and Hono gives a single file bare,
+  not in a list. Pair an upload with `bodyLimit` (`hono/body-limit`) in the route's `middleware`, which runs before the form is read.
+- **Non-JSON responses** use `imageResponse(description)` (`image/jpeg` and `image/webp`, binary) and `sseResponse(description)`
+  (`text/event-stream`) in place of `success(...)`. The handler returns a `Response` it builds with its own headers. Once any
+  status of a route has such a content type, @hono/zod-openapi types the handler's whole return as `Response`, so the compiler no
+  longer checks that route's bodies; the integration tests do. Errors still come out in the envelope.
+- **413** (`errorResponses(413)`, "Request body too large") is thrown by `bodyLimit` as an HTTPException, which `errorHandler`
+  renders as `HTTP_413`. `defineRoute` adds 415 to any route with a body, JSON or multipart ("The Content-Type of the body is not
+  supported by this route"); a route lists 413 itself.
 - **Invalid input** throws `ValidationError('VALIDATION_FAILED', …)` from the app's `defaultHook`, so
   it reaches the client through `errorHandler` like every other error.
 - **Served** at `/docs` (Swagger UI, version pinned) and `/openapi.json` where `DOCS_ENABLED` is
@@ -804,8 +818,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
 ### Scan module
 `modules/scans` owns the product scan (#20): the photos a user takes and how each one gets to a result. `ScanService`
 reaches the catalog only through `ProductCatalogService`, and never depends on `UsersService` (the users service calls
-it, through a guest cleaner, so a dependency the other way would be a cycle). Routes and the live stream come in later PRs;
-the service is complete without them.
+it, through a guest cleaner, so a dependency the other way would be a cycle). The routes are below; the live stream
+comes in a later PR.
 
 - **Tables** (migration 0009). `scans`: id, `user_id` (references users, cascade), `ip_hash`, `created_at`, `done_at`
   (null until the scan's `done` event is claimed, see Events); indexed by `user_id` and `(ip_hash, created_at)`.
@@ -907,6 +921,10 @@ the service is complete without them.
     is, queues the same step again with `at` = now and `delaySeconds: 30` and returns, so the wait uses none of the
     message's retries. Nothing is published, and `updatedAt` is untouched, so the reaper's 2 hour limit bounds the wait. If
     the waiting message cannot be queued the error is thrown and the queue retries the step.
+    **Known limitation:** if that delayed re-send is itself lost, the reaper's re-send carries the item's stored `updatedAt`
+    as its `at`, which is the key of the FIRST message, and that run is already done (it was the one that queued the wait). The
+    dispatcher therefore acks the reaper's message as a duplicate and the step does not run again, so the item is failed as
+    `unavailable` by the reaper's 2 hour limit instead of re-running. Left as it is: it needs a lost message on top of a busy catalog.
 - **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
@@ -922,7 +940,9 @@ the service is complete without them.
   again), plus the extra fields a caller names (a back photo's key). The retry's next message gets a new `at`, so a
   step queued after an undo is not mistaken for one that was already run. `transition` takes `{ from, change, next?, undo?,
   backPhoto? }`. Errors thrown by a vendor leave the item where it was for the queue's retry. `markItemFailed`, the
-  dead-letter hook, fails an item that is not yet final as `unavailable` and leaves a finished one alone.
+  dead-letter hook, fails an item as `unavailable` only while it is in a state the system is working in (`recognising`,
+  `matching`, `researching`, `reading-label`, `analysing`); an item waiting for the user (`needs-confirmation`,
+  `needs-back-photo`) or a finished one is left alone, since a dead letter for either is a stale message from an earlier state.
 - **The reaper.** A message can still be lost (the queue accepted a send that never arrived; a Worker died between the write
   and the send, with the undo never run), and the dead-letter hook only covers messages that reached the queue. A cron every
   10 minutes runs `ScanService.reap(now)`: items in `recognising`, `matching`, `researching`, `reading-label` or `analysing`
@@ -933,7 +953,7 @@ the service is complete without them.
   (and `done` if it was the scan's last). A failure on one item is logged `{ outcome: 'reap-failed', scanId, itemId }` and
   does not stop the sweep. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
   `*/10 * * * *` (reaper); `scheduled` is `createScheduledRouter` (`src/jobs/scheduled.ts`), which runs the job of
-  `controller.cron` and logs `unknown-cron` for any other, so the nightly cleanup does not run every 10 minutes. The reaper
+  `controller.cron` and, for any other, logs `unknown-cron` and throws, so Cloudflare records the run as failed (a cron in `wrangler.jsonc` this file does not know is a config mistake) and the nightly cleanup does not run every 10 minutes. The reaper
   reads no request context, so it runs without `runAs`; the cleanup handler it routes to stays in `dispatcher.ts` with its `runAs`.
 - **Events.** After every change the service publishes `{ type: 'item', item }` (the item exactly as `ScanItemView`), and
   `{ type: 'done' }` once when the item that just finished was the last non-final one. `done` is sent only by the call
@@ -953,6 +973,38 @@ the service is complete without them.
   tampered, wrongly signed or expired token, and a link to a photo deleted since, are all 404 `PHOTO_NOT_FOUND`. The
   route that serves it answers with `Cache-Control: private, no-store`. A link therefore works for whoever holds it, for at most 5
   minutes.
+- **Routes** (`scans.routes.ts`, mounted at `/scans`; schemas in `scans.schemas.ts`, shaping in `scans.presenter.ts`). Thin: each
+  calls one `ScanService` method, which does the sign-in check (`requireUser`) itself, so a request is validated before it is
+  found to be unsigned (an invalid body is 400 or 415 before 401).
+
+  | Route | Caller | Answers | Limits (per 60 s) |
+  | --- | --- | --- | --- |
+  | `POST /scans` | bearer; multipart, 1 to 10 `photos` parts | 202 the scan, every item `recognising`; 400, 401, 413, 415, 429 | 20 per IP, 10 per user |
+  | `GET /scans/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
+  | `POST /scans/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
+  | `POST /scans/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 10 per user |
+  | `GET /scans/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
+
+  - **Uploads.** The body is multipart (`multipartBody`). Hono hands one file over bare and several as an array, so the
+    `photos` schema takes either and normalises to a list before counting 1 to 10; two `photo` parts, none, or a non-file are
+    `VALIDATION_FAILED`. The schema deliberately does not check a file's declared `type` or `size`: the client's word is not
+    the bytes, so the service sniffs them and answers `UNSUPPORTED_IMAGE` (a PNG that says it is a JPEG included) or
+    `IMAGE_TOO_LARGE` (over 2,000,000 bytes or 1600 px) with a code the app can act on. The route turns each `File` into the
+    service's `ProductImage` (bytes plus the declared type, which the service never trusts).
+  - **Size.** `bodyLimit` runs before the form is read, so an oversized upload is never buffered: 10 x 2,000,000 bytes plus
+    1,000,000 for the multipart framing (21,000,000) on `POST /scans`, one photo plus the same framing on the back photo. Over
+    it is 413 `HTTP_413` in the standard error envelope.
+  - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_USER_LIMITER` (10)
+    on the back photo; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is read or the scan looked up. They bound
+    bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand underneath. Namespace ids are 1006 to 1008 at the top level, 2006 to
+    2008 in staging and 3006 to 3008 in production.
+  - **Client address.** The service is handed `cf-connecting-ip` as the address for the per-address daily quota (`unknown` where the
+    header is absent, as for the rate limiter).
+  - **The public photo route** ignores the Authorization header altogether (a broken or expired one changes nothing), answers 200
+    with the exact `Content-Type` of the stored photo (`image/jpeg` or `image/webp`), `Cache-Control: private, no-store` and the
+    bytes, and answers any bad, tampered, wrongly signed, expired or over-2048-character token, or a deleted photo, with 404
+    `PHOTO_NOT_FOUND` in the JSON error envelope. Its token parameter has no length limit of its own for that reason.
+    It is declared with `imageResponse`, so the compiler cannot check that handler's return: the integration tests do.
 - **Wiring.** The container builds the service with `D1ScansRepository`, the catalog, `AnthropicProductRecognizer`,
   `AnthropicLabelReader` (both over the shared client), `R2PhotoStore` for `PRIVATE_PHOTOS` locked to `ENVIRONMENT`
   (anything but development, staging, production or test stops the build), the job queue with the `scan-items` binding,

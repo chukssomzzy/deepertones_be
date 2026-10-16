@@ -1,3 +1,4 @@
+import { describeUnexpectedError } from '../../lib/safe-error'
 import type { HealthRepository } from './health.repository'
 import type { HealthReport } from './health.types'
 
@@ -11,7 +12,7 @@ export class HealthService {
     const database = await this.repository.ping().then(
       () => 'ok' as const,
       (error: unknown) => {
-        console.error({ check: 'database', error })
+        console.error({ check: 'database', error: describeUnexpectedError(error) })
         return 'down' as const
       },
     )

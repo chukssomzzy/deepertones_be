@@ -75,12 +75,12 @@ describe('the Worker scheduled handler', () => {
     expect(await scans.findItem(stuck)).toMatchObject({ state: 'recognising' })
   })
 
-  it('on a cron it does not know, runs neither job and says so', async () => {
+  it('on a cron it does not know, runs neither job, says so and fails the run so Cloudflare records it', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
     const stuck = await stuckItem(3 * HOUR)
     const guest = await abandonedGuest()
 
-    await fire('5 5 * * *')
+    await expect(fire('5 5 * * *')).rejects.toThrow('5 5 * * *')
 
     expect(await scans.findItem(stuck)).toMatchObject({ state: 'recognising' })
     expect(await users.findById(guest)).not.toBeNull()
