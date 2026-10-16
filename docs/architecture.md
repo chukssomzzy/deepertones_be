@@ -909,16 +909,17 @@ comes in a later PR.
                                        → ready (an earlier analysed formulation, when new research finds nothing or is refused)
                                        → needs-back-photo → reading-label → analysing → ready
                                                           ← needs-back-photo (label-unreadable)
+                                                          → failed (label-unreadable, after the 3rd back photo)
   recognising → needs-confirmation → matching     (confidence below 0.6, until the user confirms)
   recognising → rejected                          (face-or-person, not-a-beauty-product, unreadable)
   any step    → failed
   ```
   `ready`, `rejected` and `failed` are final. **Reasons**: rejected is `face-or-person`, `not-a-beauty-product` or
   `unreadable`; failed is `photo-missing` (the stored photo is gone), `analysis-failed` (the catalog gave up),
-  `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
+  `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
   later) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
-  when the last back photo could not be read, was refused by the model, or is gone. After the 3rd back photo the item is `failed` with the same reason.
+  when the last back photo could not be read, was refused by the model, or is gone.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `recognised` (once read), `product` (a
   `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
   (`/scans/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
@@ -934,7 +935,7 @@ comes in a later PR.
 - **Daily quotas.** 30 photos per user and 100 per IP in the last 24 hours (`SCAN_POLICY`). A photo counts from the moment
   it is stored: one per item by `created_at`, plus one `scan_back_photos` row per back photo by `uploaded_at`, and the
   oldest counted time is the minimum over both. Every upload is a row, so an item asked three times for its back photo
-  counts three; a row is written by the same `db.batch` as the item's move to `reading-label` (the insert runs first and
+  counts three (three is also the item's cap, `SCAN_POLICY.maxBackPhotos`); a row is written by the same `db.batch` as the item's move to `reading-label` (the insert runs first and
   only when the item is still in the state the move expects, so it exists exactly when the move applied) and is kept when
   the photo is deleted, as is a rejected item's front photo, so deleting cannot refill the quota. A failed queueing of the
   read undoes the move but not the row: the photo was sent. A photo made exactly 24 hours ago still counts. A scan is refused
