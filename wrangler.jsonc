@@ -3,7 +3,10 @@
   "name": "deepertones-be",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-10",
-  "compatibility_flags": ["nodejs_compat"],
+  // enable_request_signal makes request.signal fire in a Durable Object when the client of a streamed response goes away: without it
+  // the ScanStream never learns a client left. Env blocks inherit this list; one that sets its own would replace it. Do NOT add
+  // pipe_to_backward_propagation by hand: it crashed workerd at startup, and it becomes the default on 2026-11-17 anyway.
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
 
   // Non-secret config. Secrets go in .dev.vars locally, and in .dev.vars.<env> pushed with `npm run secrets:push` when deployed.
   // After changing vars or bindings, run `npm run cf-typegen` so c.env stays typed.
@@ -100,6 +103,13 @@
   "observability": {
     "enabled": true
   },
+
+  // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit
+  // `durable_objects`, so each restates it. `migrations` is inherited, so it is declared once, here. new_sqlite_classes is the
+  // SQLite-backed kind and the choice is permanent per class (the object keeps its streams in memory and stores nothing).
+  // Never edit a shipped migration: a later change to the class is a new entry with a new tag.
+  "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
+  "migrations": [{ "tag": "v1-scan-stream", "new_sqlite_classes": ["ScanStream"] }],
 
   // Local D1 (wrangler dev + tests). The id only names the local SQLite file; nothing remote.
   // migrations_dir must match `out` in drizzle.config.ts: drizzle-kit writes there, wrangler applies from there.
@@ -226,6 +236,8 @@
       ],
       // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
+      "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -331,6 +343,8 @@
       ],
       // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
+      "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [
         {
           "binding": "DB",

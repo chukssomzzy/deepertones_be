@@ -1,0 +1,34 @@
+// The HTTP app, kept apart from src/index.ts so `npm run openapi` can load it in plain Node: the Worker entry also exports the
+// Durable Object class, which imports `cloudflare:workers`.
+import { logger } from 'hono/logger'
+import { requestId } from 'hono/request-id'
+import { secureHeaders } from 'hono/secure-headers'
+import { mountDocs } from './docs'
+import { errorHandler, notFoundHandler } from './lib/errors'
+import { openapiApp } from './lib/openapi'
+import { auth } from './middleware/auth'
+import { container } from './middleware/container'
+import { cors } from './middleware/cors'
+import { requestContext } from './middleware/request-context'
+import { authRoutes, meRoutes } from './modules/auth/auth.routes'
+import { healthRoutes } from './modules/health/health.routes'
+import { scanRoutes } from './modules/scans/scans.routes'
+
+export const app = openapiApp()
+
+// Order matters: CORS answers preflights before any context or services are built. container is
+// lazy, so it is cheap to run early; auth needs services.tokens, and records who is calling without
+// ever rejecting. requestContext comes last and wraps every route and service call. Anything before it
+// (container, auth, a future rate limiter) runs outside the request context, so it must not call a
+// service that reads currentActor()/requireUser().
+app.use(requestId(), logger(), cors, secureHeaders(), container, auth, requestContext)
+
+// Keep this a single chain: AppType is inferred from it, and the frontend's
+// typed client (hc<AppType>) only sees routes mounted inside the chain.
+const routes = app.route('/health', healthRoutes).route('/auth', authRoutes).route('/me', meRoutes).route('/scans', scanRoutes)
+
+mountDocs(app)
+app.onError(errorHandler)
+app.notFound(notFoundHandler)
+
+export type AppType = typeof routes

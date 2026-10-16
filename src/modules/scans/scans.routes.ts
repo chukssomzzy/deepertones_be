@@ -1,5 +1,5 @@
 import { bodyLimit } from 'hono/body-limit'
-import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, success } from '../../lib/openapi'
+import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
@@ -45,6 +45,24 @@ const getScan = defineRoute({
   security: bearer,
   request: { params: ScanParams },
   responses: { 200: success(ScanResponse, 'The scan'), ...errorResponses(401, 404) },
+})
+
+const watchScan = defineRoute({
+  method: 'get',
+  path: '/{scanId}/events',
+  operationId: 'watchScan',
+  tags: ['Scans'],
+  summary: 'Follow a scan live, as server-sent events',
+  description:
+    'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as ' +
+    '`GET /scans/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
+    '`ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. ' +
+    'A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
+    'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
+    'Another user\'s scan is 404, the same as one that does not exist.',
+  security: bearer,
+  request: { params: ScanParams },
+  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 404) },
 })
 
 const confirmItem = defineRoute({
@@ -104,6 +122,7 @@ export const scanRoutes = openapiApp()
     return ok(c, toScanResponse(scan), 'Scan started', 202)
   })
   .openapi(getScan, async (c) => ok(c, toScanResponse(await c.var.services.scans.getScan(c.req.valid('param').scanId)), 'Scan found'))
+  .openapi(watchScan, async (c) => c.var.services.scans.watch(c.req.valid('param').scanId))
   .openapi(confirmItem, async (c) => {
     const { scanId, itemId } = c.req.valid('param')
     const item = await c.var.services.scans.confirm(scanId, itemId, c.req.valid('json'))

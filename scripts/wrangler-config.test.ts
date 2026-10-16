@@ -169,3 +169,54 @@ describe('wrangler.jsonc scan route rate limits', () => {
     expect(found?.namespace_id).toEqual(expect.stringMatching(/^\d+$/))
   })
 })
+
+// Live scan updates: one Durable Object per scan, bound as SCAN_STREAM. Env blocks do not inherit `durable_objects`
+// (wrangler reads the binding list back empty), so each block restates it. `migrations` and `compatibility_flags` ARE
+// inherited, so the top level carries them once; an env block that sets its own list would replace the inherited one.
+type StreamBlock = {
+  compatibility_flags?: string[]
+  durable_objects?: { bindings?: { name: string; class_name: string }[] }
+  migrations?: { tag?: string; new_sqlite_classes?: string[]; new_classes?: string[] }[]
+}
+const streamConfig = config as unknown as StreamBlock & { env: Record<string, StreamBlock> }
+
+const streamBlocks: [string, StreamBlock | undefined][] = [
+  ['top level', streamConfig],
+  ['env.staging', streamConfig.env.staging],
+  ['env.production', streamConfig.env.production],
+]
+
+describe('wrangler.jsonc scan stream Durable Object', () => {
+  it.each(streamBlocks)('%s binds the ScanStream class as SCAN_STREAM', (_, block) => {
+    expect(block?.durable_objects?.bindings ?? []).toContainEqual({ name: 'SCAN_STREAM', class_name: 'ScanStream' })
+  })
+
+  it('migrates ScanStream in as a SQLite-backed class, once, at the top level', () => {
+    const creating = (streamConfig.migrations ?? []).filter((m) => m.new_sqlite_classes?.includes('ScanStream'))
+
+    expect(creating).toHaveLength(1)
+    expect(creating[0]?.tag).toEqual(expect.any(String))
+  })
+
+  it('never declares a class with the legacy, non-SQLite kind of migration', () => {
+    const everyBlock = streamBlocks.flatMap(([, block]) => block?.migrations ?? [])
+
+    expect(everyBlock.filter((m) => m.new_classes !== undefined)).toEqual([])
+  })
+
+  it('turns on enable_request_signal, so the stream learns when a client has gone, and keeps nodejs_compat', () => {
+    expect(streamConfig.compatibility_flags).toEqual(expect.arrayContaining(['enable_request_signal', 'nodejs_compat']))
+  })
+
+  it.each(streamBlocks.slice(1))('%s keeps both flags if it sets its own compatibility_flags, which would replace the inherited list', (_, block) => {
+    if (block?.compatibility_flags === undefined) return
+
+    expect(block.compatibility_flags).toEqual(expect.arrayContaining(['enable_request_signal', 'nodejs_compat']))
+  })
+
+  // Setting it by hand crashed workerd at startup (ERR_RUNTIME_FAILURE on wrangler 4.149 / miniflare 5.20261006), and it
+  // becomes the default on 2026-11-17 anyway.
+  it.each(streamBlocks)('%s does not set pipe_to_backward_propagation', (_, block) => {
+    expect(block?.compatibility_flags ?? []).not.toContain('pipe_to_backward_propagation')
+  })
+})

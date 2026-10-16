@@ -22,6 +22,7 @@ import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError
 import { FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
 import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-specs'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
+import { toScanResponse } from './scans.presenter'
 import { FakeScansRepository } from './scans.repository.fake'
 import { SCAN_POLICY, ScanService } from './scans.service'
 
@@ -2354,5 +2355,225 @@ describe('ScanService.reap', () => {
     ctx.advance(STALE)
 
     await expect(asJob(() => ctx.service.reap(ctx.now()))).resolves.toEqual({ requeued: 1, failed: 0 })
+  })
+})
+
+describe('ScanService.watch', () => {
+  const watch = (ctx: Ctx, scanId: string, userId = USER) => asUser(() => ctx.service.watch(scanId), userId)
+
+  it('opens the stream with the scan as it now is, and answers the stream', async () => {
+    const ctx = setup()
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    ctx.advance(MINUTE)
+
+    const response = await watch(ctx, scan.id)
+
+    expect(ctx.events.subscribed).toHaveLength(1)
+    expect(ctx.events.subscribed[0]!.scanId).toBe(scan.id)
+    expect(ctx.events.subscribed[0]!.snapshot).toMatchObject({ id: scan.id, createdAt: T0, items: [{ id: scan.items[0].id, state: 'recognising' }, { id: scan.items[1].id }] })
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+  })
+
+  it('makes the snapshot, once it is JSON, exactly the scan the routes present, including a ready item with its product', async () => {
+    const ctx = setup()
+    await catalogued(ctx, CERAVE, { imageUrl: IMAGE_URL })
+    const scan = await create(ctx)
+    await run(ctx, scan.items[0].id, 'recognise')
+    await run(ctx, scan.items[0].id, 'match')
+    const shown = await asUser(() => ctx.service.getScan(scan.id))
+    expect(shown.items[0]!.state).toBe('ready')
+
+    await watch(ctx, scan.id)
+
+    expect(JSON.parse(JSON.stringify(ctx.events.subscribed[0]!.snapshot))).toEqual(JSON.parse(JSON.stringify(toScanResponse(shown))))
+  })
+
+  it('publishes each item exactly as the routes present it, once it is JSON', async () => {
+    const ctx = setup()
+    await catalogued(ctx, CERAVE, { imageUrl: IMAGE_URL })
+    const scan = await create(ctx)
+    await run(ctx, scan.items[0].id, 'recognise')
+    await run(ctx, scan.items[0].id, 'match')
+    const shown = await asUser(() => ctx.service.getScan(scan.id))
+
+    const published = ctx.events.eventsFor(scan.id).filter((e) => e.type === 'item').at(-1)!
+
+    expect(JSON.parse(JSON.stringify(published.type === 'item' ? published.item : null))).toEqual(JSON.parse(JSON.stringify(toScanResponse(shown).items[0])))
+  })
+
+  it.each([
+    ['another user', OTHER_USER, undefined],
+    ['nobody (an unknown scan)', USER, 'no-such-scan'],
+  ])('answers SCAN_NOT_FOUND to %s, and opens no stream', async (_label, userId, scanId) => {
+    const ctx = setup()
+    const scan = await create(ctx)
+
+    const error = await errorOf(watch(ctx, scanId ?? scan.id, userId))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect(ctx.events.subscribed).toEqual([])
+  })
+
+  it('answers AUTH_REQUIRED to a public caller', async () => {
+    const ctx = setup()
+    const scan = await create(ctx)
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.watch(scan.id)))
+
+    expect(error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('sends nothing more while any item is still being worked on or waiting for the user', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    await run(ctx, scan.items[0].id, 'recognise')
+    await run(ctx, scan.items[1].id, 'recognise')
+    const before = ctx.events.published.length
+
+    await watch(ctx, scan.id)
+
+    expect(ctx.events.published).toHaveLength(before)
+  })
+
+  it('follows the snapshot with done when every item is already final, whether ready, rejected or failed', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen()))
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    await run(ctx, scan.items[0].id, 'recognise')
+    await run(ctx, scan.items[1].id, 'recognise')
+    ctx.advance(HOUR)
+    await asJob(() => ctx.service.markItemFailed(scan.items[1].id))
+    const before = ctx.events.published.length
+
+    await watch(ctx, scan.id)
+
+    expect(ctx.events.subscribed).toHaveLength(1)
+    expect(ctx.events.published.slice(before)).toEqual([{ scanId: scan.id, event: { type: 'done' } }])
+  })
+
+  it('still answers the stream, and logs, when done cannot be published', async () => {
+    class DoneFails extends MemoryScanEvents {
+      failing = false
+      override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+        if (this.failing) throw new Error('stream is down')
+        return super.publish(scanId, event)
+      }
+    }
+    let events!: DoneFails
+    const ctx = setup({ events: () => (events = new DoneFails()) })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    const scan = await create(ctx)
+    await run(ctx, scan.items[0].id, 'recognise')
+    events.failing = true
+
+    const response = await watch(ctx, scan.id)
+
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'publish-failed', scanId: scan.id }))
+    logged.mockRestore()
+  })
+
+  it('lets a failure to open the stream reach the caller', async () => {
+    class SubscribeFails extends MemoryScanEvents {
+      override async subscribe(): Promise<Response> {
+        throw new Error('durable object unavailable')
+      }
+    }
+    const ctx = setup({ events: () => new SubscribeFails() })
+    const scan = await create(ctx)
+
+    await expect(watch(ctx, scan.id)).rejects.toThrow('durable object unavailable')
+  })
+})
+
+describe('ScanService.reap: a done that was lost', () => {
+  const SETTLED = 5 * MINUTE
+  /** Fails to publish while `failing`, the way a Durable Object that is down does. */
+  class FlakyEvents extends MemoryScanEvents {
+    failing = false
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (this.failing) throw new Error('stream is down')
+      return super.publish(scanId, event)
+    }
+  }
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+  const types = (ctx: Ctx, scanId: string) => ctx.events.eventsFor(scanId).map((e) => e.type)
+
+  /** A one-photo scan whose only item was rejected while publishing was down, so its done was never sent. */
+  const withLostDone = async (over: { photos?: ProductImage[] } = {}) => {
+    let events!: FlakyEvents
+    const ctx = setup({ events: () => (events = new FlakyEvents()) })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    const scan = await create(ctx, over.photos ?? [markedJpeg(1)])
+    events.failing = true
+    for (const item of scan.items) await run(ctx, item.id, 'recognise')
+    events.failing = false
+    logged.mockRestore()
+    return { ctx, scanId: scan.id as string }
+  }
+
+  it('marks the scan done and sends done once its items have all been final for over 5 minutes', async () => {
+    const { ctx, scanId } = await withLostDone()
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
+    ctx.advance(SETTLED + 1)
+
+    const result = await reap(ctx)
+
+    expect(types(ctx, scanId)).toEqual(['done'])
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toEqual(ctx.now())
+    expect(result).toEqual({ requeued: 0, failed: 0 })
+  })
+
+  it('leaves it alone before then, so it never races a publish still on its way', async () => {
+    const { ctx, scanId } = await withLostDone()
+    ctx.advance(SETTLED)
+
+    await reap(ctx)
+
+    expect(types(ctx, scanId)).toEqual([])
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
+  })
+
+  it('sends it once, however many sweeps follow', async () => {
+    const { ctx, scanId } = await withLostDone()
+    ctx.advance(SETTLED + 1)
+
+    await reap(ctx)
+    await reap(ctx)
+
+    expect(types(ctx, scanId)).toEqual(['done'])
+  })
+
+  it('does nothing for a scan that already had its done, or that still has an item to wait for', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+    const finished = await create(ctx, [markedJpeg(1)])
+    await run(ctx, finished.items[0].id, 'recognise')
+    const waiting = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    await run(ctx, waiting.items[0].id, 'recognise')
+    await run(ctx, waiting.items[1].id, 'recognise')
+    ctx.advance(HOUR)
+    const before = ctx.events.published.length
+
+    await reap(ctx)
+
+    expect(ctx.events.published).toHaveLength(before)
+  })
+
+  it('goes on to the next scan, logging the id, when one cannot be sent', async () => {
+    const { ctx, scanId } = await withLostDone({ photos: [markedJpeg(1)] })
+    const events = ctx.events as FlakyEvents
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    ctx.advance(SETTLED + 1)
+    events.failing = true
+
+    await expect(reap(ctx)).resolves.toEqual({ requeued: 0, failed: 0 })
+
+    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'reap-done-failed', scanId }))
+    logged.mockRestore()
   })
 })

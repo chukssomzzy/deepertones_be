@@ -61,6 +61,8 @@ const WORKING_STATES = Object.keys(STEP_OF_WORKING_STATE) as (keyof typeof STEP_
 /** The reaper queues a working item's step again once it has sat this long, and fails it as unavailable once it is older than the second. */
 const STUCK_AFTER_MS = 15 * MINUTE
 const GIVE_UP_AFTER_MS = 2 * HOUR
+/** The reaper sends a missing `done` for a scan whose items have all been final for this long, so it never races the publish that is still on its way. */
+const DONE_SETTLED_AFTER_MS = 5 * MINUTE
 /** One sweep looks at this many items at most, oldest first, which keeps its calls well inside a Worker's limit. */
 const REAP_BATCH = 100
 /** How long a step waits before it asks again whether work another call is doing has finished. */
@@ -196,6 +198,22 @@ export class ScanService {
   }
 
   /**
+   * Opens a live stream of the scan for its owner (another user's scan is SCAN_NOT_FOUND). The stream starts with the scan
+   * as it now is, then carries each item change and `done`. A scan whose items are all final has nothing left to say, so
+   * `done` follows the snapshot at once and the stream ends (which also covers a `done` that was lost when it was first due).
+   *
+   * Changes made between reading the scan and the stream opening are not replayed; the snapshot is as old as the read.
+   */
+  async watch(scanId: string): Promise<Response> {
+    const scan = await this.getScan(scanId)
+    const stream = await this.events.subscribe(scanId, scan)
+    if (scan.items.every((item) => isFinal(item.state))) {
+      await this.events.publish(scanId, { type: 'done' }).catch(() => console.error({ outcome: 'publish-failed', scanId }))
+    }
+    return stream
+  }
+
+  /**
    * The user's correction of a doubtful read: the item goes on to matching with the product they typed. Text that
    * ends up in the shared catalog must not carry a link, markup or a hidden character, nor be over 120 characters.
    */
@@ -309,7 +327,8 @@ export class ScanService {
    * reading the label, analysing) that has not changed for over 15 minutes has its step queued again, stamped with the
    * time it entered the state, which is the key of the message that first queued it: if that run already finished the
    * dispatcher acknowledges it, if not it runs. One older than 2 hours is failed as unavailable. An item waiting for the
-   * user is never touched. A failure on one item is logged by id and does not stop the sweep.
+   * user is never touched. A failure on one item is logged by id and does not stop the sweep. The sweep also sends the `done` of
+   * a scan whose items have all been final for over 5 minutes without one.
    *
    * `now` is passed in so the cutoffs are fixed for the whole sweep; the changes it makes are stamped by the service's clock.
    */
@@ -331,7 +350,24 @@ export class ScanService {
         console.error({ outcome: 'reap-failed', scanId: item.scanId, itemId: item.id })
       }
     }
+    await this.sendMissingDone(now)
     return { requeued, failed }
+  }
+
+  /**
+   * A scan whose items are all final and whose done time is unset had its `done` lost: publishing failed after the last
+   * item's change was stored. It is marked and `done` sent, once, by the call whose guarded update sets the time. A failure
+   * on one scan is logged by id and does not stop the sweep.
+   */
+  private async sendMissingDone(now: Date): Promise<void> {
+    const settled = await this.repository.settledScansNotDone([...FINAL_STATES], new Date(now.getTime() - DONE_SETTLED_AFTER_MS), REAP_BATCH)
+    for (const scan of settled) {
+      try {
+        if (await this.repository.markScanDone(scan.id, this.now())) await this.events.publish(scan.id, { type: 'done' })
+      } catch {
+        console.error({ outcome: 'reap-done-failed', scanId: scan.id })
+      }
+    }
   }
 
   private async recognise(item: ScanItem): Promise<void> {

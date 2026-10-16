@@ -594,5 +594,76 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         expect(await repository.staleItems([], at(HOUR), 100)).toEqual([])
       })
     })
+
+    describe('settledScansNotDone', () => {
+      const FINAL: ItemState[] = ['ready', 'rejected', 'failed']
+      const freshUser = async () => {
+        const { repository, newUser } = await make()
+        return { repository, userId: await newUser() }
+      }
+      /** A scan with one item per entry, each moved to its state at its time; returns the scan's id. */
+      const scanWith = async (repository: ScansRepository, userId: string, entries: [ItemState, number][], scanOver: Partial<NewScan> = {}) => {
+        const scan = newScan(userId, { createdAt: at(-24 * HOUR), ...scanOver })
+        const items = entries.map((_, position) => newItem(scan, position))
+        await repository.createScan(scan, items)
+        for (const [i, [state, updatedAt]] of entries.entries()) await repository.updateItem(items[i]!.id, 'recognising', { state, updatedAt: at(updatedAt) })
+        return scan.id
+      }
+      const listed = async (repository: ScansRepository, ids: string[], limit = 1000) =>
+        (await repository.settledScansNotDone(FINAL, at(0), limit)).map((s) => s.id).filter((id) => ids.includes(id))
+
+      it('lists a scan with no done time whose items are all final and were all last updated before the cutoff', async () => {
+        const { repository, userId } = await freshUser()
+        const settled = await scanWith(repository, userId, [['ready', -10 * MINUTE], ['rejected', -20 * MINUTE], ['failed', -30 * MINUTE]])
+
+        const found = await repository.settledScansNotDone(FINAL, at(0), 1000)
+
+        expect(found.find((s) => s.id === settled)).toMatchObject({ id: settled, userId, doneAt: null })
+      })
+
+      it('leaves out a scan with an item that is not final, even if the others are', async () => {
+        const { repository, userId } = await freshUser()
+        const working = await scanWith(repository, userId, [['ready', -HOUR], ['matching', -HOUR]])
+        const waiting = await scanWith(repository, userId, [['ready', -HOUR], ['needs-confirmation', -HOUR]])
+
+        expect(await listed(repository, [working, waiting])).toEqual([])
+      })
+
+      it('leaves out a scan with an item updated at the cutoff or later', async () => {
+        const { repository, userId } = await freshUser()
+        const atCutoff = await scanWith(repository, userId, [['ready', -HOUR], ['ready', 0]])
+        const after = await scanWith(repository, userId, [['ready', MINUTE]])
+        const justBefore = await scanWith(repository, userId, [['ready', -1]])
+
+        expect(await listed(repository, [atCutoff, after, justBefore])).toEqual([justBefore])
+      })
+
+      it('leaves out a scan that has a done time, and lists it again if it never had one', async () => {
+        const { repository, userId } = await freshUser()
+        const marked = await scanWith(repository, userId, [['ready', -HOUR]])
+        const unmarked = await scanWith(repository, userId, [['ready', -HOUR]])
+        await repository.markScanDone(marked, at(-30 * MINUTE))
+
+        expect(await listed(repository, [marked, unmarked])).toEqual([unmarked])
+      })
+
+      it('lists the oldest scans first, at most the limit', async () => {
+        const { repository, userId } = await freshUser()
+        const newest = await scanWith(repository, userId, [['ready', -HOUR]], { createdAt: at(-2 * HOUR) })
+        const oldest = await scanWith(repository, userId, [['ready', -HOUR]], { createdAt: at(-6 * HOUR) })
+        const middle = await scanWith(repository, userId, [['ready', -HOUR]], { createdAt: at(-4 * HOUR) })
+
+        expect(await listed(repository, [newest, oldest, middle])).toEqual([oldest, middle, newest])
+        const all = (await repository.settledScansNotDone(FINAL, at(0), 1000)).map((s) => s.id)
+        expect((await repository.settledScansNotDone(FINAL, at(0), 2)).map((s) => s.id)).toEqual(all.slice(0, 2))
+      })
+
+      it('answers nothing for no states', async () => {
+        const { repository, userId } = await freshUser()
+        await scanWith(repository, userId, [['ready', -HOUR]])
+
+        expect(await repository.settledScansNotDone([], at(0), 100)).toEqual([])
+      })
+    })
   })
 }

@@ -1,4 +1,5 @@
-import { and, asc, count, eq, gte, inArray, isNull, lt, min, sql } from 'drizzle-orm'
+import { and, asc, count, eq, exists, gte, inArray, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
+import type { SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -93,6 +94,25 @@ export class D1ScansRepository {
       .from(scanItems)
       .where(and(inArray(scanItems.state, states), lt(scanItems.updatedAt, before)))
       .orderBy(asc(scanItems.updatedAt))
+      .limit(limit)
+  }
+
+  /**
+   * Scans with no done time whose items are all in one of `states` and were all last updated before `before` (not at it),
+   * oldest scan first, at most `limit`. A scan with no items is never listed. These are the scans whose `done` was lost.
+   */
+  async settledScansNotDone(states: ItemState[], before: Date, limit: number): Promise<Scan[]> {
+    if (states.length === 0) return []
+    const itemsOfScan = (...conditions: (SQL | undefined)[]) =>
+      this.db
+        .select({ one: sql`1` })
+        .from(scanItems)
+        .where(and(eq(scanItems.scanId, scans.id), ...conditions))
+    return this.db
+      .select()
+      .from(scans)
+      .where(and(isNull(scans.doneAt), exists(itemsOfScan()), notExists(itemsOfScan(or(notInArray(scanItems.state, states), gte(scanItems.updatedAt, before))))))
+      .orderBy(asc(scans.createdAt))
       .limit(limit)
   }
 

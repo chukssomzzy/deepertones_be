@@ -98,6 +98,22 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
+   * Scans with no done time whose items are all in one of `states` and were all last updated before `before` (not at it),
+   * oldest scan first, at most `limit`. A scan with no items is never listed.
+   */
+  async settledScansNotDone(states: ItemState[], before: Date, limit: number): Promise<Scan[]> {
+    const items = [...this.items.values()]
+    return [...this.scans.values()]
+      .filter((scan) => {
+        const own = items.filter((i) => i.scanId === scan.id)
+        return scan.doneAt === null && own.length > 0 && own.every((i) => states.includes(i.state) && i.updatedAt.getTime() < before.getTime())
+      })
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .slice(0, limit)
+      .map((scan) => ({ ...scan }))
+  }
+
+  /**
    * Photos uploaded by the user at or after `since`: one per item created then, plus one per back photo uploaded then
    * (a record that survives the back photo being deleted, and that every upload adds). `oldest` is the earliest of them,
    * or null when there are none.

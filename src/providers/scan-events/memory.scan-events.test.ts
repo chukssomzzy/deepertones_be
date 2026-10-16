@@ -28,4 +28,14 @@ describe('MemoryScanEvents', () => {
     expect(events.eventsFor('scan-1')).toEqual([DONE])
     expect(events.eventsFor('scan-3')).toEqual([])
   })
+
+  it('records each subscription with its scan and snapshot, and answers an event stream', async () => {
+    const events = new MemoryScanEvents()
+    const snapshot = { id: 'scan-1', items: [] }
+
+    const response = await events.subscribe('scan-1', snapshot)
+
+    expect(events.subscribed).toEqual([{ scanId: 'scan-1', snapshot }])
+    expect(response.headers.get('Content-Type')).toBe('text/event-stream; charset=utf-8')
+  })
 })

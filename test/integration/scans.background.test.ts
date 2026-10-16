@@ -45,7 +45,11 @@ const guest = async () => {
   return id
 }
 
-const container = buildContainer(env)
+// Steps are driven by hand below. The real local queue would deliver the service's own follow-on messages a moment
+// later, into whichever test is running then (with its fetch stub), so this file's Worker queues into nothing.
+const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue
+const testEnv = { ...env, SCAN_ITEMS_QUEUE: quietQueue }
+const container = buildContainer(testEnv)
 const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous' }, fn)
 
 /** A one-photo scan, made through the real service (so the photo is in the real bucket and the rows are in D1). */
@@ -88,7 +92,7 @@ const face = recognised({ classification: 'face-or-person', brand: '', name: '',
 const runQueue = async (queue: string, body: unknown, attempts = 1) => {
   const batch = createMessageBatch(queue, [{ id: 'm', timestamp: new Date(), attempts, body }])
   const ctx = createExecutionContext()
-  await worker.queue!(batch, env, ctx)
+  await worker.queue!(batch, testEnv, ctx)
   return getQueueResult(batch, ctx)
 }
 

@@ -27,7 +27,7 @@ import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
 import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductRecognizer } from './providers/product-recognition/anthropic.product-recognizer'
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
-import { NoopScanEvents } from './providers/scan-events/noop.scan-events'
+import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
 
@@ -141,8 +141,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         labelReader: new AnthropicLabelReader(anthropic()),
         photos: privatePhotos(),
         jobs: jobQueue(),
-        // Publishes nothing until the Durable Object that holds a scan's streams lands (PR 10).
-        events: new NoopScanEvents(),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         // A separate HKDF info (see ScanService) keeps the IP hash key unrelated to how device ids are hashed with the same secret.
