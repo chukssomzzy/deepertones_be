@@ -13,7 +13,8 @@ export const PhotoLinkParams = z.object({ token: z.string() })
 // bytes are, so the service reads the bytes and answers UNSUPPORTED_IMAGE or IMAGE_TOO_LARGE with a code the app can act on.
 const PhotoFile = z.instanceof(File).openapi({ type: 'string', format: 'binary', description: 'A JPEG or WebP photo, at most 2,000,000 bytes and 1600 pixels on the longest side.' })
 
-// Hono hands over one File for one value and File[] for several, so a one-photo scan is normalised to a list before it is counted.
+// Hono hands over one File for one value and File[] for several, so a one-photo scan is normalised to a list. How many photos is the
+// service's to judge (NO_IMAGES, TOO_MANY_IMAGES), so the app gets a code it can act on rather than a generic VALIDATION_FAILED.
 const asList = (photos: File | File[]) => (Array.isArray(photos) ? photos : [photos])
 
 export const CreateScanBody = z
@@ -21,7 +22,7 @@ export const CreateScanBody = z
     photos: z
       .union([z.instanceof(File), z.array(z.instanceof(File))])
       .transform(asList)
-      .pipe(z.array(PhotoFile).min(1).max(SCAN_POLICY.maxPhotosPerScan))
+      .pipe(z.array(PhotoFile))
       // The union and the transform are opaque to the generator, so the field is described by hand.
       .openapi({
         type: 'array',

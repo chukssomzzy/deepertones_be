@@ -386,7 +386,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 - **Rate limits** are Workers rate-limit bindings (`ratelimits` in `wrangler.jsonc`, restated in every environment
   block), applied by `rateLimit(binding, 'ip' | 'user')` (`middleware/rate-limit.ts`) as route middleware in
   `defineRoute`. It runs after `auth`, outside the request context, so it reads `c.var.auth`, never
-  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller. Over the limit
+  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller (a route that must refuse them puts `signedIn()`, `middleware/signed-in.ts`, before it). Over the limit
   is 429 `RATE_LIMITED` with `Retry-After: 60`. A `namespace_id` is an account-wide counter, so each binding in
   each environment has its own. Counts are per Cloudflare location and approximate: the OTP per-recipient cooldown
   and cap still apply underneath.
@@ -974,30 +974,40 @@ comes in a later PR.
   route that serves it answers with `Cache-Control: private, no-store`. A link therefore works for whoever holds it, for at most 5
   minutes.
 - **Routes** (`scans.routes.ts`, mounted at `/scans`; schemas in `scans.schemas.ts`, shaping in `scans.presenter.ts`). Thin: each
-  calls one `ScanService` method, which does the sign-in check (`requireUser`) itself, so a request is validated before it is
-  found to be unsigned (an invalid body is 400 or 415 before 401).
+  calls one `ScanService` method, which does the sign-in check (`requireUser`) itself, so the guard stays in the service. On the
+  confirmation route a request is therefore validated before it is found to be unsigned (an invalid body is 400 or 415 before
+  401); the two upload routes put the `signedIn()` middleware in front of the body (see Size), so there an unsigned caller
+  is 401 whatever the body.
 
   | Route | Caller | Answers | Limits (per 60 s) |
   | --- | --- | --- | --- |
   | `POST /scans` | bearer; multipart, 1 to 10 `photos` parts | 202 the scan, every item `recognising`; 400, 401, 413, 415, 429 | 20 per IP, 10 per user |
   | `GET /scans/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
   | `POST /scans/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
-  | `POST /scans/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 10 per user |
+  | `POST /scans/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
   | `GET /scans/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
 
   - **Uploads.** The body is multipart (`multipartBody`). Hono hands one file over bare and several as an array, so the
-    `photos` schema takes either and normalises to a list before counting 1 to 10; two `photo` parts, none, or a non-file are
-    `VALIDATION_FAILED`. The schema deliberately does not check a file's declared `type` or `size`: the client's word is not
+    `photos` schema takes either and normalises to a list, and does not count it: the service answers `NO_IMAGES` or
+    `TOO_MANY_IMAGES` (the route is documented as 1 to 10). A multipart body cannot reach `NO_IMAGES`: with no `photos` part
+    the field is missing, which is `VALIDATION_FAILED` like two `photo` parts, none, or a part that is not a file. The schema deliberately does not check a file's declared `type` or `size`: the client's word is not
     the bytes, so the service sniffs them and answers `UNSUPPORTED_IMAGE` (a PNG that says it is a JPEG included) or
     `IMAGE_TOO_LARGE` (over 2,000,000 bytes or 1600 px) with a code the app can act on. The route turns each `File` into the
     service's `ProductImage` (bytes plus the declared type, which the service never trusts).
-  - **Size.** `bodyLimit` runs before the form is read, so an oversized upload is never buffered: 10 x 2,000,000 bytes plus
-    1,000,000 for the multipart framing (21,000,000) on `POST /scans`, one photo plus the same framing on the back photo. Over
-    it is 413 `HTTP_413` in the standard error envelope.
-  - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_USER_LIMITER` (10)
-    on the back photo; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is read or the scan looked up. They bound
-    bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand underneath. Namespace ids are 1006 to 1008 at the top level, 2006 to
-    2008 in staging and 3006 to 3008 in production.
+  - **Order and size.** Both upload routes run, in this order: the IP limiter, `signedIn()`, the user limiter, `bodyLimit`.
+    The IP limiter counts every caller, signed in or not. `signedIn()` (`middleware/signed-in.ts`) answers 401 `AUTH_REQUIRED`,
+    `TOKEN_EXPIRED` or `TOKEN_INVALID` from `c.var.auth` (the same codes as `requireUser`, through `notSignedIn` in
+    `lib/actor.ts`), so an unsigned caller costs no body read, no 413, 415 or 400; it is an early exit, and the service's
+    `requireUser` is still the guard. The user limiter needs a user, so it follows. `bodyLimit` comes last: with a
+    `Content-Length` over the limit it answers 413 from the header alone, and without one it counts the stream and cuts it
+    off, so an oversized upload is never buffered whole. The limit is 10 x 2,000,000 bytes plus 1,000,000 for the multipart
+    framing (21,000,000) on `POST /scans`, one photo plus the same framing on the back photo. Over it is 413 `HTTP_413` in
+    the standard error envelope.
+  - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
+    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
+    read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
+    do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
+    underneath. Namespace ids are 1006 to 1009 at the top level, 2006 to 2009 in staging and 3006 to 3009 in production.
   - **Client address.** The service is handed `cf-connecting-ip` as the address for the per-address daily quota (`unknown` where the
     header is absent, as for the rate limiter).
   - **The public photo route** ignores the Authorization header altogether (a broken or expired one changes nothing), answers 200

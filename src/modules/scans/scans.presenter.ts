@@ -4,11 +4,33 @@ import type { ProductView } from '../catalog/catalog.service'
 import type { ScanItemResponse, ScanResponse } from './scans.schemas'
 import type { ScanItemView, ScanView } from './scans.service'
 
+// Every field is named, so a field added to the catalog's view is not published by accident.
 const toProductResponse = ({ product, formulation, concerns, reference }: ProductView): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
-  product,
-  formulation: { ...formulation, foundAt: formulation.foundAt.toISOString(), analysedAt: formulation.analysedAt?.toISOString() ?? null },
-  concerns,
-  reference,
+  product: {
+    id: product.id,
+    brand: product.brand,
+    name: product.name,
+    variant: product.variant,
+    category: product.category,
+    imageUrl: product.imageUrl,
+  },
+  formulation: {
+    id: formulation.id,
+    ingredients: formulation.ingredients,
+    source: { kind: formulation.source.kind, url: formulation.source.url },
+    foundAt: formulation.foundAt.toISOString(),
+    analysedAt: formulation.analysedAt?.toISOString() ?? null,
+  },
+  concerns: concerns.map((concern) => ({
+    kind: concern.kind,
+    severity: concern.severity,
+    ingredients: concern.ingredients,
+    why: concern.why,
+    whoShouldTakeCare: concern.whoShouldTakeCare,
+    traits: concern.traits,
+    sources: concern.sources,
+  })),
+  reference: { version: reference.version, coverage: reference.coverage },
 })
 
 export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemResponse> => ({
@@ -16,9 +38,11 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
   position: item.position,
   state: item.state,
   reason: item.reason,
-  ...(item.recognised ? { recognised: item.recognised } : {}),
+  ...(item.recognised
+    ? { recognised: { brand: item.recognised.brand, name: item.recognised.name, variant: item.recognised.variant, category: item.recognised.category } }
+    : {}),
   ...(item.product ? { product: toProductResponse(item.product) } : {}),
-  image: item.image,
+  image: item.image ? { kind: item.image.kind, url: item.image.url } : null,
 })
 
 export const toScanResponse = (scan: ScanView): z.infer<typeof ScanResponse> => ({

@@ -21,6 +21,8 @@ const NOW = Date.now()
 const SCAN_QUEUE = 'deepertones-scan-items-development'
 /** What a request is asked to hold at most, and what the service accepts per photo (SCAN_POLICY). */
 const MAX_PHOTO_BYTES = 2_000_000
+/** One byte over what POST /scans accepts: 10 photos plus 1,000,000 of multipart framing. */
+const OVER_SCAN_BODY_BYTES = 10 * MAX_PHOTO_BYTES + 1_000_000 + 1
 
 const queued: unknown[] = []
 const WORKER_ENV = {
@@ -208,8 +210,7 @@ describe('POST /scans', () => {
 
     const eleven = await createScan(await newGuest(), Array.from({ length: 11 }, (_, i) => fileOf(markedJpeg(i), `p${i}`)))
     expect(eleven.status).toBe(400)
-    // The schema's maximum answers first (VALIDATION_FAILED); the service's own TOO_MANY_IMAGES is the backstop.
-    expect(['VALIDATION_FAILED', 'TOO_MANY_IMAGES']).toContain(await errorCodeOf(eleven))
+    expect(await errorCodeOf(eleven)).toBe('TOO_MANY_IMAGES')
   })
 
   describe('what it refuses', () => {
@@ -222,7 +223,9 @@ describe('POST /scans', () => {
       expect(await errorCodeOf(res)).toBe('HTTP_415')
     })
 
-    it('refuses a scan with no photo as VALIDATION_FAILED', async () => {
+    // The service's NO_IMAGES is unreachable from a form: a multipart body with no `photos` part leaves the field missing, and the
+    // schema (which no longer counts) rejects the missing field before the service is called.
+    it('refuses a scan with no photo as VALIDATION_FAILED, for the missing field', async () => {
       const res = await createScan(await newGuest(), [])
 
       expect(res.status).toBe(400)
@@ -246,8 +249,7 @@ describe('POST /scans', () => {
 
       const over = await createScan(await newGuest(), [fileOf(jpegPhoto({ size: MAX_PHOTO_BYTES + 1 }))])
       expect(over.status).toBe(400)
-      // The service says IMAGE_TOO_LARGE; a schema cap of the same size would say VALIDATION_FAILED first. Either is a 400 for this photo.
-      expect(['IMAGE_TOO_LARGE', 'VALIDATION_FAILED']).toContain(await errorCodeOf(over))
+      expect(await errorCodeOf(over)).toBe('IMAGE_TOO_LARGE')
     })
 
     it('refuses a photo with an edge of 1601 pixels as IMAGE_TOO_LARGE, and accepts one of 1600', async () => {
@@ -259,6 +261,18 @@ describe('POST /scans', () => {
       expect(await errorCodeOf(over)).toBe('IMAGE_TOO_LARGE')
     })
 
+    it.each([
+      ['a photos part that is text, not a file', () => { const form = new FormData(); form.append('photos', 'not a file'); return form }],
+      ['one file and one text part among the photos', () => { const form = new FormData(); form.append('photos', fileOf(markedJpeg(1))); form.append('photos', 'not a file'); return form }],
+    ])('refuses %s with 400 VALIDATION_FAILED', async (_label, makeForm) => {
+      const guest = await newGuest()
+
+      const res = await plainPost('/scans', makeForm(), guest.headers())
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    })
+
     it('answers 413 to a body of 24 MB, before reading it as a scan', async () => {
       const guest = await newGuest()
       const photos = Array.from({ length: 12 }, (_, i) => fileOf(jpegPhoto({ size: MAX_PHOTO_BYTES }), `big${i}`))
@@ -267,6 +281,16 @@ describe('POST /scans', () => {
 
       expect(res.status).toBe(413)
       expect(await read<unknown>(res)).toMatchObject({ success: false, status: 413, error: { code: 'HTTP_413' } })
+    })
+
+    // A body that is small but claims to be large can only be refused from its Content-Length, so this is the fast path.
+    it('answers 413 on a Content-Length over the limit, without reading the body', async () => {
+      const guest = await newGuest()
+
+      const res = await plainPost('/scans', new FormData(), { ...guest.headers(), 'Content-Length': String(OVER_SCAN_BODY_BYTES) })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
     })
   })
 
@@ -503,6 +527,30 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
       expect(await stateOf(guest, scanId, itemId)).toBe('needs-back-photo')
     })
 
+    it('refuses a photo part that is text, not a file, with 400 VALIDATION_FAILED, leaving the item waiting', async () => {
+      const { guest, scanId, itemId } = await waiting()
+      const form = new FormData()
+      form.append('photo', 'not a file')
+
+      const res = await plainPost(`/scans/${scanId}/items/${itemId}/back-photo`, form, guest.headers())
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-back-photo')
+    })
+
+    it('answers 413 on a Content-Length over the limit, without reading the body', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await plainPost(`/scans/${scanId}/items/${itemId}/back-photo`, new FormData(), {
+        ...guest.headers(),
+        'Content-Length': String(MAX_PHOTO_BYTES + 1_000_000 + 1),
+      })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+
     it('refuses a PNG with 400 UNSUPPORTED_IMAGE, leaving the item waiting', async () => {
       const { guest, scanId, itemId } = await waiting()
 
@@ -533,6 +581,26 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
     expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
     expect(retryAfterOf(limited!)).toBeGreaterThan(0)
   })
+
+  it('answers 429 RATE_LIMITED to the 21st back photo from one address in a minute, whoever sends it', async () => {
+    const shared = freshIp()
+    const statuses: number[] = []
+    let limited: Awaited<ReturnType<typeof addBackPhoto>> | undefined
+    for (let i = 0; i < 21; i++) {
+      // Another user each time, so only the address is shared; the scan is not theirs, as the limit is counted before it is looked up.
+      const res = await scansApi[':scanId'].items[':itemId']['back-photo'].$post(
+        { param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() }, form: { photo: fileOf(markedJpeg(i)) } },
+        { headers: (await newGuest()).headers(shared) },
+      )
+      statuses.push(res.status)
+      if (res.status === 429) limited = res
+    }
+
+    expect(statuses.slice(0, 20)).not.toContain(429)
+    expect(statuses[20]).toBe(429)
+    expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+    expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+  })
 })
 
 describe('GET /scans/photos/{token}', () => {
@@ -548,6 +616,7 @@ describe('GET /scans/photos/{token}', () => {
     expect(res.status).toBe(200)
     expect(res.headers.get('Content-Type')).toBe(mediaType)
     expect(res.headers.get('Cache-Control')).toBe('private, no-store')
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff')
     expect(await bytesOf(res)).toEqual(photo.bytes)
   })
 
@@ -597,7 +666,8 @@ describe('GET /scans/photos/{token}', () => {
 
 describe('signing in', () => {
   const ids = () => ({ param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() } })
-  // Each route is sent a valid request, because the body is checked before the sign-in is: an empty one would be 400 or 415 and hide the 401.
+  // Each route is sent a valid request: the confirmation route checks its JSON body before the sign-in, so an empty one would be 400 or 415 and hide the 401.
+  // (The two upload routes answer 401 first, whatever the body; see "on the upload routes" below.)
   const bearerRoutes: [string, (headers: Record<string, string>) => Promise<Reply>][] = [
     ['POST /scans', (headers) => scansApi.$post({ form: { photos: [fileOf(markedJpeg(1))] } }, { headers })],
     ['GET /scans/{scanId}', (headers) => scansApi[':scanId'].$get({ param: { scanId: crypto.randomUUID() } }, { headers })],
@@ -622,6 +692,65 @@ describe('signing in', () => {
 
     expect(res.status).toBe(401)
     expect(await errorCodeOf(res)).toBe('TOKEN_EXPIRED')
+  })
+
+  // An unsigned caller must not cost an upload parse: on both upload routes the sign-in is answered before the body is looked at,
+  // so what would otherwise be 413, 415 or 400 is 401.
+  describe('on the upload routes, before the body is looked at', () => {
+    const itemPath = () => `/scans/${crypto.randomUUID()}/items/${crypto.randomUUID()}/back-photo`
+    const uploads: [string, () => string, number][] = [
+      ['POST /scans', () => '/scans', OVER_SCAN_BODY_BYTES],
+      ['POST /scans/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
+    ]
+    const textPart = () => { const form = new FormData(); form.append('photos', 'not a file'); form.append('photo', 'not a file'); return form }
+
+    it.each(uploads)('%s answers 401 AUTH_REQUIRED, not 415, to a JSON body without a token', async (_route, path) => {
+      const res = await plainPost(path(), JSON.stringify({ photos: [] }), { 'cf-connecting-ip': freshIp(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+
+    it.each(uploads)('%s answers 401 AUTH_REQUIRED, not 400, to a form that does not validate, without a token', async (_route, path) => {
+      const res = await plainPost(path(), textPart(), { 'cf-connecting-ip': freshIp() })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+
+    it.each(uploads)('%s answers 401 AUTH_REQUIRED, not 413, to a Content-Length over the limit, without a token', async (_route, path, over) => {
+      const res = await plainPost(path(), new FormData(), { 'cf-connecting-ip': freshIp(), 'Content-Length': String(over) })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+
+    it.each(uploads)('%s answers 401 TOKEN_EXPIRED, not 400, to an expired token with a form that does not validate', async (_route, path) => {
+      const guest = await newGuest()
+      const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 })
+
+      const res = await plainPost(path(), textPart(), { 'cf-connecting-ip': freshIp(), Authorization: `Bearer ${old.accessToken}` })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('TOKEN_EXPIRED')
+    })
+
+    it.each(uploads)('%s answers 401 TOKEN_INVALID to a token that is not ours', async (_route, path) => {
+      const res = await plainPost(path(), textPart(), { 'cf-connecting-ip': freshIp(), Authorization: 'Bearer not.a.jwt' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('TOKEN_INVALID')
+    })
+
+    // The address limit comes first, so a flood of unsigned requests from one address is still 429, not 401 for ever.
+    it.each(uploads)('%s counts unsigned requests against the address limit before it answers 401', async (_route, path) => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      for (let i = 0; i < 21; i++) statuses.push((await plainPost(path(), new FormData(), { 'cf-connecting-ip': shared })).status)
+
+      expect(statuses.slice(0, 20)).toEqual(Array(20).fill(401))
+      expect(statuses[20]).toBe(429)
+    })
   })
 
   it('needs no verification: a guest can use every route', async () => {
@@ -673,7 +802,7 @@ describe('OpenAPI', () => {
     expect(statuses('/scans', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '413', '415', '429']))
     expect(statuses('/scans/{scanId}', 'get')).toEqual(expect.arrayContaining(['200', '401', '404']))
     expect(statuses('/scans/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
-    expect(statuses('/scans/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '415', '429']))
+    expect(statuses('/scans/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
     expect(statuses('/scans/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
   })
 })

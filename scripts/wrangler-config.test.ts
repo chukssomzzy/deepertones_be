@@ -158,6 +158,7 @@ describe('wrangler.jsonc scan route rate limits', () => {
     ['SCAN_CREATE_IP_LIMITER', 20],
     ['SCAN_CREATE_USER_LIMITER', 10],
     ['SCAN_BACK_PHOTO_USER_LIMITER', 10],
+    ['SCAN_BACK_PHOTO_IP_LIMITER', 20],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 

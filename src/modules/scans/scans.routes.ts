@@ -1,13 +1,14 @@
 import { bodyLimit } from 'hono/body-limit'
 import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, success } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
+import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
 import { BackPhotoBody, ConfirmProductBody, CreateScanBody, ItemParams, PhotoLinkParams, ScanItemResponse, ScanParams, ScanResponse } from './scans.schemas'
 import { SCAN_POLICY } from './scans.service'
 
 const bearer = [{ bearerAuth: [] }]
 
-// Room for the multipart framing around the photos. The limit runs before the form is read, so an oversized upload is never buffered.
+// Room for the multipart framing around the photos. bodyLimit runs before the form is read, so an oversized upload is never buffered.
 const FRAMING_BYTES = 1_000_000
 const MAX_SCAN_BODY_BYTES = SCAN_POLICY.maxPhotosPerScan * SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 const MAX_BACK_PHOTO_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
@@ -22,10 +23,13 @@ const createScan = defineRoute({
     'Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /scans/{scanId}` for progress. ' +
     'One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).',
   security: bearer,
+  // In this order: the address limit counts every caller, signedIn turns away the unsigned before anything is parsed, the user limit
+  // needs a user, and bodyLimit comes last because only a signed-in caller is worth reading a body for.
   middleware: [
-    bodyLimit({ maxSize: MAX_SCAN_BODY_BYTES }),
     rateLimit('SCAN_CREATE_IP_LIMITER', 'ip'),
+    signedIn(),
     rateLimit('SCAN_CREATE_USER_LIMITER', 'user'),
+    bodyLimit({ maxSize: MAX_SCAN_BODY_BYTES }),
   ],
   request: { body: multipartBody(CreateScanBody) },
   responses: { 202: success(ScanResponse, 'The scan, with every item recognising'), ...errorResponses(401, 413, 429) },
@@ -63,7 +67,12 @@ const addBackPhoto = defineRoute({
   summary: 'Send a photo of the ingredient list',
   description: 'For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.',
   security: bearer,
-  middleware: [bodyLimit({ maxSize: MAX_BACK_PHOTO_BODY_BYTES }), rateLimit('SCAN_BACK_PHOTO_USER_LIMITER', 'user')],
+  middleware: [
+    rateLimit('SCAN_BACK_PHOTO_IP_LIMITER', 'ip'),
+    signedIn(),
+    rateLimit('SCAN_BACK_PHOTO_USER_LIMITER', 'user'),
+    bodyLimit({ maxSize: MAX_BACK_PHOTO_BODY_BYTES }),
+  ],
   request: { params: ItemParams, body: multipartBody(BackPhotoBody) },
   responses: { 202: success(ScanItemResponse, 'The item, now reading the label'), ...errorResponses(401, 404, 409, 413, 429) },
 })
