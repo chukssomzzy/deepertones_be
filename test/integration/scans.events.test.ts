@@ -101,6 +101,13 @@ const catalogued = async (brand: string, name: string) => {
   await catalog.analyse(found.formulationId)
 }
 
+// The Worker builds its own container per queue message, so the client cannot be handed a fetch here: the SDK picks up the global one when it is built.
+const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  vi.stubGlobal('fetch', fetch)
+  return calls
+}
+
 const recognised = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))] })
 const beautyProduct = (brand: string, name: string) =>
   recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
@@ -198,7 +205,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     const { stream } = await watch(scanId, guest.token)
     expect(parseFrame((await stream.read(1)).frames[0]!).event).toBe('snapshot')
     // Anthropic answers the first recognise call with a face and the second with the product.
-    stubFetch(face, beautyProduct(brand, 'Hydrating Cleanser'))
+    stubAnthropic(face, beautyProduct(brand, 'Hydrating Cleanser'))
 
     expect(await step(personItem, 'recognise')).toEqual(['m'])
     expect(await step(productItem, 'recognise')).toEqual(['m'])
@@ -220,7 +227,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     const { scanId, itemIds } = await startScan(guest)
     const { stream } = await watch(scanId, guest.token)
     await stream.read(1)
-    stubFetch(face)
+    stubAnthropic(face)
 
     await step(itemIds[0]!, 'recognise')
 
@@ -237,7 +244,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     const itemId = itemIds[0]!
     const first = await watch(scanId, guest.token)
     expect(parseFrame((await first.stream.read(1)).frames[0]!).data).toMatchObject({ items: [{ id: itemId, state: 'recognising' }] })
-    stubFetch(beautyProduct(brand, 'Hydrating Cleanser'))
+    stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
     await step(itemId, 'recognise')
     expect(parseFrame((await first.stream.read(1)).frames[0]!).data).toMatchObject({ id: itemId, state: 'matching' })
     await first.stream.cancel() // the connection drops
@@ -260,7 +267,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     const tablet = await watch(scanId, guest.token)
     await phone.stream.read(1)
     await tablet.stream.read(1)
-    stubFetch(face)
+    stubAnthropic(face)
 
     await step(itemIds[0]!, 'recognise')
 
@@ -278,7 +285,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     const busy = await startScan(guest)
     const { stream } = await watch(watched.scanId, guest.token)
     await stream.read(1)
-    stubFetch(face)
+    stubAnthropic(face)
 
     await step(busy.itemIds[0]!, 'recognise')
 
@@ -300,7 +307,7 @@ describe('buildContainer scan events', () => {
     const stream = sseReader(res)
     opened.push(stream)
     await stream.read(1)
-    stubFetch(face)
+    stubAnthropic(face)
 
     await runAs({ kind: 'system', job: advanceScanItemSpec.name }, () => buildContainer(env).scans.advance(itemId, 'recognise'))
 
@@ -313,8 +320,8 @@ describe('GET /scans/{scanId}/events: a scan that is already finished', () => {
   it('sends the snapshot, then done, and ends the stream at once', async () => {
     const guest = await newGuest()
     const { scanId, itemIds } = await startScan(guest)
-    stubFetch(face)
-    await runAs({ kind: 'system', job: advanceScanItemSpec.name }, () => container.scans.advance(itemIds[0]!, 'recognise'))
+    stubAnthropic(face)
+    await runAs({ kind: 'system', job: advanceScanItemSpec.name }, () => buildContainer(testEnv).scans.advance(itemIds[0]!, 'recognise'))
     const { stream } = await watch(scanId, guest.token)
 
     const { frames, ended } = await stream.read(3)

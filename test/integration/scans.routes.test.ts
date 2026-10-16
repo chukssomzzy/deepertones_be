@@ -123,6 +123,12 @@ const runStep = async (itemId: string, step: string) => {
   const result = await getQueueResult(batch, ctx)
   expect(result.explicitAcks, `the ${step} step should be acknowledged`).toEqual(['m'])
 }
+// The Worker builds its own container per queue message, so the client cannot be handed a fetch here: the SDK picks up the global one when it is built.
+const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  vi.stubGlobal('fetch', fetch)
+  return calls
+}
 const recognisedAs = (brand: string, name: string, confidence: number) => () =>
   messageResponse({
     content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence }))],
@@ -137,7 +143,7 @@ const stateOf = async (guest: Guest, scanId: string, itemId: string) =>
 const awaitingConfirmation = async (guest: Guest) => {
   const scan = await createdScan(guest)
   const itemId = scan.items[0]!.id
-  stubFetch(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.3))
+  stubAnthropic(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.3))
   await runStep(itemId, 'recognise')
   expect(await stateOf(guest, scan.id, itemId)).toBe('needs-confirmation')
   return { scanId: scan.id, itemId }
@@ -147,7 +153,7 @@ const awaitingConfirmation = async (guest: Guest) => {
 const awaitingBackPhoto = async (guest: Guest) => {
   const scan = await createdScan(guest)
   const itemId = scan.items[0]!.id
-  stubFetch(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.92), researchFindsNothing)
+  stubAnthropic(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.92), researchFindsNothing)
   await runStep(itemId, 'recognise')
   await runStep(itemId, 'match')
   await runStep(itemId, 'research')
@@ -380,7 +386,7 @@ describe('GET /scans/{scanId}', () => {
     const guest = await newGuest()
     const scan = await createdScan(guest)
     const brand = freshBrand()
-    stubFetch(recognisedAs(brand, 'Hydrating Cleanser', 0.92))
+    stubAnthropic(recognisedAs(brand, 'Hydrating Cleanser', 0.92))
     await runStep(scan.items[0]!.id, 'recognise')
 
     const shown = await dataOf<ScanView>(await getScan(guest, scan.id))

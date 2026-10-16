@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import type { AiJob } from '../anthropic/ai-spend.provider'
 import { AnthropicClient } from '../anthropic/anthropic.client'
 import { AnthropicRefusalError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
@@ -39,15 +39,22 @@ const product = (overrides: Record<string, unknown> = {}) => ({
 })
 
 /** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job the adapter uses shows in the model it sends. */
-const make = (ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+const recognizerWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
   new AnthropicProductRecognizer(
     new AnthropicClient({
       apiKey: API_KEY,
       models: routed ? { ...MODELS, [routed]: ROUTED_TO } : MODELS,
       ledger,
-      apiUrl: 'https://anthropic.example/v1/messages',
+      baseURL: 'https://anthropic.example',
+      fetch,
     }),
   )
+
+/** A recognizer over a client whose HTTP goes through `fetch`; the returned `calls` records the requests. */
+const recognizerOver = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  return { calls, recognizer: recognizerWith(fetch) }
+}
 
 const structured = (value: unknown, stop_reason = 'end_turn') => () =>
   messageResponse({ content: [textBlock(JSON.stringify(value))], stop_reason })
@@ -65,15 +72,11 @@ const assertApiSafe = (schema: unknown, path = 'schema') => {
 
 const schemaOf = (body: any) => body.output_config.format.schema
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
-
 describe('AnthropicProductRecognizer request', () => {
   it('sends the photo as a base64 block FIRST, then the text, with 4096 max_tokens and no forced tool choice', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
 
-    await make().recognize(JPEG)
+    await recognizer.recognize(JPEG)
 
     const body = calls[0]!.body
     const content: Block[] = body.messages[0].content
@@ -86,18 +89,18 @@ describe('AnthropicProductRecognizer request', () => {
   })
 
   it('sends a webp photo with its own media type', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
 
-    await make().recognize({ bytes: JPEG_BYTES, mediaType: 'image/webp' })
+    await recognizer.recognize({ bytes: JPEG_BYTES, mediaType: 'image/webp' })
 
     expect(calls[0]!.body.messages[0].content[0].source.media_type).toBe('image/webp')
   })
 
   it('encodes a large photo completely, byte for byte', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
     const bytes = Uint8Array.from({ length: 300_000 }, (_, i) => (i * 7 + (i >> 8)) % 256)
 
-    await make().recognize({ bytes, mediaType: 'image/jpeg' })
+    await recognizer.recognize({ bytes, mediaType: 'image/jpeg' })
 
     const data: string = calls[0]!.body.messages[0].content[0].source.data
     const decoded = Uint8Array.from(atob(data), (c) => c.charCodeAt(0))
@@ -106,9 +109,9 @@ describe('AnthropicProductRecognizer request', () => {
   })
 
   it('asks for a closed json_schema answer the API accepts, with the four classifications and the five categories', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
 
-    await make().recognize(JPEG)
+    await recognizer.recognize(JPEG)
 
     const schema = schemaOf(calls[0]!.body)
     expect(schema.type).toBe('object')
@@ -121,9 +124,9 @@ describe('AnthropicProductRecognizer request', () => {
   })
 
   it('tells the model the photo is user-supplied data whose instructions must be ignored', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
 
-    await make().recognize(JPEG)
+    await recognizer.recognize(JPEG)
 
     const prompt = requestText(calls[0]!.body)
     expect(prompt).toMatch(/user-supplied/i)
@@ -132,9 +135,9 @@ describe('AnthropicProductRecognizer request', () => {
   })
 
   it('covers beauty and personal-care products including hair, body and makeup, and sends a person with no readable product to face-or-person', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, recognizer } = recognizerOver(structured(product()))
 
-    await make().recognize(JPEG)
+    await recognizer.recognize(JPEG)
 
     const prompt = requestText(calls[0]!.body)
     expect(prompt).toMatch(/personal-care/i)
@@ -146,38 +149,38 @@ describe('AnthropicProductRecognizer request', () => {
 
 describe('AnthropicProductRecognizer job routing and cost', () => {
   it('asks Claude as the recognize job and uses the model configured for it', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, fetch } = stubFetch(structured(product()))
 
-    await make(undefined, 'recognize').recognize(JPEG)
+    await recognizerWith(fetch, undefined, 'recognize').recognize(JPEG)
 
     expect(calls[0]!.body.model).toBe(ROUTED_TO)
   })
 
   it('does not use the model of any other job', async () => {
-    const calls = stubFetch(structured(product()))
+    const { calls, fetch } = stubFetch(structured(product()))
     const others = (Object.keys(MODELS) as AiJob[]).filter((job) => job !== 'recognize')
 
-    for (const other of others) await make(undefined, other).recognize(JPEG)
+    for (const other of others) await recognizerWith(fetch, undefined, other).recognize(JPEG)
 
     expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
   })
 
   it('records its call on the ledger under the recognize job', async () => {
-    stubFetch(structured(product()))
+    const { fetch } = stubFetch(structured(product()))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(ledger).recognize(JPEG)
+    await recognizerWith(fetch, ledger).recognize(JPEG)
 
     expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([['recognize', MODEL, 'settled']])
   })
 
   it('reserves room for the photo as a flat 5000 input tokens, however large the photo is', async () => {
-    stubFetch(structured(product()))
+    const { fetch } = stubFetch(structured(product()))
     const small = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
     const large = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(small).recognize({ bytes: new Uint8Array(10), mediaType: 'image/jpeg' })
-    await make(large).recognize({ bytes: new Uint8Array(300_000), mediaType: 'image/jpeg' })
+    await recognizerWith(fetch, small).recognize({ bytes: new Uint8Array(10), mediaType: 'image/jpeg' })
+    await recognizerWith(fetch, large).recognize({ bytes: new Uint8Array(300_000), mediaType: 'image/jpeg' })
 
     // 5000 tokens at $2 per million is 10000 micros of input and the 4096-token answer allowance 40960. The prompt adds a
     // little; the base64 of a 300 KB photo, counted as text, would add hundreds of thousands.
@@ -190,9 +193,9 @@ describe('AnthropicProductRecognizer job routing and cost', () => {
 
 describe('AnthropicProductRecognizer answers', () => {
   it('returns a read product with its brand, name, variant, category and confidence', async () => {
-    stubFetch(structured(product()))
+    const { recognizer } = recognizerOver(structured(product()))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({
       classification: 'beauty-product',
       brand: 'Glow Co',
       name: 'Bright Tone Serum',
@@ -203,15 +206,15 @@ describe('AnthropicProductRecognizer answers', () => {
   })
 
   it.each(['skin', 'hair', 'body', 'makeup', 'other'])('keeps the category %s', async (category) => {
-    stubFetch(structured(product({ category })))
+    const { recognizer } = recognizerOver(structured(product({ category })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', category })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', category })
   })
 
   it('trims brand, name and variant', async () => {
-    stubFetch(structured(product({ brand: '  Glow Co ', name: '\tBright Tone Serum\n', variant: ' Extra Strength  ' })))
+    const { recognizer } = recognizerOver(structured(product({ brand: '  Glow Co ', name: '\tBright Tone Serum\n', variant: ' Extra Strength  ' })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength' })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength' })
   })
 
   it.each([
@@ -219,18 +222,18 @@ describe('AnthropicProductRecognizer answers', () => {
     ['only spaces', '   '],
     ['missing', undefined],
   ])('leaves the variant out when it is %s', async (_label, variant) => {
-    stubFetch(structured(product({ variant })))
+    const { recognizer } = recognizerOver(structured(product({ variant })))
 
-    const result = await make().recognize(JPEG)
+    const result = await recognizer.recognize(JPEG)
 
     expect(result).toMatchObject({ classification: 'beauty-product', brand: 'Glow Co', name: 'Bright Tone Serum' })
     expect(result).not.toHaveProperty('variant')
   })
 
   it.each(['other-product', 'face-or-person', 'unreadable'])('returns only the classification for %s, even if the model also wrote product fields', async (classification) => {
-    stubFetch(structured(product({ classification })))
+    const { recognizer } = recognizerOver(structured(product({ classification })))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification })
   })
 
   it.each([
@@ -241,9 +244,9 @@ describe('AnthropicProductRecognizer answers', () => {
     ['a name of only spaces', { name: '   ' }],
     ['no name', { name: undefined }],
   ])('treats a beauty product with %s as unreadable', async (_label, overrides) => {
-    stubFetch(structured(product(overrides)))
+    const { recognizer } = recognizerOver(structured(product(overrides)))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
   })
 })
 
@@ -257,9 +260,9 @@ describe('AnthropicProductRecognizer confidence', () => {
     [-0.2, 0],
     [-1000, 0],
   ])('returns confidence %s as %s', async (confidence, expected) => {
-    stubFetch(structured(product({ confidence })))
+    const { recognizer } = recognizerOver(structured(product({ confidence })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ confidence: expected })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ confidence: expected })
   })
 })
 
@@ -268,22 +271,22 @@ describe('AnthropicProductRecognizer length bounds', () => {
 
   it.each(fields)('accepts a %s of exactly 120 characters', async (field) => {
     const value = 'x'.repeat(MAX_FIELD)
-    stubFetch(structured(product({ [field]: value })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: value })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', [field]: value })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', [field]: value })
   })
 
   it.each(fields)('treats a %s of 121 characters as unreadable', async (field) => {
-    stubFetch(structured(product({ [field]: 'x'.repeat(MAX_FIELD + 1) })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: 'x'.repeat(MAX_FIELD + 1) })))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
   })
 
   it.each(fields)('measures a %s after trimming, so 120 characters padded with spaces is accepted', async (field) => {
     const value = 'x'.repeat(MAX_FIELD)
-    stubFetch(structured(product({ [field]: `  ${value}  ` })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: `  ${value}  ` })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', [field]: value })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', [field]: value })
   })
 })
 
@@ -304,9 +307,9 @@ describe('AnthropicProductRecognizer links and markup', () => {
   const cases = fields.flatMap((field) => bad.map((value) => [field, value] as const))
 
   it.each(cases)('treats a %s of %j as unreadable', async (field, value) => {
-    stubFetch(structured(product({ [field]: value })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: value })))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
   })
 
   it.each([
@@ -316,9 +319,9 @@ describe('AnthropicProductRecognizer links and markup', () => {
     ['Vitamin C + E (10%)'],
     ["L'Oréal Paris"],
   ])('accepts ordinary text such as %j', async (name) => {
-    stubFetch(structured(product({ name })))
+    const { recognizer } = recognizerOver(structured(product({ name })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', name })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ classification: 'beauty-product', name })
   })
 })
 
@@ -336,34 +339,34 @@ describe('AnthropicProductRecognizer hidden characters', () => {
   const cases = fields.flatMap((field) => hidden.map(([label, value]) => [field, label, value] as const))
 
   it.each(cases)('treats a %s with %s as unreadable', async (field, _label, value) => {
-    stubFetch(structured(product({ [field]: value })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: value })))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
   })
 
   it.each(fields)('treats a %s that is only a zero-width space as unreadable', async (field) => {
-    stubFetch(structured(product({ [field]: '\u200b' })))
+    const { recognizer } = recognizerOver(structured(product({ [field]: '\u200b' })))
 
-    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
   })
 
   it('accepts accented and non-Latin text, which has no hidden characters', async () => {
-    stubFetch(structured(product({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })))
+    const { recognizer } = recognizerOver(structured(product({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })))
 
-    await expect(make().recognize(JPEG)).resolves.toMatchObject({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })
+    await expect(recognizer.recognize(JPEG)).resolves.toMatchObject({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })
   })
 })
 
 describe('AnthropicProductRecognizer errors', () => {
   it('throws AnthropicRefusalError when the model refuses', async () => {
-    stubFetch(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
+    const { recognizer } = recognizerOver(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
 
-    expect(await caught(make().recognize(JPEG))).toBeInstanceOf(AnthropicRefusalError)
+    expect(await caught(recognizer.recognize(JPEG))).toBeInstanceOf(AnthropicRefusalError)
   })
 
   it('lets AnthropicUnavailableError through when Claude is overloaded', async () => {
-    stubFetch(() => errorResponse(529, 'overloaded_error'))
+    const { recognizer } = recognizerOver(() => errorResponse(529, 'overloaded_error'))
 
-    expect(await caught(make().recognize(JPEG))).toBeInstanceOf(AnthropicUnavailableError)
+    expect(await caught(recognizer.recognize(JPEG))).toBeInstanceOf(AnthropicUnavailableError)
   })
 })

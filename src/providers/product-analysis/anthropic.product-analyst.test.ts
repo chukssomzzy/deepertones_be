@@ -1,7 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AnthropicClient } from '../anthropic/anthropic.client'
+import { describe, expect, it } from 'vitest'
 import type { AiJob } from '../anthropic/ai-spend.provider'
-import { AnthropicRefusalError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
+import { AnthropicClient } from '../anthropic/anthropic.client'
+import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../anthropic/memory.ai-spend-ledger'
 import {
   API_KEY,
@@ -66,15 +66,22 @@ const JPEG_BASE64 = '/9j/4AAQSkZJRvr7'
 const ROUTED_TO = 'claude-haiku-5-5'
 
 /** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job a method uses shows in the model it sends. */
-const make = (ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+const analystWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
   new AnthropicProductAnalyst(
     new AnthropicClient({
       apiKey: API_KEY,
       models: routed ? { ...MODELS, [routed]: ROUTED_TO } : MODELS,
       ledger,
-      apiUrl: 'https://anthropic.example/v1/messages',
+      baseURL: 'https://anthropic.example',
+      fetch,
     }),
   )
+
+/** An analyst over a client whose HTTP goes through `fetch`; the returned `calls` records the requests. */
+const analystOver = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  return { calls, analyst: analystWith(fetch) }
+}
 
 const structured = (value: unknown, stop_reason = 'end_turn') => () =>
   messageResponse({ content: [textBlock(JSON.stringify(value))], stop_reason })
@@ -92,10 +99,6 @@ const assertApiSafe = (schema: unknown, path = 'schema') => {
 
 const schemaOf = (body: any) => body.output_config.format.schema
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
-
 const JOBS = Object.keys(MODELS) as AiJob[]
 
 describe('AnthropicProductAnalyst job routing', () => {
@@ -108,38 +111,38 @@ describe('AnthropicProductAnalyst job routing', () => {
   ]
 
   it.each(methods)('%s asks Claude as the %s job and uses the model configured for it', async (_method, job, run, reply) => {
-    const calls = stubFetch(structured(reply))
+    const { calls, fetch } = stubFetch(structured(reply))
 
-    await run(make(undefined, job))
+    await run(analystWith(fetch, undefined, job))
 
     expect(calls[0]!.body.model).toBe(ROUTED_TO)
   })
 
   it.each(methods)('%s does not use the model of any other job', async (_method, job, run, reply) => {
-    const calls = stubFetch(structured(reply))
+    const { calls, fetch } = stubFetch(structured(reply))
     const others = JOBS.filter((other) => other !== job)
 
-    for (const other of others) await run(make(undefined, other))
+    for (const other of others) await run(analystWith(fetch, undefined, other))
 
     expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
   })
 
   it.each(methods)('%s records its call on the ledger under the %s job', async (_method, job, run, reply) => {
-    stubFetch(structured(reply))
+    const { fetch } = stubFetch(structured(reply))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await run(make(ledger))
+    await run(analystWith(fetch, ledger))
 
     expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([[job, MODEL, 'settled']])
   })
 
   it('reserves room for the image as a flat 5000 input tokens, however large the photo is', async () => {
-    stubFetch(structured({ matches: true }))
+    const { fetch } = stubFetch(structured({ matches: true }))
     const small = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
     const large = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(small).imageShowsProduct({ bytes: new Uint8Array(10), mediaType: 'image/png' }, PRODUCT)
-    await make(large).imageShowsProduct({ bytes: new Uint8Array(300_000), mediaType: 'image/png' }, PRODUCT)
+    await analystWith(fetch, small).imageShowsProduct({ bytes: new Uint8Array(10), mediaType: 'image/png' }, PRODUCT)
+    await analystWith(fetch, large).imageShowsProduct({ bytes: new Uint8Array(300_000), mediaType: 'image/png' }, PRODUCT)
 
     // 5000 tokens at $2 per million is 10000 micros of input, the 4096-token answer allowance 40960; the rest of the body is small.
     expect(small.entries[0]!.estimateMicros).toBe(large.entries[0]!.estimateMicros)
@@ -150,21 +153,21 @@ describe('AnthropicProductAnalyst job routing', () => {
 
 describe('AnthropicProductAnalyst.analyse', () => {
   it('returns the concerns from the structured answer', async () => {
-    stubFetch(structured({ concerns: [CONCERN] }))
+    const { analyst } = analystOver(structured({ concerns: [CONCERN] }))
 
-    await expect(make().analyse(INPUT)).resolves.toEqual([CONCERN])
+    await expect(analyst.analyse(INPUT)).resolves.toEqual([CONCERN])
   })
 
   it('returns no concerns when the model returns none', async () => {
-    stubFetch(structured({ concerns: [] }))
+    const { analyst } = analystOver(structured({ concerns: [] }))
 
-    await expect(make().analyse({ ...INPUT, flaggedFacts: [] })).resolves.toEqual([])
+    await expect(analyst.analyse({ ...INPUT, flaggedFacts: [] })).resolves.toEqual([])
   })
 
   it('requests a json_schema output with no forced tool choice, using the configured model', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
 
-    await make().analyse(INPUT)
+    await analyst.analyse(INPUT)
 
     const body = calls[0]!.body
     expect(body.output_config.format.type).toBe('json_schema')
@@ -174,10 +177,10 @@ describe('AnthropicProductAnalyst.analyse', () => {
   })
 
   it('builds the schema enums from the vocabularies it was given, and nothing else', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
     const input = { ...INPUT, kinds: ['kind-a', 'kind-b'], severities: ['sev-x'], traits: ['trait-1', 'trait-2', 'trait-3'] }
 
-    await make().analyse(input)
+    await analyst.analyse(input)
 
     const schema = schemaOf(calls[0]!.body)
     const concern = schema.properties.concerns.items.properties
@@ -187,9 +190,9 @@ describe('AnthropicProductAnalyst.analyse', () => {
   })
 
   it('uses a schema the API accepts: every object closed, no unsupported constraints', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
 
-    await make().analyse(INPUT)
+    await analyst.analyse(INPUT)
 
     const schema = schemaOf(calls[0]!.body)
     expect(schema.type).toBe('object')
@@ -197,9 +200,9 @@ describe('AnthropicProductAnalyst.analyse', () => {
   })
 
   it('states the length budget for why and whoShouldTakeCare in the prompt and in the schema descriptions', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
 
-    await make().analyse(INPUT)
+    await analyst.analyse(INPUT)
 
     const body = calls[0]!.body
     expect(body.system).toContain('2-3 sentences, at most 450 characters')
@@ -210,9 +213,9 @@ describe('AnthropicProductAnalyst.analyse', () => {
   })
 
   it('puts the product, its ingredients and every flagged fact in the prompt', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
 
-    await make().analyse(INPUT)
+    await analyst.analyse(INPUT)
 
     const prompt = requestText(calls[0]!.body)
     expect(prompt).toContain('Glow Co')
@@ -226,40 +229,46 @@ describe('AnthropicProductAnalyst.analyse', () => {
   })
 
   it('throws AnthropicRefusalError when the model refuses', async () => {
-    stubFetch(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
+    const { analyst } = analystOver(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
 
-    expect(await caught(make().analyse(INPUT))).toBeInstanceOf(AnthropicRefusalError)
+    expect(await caught(analyst.analyse(INPUT))).toBeInstanceOf(AnthropicRefusalError)
+  })
+
+  it('throws AnthropicRequestError when the answer does not match the schema built from the vocabularies', async () => {
+    const { analyst } = analystOver(structured({ concerns: [{ ...CONCERN, kind: 'not-a-known-kind' }] }))
+
+    expect(await caught(analyst.analyse(INPUT))).toBeInstanceOf(AnthropicRequestError)
   })
 
   it('lets AnthropicUnavailableError through when Claude is overloaded', async () => {
-    stubFetch(() => errorResponse(529, 'overloaded_error'))
+    const { analyst } = analystOver(() => errorResponse(529, 'overloaded_error'))
 
-    expect(await caught(make().analyse(INPUT))).toBeInstanceOf(AnthropicUnavailableError)
+    expect(await caught(analyst.analyse(INPUT))).toBeInstanceOf(AnthropicUnavailableError)
   })
 })
 
 describe('AnthropicProductAnalyst token budgets', () => {
   // Adaptive thinking counts against max_tokens, so the budgets must leave room beyond the answer.
   it('gives analyse 16000 max_tokens', async () => {
-    const calls = stubFetch(structured({ concerns: [] }))
+    const { calls, analyst } = analystOver(structured({ concerns: [] }))
 
-    await make().analyse(INPUT)
+    await analyst.analyse(INPUT)
 
     expect(calls[0]!.body.max_tokens).toBe(16000)
   })
 
   it('gives sameProduct 4096 max_tokens', async () => {
-    const calls = stubFetch(structured({ same: true }))
+    const { calls, analyst } = analystOver(structured({ same: true }))
 
-    await make().sameProduct(PRODUCT, OTHER)
+    await analyst.sameProduct(PRODUCT, OTHER)
 
     expect(calls[0]!.body.max_tokens).toBe(4096)
   })
 
   it('gives imageShowsProduct 4096 max_tokens', async () => {
-    const calls = stubFetch(structured({ matches: true }))
+    const { calls, analyst } = analystOver(structured({ matches: true }))
 
-    await make().imageShowsProduct({ bytes: JPEG_BYTES, mediaType: 'image/jpeg' }, PRODUCT)
+    await analyst.imageShowsProduct({ bytes: JPEG_BYTES, mediaType: 'image/jpeg' }, PRODUCT)
 
     expect(calls[0]!.body.max_tokens).toBe(4096)
   })
@@ -267,15 +276,15 @@ describe('AnthropicProductAnalyst token budgets', () => {
 
 describe('AnthropicProductAnalyst.sameProduct', () => {
   it.each([true, false])('returns %s when the model answers same: %s', async (same) => {
-    stubFetch(structured({ same }))
+    const { analyst } = analystOver(structured({ same }))
 
-    await expect(make().sameProduct(PRODUCT, OTHER)).resolves.toBe(same)
+    await expect(analyst.sameProduct(PRODUCT, OTHER)).resolves.toBe(same)
   })
 
   it('asks for a closed { same: boolean } json_schema answer naming both products, with no forced tool choice', async () => {
-    const calls = stubFetch(structured({ same: true }))
+    const { calls, analyst } = analystOver(structured({ same: true }))
 
-    await make().sameProduct(PRODUCT, OTHER)
+    await analyst.sameProduct(PRODUCT, OTHER)
 
     const body = calls[0]!.body
     expect(body.output_config.format.type).toBe('json_schema')
@@ -289,9 +298,9 @@ describe('AnthropicProductAnalyst.sameProduct', () => {
   })
 
   it('throws AnthropicRefusalError when the model refuses', async () => {
-    stubFetch(() => messageResponse({ content: [textBlock('No.')], stop_reason: 'refusal' }))
+    const { analyst } = analystOver(() => messageResponse({ content: [textBlock('No.')], stop_reason: 'refusal' }))
 
-    expect(await caught(make().sameProduct(PRODUCT, OTHER))).toBeInstanceOf(AnthropicRefusalError)
+    expect(await caught(analyst.sameProduct(PRODUCT, OTHER))).toBeInstanceOf(AnthropicRefusalError)
   })
 })
 
@@ -299,17 +308,17 @@ describe('AnthropicProductAnalyst.imageShowsProduct', () => {
   const image = (mediaType: ProductImage['mediaType'] = 'image/jpeg', bytes = JPEG_BYTES): ProductImage => ({ bytes, mediaType })
 
   it.each([true, false])('returns %s when the model answers matches: %s', async (matches) => {
-    stubFetch(structured({ matches }))
+    const { analyst } = analystOver(structured({ matches }))
 
-    await expect(make().imageShowsProduct(image(), PRODUCT)).resolves.toBe(matches)
+    await expect(analyst.imageShowsProduct(image(), PRODUCT)).resolves.toBe(matches)
   })
 
   it.each(['image/jpeg', 'image/png', 'image/webp'] as const)(
     'sends a %s image as a base64 block before the text',
     async (mediaType) => {
-      const calls = stubFetch(structured({ matches: true }))
+      const { calls, analyst } = analystOver(structured({ matches: true }))
 
-      await make().imageShowsProduct(image(mediaType), PRODUCT)
+      await analyst.imageShowsProduct(image(mediaType), PRODUCT)
 
       const content: Block[] = calls[0]!.body.messages[0].content
       const imageIndex = content.findIndex((block) => block.type === 'image')
@@ -324,10 +333,10 @@ describe('AnthropicProductAnalyst.imageShowsProduct', () => {
   )
 
   it('encodes a large image completely, byte for byte', async () => {
-    const calls = stubFetch(structured({ matches: true }))
+    const { calls, analyst } = analystOver(structured({ matches: true }))
     const bytes = Uint8Array.from({ length: 300_000 }, (_, i) => (i * 7 + (i >> 8)) % 256)
 
-    await make().imageShowsProduct(image('image/png', bytes), PRODUCT)
+    await analyst.imageShowsProduct(image('image/png', bytes), PRODUCT)
 
     const data: string = calls[0]!.body.messages[0].content[0].source.data
     const decoded = Uint8Array.from(atob(data), (c) => c.charCodeAt(0))
@@ -336,9 +345,9 @@ describe('AnthropicProductAnalyst.imageShowsProduct', () => {
   })
 
   it('asks for a closed { matches: boolean } json_schema answer naming the product, with no forced tool choice', async () => {
-    const calls = stubFetch(structured({ matches: true }))
+    const { calls, analyst } = analystOver(structured({ matches: true }))
 
-    await make().imageShowsProduct(image(), PRODUCT)
+    await analyst.imageShowsProduct(image(), PRODUCT)
 
     const body = calls[0]!.body
     expect(body.output_config.format.type).toBe('json_schema')
@@ -352,8 +361,8 @@ describe('AnthropicProductAnalyst.imageShowsProduct', () => {
   })
 
   it('throws AnthropicRefusalError when the model refuses', async () => {
-    stubFetch(() => messageResponse({ content: [textBlock('No.')], stop_reason: 'refusal' }))
+    const { analyst } = analystOver(() => messageResponse({ content: [textBlock('No.')], stop_reason: 'refusal' }))
 
-    expect(await caught(make().imageShowsProduct(image(), PRODUCT))).toBeInstanceOf(AnthropicRefusalError)
+    expect(await caught(analyst.imageShowsProduct(image(), PRODUCT))).toBeInstanceOf(AnthropicRefusalError)
   })
 })

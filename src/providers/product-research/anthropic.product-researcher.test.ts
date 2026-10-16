@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AnthropicClient } from '../anthropic/anthropic.client'
+import { describe, expect, it } from 'vitest'
 import type { AiJob } from '../anthropic/ai-spend.provider'
+import { AnthropicClient } from '../anthropic/anthropic.client'
 import { AnthropicRequestError, AnthropicUnavailableError, costMicros } from '../anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../anthropic/memory.ai-spend-ledger'
 import {
@@ -57,57 +57,60 @@ const respondWith = (content: Block[], stop_reason = 'end_turn') => () => messag
 const ROUTED_TO = 'claude-haiku-5-5'
 
 /** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job the adapter uses shows in the model it sends. */
-const make = (ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+const researcherWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
   new AnthropicProductResearcher(
     new AnthropicClient({
       apiKey: API_KEY,
       models: routed ? { ...MODELS, [routed]: ROUTED_TO } : MODELS,
       ledger,
-      apiUrl: 'https://anthropic.example/v1/messages',
+      baseURL: 'https://anthropic.example',
+      fetch,
     }),
   )
 
-const research = async (content: Block[]) => {
-  stubFetch(respondWith(content))
-  return make().research(PRODUCT)
+/** A researcher over a client whose HTTP goes through `fetch`; the returned `calls` records the requests. */
+const researcherOver = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  return { calls, researcher: researcherWith(fetch) }
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
+const research = async (content: Block[]) => {
+  const { researcher } = researcherOver(respondWith(content))
+  return researcher.research(PRODUCT)
+}
 
 describe('AnthropicProductResearcher job routing', () => {
   it("asks Claude as the 'research' job and uses the model configured for it", async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, fetch } = stubFetch(respondWith(searched(JSON.stringify(answer()))))
 
-    await make(undefined, 'research').research(PRODUCT)
+    await researcherWith(fetch, undefined, 'research').research(PRODUCT)
 
     expect(calls[0]!.body.model).toBe(ROUTED_TO)
   })
 
   it('does not use the model of any other job', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, fetch } = stubFetch(respondWith(searched(JSON.stringify(answer()))))
     const others = (Object.keys(MODELS) as AiJob[]).filter((job) => job !== 'research')
 
-    for (const job of others) await make(undefined, job).research(PRODUCT)
+    for (const job of others) await researcherWith(fetch, undefined, job).research(PRODUCT)
 
     expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
   })
 
   it("records the call on the ledger under the 'research' job", async () => {
-    stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { fetch } = stubFetch(respondWith(searched(JSON.stringify(answer()))))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(ledger).research(PRODUCT)
+    await researcherWith(fetch, ledger).research(PRODUCT)
 
     expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([['research', MODEL, 'settled']])
   })
 
   it('reserves room for the five searches the request allows, on top of the tokens', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, fetch } = stubFetch(respondWith(searched(JSON.stringify(answer()))))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(ledger).research(PRODUCT)
+    await researcherWith(fetch, ledger).research(PRODUCT)
 
     // Five searches at 10000 micros is 50000 on its own; the 4096-token output allowance at $10 per million adds 40960.
     expect(calls[0]!.body.tools[0].max_uses).toBe(5)
@@ -115,10 +118,10 @@ describe('AnthropicProductResearcher job routing', () => {
   })
 
   it('on Haiku, reserves enough to cover a call that used 100001 input tokens, 4096 output tokens and all 5 searches', async () => {
-    stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { fetch } = stubFetch(respondWith(searched(JSON.stringify(answer()))))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
-    await make(ledger, 'research').research(PRODUCT)
+    await researcherWith(fetch, ledger, 'research').research(PRODUCT)
 
     // ROUTED_TO is claude-haiku-5-5: five searches' worth of results can push the prompt over 100000 tokens, the long tier.
     const worstSeen = costMicros(ROUTED_TO, { inputTokens: 100_001, outputTokens: 4096, cacheWriteTokens: 0, cacheReadTokens: 0, webSearches: 5 })
@@ -236,8 +239,7 @@ describe('AnthropicProductResearcher.research', () => {
     ['nothing but closing braces', () => '}'.repeat(50_000), false],
     ['nothing but opening braces', () => '{'.repeat(50_000), false],
   ])('stays fast on text with 50k unbalanced braces: %s', async (_label, build, found) => {
-    stubFetch(respondWith(searched(build(JSON.stringify(answer())))))
-    const researcher = make()
+    const { researcher } = researcherOver(respondWith(searched(build(JSON.stringify(answer())))))
 
     const started = performance.now()
     const result = await researcher.research(PRODUCT)
@@ -317,9 +319,9 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('asks Claude with the web search tool and no forced tool choice, using the configured model', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
 
-    await make().research(PRODUCT)
+    await researcher.research(PRODUCT)
 
     expect(calls).toHaveLength(1)
     const body = calls[0]!.body
@@ -331,9 +333,9 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('puts every part of the product identity in the prompt', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
 
-    await make().research(PRODUCT)
+    await researcher.research(PRODUCT)
 
     const prompt = requestText(calls[0]!.body)
     expect(prompt).toContain('CeraVe')
@@ -343,10 +345,10 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('researches a product that has no variant', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
     const { variant: _variant, ...withoutVariant } = PRODUCT
 
-    const result = await make().research(withoutVariant)
+    const result = await researcher.research(withoutVariant)
 
     expect(result).toMatchObject({ found: true })
     expect(requestText(calls[0]!.body)).not.toContain('undefined')
@@ -358,9 +360,9 @@ describe('AnthropicProductResearcher.research', () => {
       searchCall('srvtoolu_01', 'CeraVe Hydrating Facial Cleanser ingredients'),
       searchResults('srvtoolu_01', [OFFICIAL, RETAILER]),
     ]
-    const calls = stubFetch(respondWith(paused, 'pause_turn'), respondWith([textBlock(JSON.stringify(answer()))]))
+    const { calls, researcher } = researcherOver(respondWith(paused, 'pause_turn'), respondWith([textBlock(JSON.stringify(answer()))]))
 
-    const result = await make().research(PRODUCT)
+    const result = await researcher.research(PRODUCT)
 
     expect(calls).toHaveLength(2)
     expect(calls[1]!.body.messages.at(-1)).toEqual({ role: 'assistant', content: paused })
@@ -368,14 +370,14 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('lets AnthropicUnavailableError through when Claude is overloaded', async () => {
-    stubFetch(() => errorResponse(529, 'overloaded_error'))
+    const { researcher } = researcherOver(() => errorResponse(529, 'overloaded_error'))
 
-    expect(await caught(make().research(PRODUCT))).toBeInstanceOf(AnthropicUnavailableError)
+    expect(await caught(researcher.research(PRODUCT))).toBeInstanceOf(AnthropicUnavailableError)
   })
 
   it('lets AnthropicRequestError through when the request is rejected', async () => {
-    stubFetch(() => errorResponse(400, 'invalid_request_error'))
+    const { researcher } = researcherOver(() => errorResponse(400, 'invalid_request_error'))
 
-    expect(await caught(make().research(PRODUCT))).toBeInstanceOf(AnthropicRequestError)
+    expect(await caught(researcher.research(PRODUCT))).toBeInstanceOf(AnthropicRequestError)
   })
 })
