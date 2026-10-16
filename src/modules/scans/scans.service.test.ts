@@ -290,8 +290,8 @@ describe('ScanService.create', () => {
     const scan = await create(ctx)
 
     const item = scan.items[0]
-    expect(item.image).toEqual({ kind: 'user', url: expect.stringMatching(/^\/scans\/photos\/[A-Za-z0-9_-]+$/) })
-    const token = item.image.url.replace('/scans/photos/', '')
+    expect(item.image).toEqual({ kind: 'user', url: expect.stringMatching(/^\/api\/v1\/scans\/products\/photos\/[A-Za-z0-9_-]+$/) })
+    const token = item.image.url.replace('/api/v1/scans/products/photos/', '')
     const key = photoKey(scan.id, item.id)
     expect(await verifyPhotoLink(token, PHOTO_SECRET, T0)).toEqual({ key, userId: USER })
     expect(await verifyPhotoLink(token, PHOTO_SECRET, new Date(T0.getTime() + (PHOTO_LINK_TTL_SECONDS - 1) * SECOND))).toEqual({ key, userId: USER })
@@ -1696,7 +1696,7 @@ describe('ScanService.getScan', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
 
-    const token = item.image.url.replace('/scans/photos/', '')
+    const token = item.image.url.replace('/api/v1/scans/products/photos/', '')
     const issuedAt = ctx.now().getTime()
     expect(await verifyPhotoLink(token, PHOTO_SECRET, new Date(issuedAt + (PHOTO_LINK_TTL_SECONDS - 1) * SECOND))).toEqual({ key: photoKey(scanId, itemId), userId: USER })
     expect(await verifyPhotoLink(token, PHOTO_SECRET, new Date(issuedAt + PHOTO_LINK_TTL_SECONDS * SECOND))).toBeNull()
@@ -1713,7 +1713,7 @@ describe('ScanService.getScan', () => {
 })
 
 describe('ScanService.photoForLink', () => {
-  const linkOf = async (ctx: Ctx, scanId: string, itemId: string) => (await itemOf(ctx, scanId, itemId)).image.url.replace('/scans/photos/', '') as string
+  const linkOf = async (ctx: Ctx, scanId: string, itemId: string) => (await itemOf(ctx, scanId, itemId)).image.url.replace('/api/v1/scans/products/photos/', '') as string
   // No runAs: the link is the capability (an app image component cannot send an Authorization header), so opening one
   // needs no signed-in user and the service must not read a request context at all.
   const open = (ctx: Ctx, token: string) => ctx.service.photoForLink(token)

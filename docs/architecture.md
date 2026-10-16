@@ -26,7 +26,7 @@ src/
   container.ts             composition root: the ONLY file that knows concrete classes
   docs.ts                  spec header, /openapi.json and Swagger UI at /docs
   middleware/              requestContext, container, cors, auth
-  lib/                     shared plumbing: factory, errors, openapi, actor, context, jwt, db, http, once, url-safety, image-header
+  lib/                     shared plumbing: factory, errors, openapi, api-version, actor, context, jwt, db, http, once, url-safety, image-header
   modules/<feature>/
     <feature>.routes.ts           thin controller
     <feature>.service.ts          business logic
@@ -260,6 +260,19 @@ Every route is declared with `defineRoute()` on an `openapiApp()` (`lib/openapi.
 handler, so the compiler rejects a handler that returns a status or body its route does not
 declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 
+### API versioning
+Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
+(`/auth`, `/me`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+`client.api.v1.auth`, `client.api.v1.me` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
+describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
+usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
+Anything that builds a link to an API route starts from `API_V1_PREFIX` (the service's photo link does, via `productPhotoUrl`
+in `modules/scans/scans.paths.ts`) rather than writing the path out.
+
+Scans are named by what is scanned: this module is the **product scan**, at `/api/v1/scans/products` (operations
+`createProductScan`, `getProductScan`, ..., tag "Product scans"). `/api/v1/scans/faces` is reserved for face scans. Only
+the HTTP surface carries the name: the module directory, classes, tables, queues, Durable Object and error codes keep `scan`.
+
 - **Schemas** for requests and responses live in `<feature>.schemas.ts`, built with the `z` from
   `@hono/zod-openapi` (it adds `.openapi()`). A response schema gets a component name
   (`.openapi('TrackResponse')`). The presenter's return type is `z.infer<typeof TrackResponse>`.
@@ -358,7 +371,7 @@ It is identity only: later features (skin analysis, goals) keep their own tables
   read the scan, its items, its photo links (minted only inside an owned view) and its event stream; anyone else gets the
   404 `SCAN_NOT_FOUND` another user would get. A link already minted works until it expires (5 minutes).
 - **Quotas stay per account.** The daily photo quotas count by `user_id` (and by IP), so extra profiles cannot multiply AI spend.
-- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
+- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /api/v1/me` is the only place profiles
   show.
 - **Rollout.** Deploys apply migrations (0011 profiles, 0012 `scans.profile_id`) before the new Worker goes live, and if a
   deploy fails after migrating the window lasts until one succeeds. In it the OLD Worker still creates users with no profile
@@ -376,9 +389,9 @@ It is identity only: later features (skin analysis, goals) keep their own tables
     sweep runs. The repository reads `profiles`, another module's table, because no service call can say which scans these are.
   - **Tokens without `pid`.** Tokens the old Worker issued carry no `pid`: the access token is `expired` and the refresh token
     is accepted, so one refresh upgrades the session (see "Transition rule"). Nobody is signed out.
-  - **`GET /me` changed shape**: the user's fields moved under `user`, next to `profile` and `profiles`. The app ships with
-    the change, so an app build from before it misreads `/me` from this deploy on; release them together.
-- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /me` is the only place profiles
+  - **`GET /api/v1/me` changed shape**: the user's fields moved under `user`, next to `profile` and `profiles`. The app ships with
+    the change, so an app build from before it misreads `/api/v1/me` from this deploy on; release them together.
+- **No routes yet.** Creating, switching, renaming and deleting profiles are not built; `GET /api/v1/me` is the only place profiles
   show.
 
 ### Guest cleanup
@@ -417,7 +430,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
   this is cheap) and before `requestContext`, so it (like any middleware before it, such as a future rate limiter)
   runs outside the request context and must not call services that read `currentActor`/`requireUser`, and stores `c.var.auth = { actor, tokenProblem? }`. No header is
   `missing`; a non-Bearer scheme, a bad or wrong-type token is `invalid`; a correctly signed but old one is
-  `expired`. An expired token must not block `/auth/refresh`, and public routes ignore the header. The guards turn
+  `expired`. An expired token must not block `/api/v1/auth/refresh`, and public routes ignore the header. The guards turn
   the problem into `AUTH_REQUIRED`, `TOKEN_EXPIRED` or `TOKEN_INVALID` (401), and a guest on a verified-only route
   into `VERIFICATION_REQUIRED` (403).
 - **Secrets**: `JWT_SECRET` and `DEVICE_ID_KEY` are required (different per environment); `DEVICE_ID_KEY` must never
@@ -427,20 +440,20 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 
 ### Auth routes
 `modules/auth` holds `AuthService` (the only place that combines users, otp and tokens), `auth.routes.ts`
-(`/auth/*`, plus `GET /me` as its own sub-app) and the schemas and presenter. All of it goes through services.
+(`/api/v1/auth/*`, plus `GET /api/v1/me` as its own sub-app) and the schemas and presenter. All of it goes through services.
 
 | Route | Caller | Rate limit (per 60 s) |
 | --- | --- | --- |
-| `POST /auth/anonymous` | public: starts a guest session for `{ deviceId, platform }` | 10 per IP |
-| `POST /auth/otp/send` | bearer (guests included) | 3 per IP and 3 per user |
-| `POST /auth/otp/verify` | bearer: promotes the guest, or signs in as the address's owner | 10 per IP |
-| `POST /auth/refresh` | public: `{ refreshToken }`; the Authorization header is ignored | 30 per IP |
-| `POST /auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
-| `GET /me` | bearer | none |
+| `POST /api/v1/auth/anonymous` | public: starts a guest session for `{ deviceId, platform }` | 10 per IP |
+| `POST /api/v1/auth/otp/send` | bearer (guests included) | 3 per IP and 3 per user |
+| `POST /api/v1/auth/otp/verify` | bearer: promotes the guest, or signs in as the address's owner | 10 per IP |
+| `POST /api/v1/auth/refresh` | public: `{ refreshToken }`; the Authorization header is ignored | 30 per IP |
+| `POST /api/v1/auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
+| `GET /api/v1/me` | bearer | none |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
-  profile (the app reads it from `GET /me`). Refreshing slides the refresh token's 60 days.
-- **`GET /me`** answers `{ user, profile, profiles }`: the user, the profile the session is on, and every profile of the
+  profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
+- **`GET /api/v1/me`** answers `{ user, profile, profiles }`: the user, the profile the session is on, and every profile of the
   account (default first). A session whose `pid` is not among the user's profiles gets 401 `TOKEN_EXPIRED`.
 - **Device ids are HMAC'd** with `DEVICE_ID_KEY` before they reach the database; the raw id is never stored.
 - **Verify and logout unlink the user's devices**, so the device's next bootstrap creates a new guest rather than
@@ -921,7 +934,7 @@ comes in a later PR.
   when the last back photo could not be read, was refused by the model, or is gone.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `recognised` (once read), `product` (a
   `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
-  (`/scans/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
+  (`/api/v1/scans/products/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
 - **create.** Every photo is checked before any is stored, and one bad photo refuses the whole scan: 1 to 10 photos
   (`NO_IMAGES`, `TOO_MANY_IMAGES`), at most 2,000,000 bytes and 1600 pixels on the longest side (`IMAGE_TOO_LARGE`), JPEG
   or WebP (`UNSUPPORTED_IMAGE`). The type is read from the bytes with `readImageHeader`, never from what the caller
@@ -1044,7 +1057,7 @@ comes in a later PR.
   `done` is still owed and the reaper finds the scan; without that the scan would look finished and no one would ever send it. The port
   is `ScanEvents` (`publish` and `subscribe`); `DurableObjectScanEvents` is the production adapter (see "Live updates"),
   and `MemoryScanEvents` records events and subscriptions for tests. The event's item is the service's `ScanItemView`; once
-  serialised it is byte for byte the item `GET /scans/{scanId}` presents (`Date`s become the same ISO strings the presenter writes).
+  serialised it is byte for byte the item `GET /api/v1/scans/products/{scanId}` presents (`Date`s become the same ISO strings the presenter writes).
 - **Guest cleanup.** The container registers a cleaner `{ name: 'scans', deleteFor }` with the users service, backed by
   `ScanDataCleaner` (`scans.cleaner.ts`), which depends only on the repository and the photo store, so the cleanup does not
   build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos and back
@@ -1056,7 +1069,7 @@ comes in a later PR.
   tampered, wrongly signed or expired token, and a link to a photo deleted since, are all 404 `PHOTO_NOT_FOUND`. The
   route that serves it answers with `Cache-Control: private, no-store`. A link therefore works for whoever holds it, for at most 5
   minutes.
-- **Routes** (`scans.routes.ts`, mounted at `/scans`; schemas in `scans.schemas.ts`, shaping in `scans.presenter.ts`). Thin: each
+- **Routes** (`scans.routes.ts`, mounted at `/api/v1/scans/products`; schemas in `scans.schemas.ts`, shaping in `scans.presenter.ts`). Thin: each
   calls one `ScanService` method, which does the sign-in check (`requireUser`) itself, so the guard stays in the service. On the
   confirmation route a request is therefore validated before it is found to be unsigned (an invalid body is 400 or 415 before
   401); the two upload routes put the `signedIn()` middleware in front of the body (see Size), so there an unsigned caller
@@ -1064,12 +1077,12 @@ comes in a later PR.
 
   | Route | Caller | Answers | Limits (per 60 s) |
   | --- | --- | --- | --- |
-  | `POST /scans` | bearer; multipart, 1 to 10 `photos` parts | 202 the scan, every item `recognising`; 400, 401, 413, 415, 429 | 20 per IP, 10 per user |
-  | `GET /scans/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
-  | `POST /scans/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
-  | `POST /scans/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
-  | `GET /scans/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
-  | `GET /scans/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
+  | `POST /api/v1/scans/products` | bearer; multipart, 1 to 10 `photos` parts | 202 the scan, every item `recognising`; 400, 401, 413, 415, 429 | 20 per IP, 10 per user |
+  | `GET /api/v1/scans/products/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
+  | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
+  | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
 
   - **Uploads.** The body is multipart (`multipartBody`). Hono hands one file over bare and several as an array, so the
     `photos` schema takes either and normalises to a list, and does not count it: the service answers `NO_IMAGES` or
@@ -1085,7 +1098,7 @@ comes in a later PR.
     `requireUser` is still the guard. The user limiter needs a user, so it follows. `bodyLimit` comes last: with a
     `Content-Length` over the limit it answers 413 from the header alone, and without one it counts the stream and cuts it
     off, so an oversized upload is never buffered whole. The limit is 10 x 2,000,000 bytes plus 1,000,000 for the multipart
-    framing (21,000,000) on `POST /scans`, one photo plus the same framing on the back photo. Over it is 413 `HTTP_413` in
+    framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
     `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
@@ -1114,15 +1127,15 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   and the reaper find the same object without a lookup. It holds the scan's open client streams in memory and stores nothing.
   It is a named export of `src/index.ts` (the class must be exported from the Worker's main module) and is reached only through
   `DurableObjectScanEvents`, which takes the class as a type-only import. The HTTP app lives in `src/app.ts` and `src/index.ts` re-exports it, because `npm run openapi` loads the app in plain Node and cannot load a module that imports `cloudflare:workers`. `ScanService` never sees it: it uses the `ScanEvents` port.
-- **Route overlap.** `/scans/{scanId}/events` and `/scans/photos/{token}` overlap only for the literal pair `photos`/`events`,
+- **Route overlap.** `/api/v1/scans/products/{scanId}/events` and `/api/v1/scans/products/photos/{token}` overlap only for the literal pair `photos`/`events`,
   which can never be a real scan id (a UUID) or token; that is the Redocly `no-ambiguous-paths` warning, which is left as is.
-- **Opening.** `GET /scans/{scanId}/events` (bearer) calls `ScanService.watch`, which reads the scan (so another profile's scan is
+- **Opening.** `GET /api/v1/scans/products/{scanId}/events` (bearer) calls `ScanService.watch`, which reads the scan (so another profile's scan is
   404 `SCAN_NOT_FOUND`, as a normal JSON error before any stream), and `subscribe`s: the adapter POSTs the scan as JSON to the
   object's `fetch` and returns its streaming response, re-wrapped because a stub's response has immutable headers and CORS and
   secure-headers middleware still run after the route. The route is documented with `sseResponse`, so the compiler does not
   check its return type; the integration tests do. A browser `EventSource` cannot send the bearer token; clients read the body of a `fetch`.
 - **Frames.** Headers `text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`.
-  `event: snapshot` first (the scan as `GET /scans/{scanId}` shows it), then `event: item` per change (data: the item as that
+  `event: snapshot` first (the scan as `GET /api/v1/scans/products/{scanId}` shows it), then `event: item` per change (data: the item as that
   response shows it) and `event: done` with data `{}` when every item is final, after which the object closes every stream of the scan.
   Photo links inside `image.url` are minted per view, so two views of the same item differ in that token only.
 - **Snapshot on reconnect.** There is no replay and no event ids: a client that reconnects gets a fresh snapshot, which is
@@ -1292,7 +1305,7 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
    (+ inferred type) + fake + contract → service → schemas (request + response) → presenter → routes
    (`defineRoute` with `success()` for each 2xx response, `openapiApp().openapi(route, handler)`
    with `ok()` in the handler).
-2. Wire it in `src/container.ts` and expose a getter; mount the routes in `src/app.ts`.
+2. Wire it in `src/container.ts` and expose a getter; mount the routes in `src/app.ts`, on the `v1` sub-app (see "API versioning").
 3. Unit-test the service with the fake (`runAs(...)` if it reads the actor); run the contract
    in both tiers; add a route test in `test/integration/` if the HTTP surface matters.
 4. `npm run openapi` and commit `docs/openapi.json`.

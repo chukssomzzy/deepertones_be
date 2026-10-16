@@ -17,6 +17,7 @@ import type { ProductCategory } from '../../providers/product-research/product-r
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
+import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
 import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewScanItem, Scan, ScanItem } from './scans.types'
 
@@ -773,7 +774,7 @@ export class ScanService {
     } else if (item.photoKey !== null) {
       const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
       const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
-      image = { kind: 'user', url: `/scans/photos/${token}` }
+      image = { kind: 'user', url: productPhotoUrl(token) }
     }
     return {
       id: item.id,

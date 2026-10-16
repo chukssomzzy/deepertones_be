@@ -23,7 +23,7 @@ const NOW = Date.now()
 const SCAN_QUEUE = 'deepertones-scan-items-development'
 /** What a request is asked to hold at most, and what the service accepts per photo (SCAN_POLICY). */
 const MAX_PHOTO_BYTES = 2_000_000
-/** One byte over what POST /scans accepts: 10 photos plus 1,000,000 of multipart framing. */
+/** One byte over what POST /api/v1/scans/products accepts: 10 photos plus 1,000,000 of multipart framing. */
 const OVER_SCAN_BODY_BYTES = 10 * MAX_PHOTO_BYTES + 1_000_000 + 1
 
 const queued: unknown[] = []
@@ -37,7 +37,7 @@ const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) =>
 
 const api = hc<AppType>('http://deepertones.test', { fetch: fetchWorker as typeof fetch })
 // One place that reaches into the scans routes: until the routes are mounted in AppType this is the one line that fails to compile.
-const scansApi = api.scans
+const scansApi = api.api.v1.scans.products
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -82,7 +82,7 @@ const retryAfterOf = (res: Reply) => Number(res.headers.get('Retry-After'))
 /** A guest signed in from its own address. `headers()` is the guest at that address; `headers(ip)` is the same guest from another one. */
 const newGuest = async () => {
   const ip = freshIp()
-  const res = await api.auth.anonymous.$post(
+  const res = await api.api.v1.auth.anonymous.$post(
     { json: { deviceId: `device-routes-${runSalt}-${next()}`, platform: 'ios' } },
     { headers: { 'cf-connecting-ip': ip } },
   )
@@ -109,7 +109,7 @@ const confirm = (guest: Guest, scanId: string, itemId: string, body: Record<stri
 const addBackPhoto = (guest: Guest, scanId: string, itemId: string, photo: File = fileOf(markedJpeg(9), 'back')) =>
   scansApi[':scanId'].items[':itemId']['back-photo'].$post({ param: { scanId, itemId }, form: { photo } }, { headers: guest.headers() })
 const openPhoto = (token: string, headers: Record<string, string> = {}) => scansApi.photos[':token'].$get({ param: { token } }, { headers })
-const tokenOf = (item: ItemView) => item.image!.url.replace('/scans/photos/', '')
+const tokenOf = (item: ItemView) => item.image!.url.replace('/api/v1/scans/products/photos/', '')
 const bytesOf = async (res: { arrayBuffer(): Promise<ArrayBuffer> }) => new Uint8Array(await res.arrayBuffer())
 
 // A plain request, only for what the typed client cannot express (a JSON body on a form route, or a form it would not type).
@@ -164,7 +164,7 @@ const awaitingBackPhoto = async (guest: Guest) => {
   return { scanId: scan.id, itemId }
 }
 
-describe('POST /scans', () => {
+describe('POST /api/v1/scans/products', () => {
   it('accepts one photo with 202, a scan of one recognising item, and a link to the photo that was sent', async () => {
     const guest = await newGuest()
     const photo = markedJpeg(7)
@@ -178,7 +178,7 @@ describe('POST /scans', () => {
       status: 202,
       data: {
         id: expect.any(String),
-        items: [{ id: expect.any(String), position: 0, state: 'recognising', reason: null, image: { kind: 'user', url: expect.stringMatching(/^\/scans\/photos\/[A-Za-z0-9_-]+$/) } }],
+        items: [{ id: expect.any(String), position: 0, state: 'recognising', reason: null, image: { kind: 'user', url: expect.stringMatching(/^\/api\/v1\/scans\/products\/photos\/[A-Za-z0-9_-]+$/) } }],
       },
     })
     const scan = (body as { data: ScanView }).data
@@ -225,7 +225,7 @@ describe('POST /scans', () => {
     it('refuses a JSON body with 415', async () => {
       const guest = await newGuest()
 
-      const res = await plainPost('/scans', JSON.stringify({ photos: [] }), { ...guest.headers(), 'Content-Type': 'application/json' })
+      const res = await plainPost('/api/v1/scans/products', JSON.stringify({ photos: [] }), { ...guest.headers(), 'Content-Type': 'application/json' })
 
       expect(res.status).toBe(415)
       expect(await errorCodeOf(res)).toBe('HTTP_415')
@@ -275,7 +275,7 @@ describe('POST /scans', () => {
     ])('refuses %s with 400 VALIDATION_FAILED', async (_label, makeForm) => {
       const guest = await newGuest()
 
-      const res = await plainPost('/scans', makeForm(), guest.headers())
+      const res = await plainPost('/api/v1/scans/products', makeForm(), guest.headers())
 
       expect(res.status).toBe(400)
       expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
@@ -295,7 +295,7 @@ describe('POST /scans', () => {
     it('answers 413 on a Content-Length over the limit, without reading the body', async () => {
       const guest = await newGuest()
 
-      const res = await plainPost('/scans', new FormData(), { ...guest.headers(), 'Content-Length': String(OVER_SCAN_BODY_BYTES) })
+      const res = await plainPost('/api/v1/scans/products', new FormData(), { ...guest.headers(), 'Content-Length': String(OVER_SCAN_BODY_BYTES) })
 
       expect(res.status).toBe(413)
       expect(await errorCodeOf(res)).toBe('HTTP_413')
@@ -371,7 +371,7 @@ describe('POST /scans', () => {
   })
 })
 
-describe('GET /scans/{scanId}', () => {
+describe('GET /api/v1/scans/products/{scanId}', () => {
   it('shows the owner their scan: its id and items in photo order', async () => {
     const guest = await newGuest()
     const created = await createdScan(guest, [markedJpeg(1), webpPhoto()])
@@ -409,7 +409,7 @@ describe('GET /scans/{scanId}', () => {
   })
 })
 
-describe('POST /scans/{scanId}/items/{itemId}/confirmation', () => {
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation', () => {
   it('takes the corrected product with 202 and moves the item on to matching, queuing the match', async () => {
     const guest = await newGuest()
     const { scanId, itemId } = await awaitingConfirmation(guest)
@@ -469,7 +469,7 @@ describe('POST /scans/{scanId}/items/{itemId}/confirmation', () => {
   })
 })
 
-describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () => {
   it('takes the back photo with 202, moves the item to reading-label and queues the read', async () => {
     const guest = await newGuest()
     const { scanId, itemId } = await awaitingBackPhoto(guest)
@@ -512,7 +512,7 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
     it('refuses a JSON body with 415', async () => {
       const { guest, scanId, itemId } = await waiting()
 
-      const res = await plainPost(`/scans/${scanId}/items/${itemId}/back-photo`, JSON.stringify({ photo: 'x' }), { ...guest.headers(), 'Content-Type': 'application/json' })
+      const res = await plainPost(`/api/v1/scans/products/${scanId}/items/${itemId}/back-photo`, JSON.stringify({ photo: 'x' }), { ...guest.headers(), 'Content-Type': 'application/json' })
 
       expect(res.status).toBe(415)
     })
@@ -520,7 +520,7 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
     // The typed client sends exactly one `photo`, so the shapes it cannot express are sent as a plain form.
     it('refuses two photos, and no photo, with 400 VALIDATION_FAILED, leaving the item waiting', async () => {
       const { guest, scanId, itemId } = await waiting()
-      const path = `/scans/${scanId}/items/${itemId}/back-photo`
+      const path = `/api/v1/scans/products/${scanId}/items/${itemId}/back-photo`
       const two = new FormData()
       two.append('photo', fileOf(markedJpeg(1)))
       two.append('photo', fileOf(markedJpeg(2)))
@@ -540,7 +540,7 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
       const form = new FormData()
       form.append('photo', 'not a file')
 
-      const res = await plainPost(`/scans/${scanId}/items/${itemId}/back-photo`, form, guest.headers())
+      const res = await plainPost(`/api/v1/scans/products/${scanId}/items/${itemId}/back-photo`, form, guest.headers())
 
       expect(res.status).toBe(400)
       expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
@@ -550,7 +550,7 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
     it('answers 413 on a Content-Length over the limit, without reading the body', async () => {
       const { guest, scanId, itemId } = await waiting()
 
-      const res = await plainPost(`/scans/${scanId}/items/${itemId}/back-photo`, new FormData(), {
+      const res = await plainPost(`/api/v1/scans/products/${scanId}/items/${itemId}/back-photo`, new FormData(), {
         ...guest.headers(),
         'Content-Length': String(MAX_PHOTO_BYTES + 1_000_000 + 1),
       })
@@ -611,7 +611,7 @@ describe('POST /scans/{scanId}/items/{itemId}/back-photo', () => {
   })
 })
 
-describe('GET /scans/photos/{token}', () => {
+describe('GET /api/v1/scans/products/photos/{token}', () => {
   it.each([
     ['JPEG', () => markedJpeg(5), 'image/jpeg'],
     ['WebP', () => webpPhoto(), 'image/webp'],
@@ -677,11 +677,11 @@ describe('signing in', () => {
   // Each route is sent a valid request: the confirmation route checks its JSON body before the sign-in, so an empty one would be 400 or 415 and hide the 401.
   // (The two upload routes answer 401 first, whatever the body; see "on the upload routes" below.)
   const bearerRoutes: [string, (headers: Record<string, string>) => Promise<Reply>][] = [
-    ['POST /scans', (headers) => scansApi.$post({ form: { photos: [fileOf(markedJpeg(1))] } }, { headers })],
-    ['GET /scans/{scanId}', (headers) => scansApi[':scanId'].$get({ param: { scanId: crypto.randomUUID() } }, { headers })],
-    ['POST /scans/{scanId}/items/{itemId}/confirmation', (headers) =>
+    ['POST /api/v1/scans/products', (headers) => scansApi.$post({ form: { photos: [fileOf(markedJpeg(1))] } }, { headers })],
+    ['GET /api/v1/scans/products/{scanId}', (headers) => scansApi[':scanId'].$get({ param: { scanId: crypto.randomUUID() } }, { headers })],
+    ['POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation', (headers) =>
       scansApi[':scanId'].items[':itemId'].confirmation.$post({ ...ids(), json: { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as never }, { headers })],
-    ['POST /scans/{scanId}/items/{itemId}/back-photo', (headers) =>
+    ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', (headers) =>
       scansApi[':scanId'].items[':itemId']['back-photo'].$post({ ...ids(), form: { photo: fileOf(markedJpeg(9)) } }, { headers })],
   ]
 
@@ -705,10 +705,10 @@ describe('signing in', () => {
   // An unsigned caller must not cost an upload parse: on both upload routes the sign-in is answered before the body is looked at,
   // so what would otherwise be 413, 415 or 400 is 401.
   describe('on the upload routes, before the body is looked at', () => {
-    const itemPath = () => `/scans/${crypto.randomUUID()}/items/${crypto.randomUUID()}/back-photo`
+    const itemPath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/back-photo`
     const uploads: [string, () => string, number][] = [
-      ['POST /scans', () => '/scans', OVER_SCAN_BODY_BYTES],
-      ['POST /scans/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
+      ['POST /api/v1/scans/products', () => '/api/v1/scans/products', OVER_SCAN_BODY_BYTES],
+      ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
     ]
     const textPart = () => { const form = new FormData(); form.append('photos', 'not a file'); form.append('photo', 'not a file'); return form }
 
@@ -786,32 +786,32 @@ describe('OpenAPI', () => {
   it('documents the sign-in each route needs: bearer everywhere but the public photo link', async () => {
     const { paths } = await documentOf()
 
-    expect(usesBearer(paths['/scans']?.post)).toBe(true)
-    expect(usesBearer(paths['/scans/{scanId}']?.get)).toBe(true)
-    expect(usesBearer(paths['/scans/{scanId}/items/{itemId}/confirmation']?.post)).toBe(true)
-    expect(usesBearer(paths['/scans/{scanId}/items/{itemId}/back-photo']?.post)).toBe(true)
-    expect(paths['/scans/photos/{token}']?.get).toBeDefined()
-    expect(usesBearer(paths['/scans/photos/{token}']?.get)).toBe(false)
+    expect(usesBearer(paths['/api/v1/scans/products']?.post)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}']?.get)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post)).toBe(true)
+    expect(paths['/api/v1/scans/products/photos/{token}']?.get).toBeDefined()
+    expect(usesBearer(paths['/api/v1/scans/products/photos/{token}']?.get)).toBe(false)
   })
 
   it('documents the uploads as multipart, the corrected product as JSON, and the photo as an image', async () => {
     const { paths } = await documentOf()
 
-    expect(paths['/scans']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
-    expect(paths['/scans/{scanId}/items/{itemId}/back-photo']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
-    expect(paths['/scans/{scanId}/items/{itemId}/confirmation']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
-    expect(Object.keys(paths['/scans/photos/{token}']!.get!.responses['200']!.content!).sort()).toEqual(['image/jpeg', 'image/webp'])
+    expect(paths['/api/v1/scans/products']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
+    expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
+    expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
+    expect(Object.keys(paths['/api/v1/scans/products/photos/{token}']!.get!.responses['200']!.content!).sort()).toEqual(['image/jpeg', 'image/webp'])
   })
 
   it('lists the statuses the scan routes can answer with', async () => {
     const { paths } = await documentOf()
     const statuses = (path: string, method: string) => Object.keys(paths[path]![method]!.responses)
 
-    expect(statuses('/scans', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '413', '415', '429']))
-    expect(statuses('/scans/{scanId}', 'get')).toEqual(expect.arrayContaining(['200', '401', '404']))
-    expect(statuses('/scans/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
-    expect(statuses('/scans/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
-    expect(statuses('/scans/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
+    expect(statuses('/api/v1/scans/products', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '413', '415', '429']))
+    expect(statuses('/api/v1/scans/products/{scanId}', 'get')).toEqual(expect.arrayContaining(['200', '401', '404']))
+    expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
+    expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
+    expect(statuses('/api/v1/scans/products/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
   })
 })
 
@@ -832,7 +832,7 @@ describe('profiles', () => {
     const { accessToken } = await tokenService.issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, profile.id)
     return { ...guest, token: accessToken, headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${accessToken}` }) }
   }
-  const watch = (guest: Guest, scanId: string) => fetchWorker(`http://deepertones.test/scans/${scanId}/events`, { headers: guest.headers() })
+  const watch = (guest: Guest, scanId: string) => fetchWorker(`http://deepertones.test/api/v1/scans/products/${scanId}/events`, { headers: guest.headers() })
   const expectNotFound = async (res: Reply) => {
     expect(res.status).toBe(404)
     expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')

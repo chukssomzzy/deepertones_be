@@ -16,11 +16,11 @@ const MAX_BACK_PHOTO_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 const createScan = defineRoute({
   method: 'post',
   path: '/',
-  operationId: 'createScan',
-  tags: ['Scans'],
-  summary: 'Start a scan from 1 to 10 photos',
+  operationId: 'createProductScan',
+  tags: ['Product scans'],
+  summary: 'Start a product scan from 1 to 10 photos',
   description:
-    'Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /scans/{scanId}` for progress. ' +
+    'Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /api/v1/scans/products/{scanId}` for progress. ' +
     'One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).',
   security: bearer,
   // In this order: the address limit counts every caller, signedIn turns away the unsigned before anything is parsed, the user limit
@@ -38,9 +38,9 @@ const createScan = defineRoute({
 const getScan = defineRoute({
   method: 'get',
   path: '/{scanId}',
-  operationId: 'getScan',
-  tags: ['Scans'],
-  summary: 'A scan and where each of its items has got to',
+  operationId: 'getProductScan',
+  tags: ['Product scans'],
+  summary: 'A product scan and where each of its items has got to',
   description: 'Another user\'s scan is 404, the same as one that does not exist.',
   security: bearer,
   request: { params: ScanParams },
@@ -50,12 +50,12 @@ const getScan = defineRoute({
 const watchScan = defineRoute({
   method: 'get',
   path: '/{scanId}/events',
-  operationId: 'watchScan',
-  tags: ['Scans'],
-  summary: 'Follow a scan live, as server-sent events',
+  operationId: 'watchProductScan',
+  tags: ['Product scans'],
+  summary: 'Follow a product scan live, as server-sent events',
   description:
     'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as ' +
-    '`GET /scans/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
+    '`GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
     '`ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. ' +
     'A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
     'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
@@ -68,8 +68,8 @@ const watchScan = defineRoute({
 const confirmItem = defineRoute({
   method: 'post',
   path: '/{scanId}/items/{itemId}/confirmation',
-  operationId: 'confirmScanItem',
-  tags: ['Scans'],
+  operationId: 'confirmProductScanItem',
+  tags: ['Product scans'],
   summary: 'Correct what a doubtful photo was read as',
   description: 'For an item in `needs-confirmation`. The item goes on to matching with the product given.',
   security: bearer,
@@ -80,8 +80,8 @@ const confirmItem = defineRoute({
 const addBackPhoto = defineRoute({
   method: 'post',
   path: '/{scanId}/items/{itemId}/back-photo',
-  operationId: 'addScanItemBackPhoto',
-  tags: ['Scans'],
+  operationId: 'addProductScanItemBackPhoto',
+  tags: ['Product scans'],
   summary: 'Send a photo of the ingredient list',
   description: 'For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.',
   security: bearer,
@@ -98,9 +98,9 @@ const addBackPhoto = defineRoute({
 const getPhoto = defineRoute({
   method: 'get',
   path: '/photos/{token}',
-  operationId: 'getScanPhoto',
-  tags: ['Scans'],
-  summary: 'The photo a link from a scan opens',
+  operationId: 'getProductScanPhoto',
+  tags: ['Product scans'],
+  summary: 'The photo a link from a product scan opens',
   description:
     'Public: the signed link is the credential, and it works for 5 minutes for whoever holds it. Any Authorization header is ignored. ' +
     'A link that is malformed, tampered with, expired or to a photo since deleted is 404 PHOTO_NOT_FOUND.',

@@ -2,7 +2,7 @@ import { factory } from '../lib/factory'
 
 /**
  * Turns `Authorization: Bearer <access token>` into `c.var.auth` for requestContext. It never
- * responds: an expired token must not block /auth/refresh, and public routes must ignore a bad
+ * responds: an expired token must not block /api/v1/auth/refresh, and public routes must ignore a bad
  * header. The guards (requireUser, requireVerified) turn the recorded problem into the right 401.
  * No database read here; the token version is checked only at refresh.
  */

@@ -59,7 +59,7 @@ export const mountDocs = (app: OpenAPIHono<AppEnv>) => {
     type: 'http',
     scheme: 'bearer',
     bearerFormat: 'JWT',
-    description: 'The access token from /auth/anonymous, /auth/otp/verify or /auth/refresh.',
+    description: 'The access token from /api/v1/auth/anonymous, /api/v1/auth/otp/verify or /api/v1/auth/refresh.',
   })
   app.get('/openapi.json', docsEnabled, (c) =>
     c.json(app.getOpenAPI31Document({ ...apiDocument, servers: serversFor(new URL(c.req.url).origin) })),
