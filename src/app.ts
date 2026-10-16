@@ -4,6 +4,7 @@ import { logger } from 'hono/logger'
 import { requestId } from 'hono/request-id'
 import { secureHeaders } from 'hono/secure-headers'
 import { mountDocs } from './docs'
+import { API_V1_PREFIX } from './lib/api-version'
 import { errorHandler, notFoundHandler } from './lib/errors'
 import { openapiApp } from './lib/openapi'
 import { auth } from './middleware/auth'
@@ -12,6 +13,7 @@ import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
 import { authRoutes, meRoutes } from './modules/auth/auth.routes'
 import { healthRoutes } from './modules/health/health.routes'
+import { PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
 import { scanRoutes } from './modules/scans/scans.routes'
 
 export const app = openapiApp()
@@ -25,7 +27,9 @@ app.use(requestId(), logger(), cors, secureHeaders(), container, auth, requestCo
 
 // Keep this a single chain: AppType is inferred from it, and the frontend's
 // typed client (hc<AppType>) only sees routes mounted inside the chain.
-const routes = app.route('/health', healthRoutes).route('/auth', authRoutes).route('/me', meRoutes).route('/scans', scanRoutes)
+// Everything but /health lives under API_V1_PREFIX: one sub-app carries the versioned routes so a future v2 sits beside it.
+const v1 = openapiApp().route('/auth', authRoutes).route('/me', meRoutes).route(PRODUCT_SCANS_PATH, scanRoutes)
+const routes = app.route('/health', healthRoutes).route(API_V1_PREFIX, v1)
 
 mountDocs(app)
 app.onError(errorHandler)

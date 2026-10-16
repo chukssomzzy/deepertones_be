@@ -64,7 +64,7 @@ export const SessionResponse = z
   .object({
     tokens: z.object({
       accessToken: z.string().openapi({ description: 'Send as `Authorization: Bearer ...`. Lives 15 minutes.' }),
-      refreshToken: z.string().openapi({ description: 'Send only to `/auth/refresh`. Lives 60 days from each use.' }),
+      refreshToken: z.string().openapi({ description: 'Send only to `/api/v1/auth/refresh`. Lives 60 days from each use.' }),
       accessExpiresAt: z.iso.datetime(),
       refreshExpiresAt: z.iso.datetime(),
     }),

@@ -93,20 +93,21 @@ else console.error(body.error.code) // see "Response shape"
 ## Auth for the app
 
 Everyone is a user: a guest (`status: "anonymous"`) tied to the device, who becomes `verified` by proving an email.
-Every success response is `{ success, status, message, data }`; `data` below is that `data`.
+Every success response is `{ success, status, message, data }`; `data` below is that `data`. All API routes live under
+`/api/v1`; only `/health`, `/docs` and `/openapi.json` are at the root.
 
-1. **At app start** call `POST /auth/anonymous` with `{ deviceId, platform: "ios" | "android" }`. The device id is
+1. **At app start** call `POST /api/v1/auth/anonymous` with `{ deviceId, platform: "ios" | "android" }`. The device id is
    Android's `getAndroidId`, or on iOS a UUID you generate once and keep in the Keychain (`expo-secure-store`). The
    same device id gets the same guest. You get `{ tokens, user }`.
 2. **Store the tokens in `expo-secure-store`.** Send `Authorization: Bearer <accessToken>` on every call. The access
    token lives 15 minutes, the refresh token 60 days (each refresh restarts the 60 days).
-3. **On a 401 with `TOKEN_EXPIRED`** call `POST /auth/refresh` with `{ refreshToken }`, store the new pair and retry.
+3. **On a 401 with `TOKEN_EXPIRED`** call `POST /api/v1/auth/refresh` with `{ refreshToken }`, store the new pair and retry.
    **On `TOKEN_INVALID`** (from any call, including refresh) throw the stored tokens away and go back to step 1.
-4. **To sign in**, with the guest's token: `POST /auth/otp/send` with `{ channel: "email", address }`, then
-   `POST /auth/otp/verify` with `{ channel, address, code }`. Verify returns a new session: store it, replacing
+4. **To sign in**, with the guest's token: `POST /api/v1/auth/otp/send` with `{ channel: "email", address }`, then
+   `POST /api/v1/auth/otp/verify` with `{ channel, address, code }`. Verify returns a new session: store it, replacing
    the old one. If the address already belongs to an account you are signed in as that account, and the guest is left
-   behind. `GET /me` returns the current user.
-5. **To log out** call `POST /auth/logout` with `{ deviceId, platform }` and the bearer token. It signs the user out
+   behind. `GET /api/v1/me` returns the current user.
+5. **To log out** call `POST /api/v1/auth/logout` with `{ deviceId, platform }` and the bearer token. It signs the user out
    on every device (their other devices' refresh then fails with `TOKEN_INVALID`) and returns a fresh guest session
    to store.
 
@@ -116,7 +117,7 @@ else is a 400 `VALIDATION_FAILED` and costs no attempt.
 Error codes to handle (in `error.code`):
 
 - `AUTH_REQUIRED` (401): no token. `TOKEN_EXPIRED` (401): refresh. `TOKEN_INVALID` (401): start over from step 1.
-- `USER_NOT_FOUND` (404, on `/me` and logout): the account is gone; re-bootstrap.
+- `USER_NOT_FOUND` (404, on `/api/v1/me` and logout): the account is gone; re-bootstrap.
 - `RATE_LIMITED` (429): wait `Retry-After` seconds.
 - `ACCOUNT_LINKING_UNAVAILABLE` (409): a verified user tried to add a different, unowned email. Not supported yet;
   no code is sent or used. `NOT_A_GUEST` (409) should now be unreachable in practice.
