@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
+import { photoStoreContract } from './photo-store.contract'
+import type { PhotoEnvironment } from './photo-store.provider'
 import { R2PhotoStore } from './r2.photo-store'
 
 const KEY = 'photos/test/user-1/scan-1/item-1.jpg'
@@ -46,7 +48,9 @@ const fakeBucket = () => {
   return { bucket: { put, get, delete: del } as unknown as R2Bucket, put, get, del, objects, seed }
 }
 
-const make = (fake = fakeBucket()) => ({ store: new R2PhotoStore({ bucket: fake.bucket }), fake })
+const make = (fake = fakeBucket(), environment: PhotoEnvironment = 'test') => ({ store: new R2PhotoStore({ bucket: fake.bucket, environment }), fake })
+
+photoStoreContract('R2PhotoStore', (environment) => make(fakeBucket(), environment).store)
 
 const caught = async (promise: Promise<unknown>) => {
   try {
@@ -74,7 +78,7 @@ describe('R2PhotoStore.put', () => {
     const put = vi.fn(async () => {
       throw new Error('R2 unavailable')
     })
-    const store = new R2PhotoStore({ bucket: { put } as unknown as R2Bucket })
+    const store = new R2PhotoStore({ bucket: { put } as unknown as R2Bucket, environment: 'test' })
 
     await expect(store.put(KEY, JPEG)).rejects.toThrow('R2 unavailable')
   })
@@ -200,7 +204,7 @@ describe('R2PhotoStore.deleteMany', () => {
     const del = vi.fn(async () => {
       throw new Error('R2 unavailable')
     })
-    const store = new R2PhotoStore({ bucket: { delete: del } as unknown as R2Bucket })
+    const store = new R2PhotoStore({ bucket: { delete: del } as unknown as R2Bucket, environment: 'test' })
 
     await expect(store.deleteMany([KEY])).rejects.toThrow('R2 unavailable')
   })
@@ -214,8 +218,10 @@ describe('R2PhotoStore keys', () => {
     'photos/test/user-1/scan-1/item-1.webp',
     'photos/production/0b9f3c1e-7a2d-4e5f-8c6b-1d2e3f4a5b6c/1c2d3e4f-0000-4a5b-8c6d-7e8f9a0b1c2d/9f8e7d6c-1111-4b2a-9c3d-4e5f6a7b8c9d.webp',
     'photos/test/u/s/i.jpg',
+    'photos/test/user-1/scan-1/item-1-back.jpg',
+    'photos/test/user-1/scan-1/item-1-back.webp',
   ])('accepts the key %s in every method', async (key) => {
-    const { store, fake } = make()
+    const { store, fake } = make(fakeBucket(), key.split('/')[1] as PhotoEnvironment)
 
     await store.put(key, key.endsWith('.webp') ? WEBP : JPEG)
     await expect(store.get(key)).resolves.not.toBeNull()
@@ -231,6 +237,8 @@ describe('R2PhotoStore keys', () => {
     ['no photos/ prefix', 'private/test/user-1/scan-1/item-1.jpg'],
     ['a leading slash', '/photos/test/user-1/scan-1/item-1.jpg'],
     ['an unknown environment', 'photos/prod/user-1/scan-1/item-1.jpg'],
+    ['another environment than the store\'s', 'photos/production/user-1/scan-1/item-1.jpg'],
+    ['the environment as a prefix of a longer name', 'photos/test2/user-1/scan-1/item-1.jpg'],
     ['an uppercase environment', 'photos/Production/user-1/scan-1/item-1.jpg'],
     ['no environment', 'photos/user-1/scan-1/item-1.jpg'],
     ['a missing item segment', 'photos/test/user-1/item-1.jpg'],
@@ -269,5 +277,19 @@ describe('R2PhotoStore keys', () => {
     expect(fake.put).not.toHaveBeenCalled()
     expect(fake.get).not.toHaveBeenCalled()
     expect(fake.del).not.toHaveBeenCalled()
+  })
+})
+
+describe('R2PhotoStore media rules', () => {
+  it.each([
+    ['a webp under a .jpg key', KEY, WEBP],
+    ['a jpeg under a .webp key', WEBP_KEY, JPEG],
+    ['a png', KEY, { bytes: new Uint8Array([1]), mediaType: 'image/png' } as unknown as ProductImage],
+  ])('refuses to put %s and leaves the bucket untouched', async (_label, key, image) => {
+    const { store, fake } = make()
+
+    await expect(store.put(key, image)).rejects.toThrow(/media type/i)
+
+    expect(fake.put).not.toHaveBeenCalled()
   })
 })

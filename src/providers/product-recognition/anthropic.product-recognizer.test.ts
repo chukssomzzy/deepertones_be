@@ -322,6 +322,38 @@ describe('AnthropicProductRecognizer links and markup', () => {
   })
 })
 
+describe('AnthropicProductRecognizer hidden characters', () => {
+  const fields = ['brand', 'name', 'variant'] as const
+  const hidden = [
+    ['a NUL', 'Glow\u0000 Co'],
+    ['a newline', 'Glow\nCo'],
+    ['a tab', 'Glow\tCo'],
+    ['a right-to-left override (U+202E)', 'Glow\u202eCo'],
+    ['a zero-width space (U+200B)', 'Glow\u200b Co'],
+    ['a zero-width joiner (U+200D)', 'Glow\u200dCo'],
+    ['a soft hyphen (U+00AD)', 'Glow\u00adCo'],
+  ] as const
+  const cases = fields.flatMap((field) => hidden.map(([label, value]) => [field, label, value] as const))
+
+  it.each(cases)('treats a %s with %s as unreadable', async (field, _label, value) => {
+    stubFetch(structured(product({ [field]: value })))
+
+    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+  })
+
+  it.each(fields)('treats a %s that is only a zero-width space as unreadable', async (field) => {
+    stubFetch(structured(product({ [field]: '\u200b' })))
+
+    await expect(make().recognize(JPEG)).resolves.toStrictEqual({ classification: 'unreadable' })
+  })
+
+  it('accepts accented and non-Latin text, which has no hidden characters', async () => {
+    stubFetch(structured(product({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })))
+
+    await expect(make().recognize(JPEG)).resolves.toMatchObject({ brand: 'Nuxe Crème', name: 'Huile Prodigieuse® 油', variant: 'Néroli' })
+  })
+})
+
 describe('AnthropicProductRecognizer errors', () => {
   it('throws AnthropicRefusalError when the model refuses', async () => {
     stubFetch(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))

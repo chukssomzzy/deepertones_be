@@ -8,7 +8,8 @@ import type { LabelReader, LabelReading } from './label-reader.provider'
 const MAX_TOKENS = 4096
 const MAX_INGREDIENTS = 150
 const MAX_INGREDIENT_LENGTH = 120
-const CONTROL_CHARACTER = /\p{Cc}/u
+// Control characters and invisible format characters (a right-to-left override, a zero-width space) can disguise an ingredient.
+const HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
 
 const SYSTEM_PROMPT = `You read the ingredient list off a photo of a beauty or personal-care product label for Deeper Tones, an app for people with deeper skin tones.
 
@@ -61,6 +62,6 @@ const accept = ({ readable, ingredients }: { readable?: unknown; ingredients?: u
   if (readable === false || !Array.isArray(ingredients) || !ingredients.every((entry) => typeof entry === 'string')) return NOT_READABLE
   const entries = (ingredients as string[]).map((entry) => entry.trim()).filter((entry) => entry !== '')
   if (entries.length === 0 || entries.length > MAX_INGREDIENTS) return NOT_READABLE
-  if (entries.some((entry) => entry.length > MAX_INGREDIENT_LENGTH || CONTROL_CHARACTER.test(entry) || hasLinkOrMarkup(entry))) return NOT_READABLE
+  if (entries.some((entry) => entry.length > MAX_INGREDIENT_LENGTH || HIDDEN_CHARACTER.test(entry) || hasLinkOrMarkup(entry))) return NOT_READABLE
   return { readable: true, ingredients: entries }
 }

@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
 import { MemoryPhotoStore } from './memory.photo-store'
+import { photoStoreContract } from './photo-store.contract'
+
+photoStoreContract('MemoryPhotoStore', (environment) => new MemoryPhotoStore({ environment }))
 
 const KEY_A = 'photos/test/user-1/scan-1/item-1.jpg'
 const KEY_B = 'photos/test/user-1/scan-1/item-2.webp'
@@ -10,7 +13,7 @@ const WEBP: ProductImage = { bytes: new Uint8Array([4, 5]), mediaType: 'image/we
 
 describe('MemoryPhotoStore', () => {
   it('returns what was put under a key, and null for a key it does not hold', async () => {
-    const store = new MemoryPhotoStore()
+    const store = new MemoryPhotoStore({ environment: 'test' })
 
     await store.put(KEY_A, JPEG)
 
@@ -19,7 +22,7 @@ describe('MemoryPhotoStore', () => {
   })
 
   it('delete removes one key, and deleting a missing key is not an error', async () => {
-    const store = new MemoryPhotoStore()
+    const store = new MemoryPhotoStore({ environment: 'test' })
     await store.put(KEY_A, JPEG)
     await store.put(KEY_B, WEBP)
 
@@ -31,7 +34,7 @@ describe('MemoryPhotoStore', () => {
   })
 
   it('deleteMany removes every key it is given, ignores missing ones, and leaves the rest', async () => {
-    const store = new MemoryPhotoStore()
+    const store = new MemoryPhotoStore({ environment: 'test' })
     await store.put(KEY_A, JPEG)
     await store.put(KEY_B, WEBP)
     await store.put(KEY_C, WEBP)

@@ -8,6 +8,8 @@ import type { ProductRecognizer, Recognition } from './product-recognizer.provid
 // Haiku 5.5's adaptive thinking counts against max_tokens: a small budget can be spent thinking and cut the answer off.
 const MAX_TOKENS = 4096
 const MAX_FIELD_LENGTH = 120
+// Control characters and invisible format characters (a right-to-left override, a zero-width space) can disguise a name.
+const HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
 
 const CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable'] as const
 const CATEGORIES: readonly ProductCategory[] = ['skin', 'hair', 'body', 'makeup', 'other']
@@ -43,12 +45,12 @@ type Answer = Partial<Record<'classification' | 'brand' | 'name' | 'variant' | '
 
 const UNREADABLE: Recognition = { classification: 'unreadable' }
 
-/** A trimmed string no longer than the bound and free of links and markup, or undefined. An empty string stays empty. */
+/** A trimmed string no longer than the bound and free of hidden characters, links and markup, or undefined. An empty string stays empty. */
 const cleanText = (value: unknown): string | undefined => {
   if (value === undefined || value === null) return ''
   if (typeof value !== 'string') return undefined
   const text = value.trim()
-  return text.length <= MAX_FIELD_LENGTH && !hasLinkOrMarkup(text) ? text : undefined
+  return text.length <= MAX_FIELD_LENGTH && !HIDDEN_CHARACTER.test(text) && !hasLinkOrMarkup(text) ? text : undefined
 }
 
 /** Names the product in a photo with Claude. The model is not trusted: anything out of bounds is `unreadable`. */

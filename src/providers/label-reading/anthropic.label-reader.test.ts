@@ -226,6 +226,11 @@ describe('AnthropicLabelReader bounds', () => {
     ['a carriage return inside the entry', 'Aqua\rGlycerin'],
     ['an escape', 'Aqua\u001b[31m'],
     ['DEL', 'Aqua\u007f'],
+    ['a right-to-left override (U+202E)', 'Aqua\u202eGlycerin'],
+    ['a zero-width space (U+200B)', 'Aq\u200bua'],
+    ['a zero-width joiner (U+200D)', 'Aqua\u200dGlycerin'],
+    ['a soft hyphen (U+00AD)', 'Glycer\u00adin'],
+    ['a byte order mark inside the entry (U+FEFF)', 'Aqua\ufeffGlycerin'],
   ])('is not readable when an entry has %s', async (_label, entry) => {
     stubFetch(structured(answer(['Water', entry, 'Glycerin'])))
 

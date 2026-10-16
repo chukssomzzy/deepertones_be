@@ -31,7 +31,13 @@ const open = (token: string) => {
 const seal = (payload: string, signature: string) => toB64url(encoder.encode(`${payload}.${signature}`))
 
 const sign = (overrides: Partial<{ key: string; userId: string; expiresAt: Date }> = {}, secret = SECRET) =>
-  signPhotoLink({ key: KEY, userId: USER, expiresAt: EXPIRES, ...overrides }, secret)
+  signPhotoLink({ key: KEY, userId: USER, expiresAt: EXPIRES, ...overrides }, secret, NOW)
+
+/** A token with a valid signature over any claims, made with WebCrypto here: a link the real signer would refuse to mint. */
+const forge = async (claims: Record<string, unknown>, secret = SECRET) => {
+  const payload = JSON.stringify(claims)
+  return seal(payload, toB64url(await hmacWithHkdf(secret, 'deepertones/photo-link/v1', payload)))
+}
 
 /** HMAC-SHA-256 under a key HKDF-derived from the secret with the given info (empty salt, 256 bits): a near miss the real key must not match. */
 const hmacWithHkdf = async (secret: string, info: string, data: string) => {
@@ -130,6 +136,88 @@ describe('verifyPhotoLink expiry', () => {
   })
 })
 
+describe('the link lifetime cap', () => {
+  const MS = PHOTO_LINK_TTL_SECONDS * 1000
+
+  it('signs a link that ends exactly one TTL from now, and it verifies right up to its end', async () => {
+    const token = await sign({ expiresAt: new Date(NOW.getTime() + MS) })
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toStrictEqual({ key: KEY, userId: USER })
+  })
+
+  it.each([
+    ['1 millisecond over', MS + 1],
+    ['an hour', 3_600_000],
+    ['a year', 365 * 24 * 3_600_000],
+  ])('refuses to sign a link that ends %s after now', async (_label, ahead) => {
+    await expect(sign({ expiresAt: new Date(NOW.getTime() + ahead) })).rejects.toThrow(/longer than 300 seconds/)
+  })
+
+  it('refuses to sign an expiry that is not a time', async () => {
+    await expect(sign({ expiresAt: new Date(Number.NaN) })).rejects.toThrow(/expiry/i)
+  })
+
+  it('measures the cap from the clock it is given, not from the real one', async () => {
+    const later = new Date(NOW.getTime() + 10 * MS)
+
+    await expect(signPhotoLink({ key: KEY, userId: USER, expiresAt: new Date(later.getTime() + MS) }, SECRET, later)).resolves.toEqual(expect.any(String))
+    await expect(signPhotoLink({ key: KEY, userId: USER, expiresAt: new Date(later.getTime() + MS + 1) }, SECRET, later)).rejects.toThrow()
+  })
+
+  it('verifies a forged link that ends exactly one TTL from now', async () => {
+    const token = await forge({ key: KEY, userId: USER, exp: NOW.getTime() + MS })
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toStrictEqual({ key: KEY, userId: USER })
+  })
+
+  it.each([
+    ['1 millisecond over', MS + 1],
+    ['an hour', 3_600_000],
+    ['a year', 365 * 24 * 3_600_000],
+    ['the far future', 8.64e15],
+  ])('returns null for a validly signed link that ends %s after now', async (_label, ahead) => {
+    const token = await forge({ key: KEY, userId: USER, exp: NOW.getTime() + ahead })
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toBeNull()
+  })
+})
+
+describe('signPhotoLink user binding', () => {
+  it.each([
+    ['another user', 'photos/test/user-2/scan-1/item-1.jpg'],
+    ['no user segment', 'photos/test'],
+    ['an empty user segment', 'photos/test//scan-1/item-1.jpg'],
+    ['a key outside photos/', 'catalog/test/user-1/scan-1/item-1.jpg'],
+    ['the user id as a prefix of the segment', 'photos/test/user-10/scan-1/item-1.jpg'],
+    ['the user id in the wrong segment', 'photos/user-1/test/scan-1/item-1.jpg'],
+  ])('refuses to sign a key with %s', async (_label, key) => {
+    await expect(sign({ key })).rejects.toThrow(/belong to the user/)
+  })
+
+  it('refuses an empty user id', async () => {
+    await expect(sign({ userId: '', key: 'photos/test//scan-1/item-1.jpg' })).rejects.toThrow(/belong to the user/)
+  })
+
+  it('signs the back photo of the same user', async () => {
+    const key = 'photos/test/user-1/scan-1/item-1-back.webp'
+
+    await expect(verifyPhotoLink(await sign({ key }), SECRET, NOW)).resolves.toStrictEqual({ key, userId: USER })
+  })
+})
+
+describe('the secret', () => {
+  it('refuses to sign with an empty secret', async () => {
+    await expect(sign({}, '')).rejects.toThrow(/empty secret/)
+  })
+
+  it('verifies nothing with an empty secret, not even a link forged under it', async () => {
+    const token = await forge({ key: KEY, userId: USER, exp: EXPIRES.getTime() }, '')
+
+    await expect(verifyPhotoLink(token, '', NOW)).resolves.toBeNull()
+    await expect(verifyPhotoLink(await sign(), '', NOW)).resolves.toBeNull()
+  })
+})
+
 describe('verifyPhotoLink forgery', () => {
   it('refuses a link signed with a different secret', async () => {
     const token = await sign({}, OTHER_SECRET)
@@ -164,8 +252,8 @@ describe('verifyPhotoLink forgery', () => {
   // Each field is covered by the signature: another link's payload under this link's signature is refused.
   it.each([
     ['key', { key: 'photos/test/user-1/scan-1/item-9.jpg' }],
-    ['user', { userId: 'user-2' }],
-    ['expiry', { expiresAt: at(PHOTO_LINK_TTL_SECONDS * 12) }],
+    ['user', { userId: 'user-2', key: 'photos/test/user-2/scan-1/item-1.jpg' }],
+    ['expiry', { expiresAt: at(PHOTO_LINK_TTL_SECONDS / 2) }],
   ])('refuses a link whose %s was swapped for another link\'s', async (_field, other) => {
     const original = open(await sign())
     const swapped = open(await sign(other))
@@ -223,7 +311,7 @@ describe('verifyPhotoLink malformed input', () => {
 
 describe('verifyPhotoLink token length', () => {
   // A longer user id makes a longer token, so a correctly signed token can be put either side of 2048 characters.
-  const tokenFor = (idLength: number) => sign({ userId: 'u'.repeat(idLength) })
+  const tokenFor = (idLength: number) => sign({ userId: 'u'.repeat(idLength), key: `photos/test/${'u'.repeat(idLength)}/scan-1/item-1.jpg` })
 
   it('accepts the longest signed token that fits in 2048 characters and refuses the next one up', async () => {
     // Token length never shrinks as the id grows, so bisect for the longest id whose token still fits.
@@ -240,7 +328,7 @@ describe('verifyPhotoLink token length', () => {
     expect(longest.length).toBeLessThanOrEqual(MAX_TOKEN_LENGTH)
     expect(longest.length).toBeGreaterThan(MAX_TOKEN_LENGTH - 8)
     expect(tooLong.length).toBeGreaterThan(MAX_TOKEN_LENGTH)
-    await expect(verifyPhotoLink(longest, SECRET, NOW)).resolves.toStrictEqual({ key: KEY, userId: 'u'.repeat(fits) })
+    await expect(verifyPhotoLink(longest, SECRET, NOW)).resolves.toStrictEqual({ key: `photos/test/${'u'.repeat(fits)}/scan-1/item-1.jpg`, userId: 'u'.repeat(fits) })
     await expect(verifyPhotoLink(tooLong, SECRET, NOW)).resolves.toBeNull()
   })
 })
