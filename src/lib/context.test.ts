@@ -42,8 +42,8 @@ describe('requestContext middleware', () => {
 })
 
 const PUBLIC: Actor = { kind: 'public' }
-const GUEST: Actor = { kind: 'user', userId: 'u_1', status: 'anonymous' }
-const VERIFIED: Actor = { kind: 'user', userId: 'u_2', status: 'verified' }
+const GUEST: Actor = { kind: 'user', userId: 'u_1', status: 'anonymous', profileId: 'p_1' }
+const VERIFIED: Actor = { kind: 'user', userId: 'u_2', status: 'verified', profileId: 'p_2' }
 const SYSTEM: Actor = { kind: 'system', job: 'nightly' }
 
 const withProblem = <T>(actor: Actor, tokenProblem: 'missing' | 'expired' | 'invalid' | undefined, fn: () => T) =>

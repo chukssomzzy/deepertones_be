@@ -1,10 +1,12 @@
-import { createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test'
+import { abortAllDurableObjects, createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
 import { hc } from 'hono/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
+import { createDb } from '../../src/lib/db'
 import { signPhotoLink } from '../../src/lib/photo-link'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
 import { messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
@@ -629,7 +631,7 @@ describe('GET /scans/photos/{token}', () => {
   it('ignores an Authorization header that is broken or expired', async () => {
     const guest = await newGuest()
     const scan = await createdScan(guest)
-    const expired = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 })
+    const expired = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, 'any-profile')
     const token = tokenOf(scan.items[0]!)
 
     expect((await openPhoto(token, { Authorization: 'Bearer not.a.jwt' })).status).toBe(200)
@@ -692,7 +694,7 @@ describe('signing in', () => {
 
   it.each(bearerRoutes)('%s answers 401 TOKEN_EXPIRED for an access token past its 15 minutes', async (_route, call) => {
     const guest = await newGuest()
-    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 })
+    const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, 'any-profile')
 
     const res = await call({ 'cf-connecting-ip': freshIp(), Authorization: `Bearer ${old.accessToken}` })
 
@@ -733,7 +735,7 @@ describe('signing in', () => {
 
     it.each(uploads)('%s answers 401 TOKEN_EXPIRED, not 400, to an expired token with a form that does not validate', async (_route, path) => {
       const guest = await newGuest()
-      const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 })
+      const old = await new TokenService({ secret: env.JWT_SECRET, now: () => new Date(NOW - 16 * MINUTE) }).issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, 'any-profile')
 
       const res = await plainPost(path(), textPart(), { 'cf-connecting-ip': freshIp(), Authorization: `Bearer ${old.accessToken}` })
 
@@ -810,5 +812,107 @@ describe('OpenAPI', () => {
     expect(statuses('/scans/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
     expect(statuses('/scans/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
     expect(statuses('/scans/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
+  })
+})
+
+// --- profiles: a scan belongs to the profile that made it ---
+// There is no route to make a second profile yet, so one is inserted through the repository and a token for it is minted with
+// the token service. The scan helpers above then work for either profile of the account.
+
+describe('profiles', () => {
+  const profiles = new D1ProfilesRepository(createDb(env.DB))
+  const tokenService = new TokenService({ secret: env.JWT_SECRET })
+
+  afterEach(() => abortAllDurableObjects())
+
+  /** The same account acting as a second profile of its own: a guest whose token names a new profile. */
+  const asSecondProfile = async (guest: Guest): Promise<Guest> => {
+    const profile = { id: crypto.randomUUID(), userId: guest.userId, displayName: null, isDefault: false, createdAt: new Date(NOW + MINUTE) }
+    await profiles.insert(profile)
+    const { accessToken } = await tokenService.issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, profile.id)
+    return { ...guest, token: accessToken, headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${accessToken}` }) }
+  }
+  const watch = (guest: Guest, scanId: string) => fetchWorker(`http://deepertones.test/scans/${scanId}/events`, { headers: guest.headers() })
+  const expectNotFound = async (res: Reply) => {
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+  }
+
+  it('shows a scan only to the profile that made it: the account\'s other profile gets 404 SCAN_NOT_FOUND, and the maker still sees it', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const scan = await createdScan(first)
+
+    await expectNotFound(await getScan(second, scan.id))
+    const shown = await getScan(first, scan.id)
+    expect(shown.status).toBe(200)
+    expect((await dataOf<ScanView>(shown)).id).toBe(scan.id)
+  })
+
+  it('files a scan under the active profile, not the default one: what the second profile makes, the first cannot see', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const scan = await createdScan(second)
+
+    const own = await getScan(second, scan.id)
+    expect(own.status).toBe(200)
+    expect((await dataOf<ScanView>(own)).id).toBe(scan.id)
+    await expectNotFound(await getScan(first, scan.id))
+  })
+
+  it('opens the live event stream only for the profile that made the scan; another profile of the account gets a plain 404', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const scan = await createdScan(first)
+
+    const other = await watch(second, scan.id)
+    expect(other.headers.get('Content-Type')).toContain('application/json')
+    await expectNotFound(other)
+    const own = await watch(first, scan.id)
+    expect(own.status).toBe(200)
+    expect(own.headers.get('Content-Type')).toContain('text/event-stream')
+    await own.body!.cancel()
+  })
+
+  it('refuses another profile\'s confirmation with 404 SCAN_NOT_FOUND and changes nothing; the maker\'s confirmation is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingConfirmation(first)
+
+    await expectNotFound(await confirm(second, scanId, itemId))
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-confirmation')
+    expect((await confirm(first, scanId, itemId)).status).toBe(202)
+  })
+
+  it('refuses another profile\'s back photo with 404 SCAN_NOT_FOUND and changes nothing; the maker\'s back photo is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingBackPhoto(first)
+
+    await expectNotFound(await addBackPhoto(second, scanId, itemId))
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-back-photo')
+    expect((await addBackPhoto(first, scanId, itemId)).status).toBe(202)
+  })
+
+  describe('the daily quota', () => {
+    const ten = () => Array.from({ length: 10 }, (_, i) => fileOf(markedJpeg(i), `p${i}`))
+
+    // 20 photos from the first profile and 10 from the second are exactly the 30 an account may take in a day.
+    // Counted per profile, the 31st photo would still be allowed.
+    it('is shared by the account\'s profiles: 20 photos from one and 10 from another use up the 30, and the 31st is refused to either', async () => {
+      const first = await newGuest()
+      const second = await asSecondProfile(first)
+      for (let i = 0; i < 2; i++) expect((await createScan(first, ten(), freshIp())).status).toBe(202)
+      expect((await createScan(second, ten(), freshIp())).status).toBe(202)
+
+      const refusedSecond = await createScan(second, [fileOf(markedJpeg(1))], freshIp())
+      const refusedFirst = await createScan(first, [fileOf(markedJpeg(1))], freshIp())
+
+      for (const res of [refusedSecond, refusedFirst]) {
+        expect(res.status).toBe(429)
+        expect(await errorCodeOf(res)).toBe('SCAN_DAILY_LIMIT')
+        expect(retryAfterOf(res)).toBeGreaterThan(0)
+      }
+    })
   })
 })

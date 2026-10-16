@@ -14,7 +14,7 @@ scansRepositoryContract('D1', () => {
     repository: new D1ScansRepository(db),
     newUser: async () => {
       const id = crypto.randomUUID()
-      await users.createGuestForDevice({ user: { id, createdAt: BASE }, device: { deviceHash: `scans-contract-${id}`, platform: 'ios' } })
+      await users.createGuestForDevice({ user: { id, createdAt: BASE }, device: { deviceHash: `scans-contract-${id}`, platform: 'ios' }, profile: { id: crypto.randomUUID() } })
       return id
     },
   }

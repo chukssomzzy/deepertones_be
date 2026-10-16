@@ -276,6 +276,58 @@
           "refreshToken"
         ]
       },
+      "Me": {
+        "type": "object",
+        "properties": {
+          "user": {
+            "$ref": "#/components/schemas/User"
+          },
+          "profile": {
+            "$ref": "#/components/schemas/Profile"
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Profile"
+            },
+            "description": "Every profile of the account, the default first."
+          }
+        },
+        "required": [
+          "user",
+          "profile",
+          "profiles"
+        ]
+      },
+      "Profile": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Unset for now."
+          },
+          "isDefault": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "id",
+          "displayName",
+          "isDefault",
+          "createdAt"
+        ],
+        "description": "The profile this session is on."
+      },
       "Scan": {
         "type": "object",
         "properties": {
@@ -1325,7 +1377,7 @@
         "tags": [
           "Auth"
         ],
-        "summary": "The signed-in user",
+        "summary": "The signed-in user, the profile this session is on, and every profile of the account",
         "security": [
           {
             "bearerAuth": []
@@ -1333,7 +1385,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The user",
+            "description": "The user and their profiles",
             "content": {
               "application/json": {
                 "schema": {
@@ -1355,7 +1407,7 @@
                       "description": "Human-readable; may change."
                     },
                     "data": {
-                      "$ref": "#/components/schemas/User"
+                      "$ref": "#/components/schemas/Me"
                     }
                   },
                   "required": [

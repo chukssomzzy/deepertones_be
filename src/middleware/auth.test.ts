@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import type { Container } from '../container'
 import { currentContext } from '../lib/context'
 import { factory } from '../lib/factory'
+import { signJwt } from '../lib/jwt'
 import { TokenService } from '../modules/auth/tokens.service'
 import { auth } from './auth'
 import { requestContext } from './request-context'
@@ -27,7 +28,7 @@ const appAt = (now: Date) =>
       return c.json({ actor, tokenProblem: tokenProblem ?? null })
     })
 
-const issue = () => new TokenService({ secret: SECRET, now: () => ISSUED }).issue({ id: 'u_1', status: 'verified', tokenVersion: 1 })
+const issue = () => new TokenService({ secret: SECRET, now: () => ISSUED }).issue({ id: 'u_1', status: 'verified', tokenVersion: 1 }, 'p_1')
 
 const call = async (authorization?: string, now = after(1)) => {
   const res = await appAt(now).request('/ctx', { headers: authorization ? { Authorization: authorization } : {} }, env)
@@ -45,8 +46,14 @@ describe('auth middleware', () => {
     const { status, body } = await call(`Bearer ${accessToken}`)
 
     expect(status).toBe(200)
-    expect(body.actor).toEqual({ kind: 'user', userId: 'u_1', status: 'verified' })
+    expect(body.actor).toEqual({ kind: 'user', userId: 'u_1', status: 'verified', profileId: 'p_1' })
     expect(body.tokenProblem).toBeNull()
+  })
+
+  it('treats an access token with no profile as public with tokenProblem expired, so the app refreshes', async () => {
+    const old = await signJwt({ sub: 'u_1', ver: 1, st: 'verified', typ: 'access' }, { secret: SECRET, expiresInSeconds: 900, now: ISSUED })
+
+    expect(await call(`Bearer ${old}`)).toEqual({ status: 200, body: { actor: { kind: 'public' }, tokenProblem: 'expired' } })
   })
 
   it('treats an expired access token as public with tokenProblem expired, and still runs the route', async () => {
@@ -77,7 +84,7 @@ describe('auth middleware', () => {
   it('matches the Bearer scheme case-insensitively', async () => {
     const { accessToken } = await issue()
 
-    expect((await call(`bearer ${accessToken}`)).body.actor).toEqual({ kind: 'user', userId: 'u_1', status: 'verified' })
+    expect((await call(`bearer ${accessToken}`)).body.actor).toEqual({ kind: 'user', userId: 'u_1', status: 'verified', profileId: 'p_1' })
   })
 
   it('treats two spaces after Bearer as invalid', async () => {

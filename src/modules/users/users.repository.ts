@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, lt, notExists, sql } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import { profiles } from '../profiles/profiles.table'
 import { devices, users } from './users.table'
 import type { Device, User, UserIdentifier } from './users.types'
 
@@ -24,15 +25,20 @@ const DELETE_CHUNK = 90
 export class D1UsersRepository {
   constructor(private readonly db: Db) {}
 
-  /** Creates a guest and points the device at it (creating or re-pointing the device row), atomically. */
+  /**
+   * Creates a guest with its default profile and points the device at it (creating or re-pointing the device row), in ONE
+   * batch: a user never exists without its profile, and a profile id that is taken rolls everything back.
+   */
   async createGuestForDevice(input: {
     user: { id: string; createdAt: Date }
     device: { deviceHash: string; platform: Device['platform'] }
+    profile: { id: string }
   }): Promise<User> {
     const { id, createdAt } = input.user
     const { deviceHash, platform } = input.device
     await this.db.batch([
       this.db.insert(users).values({ id, createdAt, lastSeenAt: createdAt }),
+      this.db.insert(profiles).values({ id: input.profile.id, userId: id, displayName: null, isDefault: true, createdAt }),
       this.db
         .insert(devices)
         .values({ deviceHash, platform, userId: id, createdAt, lastSeenAt: createdAt })

@@ -3,14 +3,20 @@ import { requireUser } from '../../lib/context'
 import { ConflictError, NotFoundError, UnauthorizedError } from '../../lib/errors'
 import type { OtpChannel, OtpRecipient } from '../otp/otp.types'
 import { type OtpService, parseRecipient } from '../otp/otp.service'
+import type { ProfilesService } from '../profiles/profiles.service'
+import type { Profile } from '../profiles/profiles.types'
 import type { UsersService } from '../users/users.service'
 import type { Device, User, UserIdentifier } from '../users/users.types'
 import type { IssuedTokens, TokenService } from './tokens.service'
 
 export type Session = { tokens: IssuedTokens; user: User }
 
+/** The signed-in user, the profile the session is on, and every profile of the user (the default first). */
+export type Me = { user: User; profile: Profile; profiles: Profile[] }
+
 export type AuthServiceDeps = {
   users: UsersService
+  profiles: ProfilesService
   otp: OtpService
   tokens: TokenService
   /** Keys the HMAC of device ids, so a leaked devices table cannot be matched against known device ids. */
@@ -30,6 +36,7 @@ const identifierOf = (recipient: OtpRecipient): UserIdentifier =>
  */
 export class AuthService {
   private readonly users: UsersService
+  private readonly profiles: ProfilesService
   private readonly otp: OtpService
   private readonly tokens: TokenService
   // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
@@ -37,6 +44,7 @@ export class AuthService {
 
   constructor(deps: AuthServiceDeps) {
     this.users = deps.users
+    this.profiles = deps.profiles
     this.otp = deps.otp
     this.tokens = deps.tokens
     this.#deviceIdKey = deps.deviceIdKey
@@ -49,7 +57,8 @@ export class AuthService {
    */
   async bootstrap(deviceId: string, platform: Device['platform']): Promise<Session> {
     const deviceHash = await hmacSha256Hex(this.#deviceIdKey, deviceId)
-    return this.session(await this.users.guestForDevice(deviceHash, platform))
+    const user = await this.users.guestForDevice(deviceHash, platform)
+    return this.session(user, (await this.profiles.defaultFor(user.id)).id)
   }
 
   /**
@@ -67,7 +76,8 @@ export class AuthService {
    * caller's devices are then unlinked: after a sign-in as someone else, a later logout must not
    * land the device back on the pre-login guest's data. A new session is issued. Promotion bumps
    * the token version itself; when the guest is left behind ('existing') we bump it here, so the
-   * guest's old refresh token stops working in both cases.
+   * guest's old refresh token stops working in both cases. A promoted guest stays on the profile it was on (same row,
+   * so its scans stay readable); signing in as an existing account starts on that account's default profile.
    */
   async verifyOtp(recipient: { channel: OtpChannel; address: string }, code: string): Promise<Session> {
     const actor = requireUser()
@@ -76,13 +86,15 @@ export class AuthService {
     const { outcome, user } = await this.users.promote(actor.userId, identifierOf(verified))
     if (outcome === 'existing' && caller.status === 'anonymous') await this.users.bumpTokenVersion(actor.userId)
     await this.users.unlinkDevices(actor.userId)
-    return this.session(user)
+    return this.session(user, outcome === 'promoted' ? actor.profileId : (await this.profiles.defaultFor(user.id)).id)
   }
 
   /**
    * Public: the access token is usually expired by now. The refresh token must be ours, unexpired,
    * and carry the user's current token version, which is what makes logout (a bump) effective on
    * every device. A user that no longer exists is TOKEN_INVALID, not a 404: the token is what is wrong.
+   * The session stays on the token's profile while it still belongs to the user; otherwise (no pid, a deleted or
+   * foreign profile) it falls back to the default, so a bad pid can never wedge a session.
    */
   async refresh(refreshToken: string): Promise<Session> {
     const verified = await this.tokens.verifyRefresh(refreshToken)
@@ -99,7 +111,8 @@ export class AuthService {
       throw new UnauthorizedError('TOKEN_INVALID', 'Your session is not valid')
     }
     await this.users.touch(user.id)
-    return this.session(user)
+    const kept = verified.profileId === null ? null : await this.profiles.ownedBy(user.id, verified.profileId)
+    return this.session(user, (kept ?? (await this.profiles.defaultFor(user.id))).id)
   }
 
   /**
@@ -114,8 +127,13 @@ export class AuthService {
     return this.bootstrap(deviceId, platform)
   }
 
-  async me(): Promise<User> {
-    return this.users.get(requireUser().userId)
+  /** A session whose profile is no longer the user's (deleted, or never theirs) is TOKEN_EXPIRED, so the app refreshes onto the default. */
+  async me(): Promise<Me> {
+    const { userId, profileId } = requireUser()
+    const [user, profiles] = await Promise.all([this.users.get(userId), this.profiles.of(userId)])
+    const profile = profiles.find((p) => p.id === profileId)
+    if (!profile) throw new UnauthorizedError('TOKEN_EXPIRED', 'Your session has expired')
+    return { user, profile, profiles }
   }
 
   /**
@@ -135,7 +153,7 @@ export class AuthService {
     return caller
   }
 
-  private async session(user: User): Promise<Session> {
-    return { tokens: await this.tokens.issue(user), user }
+  private async session(user: User, profileId: string): Promise<Session> {
+    return { tokens: await this.tokens.issue(user, profileId), user }
   }
 }

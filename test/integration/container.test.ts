@@ -53,7 +53,7 @@ describe('buildContainer', () => {
     const tokens = buildContainer(env).tokens
     expect(tokens).toBeInstanceOf(TokenService)
 
-    const { accessToken } = await tokens.issue({ id: 'u_1', status: 'anonymous', tokenVersion: 0 })
+    const { accessToken } = await tokens.issue({ id: 'u_1', status: 'anonymous', tokenVersion: 0 }, 'p_1')
     expect(await tokens.verifyAccess(accessToken)).toMatchObject({ ok: true, userId: 'u_1' })
 
     const rotated = buildContainer({ ...env, JWT_SECRET: 'rotated-in', JWT_SECRET_PREVIOUS: env.JWT_SECRET }).tokens
@@ -105,13 +105,13 @@ describe('buildContainer guest cleanup', () => {
     const longAgo = new Date(NOW - 120 * DAY)
     const guest = async (label: string, seenAt: Date) => {
       const id = crypto.randomUUID()
-      await users.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `${label}-${salt}`, platform: 'ios' } })
+      await users.createGuestForDevice({ user: { id, createdAt: seenAt }, device: { deviceHash: `${label}-${salt}`, platform: 'ios' }, profile: { id: `profile-${id}` } })
       await users.touch(id, seenAt)
       await users.unlinkDevices(id)
       return id
     }
     const scanAs = (userId: string) =>
-      runAs({ kind: 'user', userId, status: 'anonymous' }, () => container.scans.create({ photos: [jpegPhoto()], clientIp: '203.0.113.9' }))
+      runAs({ kind: 'user', userId, status: 'anonymous', profileId: `profile-${userId}` }, () => container.scans.create({ photos: [jpegPhoto()], clientIp: '203.0.113.9' }))
     const abandoned = await guest('abandoned', longAgo)
     const recent = await guest('recent', new Date(NOW - 10 * DAY))
     const abandonedScan = await scanAs(abandoned)
@@ -122,19 +122,19 @@ describe('buildContainer guest cleanup', () => {
 
     expect(deleted).toBeGreaterThanOrEqual(1)
     expect(await photosOf(abandoned)).toEqual([])
-    await expect(runAs({ kind: 'user', userId: abandoned, status: 'anonymous' }, () => container.scans.getScan(abandonedScan.id))).rejects.toMatchObject({ code: 'SCAN_NOT_FOUND' })
+    await expect(runAs({ kind: 'user', userId: abandoned, status: 'anonymous', profileId: `profile-${abandoned}` }, () => container.scans.getScan(abandonedScan.id))).rejects.toMatchObject({ code: 'SCAN_NOT_FOUND' })
     expect(await photosOf(recent)).toHaveLength(1)
-    await expect(runAs({ kind: 'user', userId: recent, status: 'anonymous' }, () => container.scans.getScan(recentScan.id))).resolves.toMatchObject({ id: recentScan.id })
+    await expect(runAs({ kind: 'user', userId: recent, status: 'anonymous', profileId: `profile-${recent}` }, () => container.scans.getScan(recentScan.id))).resolves.toMatchObject({ id: recentScan.id })
   })
 
   it('cleans up scans without building the catalog or the model clients: it works with the AI settings unusable', async () => {
     const users = new D1UsersRepository(createDb(env.DB))
     const id = crypto.randomUUID()
     const longAgo = new Date(NOW - 120 * DAY)
-    await users.createGuestForDevice({ user: { id, createdAt: longAgo }, device: { deviceHash: `no-ai-${id}`, platform: 'ios' } })
+    await users.createGuestForDevice({ user: { id, createdAt: longAgo }, device: { deviceHash: `no-ai-${id}`, platform: 'ios' }, profile: { id: `profile-${id}` } })
     await users.touch(id, longAgo)
     await users.unlinkDevices(id)
-    await runAs({ kind: 'user', userId: id, status: 'anonymous' }, () => buildContainer(env).scans.create({ photos: [jpegPhoto()], clientIp: '203.0.113.9' }))
+    await runAs({ kind: 'user', userId: id, status: 'anonymous', profileId: `profile-${id}` }, () => buildContainer(env).scans.create({ photos: [jpegPhoto()], clientIp: '203.0.113.9' }))
     expect(await photosOf(id)).toHaveLength(1)
     // A budget that is not a number makes building the AI usage ledger throw, and the catalog, recogniser and label reader all sit behind it.
     const withoutAi = buildContainer({ ...env, AI_DAILY_BUDGET_USD: 'not-a-number' })

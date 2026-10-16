@@ -6,7 +6,8 @@ export type ScanItem = typeof scanItems.$inferSelect
 export type ItemState = ScanItem['state']
 export type ItemReason = NonNullable<ScanItem['reason']>
 
-export type NewScan = Omit<Scan, 'doneAt'>
+/** The column is nullable in SQL (see the table), but a new scan always has its profile. */
+export type NewScan = Omit<Scan, 'doneAt' | 'profileId'> & { profileId: string }
 
 /** A back photo upload, to be counted against the daily quotas. */
 export type NewBackPhoto = typeof scanBackPhotos.$inferInsert

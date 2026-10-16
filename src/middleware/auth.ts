@@ -16,7 +16,7 @@ export const auth = factory.createMiddleware(async (c, next) => {
   const token = /^bearer (\S+)$/i.exec(header.trim())?.[1]
   const result = token ? await c.var.services.tokens.verifyAccess(token) : undefined
   if (result?.ok) {
-    c.set('auth', { actor: { kind: 'user', userId: result.userId, status: result.status } })
+    c.set('auth', { actor: { kind: 'user', userId: result.userId, status: result.status, profileId: result.profileId } })
   } else {
     c.set('auth', { actor: { kind: 'public' }, tokenProblem: result?.problem ?? 'invalid' })
   }

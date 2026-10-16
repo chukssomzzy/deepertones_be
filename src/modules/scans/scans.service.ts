@@ -160,7 +160,7 @@ export class ScanService {
    * burst limits on the route bound that.
    */
   async create(input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
-    const { userId } = requireUser()
+    const { userId, profileId } = requireUser()
     if (input.photos.length === 0) throw new ValidationError('NO_IMAGES', 'Send at least one photo')
     if (input.photos.length > this.policy.maxPhotosPerScan) {
       throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${this.policy.maxPhotosPerScan} photos`)
@@ -178,7 +178,7 @@ export class ScanService {
     })
     try {
       await Promise.all(stored.map(({ item, image }) => this.photos.put(item.photoKey, image)))
-      await this.repository.createScan({ id: scanId, userId, ipHash, createdAt: now }, stored.map(({ item }) => item))
+      await this.repository.createScan({ id: scanId, userId, profileId, ipHash, createdAt: now }, stored.map(({ item }) => item))
     } catch (error) {
       await this.photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
       throw error
@@ -198,14 +198,14 @@ export class ScanService {
     return this.scanView({ id: scanId, createdAt: now }, await this.repository.itemsOf(scanId), now)
   }
 
-  /** The scan as it now is. Another user's scan is SCAN_NOT_FOUND, with no hint that it exists. */
+  /** The scan as it now is. A scan made by another profile, of this account or any other, is SCAN_NOT_FOUND, with no hint that it exists. */
   async getScan(scanId: string): Promise<ScanView> {
     const { scan, items } = await this.ownedScan(scanId)
     return this.scanView(scan, items, this.now())
   }
 
   /**
-   * Opens a live stream of the scan for its owner (another user's scan is SCAN_NOT_FOUND). The stream starts with the scan
+   * Opens a live stream of the scan for the profile that made it (anyone else's scan is SCAN_NOT_FOUND). The stream starts with the scan
    * as it now is, then carries each item change and `done`.
    *
    * The snapshot is read before the stream opens, and a change stored in between would reach no one: it was published
@@ -222,10 +222,11 @@ export class ScanService {
     return stream
   }
 
+  /** A scan is readable only by the profile that made it; another profile of the same account gets the same 404 as another user. */
   private async ownedScan(scanId: string): Promise<{ scan: Scan; items: ScanItem[] }> {
-    const { userId } = requireUser()
+    const { userId, profileId } = requireUser()
     const scan = await this.repository.findScan(scanId)
-    if (!scan || scan.userId !== userId) throw ScanService.scanNotFound()
+    if (!scan || scan.userId !== userId || scan.profileId !== profileId) throw ScanService.scanNotFound()
     return { scan, items: await this.repository.itemsOf(scanId) }
   }
 
@@ -724,10 +725,11 @@ export class ScanService {
     }
   }
 
+  /** An item is owned through its scan: the scan's profile decides, not the item's own user_id, which only feeds the quotas. */
   private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
-    const { userId } = requireUser()
+    await this.ownedScan(scanId)
     const item = await this.repository.findItem(itemId)
-    if (!item || item.scanId !== scanId || item.userId !== userId) throw ScanService.scanNotFound()
+    if (!item || item.scanId !== scanId) throw ScanService.scanNotFound()
     return item
   }
 

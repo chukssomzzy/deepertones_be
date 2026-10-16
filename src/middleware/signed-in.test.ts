@@ -27,8 +27,8 @@ const callWith = async (auth: AppEnv['Variables']['auth']) => {
 
 describe('signedIn', () => {
   it.each([
-    ['a guest', { kind: 'user', userId: 'u_1', status: 'anonymous' } as const],
-    ['a verified user', { kind: 'user', userId: 'u_1', status: 'verified' } as const],
+    ['a guest', { kind: 'user', userId: 'u_1', status: 'anonymous', profileId: 'p_1' } as const],
+    ['a verified user', { kind: 'user', userId: 'u_1', status: 'verified', profileId: 'p_1' } as const],
   ])('lets %s through', async (_label, actor) => {
     expect(await callWith({ actor })).toEqual({ status: 200, code: undefined, reached: true })
   })

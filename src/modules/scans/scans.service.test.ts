@@ -37,6 +37,9 @@ const PHOTO_SECRET = 'photo-link-secret-for-tests'
 const IP_SECRET = 'ip-hash-secret-for-tests'
 const USER = 'user-1'
 const OTHER_USER = 'user-2'
+// Two profiles of one account (USER): a scan belongs to the profile that made it.
+const PROFILE = 'profile-1'
+const OTHER_PROFILE = 'profile-2'
 const IP = '203.0.113.7'
 const OTHER_IP = '198.51.100.23'
 const SOURCE_URL = 'https://www.cerave.com/hydrating-cleanser'
@@ -126,8 +129,8 @@ const setup = (options: SetupOptions = {}) => {
   }
 }
 
-const user = (userId = USER) => ({ kind: 'user', userId, status: 'anonymous' }) as const
-const asUser = <T>(fn: () => Promise<T>, userId = USER) => runAs(user(userId), fn)
+const user = (userId = USER, profileId = PROFILE) => ({ kind: 'user', userId, status: 'anonymous', profileId }) as const
+const asUser = <T>(fn: () => Promise<T>, userId = USER, profileId = PROFILE) => runAs(user(userId, profileId), fn)
 const asJob = <T>(fn: () => Promise<T>) => runAs({ kind: 'system', job: advanceScanItemSpec.name }, fn)
 
 const errorOf = async (promise: Promise<unknown>) => {
@@ -142,9 +145,9 @@ const errorOf = async (promise: Promise<unknown>) => {
 type Step = 'recognise' | 'match' | 'research' | 'read-label' | 'analyse'
 
 // The views are loosely typed here on purpose: these tests read the public shape, and null checks on `image` would only add noise.
-const create = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string } = {}): Promise<any> =>
-  asUser(() => ctx.service.create({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER)
-const getScan = (ctx: Ctx, scanId: string, userId = USER): Promise<any> => asUser(() => ctx.service.getScan(scanId), userId)
+const create = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}): Promise<any> =>
+  asUser(() => ctx.service.create({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
+const getScan = (ctx: Ctx, scanId: string, userId = USER, profileId = PROFILE): Promise<any> => asUser(() => ctx.service.getScan(scanId), userId, profileId)
 const run = (ctx: Ctx, itemId: string, step: Step) => asJob(() => ctx.service.advance(itemId, step))
 const itemOf = async (ctx: Ctx, scanId: string, itemId: string): Promise<any> => (await getScan(ctx, scanId)).items.find((i: { id: string }) => i.id === itemId)!
 const stateOf = async (ctx: Ctx, scanId: string, itemId: string) => {
@@ -2841,5 +2844,96 @@ describe('ScanService.reap: how far back it repairs a done', () => {
 
     expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
     expect(ctx.events.eventsFor(scanId)).toHaveLength(sent)
+  })
+})
+
+describe('ScanService: a scan belongs to the profile that made it', () => {
+  const photosOf = (count: number) => Array.from({ length: count }, (_, i) => markedJpeg(i))
+
+  it('is stored with the profile of the caller who made it', async () => {
+    const ctx = setup()
+
+    const mine = await create(ctx)
+    const theirs = await create(ctx, [markedJpeg(2)], { profileId: OTHER_PROFILE })
+
+    // No view shows the profile, so this reads the stored scan.
+    expect((await ctx.repository.findScan(mine.id))!.profileId).toBe(PROFILE)
+    expect((await ctx.repository.findScan(theirs.id))!.profileId).toBe(OTHER_PROFILE)
+  })
+
+  it('shows each profile its own scan, and the account\'s other profile nothing of it', async () => {
+    const ctx = setup()
+    const mine = await create(ctx)
+    const theirs = await create(ctx, [markedJpeg(2)], { profileId: OTHER_PROFILE })
+
+    expect((await getScan(ctx, mine.id, USER, PROFILE)).id).toBe(mine.id)
+    expect((await getScan(ctx, theirs.id, USER, OTHER_PROFILE)).id).toBe(theirs.id)
+    expect((await errorOf(getScan(ctx, mine.id, USER, OTHER_PROFILE))).code).toBe('SCAN_NOT_FOUND')
+    expect((await errorOf(getScan(ctx, theirs.id, USER, PROFILE))).code).toBe('SCAN_NOT_FOUND')
+  })
+
+  it('answers getScan with SCAN_NOT_FOUND, with no photo link, to another profile of the same user', async () => {
+    const ctx = setup()
+    const scan = await create(ctx)
+
+    const error = await errorOf(getScan(ctx, scan.id, USER, OTHER_PROFILE))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+  })
+
+  it('answers watch with SCAN_NOT_FOUND to another profile of the same user, opening no stream', async () => {
+    const ctx = setup()
+    const scan = await create(ctx)
+
+    const error = await errorOf(asUser(() => ctx.service.watch(scan.id), USER, OTHER_PROFILE))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect(ctx.events.subscribed).toHaveLength(0)
+  })
+
+  it('answers confirm with SCAN_NOT_FOUND to another profile of the same user, changing and queueing nothing', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(
+      asUser(() => ctx.service.confirm(scanId, itemId, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' }), USER, OTHER_PROFILE),
+    )
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-confirmation')
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('answers addBackPhoto with SCAN_NOT_FOUND to another profile of the same user, storing nothing', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await reach(ctx, 'needs-back-photo')
+    const stored = ctx.photos.stored.size
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(9), IP), USER, OTHER_PROFILE))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-back-photo')
+    expect(ctx.photos.stored.size).toBe(stored)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('counts the daily photo quota across the account\'s profiles: 29 taken by two profiles, then 2 more is too many but 1 more is fine', async () => {
+    const ctx = setup()
+    await create(ctx, photosOf(10), { ip: '192.0.2.1', profileId: PROFILE })
+    await create(ctx, photosOf(10), { ip: '192.0.2.2', profileId: OTHER_PROFILE })
+    await create(ctx, photosOf(9), { ip: '192.0.2.3', profileId: PROFILE })
+
+    const tooMany = await errorOf(create(ctx, photosOf(2), { profileId: OTHER_PROFILE }))
+    expect(tooMany).toBeInstanceOf(RateLimitedError)
+    expect(tooMany.code).toBe('SCAN_DAILY_LIMIT')
+
+    await expect(create(ctx, photosOf(1), { profileId: OTHER_PROFILE })).resolves.toMatchObject({ items: expect.any(Array) })
+    expect((await errorOf(create(ctx, photosOf(1), { profileId: PROFILE }))).code).toBe('SCAN_DAILY_LIMIT')
   })
 })

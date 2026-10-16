@@ -17,7 +17,8 @@ const freshId = () => crypto.randomUUID()
 /** What a contract run needs: the repository, and a way to get a user id that exists (D1 enforces scans.user_id -> users.id). */
 export type ScansContractSetup = { repository: ScansRepository; newUser: () => Promise<string> }
 
-const newScan = (userId: string, over: Partial<NewScan> = {}): NewScan => ({ id: freshId(), userId, ipHash: fresh('iphash'), createdAt: BASE, ...over })
+// scans.profile_id has no foreign key (profiles die with their user, and the user's scans with it), so any id will do.
+const newScan = (userId: string, over: Partial<NewScan> = {}): NewScan => ({ id: freshId(), userId, profileId: freshId(), ipHash: fresh('iphash'), createdAt: BASE, ...over })
 
 const newUpload = (itemId: string, userId: string, uploadedAt: Date, over: Partial<NewBackPhoto> = {}): NewBackPhoto => ({
   id: freshId(),
@@ -40,7 +41,7 @@ const newItem = (scan: NewScan, position: number, over: Partial<NewScanItem> = {
 
 /**
  * Behaviour every ScansRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier).
- * Assumptions the D1 table must meet: scans.user_id references users (so `newUser` makes real users), scan_items.scan_id
+ * Assumptions the D1 table must meet: scans.user_id references users (so `newUser` makes real users), scans.profile_id is plain text with no foreign key, scan_items.scan_id
  * references scans, and product_id / formulation_id are plain text with no foreign key (the catalog is not this module's).
  */
 export const scansRepositoryContract = (name: string, make: () => ScansContractSetup | Promise<ScansContractSetup>) => {
@@ -62,6 +63,25 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
 
         expect(stored).toMatchObject({ id: scan.id, userId: scan.userId, ipHash: scan.ipHash, doneAt: null })
         expect(stored!.createdAt.getTime()).toBe(BASE.getTime())
+      })
+
+      it('stores the profile the scan was made by, and gives it back', async () => {
+        const profileId = freshId()
+        const { repository, scan } = await seeded(1, { profileId })
+
+        expect((await repository.findScan(scan.id))!.profileId).toBe(profileId)
+      })
+
+      it('keeps the profile of each scan apart: two scans of one user, made by two profiles', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const [a, b] = [newScan(userId, { profileId: freshId() }), newScan(userId, { profileId: freshId() })]
+        await repository.createScan(a, [newItem(a, 0)])
+        await repository.createScan(b, [newItem(b, 0)])
+
+        expect((await repository.findScan(a.id))!.profileId).toBe(a.profileId)
+        expect((await repository.findScan(b.id))!.profileId).toBe(b.profileId)
+        expect(a.profileId).not.toBe(b.profileId)
       })
 
       it('stores every item recognising, with no reason, recognised fields, product or back photo, and updatedAt equal to createdAt', async () => {

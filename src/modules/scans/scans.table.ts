@@ -14,6 +14,10 @@ export const scans = sqliteTable(
     userId: text('user_id')
       .notNull()
       .references(() => users.id, { onDelete: 'cascade' }),
+    // The profile that made the scan, and the only one that may read it. Nullable in SQL and with no foreign key: adding a
+    // NOT NULL or REFERENCES column to a parent table takes a table rebuild, which could cascade-delete scan_items. A profile
+    // dies only with its user, and the user's scans go with the user, so nothing is left dangling. Code always sets it.
+    profileId: text('profile_id'),
     ipHash: text('ip_hash').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     doneAt: integer('done_at', { mode: 'timestamp_ms' }),
@@ -22,6 +26,7 @@ export const scans = sqliteTable(
   // The partial one holds only scans still without a done time (a small, recent set), for the reaper's lost-done repair.
   (t) => [
     index('scans_user_id_idx').on(t.userId),
+    index('scans_profile_id_created_at_idx').on(t.profileId, t.createdAt),
     index('scans_ip_hash_created_at_idx').on(t.ipHash, t.createdAt),
     index('scans_not_done_created_at_idx').on(t.createdAt).where(sql`${t.doneAt} IS NULL`),
   ],

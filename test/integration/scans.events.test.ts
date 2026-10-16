@@ -45,15 +45,16 @@ const container = buildContainer(testEnv)
 /** A guest, and the bearer token the app would hold for it. */
 const newGuest = async () => {
   const id = crypto.randomUUID()
-  await users.createGuestForDevice({ user: { id, createdAt: new Date() }, device: { deviceHash: `scans-events-${id}`, platform: 'ios' } })
-  const { accessToken } = await tokens.issue({ id, status: 'anonymous', tokenVersion: 0 })
-  return { userId: id, token: accessToken }
+  const profileId = crypto.randomUUID()
+  await users.createGuestForDevice({ user: { id, createdAt: new Date() }, device: { deviceHash: `scans-events-${id}`, platform: 'ios' }, profile: { id: profileId } })
+  const { accessToken } = await tokens.issue({ id, status: 'anonymous', tokenVersion: 0 }, profileId)
+  return { userId: id, profileId, token: accessToken }
 }
 type Guest = Awaited<ReturnType<typeof newGuest>>
 
 /** A scan of the given photos, made through the service for this guest, with its items' ids in photo order. */
 const startScan = async (guest: Guest, photos = [jpegPhoto()]) => {
-  const scan = await runAs({ kind: 'user', userId: guest.userId, status: 'anonymous' }, () => container.scans.create({ photos, clientIp: freshIp() }))
+  const scan = await runAs({ kind: 'user', userId: guest.userId, status: 'anonymous', profileId: guest.profileId }, () => container.scans.create({ photos, clientIp: freshIp() }))
   return { scanId: scan.id as string, itemIds: scan.items.map((item: { id: string }) => item.id) as string[] }
 }
 
