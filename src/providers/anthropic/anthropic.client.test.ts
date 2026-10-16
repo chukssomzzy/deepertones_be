@@ -42,6 +42,8 @@ const API_URL = `${BASE_URL}/v1/messages`
 const PROMPT = 'Private prompt text 482913'
 const FREE_TEXT = 'Free text from the API 7731'
 const SCHEMA = z.object({ same: z.boolean() })
+/** What the client sends for SCHEMA: zod's JSON Schema without its `$schema` draft marker. */
+const { $schema: _draft, ...SENT_SCHEMA } = z.toJSONSchema(SCHEMA)
 
 const BODY = {
   max_tokens: 1024,
@@ -88,7 +90,7 @@ describe('AnthropicClient.createMessage', () => {
     expect(call.init.method).toBe('POST')
     expect(call.headers.get('x-api-key')).toBe(API_KEY)
     expect(call.headers.get('anthropic-version')).toBe('2023-06-01')
-    expect(call.headers.get('content-type')).toContain('application/json')
+    expect(call.headers.get('content-type')).toMatch(/^application\/json(;|$)/)
     expect(call.body).toEqual({ ...BODY, model: MODEL })
     expect(message).toMatchObject({ role: 'assistant', stop_reason: 'end_turn', content: [textBlock('hello')] })
   })
@@ -168,6 +170,30 @@ describe('AnthropicClient.createMessage', () => {
     expect(calls).toHaveLength(1)
   })
 
+  // The statuses the SDK itself would retry (408, 409, and anything carrying x-should-retry: true), with one reservation each.
+  it.each([
+    ['HTTP 408', () => errorResponse(408, 'timeout_error'), 'released'],
+    ['HTTP 409', () => errorResponse(409, 'conflict_error'), 'released'],
+    [
+      'HTTP 503 with x-should-retry: true',
+      () => {
+        const response = errorResponse(503, 'api_error')
+        response.headers.set('x-should-retry', 'true')
+        return response
+      },
+      'settled',
+    ],
+  ])('sends exactly one request, with one ledger entry, on %s (the SDK must not retry)', async (_label, respond, expected) => {
+    const { calls, fetch } = stubFetch(respond, ok())
+    const ledger = newLedger()
+
+    await caught(make(fetch, { ledger }).createMessage(BODY, RESEARCH))
+
+    expect(calls).toHaveLength(1)
+    expect(ledger.entries.map((e) => e.status)).toEqual([expected])
+    if (expected === 'settled') expect(ledger.entries[0]!.costMicros).toBe(ledger.entries[0]!.estimateMicros)
+  })
+
   it('sends exactly one request when the network fails', async () => {
     const { calls, fetch } = stubFetch(() => Promise.reject(new TypeError('network down')), ok())
 
@@ -221,6 +247,18 @@ describe('AnthropicClient.createMessage', () => {
     expect(state.signal).toBeInstanceOf(AbortSignal)
     expect(state.signal!.aborted).toBe(true)
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    // Our own AbortSignal.timeout fired: the APIUserAbortError branch.
+    expect((error as Error).message).toBe('Claude request was aborted (timeout)')
+    expectNoLeak(error)
+  })
+
+  it('names the SDK\'s own timeout (APIConnectionTimeoutError) when fetch rejects with an AbortError we did not trigger', async () => {
+    const { fetch } = stubFetch(() => Promise.reject(new DOMException('timed out', 'AbortError')))
+
+    const error = await caught(make(fetch).createMessage(BODY, RESEARCH))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).toBe('Claude request failed before a response (APIConnectionTimeoutError)')
     expectNoLeak(error)
   })
 
@@ -289,6 +327,7 @@ describe('AnthropicClient reply and environment hygiene', () => {
     const error = await caught(make(fetch, { timeoutMs: 50 }).createMessage(BODY, RESEARCH))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).toBe('Claude reply could not be read (DOMException)')
     expectNoLeak(error)
   })
 
@@ -370,14 +409,8 @@ describe('AnthropicClient.structured', () => {
 
     expect(result).toEqual({ same: true })
     const body = calls[0]!.body
-    expect(body).toMatchObject({ ...BODY, model: MODEL })
-    expect(body.output_config.format.type).toBe('json_schema')
-    expect(body.output_config.format.schema).toMatchObject({
-      type: 'object',
-      properties: { same: { type: 'boolean' } },
-      required: ['same'],
-      additionalProperties: false,
-    })
+    expect(body).toEqual({ ...BODY, model: MODEL, output_config: { format: { type: 'json_schema', schema: SENT_SCHEMA } } })
+    expect(body.output_config.format.schema).not.toHaveProperty('$schema')
   })
 
   it('sends exactly one request', async () => {
@@ -581,12 +614,8 @@ describe('AnthropicClient reserving before a request', () => {
 
     await make(fetch, { ledger }).structured(BODY, SCHEMA, RESEARCH)
 
-    expect(calls[0]!.body.output_config.format.schema).toMatchObject({
-      type: 'object',
-      properties: { same: { type: 'boolean' } },
-      required: ['same'],
-      additionalProperties: false,
-    })
+    expect(calls[0]!.body).toEqual({ ...BODY, model: MODEL, output_config: { format: { type: 'json_schema', schema: SENT_SCHEMA } } })
+    expect(calls[0]!.body.output_config.format.schema).not.toHaveProperty('$schema')
     expect(ledger.entries[0]!.estimateMicros).toBe(worstCaseOf(calls[0]!.body))
   })
 
@@ -819,6 +848,17 @@ describe('AnthropicClient settling after a response', () => {
     expect(ledger.entries[0]!.costMicros).toBe(ledger.entries[0]!.estimateMicros)
   })
 
+  it('settles at the actual usage, and still reports unavailable, for a 200 that carries usage but no content', async () => {
+    const usage = { input_tokens: 1000, output_tokens: 500 }
+    const { fetch } = stubFetch(() => json({ type: 'message', stop_reason: 'end_turn', usage }))
+    const ledger = newLedger()
+
+    const error = await caught(make(fetch, { ledger }).createMessage(BODY, RESEARCH))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect(ledger.entries.map((e) => [e.status, e.costMicros])).toEqual([['settled', 7_000]])
+  })
+
   it('settles at the reserved worst case, and still reports unavailable, for a 200 that is not a message', async () => {
     const { fetch } = stubFetch(() => new Response('<html>Bad gateway</html>', { status: 200 }))
     const ledger = newLedger()
@@ -914,8 +954,7 @@ describe('AnthropicClient releasing only when the request was clearly not proces
     const error = await caught(make(fetch, { timeoutMs: 10, ledger }).createMessage(BODY, RESEARCH))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
-    // The message names the kind of failure, as it did before the SDK.
-    expect((error as Error).message).toMatch(/timeout/i)
+    expect((error as Error).message).toBe('Claude request was aborted (timeout)')
     expect(ledger.entries.map((e) => [e.status, e.costMicros === e.estimateMicros])).toEqual([['settled', true]])
   })
 
@@ -966,6 +1005,7 @@ describe('AnthropicClient releasing only when the request was clearly not proces
     const error = await caught(make(fetch, { timeoutMs: 50, ledger }).createMessage(BODY, RESEARCH))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).toBe('Claude reply could not be read (DOMException)')
     expect(ledger.entries.map((e) => [e.status, e.costMicros === e.estimateMicros])).toEqual([['settled', true]])
   })
 
