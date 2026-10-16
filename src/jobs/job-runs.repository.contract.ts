@@ -112,10 +112,65 @@ export const jobRunsRepositoryContract = (name: string, make: () => JobRunsRepos
       const repo = await make()
       const job = freshJob()
 
-      await repo.markFailed(job, 'never-claimed', 'dead-lettered', NOW)
+      await repo.markFailed(job, 'never-claimed', 'no such number', NOW)
 
-      expect(await repo.get(job, 'never-claimed')).toMatchObject({ status: 'failed', lastError: 'dead-lettered' })
+      expect(await repo.get(job, 'never-claimed')).toMatchObject({ status: 'failed', lastError: 'no such number' })
       expect(await repo.claim(job, 'never-claimed', at(MINUTE), LEASE_MS)).toEqual({ outcome: 'failed' })
+    })
+
+    it('markDeadLettered creates the run when none exists, failed with no attempts and the bare dead-lettered reason', async () => {
+      const repo = await make()
+      const job = freshJob()
+
+      await repo.markDeadLettered(job, 'never-claimed', NOW)
+
+      expect(await repo.get(job, 'never-claimed')).toMatchObject({
+        status: 'failed',
+        attempts: 0,
+        lastError: 'dead-lettered',
+      })
+      expect(await repo.claim(job, 'never-claimed', at(MINUTE), LEASE_MS)).toEqual({ outcome: 'failed' })
+    })
+
+    it('markDeadLettered on a claimed run with no recorded error makes it terminal with exactly dead-lettered as the reason', async () => {
+      const repo = await make()
+      const job = freshJob()
+      await repo.claim(job, 'k', NOW, LEASE_MS)
+
+      await repo.markDeadLettered(job, 'k', at(SECOND))
+
+      const run = await repo.get(job, 'k')
+      expect(run).toMatchObject({ status: 'failed', attempts: 1, lastError: 'dead-lettered', leaseUntil: null })
+      expect(run!.updatedAt.getTime()).toBe(at(SECOND).getTime())
+      expect(await repo.claim(job, 'k', at(LEASE_MS * 10), LEASE_MS)).toEqual({ outcome: 'failed' })
+    })
+
+    it('markDeadLettered keeps the error recorded by the last retry, prefixed with dead-lettered', async () => {
+      const repo = await make()
+      const job = freshJob()
+      const token = await claimed(repo, job, 'k', NOW)
+      await repo.release(job, 'k', token, 'ZeptoMail send failed (HTTP 422, code TM_3201, details SM_111)', at(SECOND))
+
+      await repo.markDeadLettered(job, 'k', at(2 * SECOND))
+
+      expect(await repo.get(job, 'k')).toMatchObject({
+        status: 'failed',
+        attempts: 1,
+        lastError: 'dead-lettered: ZeptoMail send failed (HTTP 422, code TM_3201, details SM_111)',
+      })
+    })
+
+    it('markDeadLettered wraps only the latest error after several failed attempts', async () => {
+      const repo = await make()
+      const job = freshJob()
+      for (let i = 1; i <= 3; i++) {
+        const token = await claimed(repo, job, 'k', at(i * SECOND))
+        await repo.release(job, 'k', token, `failure ${i}`, at(i * SECOND))
+      }
+
+      await repo.markDeadLettered(job, 'k', at(4 * SECOND))
+
+      expect(await repo.get(job, 'k')).toMatchObject({ status: 'failed', attempts: 3, lastError: 'dead-lettered: failure 3' })
     })
 
     it('release keeps the run running but frees it at once, recording the error', async () => {

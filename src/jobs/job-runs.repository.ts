@@ -7,6 +7,9 @@ export type JobRun = typeof jobRuns.$inferSelect
 /** `token` is the lease expiry in ms; markDone and release must present it, so a worker whose lease was taken over cannot touch the new owner's run. */
 export type ClaimResult = { outcome: 'claimed'; token: number } | { outcome: 'busy' | 'done' | 'failed' }
 
+const DEAD_LETTERED = 'dead-lettered'
+const DEAD_LETTERED_PREFIX = `${DEAD_LETTERED}: `
+
 export class D1JobRunsRepository {
   constructor(private readonly db: Db) {}
 
@@ -58,6 +61,23 @@ export class D1JobRunsRepository {
       .onConflictDoUpdate({
         target: [jobRuns.job, jobRuns.key],
         set: { status: 'failed', leaseUntil: null, updatedAt: at, lastError: error },
+      })
+  }
+
+  /** Terminal, like markFailed, but keeps the last retry's error: `dead-lettered: <error>`. Creates the run if none exists. */
+  async markDeadLettered(job: string, key: string, at: Date): Promise<void> {
+    await this.db
+      .insert(jobRuns)
+      .values({ job, key, status: 'failed', updatedAt: at, attempts: 0, lastError: DEAD_LETTERED })
+      .onConflictDoUpdate({
+        target: [jobRuns.job, jobRuns.key],
+        // Wraps the row's current error inside the statement, not read first, so there is no read-then-write race with release.
+        set: {
+          status: 'failed',
+          leaseUntil: null,
+          updatedAt: at,
+          lastError: sql`CASE WHEN ${jobRuns.lastError} IS NULL THEN ${DEAD_LETTERED} ELSE ${DEAD_LETTERED_PREFIX} || ${jobRuns.lastError} END`,
+        },
       })
   }
 

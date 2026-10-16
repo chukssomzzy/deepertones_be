@@ -64,7 +64,7 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
             continue
           }
           await runAs(actor, () => job.onDeadLetter?.(body, services))
-          await jobRuns.markFailed(job.name, key, 'dead-lettered', now())
+          await jobRuns.markDeadLettered(job.name, key, now())
           log('error', key, attempt, 'dead-lettered')
           message.ack()
           continue

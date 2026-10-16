@@ -126,7 +126,8 @@ request. Queues deliver at least once, so the system is built around repeat-safe
 - **Dead letters never override `done` or `failed`.** On the dead-letter queue the run is read
   first: a finished run is acked (`dead-letter-ignored`) with no hook and no write. Otherwise
   `onDeadLetter` updates domain state (e.g. marks a challenge failed), then the run is recorded as
-  failed (`dead-lettered`).
+  failed with `last_error` = `dead-lettered: <last retry's error>` (just `dead-lettered` if no
+  attempt recorded one), so the cause survives.
 - **Bookkeeping failures** (D1 down, a hook that throws) are logged as `dispatcher-error` and the
   message is retried with backoff; they do not lose it. The purge failing is logged only.
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body)`, typed by the job's
