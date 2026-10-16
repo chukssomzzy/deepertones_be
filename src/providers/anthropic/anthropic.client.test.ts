@@ -1,4 +1,5 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
+import { z } from 'zod'
 import { AnthropicClient } from './anthropic.client'
 import {
   AnthropicConfigError,
@@ -15,6 +16,7 @@ import {
   citation,
   DEFAULT_API_URL,
   errorResponse,
+  hangingFetch,
   json,
   MODEL,
   messageResponse,
@@ -27,8 +29,10 @@ import {
   thinkingBlock,
 } from './messages-api.fake'
 
-const API_URL = 'https://anthropic.example/v1/messages'
+const BASE_URL = 'https://anthropic.example'
+const API_URL = `${BASE_URL}/v1/messages`
 const PROMPT = 'Private prompt text 482913'
+const FREE_TEXT = 'Free text from the API 7731'
 
 const BODY = {
   max_tokens: 1024,
@@ -36,10 +40,11 @@ const BODY = {
   messages: [{ role: 'user', content: PROMPT }],
 }
 
-const config = { apiKey: API_KEY, model: MODEL, apiUrl: API_URL }
+type Config = ConstructorParameters<typeof AnthropicClient>[0]
 
-const make = (overrides: Partial<ConstructorParameters<typeof AnthropicClient>[0]> = {}) =>
-  new AnthropicClient({ ...config, ...overrides })
+/** A client whose HTTP goes through the injected `fetch`; nothing global is stubbed. */
+const make = (fetch: NonNullable<Config['fetch']>, overrides: Partial<Config> = {}) =>
+  new AnthropicClient({ apiKey: API_KEY, model: MODEL, baseURL: BASE_URL, fetch, ...overrides })
 
 const ok = (content: Block[] = [textBlock('hi')], stop_reason = 'end_turn') => () => messageResponse({ content, stop_reason })
 
@@ -47,15 +52,21 @@ const ok = (content: Block[] = [textBlock('hi')], stop_reason = 'end_turn') => (
 const assistantBlocks = (body: any): Block[] =>
   body.messages.filter((m: any) => m.role === 'assistant').flatMap((m: any) => m.content)
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
+/** The API's free text, the key and the prompt must reach neither the message, the string form nor a cause. */
+const expectNoLeak = (error: unknown) => {
+  const e = error as Error
+  expect(e.message).not.toContain(FREE_TEXT)
+  expect(String(e)).not.toContain(FREE_TEXT)
+  expect(e.message).not.toContain(API_KEY)
+  expect(e.message).not.toContain(PROMPT)
+  expect(e.cause).toBeUndefined()
+}
 
 describe('AnthropicClient.createMessage', () => {
   it('posts the body to the Messages API with the key, version and content-type headers and the configured model', async () => {
-    const calls = stubFetch(ok([textBlock('hello')]))
+    const { calls, fetch } = stubFetch(ok([textBlock('hello')]))
 
-    const message = await make().createMessage(BODY)
+    const message = await make(fetch).createMessage(BODY)
 
     expect(calls).toHaveLength(1)
     const call = calls[0]!
@@ -63,22 +74,22 @@ describe('AnthropicClient.createMessage', () => {
     expect(call.init.method).toBe('POST')
     expect(call.headers.get('x-api-key')).toBe(API_KEY)
     expect(call.headers.get('anthropic-version')).toBe('2023-06-01')
-    expect(call.headers.get('content-type')).toBe('application/json')
+    expect(call.headers.get('content-type')).toContain('application/json')
     expect(call.body).toEqual({ ...BODY, model: MODEL })
     expect(message).toMatchObject({ role: 'assistant', stop_reason: 'end_turn', content: [textBlock('hello')] })
   })
 
-  it('posts to the public Messages API URL when no apiUrl is configured', async () => {
-    const calls = stubFetch(ok())
+  it('posts to the public Messages API URL when no baseURL is configured', async () => {
+    const { calls, fetch } = stubFetch(ok())
 
-    await make({ apiUrl: undefined }).createMessage(BODY)
+    await make(fetch, { baseURL: undefined }).createMessage(BODY)
 
     expect(calls[0]!.url).toBe(DEFAULT_API_URL)
   })
 
   it('rejects naming ANTHROPIC_API_KEY when the key is empty, without calling the API', async () => {
-    const calls = stubFetch(ok())
-    const client = make({ apiKey: '' })
+    const { calls, fetch } = stubFetch(ok())
+    const client = make(fetch, { apiKey: '' })
 
     const error = await caught(Promise.resolve().then(() => client.createMessage(BODY)))
 
@@ -92,9 +103,9 @@ describe('AnthropicClient.createMessage', () => {
     [402, 'billing_error'],
     [403, 'permission_error'],
   ])('throws an AnthropicConfigError on HTTP %s %s, which is neither a request nor an unavailable error', async (status, type) => {
-    stubFetch(() => errorResponse(status, type))
+    const { fetch } = stubFetch(() => errorResponse(status, type))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
     expect(error).toBeInstanceOf(AnthropicConfigError)
     expect(error).not.toBeInstanceOf(AnthropicRequestError)
@@ -106,9 +117,9 @@ describe('AnthropicClient.createMessage', () => {
     [404, 'not_found_error'],
     [413, 'request_too_large'],
   ])('throws a non-retryable AnthropicRequestError on HTTP %s %s', async (status, type) => {
-    stubFetch(() => errorResponse(status, type))
+    const { fetch } = stubFetch(() => errorResponse(status, type))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
     expect(error).toBeInstanceOf(AnthropicRequestError)
     expect(error).not.toBeInstanceOf(AnthropicUnavailableError)
@@ -120,55 +131,92 @@ describe('AnthropicClient.createMessage', () => {
     [504, 'timeout_error'],
     [529, 'overloaded_error'],
   ])('throws a retryable AnthropicUnavailableError on HTTP %s %s', async (status, type) => {
-    stubFetch(() => errorResponse(status, type))
+    const { fetch } = stubFetch(() => errorResponse(status, type))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
     expect(error).not.toBeInstanceOf(AnthropicRequestError)
   })
 
+  // The job dispatcher is the only retrier: the SDK must not retry on its own.
+  it.each([
+    [429, 'rate_limit_error'],
+    [500, 'api_error'],
+    [529, 'overloaded_error'],
+  ])('sends exactly one request when the API answers HTTP %s %s', async (status, type) => {
+    const { calls, fetch } = stubFetch(() => errorResponse(status, type), ok())
+
+    await caught(make(fetch).createMessage(BODY))
+
+    expect(calls).toHaveLength(1)
+  })
+
+  it('sends exactly one request when the network fails', async () => {
+    const { calls, fetch } = stubFetch(() => Promise.reject(new TypeError('network down')), ok())
+
+    await caught(make(fetch).createMessage(BODY))
+
+    expect(calls).toHaveLength(1)
+  })
+
   it.each([
     [401, 'authentication_error'],
+    [429, 'rate_limit_error'],
     [529, 'overloaded_error'],
+    [400, 'invalid_request_error'],
   ])('describes an HTTP %s failure by status, error type and request id only, never the key or any content', async (status, type) => {
-    stubFetch(() => errorResponse(status, type, 'Free text from the API 7731'))
+    const { fetch } = stubFetch(() => errorResponse(status, type, FREE_TEXT))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
     const message = (error as Error).message
     expect(message).toContain(String(status))
     expect(message).toContain(type)
     expect(message).toContain(REQUEST_ID)
-    expect(message).not.toContain(API_KEY)
-    expect(message).not.toContain(PROMPT)
-    expect(message).not.toContain('Free text from the API 7731')
+    expectNoLeak(error)
   })
 
-  it('reports unavailable when the network request fails', async () => {
-    stubFetch(() => Promise.reject(new TypeError('network down')))
+  it('ignores an error type that is not identifier-shaped, so nothing free-form reaches the message', async () => {
+    const { fetch } = stubFetch(() => errorResponse(400, `Bad! ${FREE_TEXT}`))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
-    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect(error).toBeInstanceOf(AnthropicRequestError)
+    expectNoLeak(error)
   })
 
-  it('reports unavailable instead of hanging when the API never answers', async () => {
-    let signal: AbortSignal | null | undefined
-    vi.stubGlobal(
-      'fetch',
-      (_input: RequestInfo | URL, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          signal = init?.signal
-          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-        }),
-    )
+  it('reports unavailable, without the cause text or a cause, when the network request fails', async () => {
+    const { fetch } = stubFetch(() => Promise.reject(new TypeError('network down 90210')))
 
-    const error = await caught(make({ timeoutMs: 10 }).createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
-    expect(signal).toBeInstanceOf(AbortSignal)
-    expect(signal!.aborted).toBe(true)
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect((error as Error).message).not.toContain('90210')
+    expectNoLeak(error)
+  })
+
+  it('reports unavailable instead of hanging when the API never answers within timeoutMs', async () => {
+    const { state, fetch } = hangingFetch()
+
+    const error = await caught(make(fetch, { timeoutMs: 10 }).createMessage(BODY))
+
+    expect(state.signal).toBeInstanceOf(AbortSignal)
+    expect(state.signal!.aborted).toBe(true)
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expectNoLeak(error)
+  })
+
+  it.each([
+    ['an HTML page', () => new Response('<html>Bad gateway</html>', { status: 200 })],
+    ['JSON without content', () => json({ type: 'message', stop_reason: 'end_turn' })],
+  ])('reports unavailable, not a request error, for a 200 that is %s', async (_label, respond) => {
+    const { fetch } = stubFetch(respond)
+
+    const error = await caught(make(fetch).createMessage(BODY))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expect(error).not.toBeInstanceOf(AnthropicRequestError)
   })
 })
 
@@ -179,9 +227,9 @@ describe('AnthropicClient.createMessage pause_turn continuation', () => {
   const last: Block[] = [textBlock('{"done":true}')]
 
   it('re-sends the request with the paused assistant content appended unchanged, and returns every block in order', async () => {
-    const calls = stubFetch(ok(first, 'pause_turn'), ok(last))
+    const { calls, fetch } = stubFetch(ok(first, 'pause_turn'), ok(last))
 
-    const message = await make().createMessage(BODY)
+    const message = await make(fetch).createMessage(BODY)
 
     expect(calls).toHaveLength(2)
     expect(calls[1]!.body).toEqual({
@@ -192,9 +240,9 @@ describe('AnthropicClient.createMessage pause_turn continuation', () => {
   })
 
   it('allows three continuations: the original request plus three re-sends', async () => {
-    const calls = stubFetch(ok(first, 'pause_turn'), ok(second, 'pause_turn'), ok(third, 'pause_turn'), ok(last))
+    const { calls, fetch } = stubFetch(ok(first, 'pause_turn'), ok(second, 'pause_turn'), ok(third, 'pause_turn'), ok(last))
 
-    const message = await make().createMessage(BODY)
+    const message = await make(fetch).createMessage(BODY)
 
     expect(calls).toHaveLength(4)
     expect(assistantBlocks(calls[3]!.body)).toEqual([...first, ...second, ...third])
@@ -202,9 +250,9 @@ describe('AnthropicClient.createMessage pause_turn continuation', () => {
   })
 
   it('throws AnthropicUnavailableError, without a fifth request, when the model is still paused after three continuations', async () => {
-    const calls = stubFetch(ok(first, 'pause_turn'))
+    const { calls, fetch } = stubFetch(ok(first, 'pause_turn'))
 
-    const error = await caught(make().createMessage(BODY))
+    const error = await caught(make(fetch).createMessage(BODY))
 
     expect(error).toBeInstanceOf(AnthropicUnavailableError)
     expect(calls).toHaveLength(4)
@@ -212,63 +260,93 @@ describe('AnthropicClient.createMessage pause_turn continuation', () => {
 })
 
 describe('AnthropicClient.structured', () => {
-  const SCHEMA = {
-    type: 'object',
-    properties: { same: { type: 'boolean' } },
-    required: ['same'],
-    additionalProperties: false,
-  }
+  const SCHEMA = z.object({ same: z.boolean() })
 
-  it('sends the body with a json_schema output format and returns the parsed JSON', async () => {
-    const calls = stubFetch(ok([textBlock('{"same":true}')]))
+  it('sends a json_schema output format derived from the zod schema and returns the parsed, typed answer', async () => {
+    const { calls, fetch } = stubFetch(ok([textBlock('{"same":true}')]))
 
-    const result = await make().structured<{ same: boolean }>(BODY, SCHEMA)
+    const result: { same: boolean } = await make(fetch).structured(BODY, SCHEMA)
 
     expect(result).toEqual({ same: true })
-    expect(calls[0]!.body).toEqual({
-      ...BODY,
-      model: MODEL,
-      output_config: { format: { type: 'json_schema', schema: SCHEMA } },
+    const body = calls[0]!.body
+    expect(body).toMatchObject({ ...BODY, model: MODEL })
+    expect(body.output_config.format.type).toBe('json_schema')
+    expect(body.output_config.format.schema).toMatchObject({
+      type: 'object',
+      properties: { same: { type: 'boolean' } },
+      required: ['same'],
+      additionalProperties: false,
     })
   })
 
-  it('ignores thinking blocks and joins the text blocks before parsing', async () => {
-    stubFetch(ok([thinkingBlock('{"same":false}'), textBlock('{"same":'), textBlock('true}')]))
+  it('sends exactly one request', async () => {
+    const { calls, fetch } = stubFetch(ok([textBlock('{"same":true}')]))
 
-    const result = await make().structured<{ same: boolean }>(BODY, SCHEMA)
+    await make(fetch).structured(BODY, SCHEMA)
+
+    expect(calls).toHaveLength(1)
+  })
+
+  it('ignores thinking blocks and joins the text blocks before parsing', async () => {
+    const { fetch } = stubFetch(ok([thinkingBlock('{"same":false}'), textBlock('{"same":'), textBlock('true}')]))
+
+    const result = await make(fetch).structured(BODY, SCHEMA)
 
     expect(result).toEqual({ same: true })
   })
 
   it('throws AnthropicRefusalError when the model refuses', async () => {
-    stubFetch(ok([textBlock('I cannot help with that.')], 'refusal'))
+    const { fetch } = stubFetch(ok([textBlock('I cannot help with that.')], 'refusal'))
 
-    const error = await caught(make().structured(BODY, SCHEMA))
+    const error = await caught(make(fetch).structured(BODY, SCHEMA))
 
     expect(error).toBeInstanceOf(AnthropicRefusalError)
   })
 
   it('throws a non-retryable AnthropicRequestError when the output was cut off by max_tokens', async () => {
-    stubFetch(ok([textBlock('{"same":')], 'max_tokens'))
+    const { fetch } = stubFetch(ok([textBlock('{"same":')], 'max_tokens'))
 
-    const error = await caught(make().structured(BODY, SCHEMA))
+    const error = await caught(make(fetch).structured(BODY, SCHEMA))
 
     expect(error).toBeInstanceOf(AnthropicRequestError)
     expect(error).not.toBeInstanceOf(AnthropicUnavailableError)
   })
 
-  it('throws AnthropicRequestError, without echoing the output, when the text is not JSON', async () => {
-    stubFetch(ok([textBlock('Sorry, secret-output-5521 is not JSON')]))
+  it('throws AnthropicRequestError, without echoing the output or carrying a cause, when the text is not JSON', async () => {
+    const { fetch } = stubFetch(ok([textBlock('Sorry, secret-output-5521 is not JSON')]))
 
-    const error = await caught(make().structured(BODY, SCHEMA))
+    const error = await caught(make(fetch).structured(BODY, SCHEMA))
 
     expect(error).toBeInstanceOf(AnthropicRequestError)
     expect((error as Error).message).not.toContain('secret-output-5521')
+    expect((error as Error).cause).toBeUndefined()
+  })
+
+  it.each([
+    ['a wrong type', '{"same":"secret-output-5521"}'],
+    ['a missing field', '{"other":true}'],
+  ])('throws AnthropicRequestError, without echoing the output or carrying a cause, when the JSON fails the schema with %s', async (_label, text) => {
+    const { fetch } = stubFetch(ok([textBlock(text)]))
+
+    const error = await caught(make(fetch).structured(BODY, SCHEMA))
+
+    expect(error).toBeInstanceOf(AnthropicRequestError)
+    expect((error as Error).message).not.toContain('secret-output-5521')
+    expect((error as Error).cause).toBeUndefined()
+  })
+
+  it('maps API failures the same way as createMessage, without the free text or a cause', async () => {
+    const { fetch } = stubFetch(() => errorResponse(529, 'overloaded_error', FREE_TEXT))
+
+    const error = await caught(make(fetch).structured(BODY, SCHEMA))
+
+    expect(error).toBeInstanceOf(AnthropicUnavailableError)
+    expectNoLeak(error)
   })
 
   it('rejects naming ANTHROPIC_API_KEY when the key is empty, without calling the API', async () => {
-    const calls = stubFetch(ok())
-    const client = make({ apiKey: '' })
+    const { calls, fetch } = stubFetch(ok())
+    const client = make(fetch, { apiKey: '' })
 
     const error = await caught(Promise.resolve().then(() => client.structured(BODY, SCHEMA)))
 
@@ -325,41 +403,3 @@ describe('sourceUrlsOf', () => {
   })
 })
 
-describe('AnthropicClient failure descriptions', () => {
-  it('names a network failure by kind, without the cause text', async () => {
-    stubFetch(() => Promise.reject(new TypeError('network down 90210')))
-
-    const error = await caught(make().createMessage(BODY))
-
-    expect(error).toBeInstanceOf(AnthropicUnavailableError)
-    expect((error as Error).message).toContain('HttpNetworkError')
-    expect((error as Error).message).not.toContain('90210')
-  })
-
-  it('names a timeout by kind', async () => {
-    vi.stubGlobal(
-      'fetch',
-      (_input: RequestInfo | URL, init?: RequestInit) =>
-        new Promise<Response>((_resolve, reject) => {
-          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
-        }),
-    )
-
-    const error = await caught(make({ timeoutMs: 10 }).createMessage(BODY))
-
-    expect(error).toBeInstanceOf(AnthropicUnavailableError)
-    expect((error as Error).message).toContain('HttpTimeoutError')
-  })
-
-  it.each([
-    ['an HTML page', () => new Response('<html>Bad gateway</html>', { status: 200 })],
-    ['JSON without content', () => json({ type: 'message', stop_reason: 'end_turn' })],
-  ])('reports unavailable, not a request error, for a 200 that is %s', async (_label, respond) => {
-    stubFetch(respond)
-
-    const error = await caught(make().createMessage(BODY))
-
-    expect(error).toBeInstanceOf(AnthropicUnavailableError)
-    expect(error).not.toBeInstanceOf(AnthropicRequestError)
-  })
-})

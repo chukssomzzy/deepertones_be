@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { AnthropicClient } from '../anthropic/anthropic.client'
 import { AnthropicRequestError, AnthropicUnavailableError } from '../anthropic/anthropic.provider'
 import {
@@ -50,16 +50,17 @@ const searched = (finalText: string, urls = [OFFICIAL, RETAILER], citations?: Bl
 
 const respondWith = (content: Block[], stop_reason = 'end_turn') => () => messageResponse({ content, stop_reason })
 
-const make = () => new AnthropicProductResearcher(new AnthropicClient({ apiKey: API_KEY, model: MODEL, apiUrl: 'https://anthropic.example/v1/messages' }))
-
-const research = async (content: Block[]) => {
-  stubFetch(respondWith(content))
-  return make().research(PRODUCT)
+/** A researcher over a client whose HTTP goes through `fetch`; the returned `calls` records the requests. */
+const researcherOver = (...responders: Parameters<typeof stubFetch>) => {
+  const { calls, fetch } = stubFetch(...responders)
+  const researcher = new AnthropicProductResearcher(new AnthropicClient({ apiKey: API_KEY, model: MODEL, baseURL: 'https://anthropic.example', fetch }))
+  return { calls, researcher }
 }
 
-afterEach(() => {
-  vi.unstubAllGlobals()
-})
+const research = async (content: Block[]) => {
+  const { researcher } = researcherOver(respondWith(content))
+  return researcher.research(PRODUCT)
+}
 
 describe('AnthropicProductResearcher.research', () => {
   it('returns the ingredients, cited source and image when the model found them on a page the search returned', async () => {
@@ -164,8 +165,7 @@ describe('AnthropicProductResearcher.research', () => {
     ['nothing but closing braces', () => '}'.repeat(50_000), false],
     ['nothing but opening braces', () => '{'.repeat(50_000), false],
   ])('stays fast on text with 50k unbalanced braces: %s', async (_label, build, found) => {
-    stubFetch(respondWith(searched(build(JSON.stringify(answer())))))
-    const researcher = make()
+    const { researcher } = researcherOver(respondWith(searched(build(JSON.stringify(answer())))))
 
     const started = performance.now()
     const result = await researcher.research(PRODUCT)
@@ -245,9 +245,9 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('asks Claude with the web search tool and no forced tool choice, using the configured model', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
 
-    await make().research(PRODUCT)
+    await researcher.research(PRODUCT)
 
     expect(calls).toHaveLength(1)
     const body = calls[0]!.body
@@ -259,9 +259,9 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('puts every part of the product identity in the prompt', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
 
-    await make().research(PRODUCT)
+    await researcher.research(PRODUCT)
 
     const prompt = requestText(calls[0]!.body)
     expect(prompt).toContain('CeraVe')
@@ -271,10 +271,10 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('researches a product that has no variant', async () => {
-    const calls = stubFetch(respondWith(searched(JSON.stringify(answer()))))
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
     const { variant: _variant, ...withoutVariant } = PRODUCT
 
-    const result = await make().research(withoutVariant)
+    const result = await researcher.research(withoutVariant)
 
     expect(result).toMatchObject({ found: true })
     expect(requestText(calls[0]!.body)).not.toContain('undefined')
@@ -286,9 +286,9 @@ describe('AnthropicProductResearcher.research', () => {
       searchCall('srvtoolu_01', 'CeraVe Hydrating Facial Cleanser ingredients'),
       searchResults('srvtoolu_01', [OFFICIAL, RETAILER]),
     ]
-    const calls = stubFetch(respondWith(paused, 'pause_turn'), respondWith([textBlock(JSON.stringify(answer()))]))
+    const { calls, researcher } = researcherOver(respondWith(paused, 'pause_turn'), respondWith([textBlock(JSON.stringify(answer()))]))
 
-    const result = await make().research(PRODUCT)
+    const result = await researcher.research(PRODUCT)
 
     expect(calls).toHaveLength(2)
     expect(calls[1]!.body.messages.at(-1)).toEqual({ role: 'assistant', content: paused })
@@ -296,14 +296,14 @@ describe('AnthropicProductResearcher.research', () => {
   })
 
   it('lets AnthropicUnavailableError through when Claude is overloaded', async () => {
-    stubFetch(() => errorResponse(529, 'overloaded_error'))
+    const { researcher } = researcherOver(() => errorResponse(529, 'overloaded_error'))
 
-    expect(await caught(make().research(PRODUCT))).toBeInstanceOf(AnthropicUnavailableError)
+    expect(await caught(researcher.research(PRODUCT))).toBeInstanceOf(AnthropicUnavailableError)
   })
 
   it('lets AnthropicRequestError through when the request is rejected', async () => {
-    stubFetch(() => errorResponse(400, 'invalid_request_error'))
+    const { researcher } = researcherOver(() => errorResponse(400, 'invalid_request_error'))
 
-    expect(await caught(make().research(PRODUCT))).toBeInstanceOf(AnthropicRequestError)
+    expect(await caught(researcher.research(PRODUCT))).toBeInstanceOf(AnthropicRequestError)
   })
 })
