@@ -453,7 +453,7 @@ HTTP routes of its own: `AuthService` calls `otp.send({ channel, address })` and
   to one recipient never verifies for another. The comparison is constant time (`timingSafeEqual`).
 - **Codes come from the CSPRNG**, four digits, via `randomDigits`, which rejects bytes that would
   bias the digits.
-- **One policy object, `OTP_POLICY`**: 4 digits, valid 10 minutes, 5 wrong tries, single use, a
+- **One policy object, `OTP_POLICY`**: 4 digits, valid 10 minutes, 3 wrong tries, single use, a
   60s resend cooldown, and at most 5 sends per recipient per rolling hour. The WhatsApp template's
   code expiry is set by hand in Meta, so it must match `ttlMinutes`; the email says the same
   number, taken from the policy.

@@ -67,7 +67,7 @@ class DownQueue extends MemoryJobQueue {
 
 describe('OTP_POLICY', () => {
   it('is the agreed policy', () => {
-    expect(OTP_POLICY).toEqual({ length: 4, ttlMinutes: 10, maxAttempts: 5, cooldownSeconds: 60, maxSendsPerHour: 5 })
+    expect(OTP_POLICY).toEqual({ length: 4, ttlMinutes: 10, maxAttempts: 3, cooldownSeconds: 60, maxSendsPerHour: 5 })
   })
 })
 
@@ -617,23 +617,23 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
     it('counts down the attempts remaining on each wrong code', async () => {
       await send()
 
-      for (const attemptsRemaining of [4, 3, 2, 1]) {
+      for (const attemptsRemaining of [2, 1]) {
         const error = await errorOf(verify(c.raw, WRONG))
         expect(error).toBeInstanceOf(ValidationError)
         expect(error).toMatchObject({ code: 'OTP_INVALID', details: { attemptsRemaining } })
       }
     })
 
-    it('still accepts the correct code after four wrong tries', async () => {
+    it('still accepts the correct code after two wrong tries', async () => {
       await send()
-      for (let i = 0; i < 4; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 2; i++) await errorOf(verify(c.raw, WRONG))
 
       expect(await verify(c.raw, CODE)).toEqual(canonical)
     })
 
-    it('kills the code on the fifth wrong try, which itself is rate limited without a retry hint', async () => {
+    it('kills the code on the third wrong try, which itself is rate limited without a retry hint', async () => {
       await send()
-      for (let i = 0; i < 4; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 2; i++) await errorOf(verify(c.raw, WRONG))
 
       const error = await errorOf(verify(c.raw, WRONG))
 
@@ -644,7 +644,7 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
     it('rejects even the correct code once the attempts are used up', async () => {
       await send()
-      for (let i = 0; i < 5; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 3; i++) await errorOf(verify(c.raw, WRONG))
 
       const error = await errorOf(verify(c.raw, CODE))
 
@@ -654,7 +654,7 @@ describe.each(CHANNELS)('OtpService over $channel', (c) => {
 
     it('reports expired rather than too many attempts once a locked code has also expired', async () => {
       await send()
-      for (let i = 0; i < 5; i++) await errorOf(verify(c.raw, WRONG))
+      for (let i = 0; i < 3; i++) await errorOf(verify(c.raw, WRONG))
       at(10 * MINUTE)
 
       expect(await errorOf(verify(c.raw, CODE))).toMatchObject({ code: 'OTP_EXPIRED' })

@@ -15,7 +15,7 @@ import type { OtpChannel, OtpRecipient } from './otp.types'
 export const OTP_POLICY = {
   length: 4,
   ttlMinutes: 10,
-  maxAttempts: 5,
+  maxAttempts: 3,
   cooldownSeconds: 60,
   maxSendsPerHour: 5,
 } as const
