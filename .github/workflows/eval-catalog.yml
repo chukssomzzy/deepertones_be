@@ -1,0 +1,62 @@
+# Measures the catalog's model-backed steps (ingredient research and concern analysis) against fixed cases.
+# See "Catalog eval" in docs/architecture.md.
+#
+# This makes real, billed Claude calls, so it is never part of tests.yml and never runs on a pull request: only on a
+# weekly schedule or by hand. It is report-only. The job cannot fail the build (continue-on-error), a red run just
+# means a case did not hold, and the JSON report is uploaded as an artifact.
+#
+# Needs the repository secret ANTHROPIC_API_KEY. Without it the run says so and stops without failing.
+name: Eval catalog
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Which cases to run
+        type: choice
+        options: [all, analysis, research]
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Eval catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - name: Check for the API key
+        id: key
+        # The key is scoped to the steps that need it, so `npm ci` and dependency lifecycle scripts never see it.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set as a repository secret, so the catalog eval was skipped."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run the eval
+        if: steps.key.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: npm run eval:catalog -- --mode ${{ inputs.mode || 'all' }}
+      - name: Upload the report
+        if: always() && steps.key.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalog-eval
+          path: .eval/
+          if-no-files-found: ignore

@@ -52,6 +52,7 @@ describe('parseEnvFile', () => {
 describe('SECRETS', () => {
   it('lists exactly the known secrets, with the right ones required', () => {
     expect(Object.keys(SECRETS).sort()).toEqual([
+      'ANTHROPIC_API_KEY',
       'DEVICE_ID_KEY',
       'JWT_SECRET',
       'JWT_SECRET_PREVIOUS',
@@ -60,6 +61,7 @@ describe('SECRETS', () => {
       'ZEPTOMAIL_API_KEY',
     ])
     expect(SECRETS.ZEPTOMAIL_API_KEY!.required).toBe(true)
+    expect(SECRETS.ANTHROPIC_API_KEY!.required).toBe(true)
     expect(SECRETS.OTP_PEPPER!.required).toBe(true)
     expect(SECRETS.JWT_SECRET!.required).toBe(true)
     expect(SECRETS.DEVICE_ID_KEY!.required).toBe(true)
@@ -69,7 +71,7 @@ describe('SECRETS', () => {
 })
 
 describe('planSecretPush', () => {
-  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk' }
+  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak' }
 
   it('sends known secrets that have a value', () => {
     const plan = planSecretPush({ values: map({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' }) })
@@ -109,7 +111,13 @@ describe('planSecretPush', () => {
   })
 
   it('warns, without erroring, about required secrets that are absent or blank (sorted)', () => {
-    expect(planSecretPush({ values: map({}) }).missingRequired).toEqual(['DEVICE_ID_KEY', 'JWT_SECRET', 'OTP_PEPPER', 'ZEPTOMAIL_API_KEY'])
+    expect(planSecretPush({ values: map({}) }).missingRequired).toEqual([
+      'ANTHROPIC_API_KEY',
+      'DEVICE_ID_KEY',
+      'JWT_SECRET',
+      'OTP_PEPPER',
+      'ZEPTOMAIL_API_KEY',
+    ])
     const blankOne = planSecretPush({ values: map({ ...good, OTP_PEPPER: '' }) })
     expect(blankOne.missingRequired).toEqual(['OTP_PEPPER'])
     expect(blankOne.errors).toEqual([])
@@ -165,6 +173,17 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
     it('lists every vars key in NOT_SECRETS', () => {
       for (const name of Object.keys(env.vars)) expect(NOT_SECRETS, name).toHaveProperty(name)
     })
+  })
+
+  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS'])(
+    'lists %s as config, so it is never pushed as a secret',
+    (name) => {
+      expect(NOT_SECRETS).toHaveProperty(name)
+    },
+  )
+
+  it('no longer lists ANTHROPIC_MODEL, which wrangler.jsonc replaced with one variable per job', () => {
+    expect(NOT_SECRETS).not.toHaveProperty('ANTHROPIC_MODEL')
   })
 
   it('never lists a name as both a secret and config', () => {

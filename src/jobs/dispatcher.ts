@@ -2,6 +2,7 @@ import type { z } from 'zod'
 import { buildContainer, buildJobRuntime, type Container } from '../container'
 import { runAs } from '../lib/context'
 import { type JobDefinition, PermanentJobError, queueNames } from './job'
+import { describeError } from './safe-error'
 
 const LEASE_MS = 2 * 60 * 1000
 const KEEP_RUNS_MS = 7 * 24 * 60 * 60 * 1000
@@ -56,10 +57,17 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
         const actor = { kind: 'system', job: job.name } as const
 
         if (deadLetter) {
-          // A dead letter never overrides a finished run (e.g. a duplicate delivery that succeeded).
+          // A dead letter never overrides a finished run (e.g. a duplicate delivery that succeeded), nor one another
+          // delivery of the same key is working on right now: failing that item would undo work about to succeed.
+          // `>` mirrors claim's `<=`: a lease that ends exactly now is over.
           const run = await jobRuns.get(job.name, key)
           if (run?.status === 'done' || run?.status === 'failed') {
             log('log', key, attempt, 'dead-letter-ignored')
+            message.ack()
+            continue
+          }
+          if (run?.status === 'running' && run.leaseUntil && run.leaseUntil.getTime() > now().getTime()) {
+            log('log', key, attempt, 'dead-letter-in-progress')
             message.ack()
             continue
           }
@@ -85,7 +93,7 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
         try {
           await runAs(actor, () => job.handle(body, services))
         } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error)
+          const reason = describeError(error)
           if (error instanceof PermanentJobError) {
             await jobRuns.markFailed(job.name, key, reason, now())
             log('error', key, attempt, 'permanent-failure')
@@ -103,7 +111,7 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
         message.ack()
       } catch (error) {
         // The bookkeeping itself failed (D1 down, hook threw): let the queue redeliver.
-        console.error({ job: job.name, key, attempt, outcome: 'dispatcher-error', error: String(error) })
+        console.error({ job: job.name, key, attempt, outcome: 'dispatcher-error', error: describeError(error) })
         message.retry({ delaySeconds: delaySeconds(attempt) })
       }
     }
@@ -111,7 +119,7 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
     try {
       await jobRuns.purgeOlderThan(new Date(now().getTime() - KEEP_RUNS_MS))
     } catch (error) {
-      console.error({ job: job.name, outcome: 'purge-failed', error: String(error) })
+      console.error({ job: job.name, outcome: 'purge-failed', error: describeError(error) })
     }
   }
 }
@@ -128,7 +136,7 @@ export const createScheduledHandler = () => {
       const { deleted } = await runAs({ kind: 'system', job }, () => buildContainer(env).users.purgeUnreachableGuests())
       console.log({ job, outcome: 'done', deleted })
     } catch (error) {
-      console.error({ job, outcome: 'failed', error: String(error) })
+      console.error({ job, outcome: 'failed', error: describeError(error) })
       throw error
     }
   }

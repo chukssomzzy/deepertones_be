@@ -4,6 +4,7 @@ import { hmacSha256Hex, openText, randomDigits, sealText, timingSafeEqual } from
 import { NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { parseEmailAddress } from '../../lib/email-address'
 import { parsePhoneNumber } from '../../lib/phone'
+import { describeUnexpectedError } from '../../lib/safe-error'
 import { type EmailSender, EmailDeliveryError } from '../../providers/email/email.provider'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import { type OtpDelivery, OtpDeliveryError } from '../../providers/otp-delivery/otp-delivery.provider'
@@ -127,7 +128,7 @@ export class OtpService {
       await this.jobs.enqueue(deliverOtpSpec, { challengeId, sealedCode })
     } catch (error) {
       // Never log the code or the sealed code.
-      console.error({ outcome: 'enqueue-failed', challengeId, error: String(error) })
+      console.error({ outcome: 'enqueue-failed', challengeId, error: describeUnexpectedError(error) })
       await this.repository.markFailed(challengeId, 'unavailable')
       throw new UnavailableError('OTP_DELIVERY_UNAVAILABLE', 'Could not send the code right now; try again shortly')
     }

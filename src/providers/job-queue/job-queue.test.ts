@@ -14,8 +14,14 @@ const job = jobSpec({
 
 const fakeQueue = () => {
   const sent: unknown[] = []
-  const queue = { send: async (body: unknown) => void sent.push(body) } as unknown as Queue
-  return { queue, sent }
+  const options: unknown[] = []
+  const queue = {
+    send: async (body: unknown, sendOptions?: unknown) => {
+      sent.push(body)
+      options.push(sendOptions)
+    },
+  } as unknown as Queue
+  return { queue, sent, options }
 }
 
 describe('MemoryJobQueue', () => {
@@ -26,6 +32,29 @@ describe('MemoryJobQueue', () => {
 
     expect(memory.enqueued).toEqual([{ job: 'test-job', body: { id: 'a' } }])
   })
+
+  it('records the delay of an enqueue that asked for one, and no delay field for one that did not', async () => {
+    const memory = new MemoryJobQueue()
+
+    await memory.enqueue(job, { id: 'a' }, { delaySeconds: 30 })
+    await memory.enqueue(job, { id: 'b' })
+
+    expect(memory.enqueued).toEqual([
+      { job: 'test-job', body: { id: 'a' }, delaySeconds: 30 },
+      { job: 'test-job', body: { id: 'b' } },
+    ])
+  })
+
+  it('fails the next enqueue with the error it was given, records nothing for it, and then works again', async () => {
+    const memory = new MemoryJobQueue()
+    const outage = new Error('queue is down')
+    memory.failNextWith(outage)
+
+    await expect(memory.enqueue(job, { id: 'a' })).rejects.toBe(outage)
+    await memory.enqueue(job, { id: 'b' })
+
+    expect(memory.enqueued).toEqual([{ job: 'test-job', body: { id: 'b' } }])
+  })
 })
 
 describe('CloudflareQueuesJobQueue', () => {
@@ -35,6 +64,16 @@ describe('CloudflareQueuesJobQueue', () => {
     await new CloudflareQueuesJobQueue({ 'test-job': queue }).enqueue(job, { id: 'a' })
 
     expect(sent).toEqual([{ id: 'a' }])
+  })
+
+  it('sends the delay with the body when one is asked for, and no options when it is not', async () => {
+    const { queue, options } = fakeQueue()
+    const adapter = new CloudflareQueuesJobQueue({ 'test-job': queue })
+
+    await adapter.enqueue(job, { id: 'a' }, { delaySeconds: 30 })
+    await adapter.enqueue(job, { id: 'b' })
+
+    expect(options).toEqual([{ delaySeconds: 30 }, undefined])
   })
 
   it('sends the parsed body, without fields the schema does not know', async () => {

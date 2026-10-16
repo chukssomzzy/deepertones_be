@@ -10,7 +10,7 @@ const RETRY_AFTER_SECONDS = 60
  * It runs after `auth` but outside requestContext, so it reads c.var.auth and never currentActor().
  *
  * `ip` keys on the client address Cloudflare sets; `user` keys on the token's user id and is skipped
- * for a public caller (the IP limiter already covers them, and the route's guard rejects them).
+ * for a public caller (the IP limiter already covers them). A route that wants public callers refused puts `signedIn()` before it.
  * The binding's period is fixed at 60 s in wrangler.jsonc, hence the constant Retry-After.
  */
 export const rateLimit = (binding: LimiterName, key: 'ip' | 'user') =>

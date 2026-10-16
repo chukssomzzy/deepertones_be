@@ -31,4 +31,17 @@ describe('HealthService.check', () => {
       checks: { database: 'down' },
     })
   })
+
+  it('logs a failed check by the error\'s name, never its message, which may carry connection details', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+    repository.ping = async () => {
+      throw new TypeError('connect failed: password hunter2')
+    }
+
+    await service.check()
+
+    expect(log).toHaveBeenCalledWith({ check: 'database', error: 'TypeError' })
+    expect(JSON.stringify(log.mock.calls)).not.toContain('hunter2')
+    log.mockRestore()
+  })
 })

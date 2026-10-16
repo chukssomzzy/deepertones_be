@@ -2,7 +2,8 @@ import { catchError, type Observable, throwError, timeout, TimeoutError } from '
 import { fromFetch } from 'rxjs/fetch'
 
 /**
- * The one HTTP client for vendor adapters (src/providers, plus build scripts under scripts/; lint:arch only checks src, so the scripts side is by convention). It returns an
+ * The one HTTP client for vendor adapters (src/providers, plus build scripts under scripts/; lint:arch only checks src, so the scripts side is by convention).
+ * `requestJson$` is for JSON APIs and `requestBytes$` for binary downloads. Both return an
  * Observable so an adapter can compose operators over it. Adapters convert at their own boundary
  * with `firstValueFrom`, so services stay Promise-based and never see rxjs.
  *
@@ -29,6 +30,38 @@ export class HttpNetworkError extends HttpTransportError {}
 /** No response arrived within `timeoutMs`; the request was aborted. */
 export class HttpTimeoutError extends HttpTransportError {}
 
+export type HttpBytesResponse = {
+  status: number
+  ok: boolean
+  contentType: string | null
+  /** The Location header, for a redirect the caller decides whether to follow. */
+  location: string | null
+  bytes: Uint8Array
+}
+
+/** The body is bigger than the caller allows. Not a transport failure: the server did answer. */
+export class HttpTooLargeError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = new.target.name
+  }
+}
+
+const transportErrors =
+  (timeoutMs: number) =>
+  <T>(source: Observable<T>): Observable<T> =>
+    source.pipe(
+      catchError((error: unknown) =>
+        throwError(() =>
+          error instanceof HttpTooLargeError
+            ? error
+            : error instanceof TimeoutError
+              ? new HttpTimeoutError(`No response within ${timeoutMs}ms`, { cause: error })
+              : new HttpNetworkError('Request failed before a response', { cause: error }),
+        ),
+      ),
+    )
+
 /**
  * Cold: nothing is sent until subscribed, and unsubscribing aborts the request. Emits once, for any
  * status. Errors only with HttpTransportError subclasses.
@@ -53,12 +86,59 @@ export const requestJson$ = (url: string, init: RequestInit & { timeoutMs: numbe
     },
   }).pipe(
     timeout({ first: timeoutMs }),
-    catchError((error: unknown) =>
-      throwError(() =>
-        error instanceof TimeoutError
-          ? new HttpTimeoutError(`No response within ${timeoutMs}ms`, { cause: error })
-          : new HttpNetworkError('Request failed before a response', { cause: error }),
-      ),
-    ),
+    transportErrors(timeoutMs),
   )
+}
+
+/**
+ * Like `requestJson$`, for binary bodies from servers we do not trust. Redirects are never followed
+ * (`redirect: 'manual'`): a 3xx is emitted with its `location` so the caller can vet the next hop.
+ * The body is capped at `maxBytes`: a larger `content-length` fails before any byte is read, and
+ * otherwise the body is streamed and abandoned the moment the cap is passed, so a server that never
+ * stops sending cannot fill memory. Errors with HttpTooLargeError or HttpTransportError subclasses.
+ * `timeoutMs` covers the response and the whole body.
+ */
+export const requestBytes$ = (url: string, init: RequestInit & { timeoutMs: number; maxBytes: number }): Observable<HttpBytesResponse> => {
+  const { timeoutMs, maxBytes, ...fetchInit } = init
+  return fromFetch<HttpBytesResponse>(url, {
+    ...fetchInit,
+    redirect: 'manual',
+    selector: async (response) => ({
+      status: response.status,
+      ok: response.ok,
+      contentType: response.headers.get('content-type'),
+      location: response.headers.get('location'),
+      bytes: await readCapped(response, maxBytes),
+    }),
+  }).pipe(timeout({ first: timeoutMs }), transportErrors(timeoutMs))
+}
+
+const readCapped = async (response: Response, maxBytes: number): Promise<Uint8Array> => {
+  const declared = Number(response.headers.get('content-length'))
+  if (declared > maxBytes) {
+    await response.body?.cancel()
+    throw new HttpTooLargeError(`Body is ${declared} bytes, over the ${maxBytes} byte limit`)
+  }
+  if (!response.body) return new Uint8Array(0)
+
+  const reader = response.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      await reader.cancel()
+      throw new HttpTooLargeError(`Body is over the ${maxBytes} byte limit`)
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
 }

@@ -20,6 +20,8 @@
     "openapi": "tsx scripts/openapi.ts",
     "emails:preview": "tsx scripts/email-preview.ts",
     "assets:sync": "tsx scripts/sync-assets.ts",
+    "eval:catalog": "tsx scripts/eval-catalog.ts",
+    "ai:spend": "tsx scripts/ai-spend.ts",
     "secrets:push": "tsx scripts/push-secrets.ts",
     "openapi:lint": "REDOCLY_TELEMETRY=off redocly lint docs/openapi.json",
     "test": "vitest run",
@@ -29,6 +31,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0",
     "@hono/swagger-ui": "^0.6.1",
     "@hono/zod-openapi": "^1.6.3",
     "drizzle-orm": "^0.45.4",

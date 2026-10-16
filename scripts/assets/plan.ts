@@ -1,5 +1,7 @@
 export const CACHE_CONTROL = 'public, max-age=86400'
 export const MANIFEST_KEY = '_sync-manifest.json'
+// The Worker writes stock images here (catalog/<environment>/…) into the same bucket; the sync must never overwrite them.
+export const CATALOG_PREFIX = 'catalog/'
 
 export type Manifest = { version: 1; files: Record<string, string> }
 export type LocalFile = { key: string; sha256: string }
@@ -28,10 +30,17 @@ export function contentTypeFor(key: string): string {
   return type
 }
 
+/** Throws for a local key the sync must not write: the manifest's own, or one under the Worker's catalog prefix. */
+export function assertKeyAllowed(key: string): void {
+  if (key === MANIFEST_KEY) throw new Error(`${MANIFEST_KEY} is reserved for the sync manifest; rename the local file`)
+  if (key.startsWith(CATALOG_PREFIX)) {
+    throw new Error(`${key}: the ${CATALOG_PREFIX} prefix is reserved for catalog images written by the Worker; move the file out of assets/${CATALOG_PREFIX}`)
+  }
+}
+
 /** Pure: decides what to upload from the local hashes and the manifest of the previous run. */
 export function planAssetSync(local: LocalFile[], manifest: Manifest | null, opts: { force?: boolean } = {}): AssetPlan {
-  const collision = local.find((f) => f.key === MANIFEST_KEY)
-  if (collision) throw new Error(`${MANIFEST_KEY} is reserved for the sync manifest; rename the local file`)
+  for (const f of local) assertKeyAllowed(f.key)
 
   const previous = manifest?.files ?? {}
   const sorted = [...local].sort((a, b) => (a.key < b.key ? -1 : 1))

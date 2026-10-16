@@ -3,7 +3,10 @@
   "name": "deepertones-be",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-10",
-  "compatibility_flags": ["nodejs_compat"],
+  // enable_request_signal makes request.signal fire in a Durable Object when the client of a streamed response goes away: without it
+  // the ScanStream never learns a client left. Env blocks inherit this list; one that sets its own would replace it. Do NOT add
+  // pipe_to_backward_propagation by hand: it crashed workerd at startup, and it becomes the default on 2026-11-17 anyway.
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
 
   // Non-secret config. Secrets go in .dev.vars locally, and in .dev.vars.<env> pushed with `npm run secrets:push` when deployed.
   // After changing vars or bindings, run `npm run cf-typegen` so c.env stays typed.
@@ -24,21 +27,35 @@
     "WHATSAPP_PHONE_NUMBER_ID": "1297385913467660",
     // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
     "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-    "WHATSAPP_OTP_LANGUAGE": "en"
+    "WHATSAPP_OTP_LANGUAGE": "en",
+    // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+    "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+    // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+    "AI_DAILY_BUDGET_USD": "1",
+    // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
+    "CATALOG_IMAGES_PUBLIC_URL": ""
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
 
-  // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+  // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
   //   npx wrangler queues create deepertones-otp-delivery-development
   //   npx wrangler queues create deepertones-otp-delivery-dlq-development
+  //   npx wrangler queues create deepertones-scan-items-development
+  //   npx wrangler queues create deepertones-scan-items-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
-    "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" }],
+    "producers": [
+      { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" },
+      { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-development" }
+    ],
     "consumers": [
       {
         "queue": "deepertones-otp-delivery-development",
@@ -49,7 +66,17 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-otp-delivery-dlq-development"
       },
-      { "queue": "deepertones-otp-delivery-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-otp-delivery-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-scan-items-development",
+        "max_batch_size": 10,
+        // A person is watching the scan: do not hold a partial batch.
+        "max_batch_timeout": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-scan-items-dlq-development"
+      },
+      { "queue": "deepertones-scan-items-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -60,16 +87,29 @@
     { "name": "AUTH_OTP_SEND_USER_LIMITER", "namespace_id": "1002", "simple": { "limit": 3, "period": 60 } },
     { "name": "AUTH_OTP_VERIFY_IP_LIMITER", "namespace_id": "1003", "simple": { "limit": 10, "period": 60 } },
     { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "1004", "simple": { "limit": 10, "period": 60 } },
-    { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } }
+    { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "1005", "simple": { "limit": 30, "period": 60 } },
+    { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "1006", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "1007", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "1008", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "1009", "simple": { "limit": 20, "period": 60 } }
   ],
 
-  // Daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
-  // Env blocks do not inherit triggers, so each deployed environment restates it.
-  "triggers": { "crons": ["17 3 * * *"] },
+  // Two crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
+  // is a change there too. Env blocks do not inherit triggers, so each deployed environment restates both.
+  //   17 3 * * *      daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
+  //   */10 * * * *    scan reaper (ScanService.reap): queues scan steps that were lost again and fails items stuck for over 2 hours.
+  "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
 
   "observability": {
     "enabled": true
   },
+
+  // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit
+  // `durable_objects`, so each restates it. `migrations` is inherited, so it is declared once, here. new_sqlite_classes is the
+  // SQLite-backed kind and the choice is permanent per class (the object keeps its streams in memory and stores nothing).
+  // Never edit a shipped migration: a later change to the class is a new entry with a new tag.
+  "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
+  "migrations": [{ "tag": "v1-scan-stream", "new_sqlite_classes": ["ScanStream"] }],
 
   // Local D1 (wrangler dev + tests). The id only names the local SQLite file; nothing remote.
   // migrations_dir must match `out` in drizzle.config.ts: drizzle-kit writes there, wrangler applies from there.
@@ -82,8 +122,19 @@
     }
   ],
 
+  // The one public bucket, deepertones-assets, for everything public. The CI sync owns email/ and the other keys from the
+  // repo's assets/ folder; the Worker owns catalog/<environment>/…. The two never overlap (the sync refuses a catalog/ file).
+  // Here it is a local simulation: wrangler dev and the tests write to a local bucket, never the real one.
+  //
+  // The one private bucket, deepertones-private, for users' product photos, shared by every environment (the owner's rule).
+  // Keys are prefixed photos/<environment>/…. It has no public domain and r2.dev is off: photos leave only through signed
+  // photo links the Worker checks. Local here too, like the public bucket.
+  "r2_buckets": [
+    { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+    { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
+  ],
+
   // More storage bindings, added as we need them:
-  // "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "deepertones" }],
   // "kv_namespaces": [{ "binding": "KV", "id": "" }],
   //
   // The test suite boots this file's top level. Never mark a binding here "remote": true:
@@ -119,20 +170,34 @@
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-        "WHATSAPP_OTP_LANGUAGE": "en"
+        "WHATSAPP_OTP_LANGUAGE": "en",
+        // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+        "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        "AI_DAILY_BUDGET_USD": "5",
+        // Where deepertones-assets is served from (its custom domain).
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
-      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
+      // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
       //   npx wrangler queues create deepertones-otp-delivery-dlq-staging
+      //   npx wrangler queues create deepertones-scan-items-staging
+      //   npx wrangler queues create deepertones-scan-items-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
-        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" }],
+        "producers": [
+          { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" },
+          { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-staging" }
+        ],
         "consumers": [
           {
             "queue": "deepertones-otp-delivery-staging",
@@ -143,7 +208,17 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-otp-delivery-dlq-staging"
           },
-          { "queue": "deepertones-otp-delivery-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-otp-delivery-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-scan-items-staging",
+            "max_batch_size": 10,
+            // A person is watching the scan: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-scan-items-dlq-staging"
+          },
+          { "queue": "deepertones-scan-items-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -153,10 +228,16 @@
         { "name": "AUTH_OTP_SEND_USER_LIMITER", "namespace_id": "2002", "simple": { "limit": 3, "period": 60 } },
         { "name": "AUTH_OTP_VERIFY_IP_LIMITER", "namespace_id": "2003", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "2004", "simple": { "limit": 10, "period": 60 } },
-        { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "2005", "simple": { "limit": 30, "period": 60 } }
+        { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "2005", "simple": { "limit": 30, "period": 60 } },
+        { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "2006", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "2007", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "2008", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "2009", "simple": { "limit": 20, "period": 60 } }
       ],
-      // Daily guest cleanup, 03:17 UTC (see the top level).
-      "triggers": { "crons": ["17 3 * * *"] },
+      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
+      "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -164,6 +245,15 @@
           "database_id": "558afc3f-0a25-488f-9e7c-d62675124507",
           "migrations_dir": "migrations"
         }
+      ],
+      // The one public bucket, shared with the CI sync, which owns email/ and the other repo assets/ keys. The Worker writes
+      // only under catalog/<environment>/…, so the two never overlap.
+      //
+      // The one private bucket for every environment (the owner's rule): keys are prefixed photos/<environment>/…, it has no
+      // public domain and r2.dev is off, so photos leave only through signed photo links.
+      "r2_buckets": [
+        { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+        { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
       ]
     },
     "production": {
@@ -187,20 +277,34 @@
         "WHATSAPP_PHONE_NUMBER_ID": "",
         // The approved authentication template. Its code expiry must be set to 10 minutes to match OTP_POLICY.
         "WHATSAPP_OTP_TEMPLATE": "deepertones_otp",
-        "WHATSAPP_OTP_LANGUAGE": "en"
+        "WHATSAPP_OTP_LANGUAGE": "en",
+        // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
+        "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        "AI_DAILY_BUDGET_USD": "30",
+        // Where deepertones-assets is served from (its custom domain).
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET and DEVICE_ID_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY"] },
-      // Both queues below (main + dead-letter) must exist before the first deploy that binds them;
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
+      // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production
       //   npx wrangler queues create deepertones-otp-delivery-dlq-production
+      //   npx wrangler queues create deepertones-scan-items-production
+      //   npx wrangler queues create deepertones-scan-items-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
-        "producers": [{ "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" }],
+        "producers": [
+          { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" },
+          { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-production" }
+        ],
         "consumers": [
           {
             "queue": "deepertones-otp-delivery-production",
@@ -211,7 +315,17 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-otp-delivery-dlq-production"
           },
-          { "queue": "deepertones-otp-delivery-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-otp-delivery-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-scan-items-production",
+            "max_batch_size": 10,
+            // A person is watching the scan: do not hold a partial batch.
+            "max_batch_timeout": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the item failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-scan-items-dlq-production"
+          },
+          { "queue": "deepertones-scan-items-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -221,10 +335,16 @@
         { "name": "AUTH_OTP_SEND_USER_LIMITER", "namespace_id": "3002", "simple": { "limit": 3, "period": 60 } },
         { "name": "AUTH_OTP_VERIFY_IP_LIMITER", "namespace_id": "3003", "simple": { "limit": 10, "period": 60 } },
         { "name": "AUTH_BOOTSTRAP_IP_LIMITER", "namespace_id": "3004", "simple": { "limit": 10, "period": 60 } },
-        { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "3005", "simple": { "limit": 30, "period": 60 } }
+        { "name": "AUTH_REFRESH_IP_LIMITER", "namespace_id": "3005", "simple": { "limit": 30, "period": 60 } },
+        { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "3006", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "3007", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "3008", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "3009", "simple": { "limit": 20, "period": 60 } }
       ],
-      // Daily guest cleanup, 03:17 UTC (see the top level).
-      "triggers": { "crons": ["17 3 * * *"] },
+      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
+      "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [
         {
           "binding": "DB",
@@ -232,6 +352,15 @@
           "database_id": "2a224d3f-1ddb-4761-a21b-5025502b2fce",
           "migrations_dir": "migrations"
         }
+      ],
+      // The one public bucket, shared with the CI sync, which owns email/ and the other repo assets/ keys. The Worker writes
+      // only under catalog/<environment>/…, so the two never overlap.
+      //
+      // The one private bucket for every environment (the owner's rule): keys are prefixed photos/<environment>/…, it has no
+      // public domain and r2.dev is off, so photos leave only through signed photo links.
+      "r2_buckets": [
+        { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
+        { "binding": "PRIVATE_PHOTOS", "bucket_name": "deepertones-private" }
       ]
     }
   }

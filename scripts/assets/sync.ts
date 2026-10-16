@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { CACHE_CONTROL, MANIFEST_KEY, contentTypeFor, planAssetSync, type Manifest } from './plan'
+import { CACHE_CONTROL, MANIFEST_KEY, assertKeyAllowed, contentTypeFor, planAssetSync, type Manifest } from './plan'
 
 export interface R2Client {
   bucketExists(bucket: string): Promise<boolean>
@@ -57,7 +57,7 @@ export async function syncAssets(deps: SyncDeps): Promise<SyncResult> {
   // Validate every key before the first write (dry run included): a bad extension must fail the
   // whole run up front, not after earlier files are uploaded and the manifest is never written.
   for (const f of files) {
-    if (f.key === MANIFEST_KEY) throw new Error(`${MANIFEST_KEY} is reserved for the sync manifest; rename the local file`)
+    assertKeyAllowed(f.key)
     contentTypeFor(f.key)
   }
 

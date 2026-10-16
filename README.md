@@ -137,8 +137,54 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET` and `DEVICE_ID_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET` and `DEVICE_ID_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate each with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
+
+## Product catalog setup
+
+Product research and analysis call Claude, and stock images are kept in the existing public bucket
+`deepertones-assets`, served at `assets.deepertones.com` (see [Email assets](#email-assets)), under
+`catalog/<environment>/`. There is no bucket or domain to create: both already exist, and the CI asset sync never
+touches `catalog/` (it refuses a local file under that prefix). Design in "Product catalog service" in
+`docs/architecture.md`. What is left for the account owner, once per environment:
+
+1. Create an Anthropic API key per environment (Claude Console → API keys; a separate key or workspace for each, so
+   spend limits and revocation are per environment) and put it in `.dev.vars.staging` and `.dev.vars.production` as
+   `ANTHROPIC_API_KEY`.
+2. Push them: `npm run secrets:push -- --env staging --apply`, then `npm run secrets:push -- --env production --apply`.
+3. Optional: add a response header rule (the `deepertones.com` zone → Rules → Transform Rules → Modify Response
+   Header) that sets `X-Content-Type-Options: nosniff` for `assets.deepertones.com`, so a browser never
+   reinterprets a stored object.
+
+Deploys fail until `ANTHROPIC_API_KEY` is set on the environment's Worker (it is in `secrets.required`), so do steps 1
+and 2 before merging to `staging` or `main`. The first catalog image can only be written once `deepertones-assets`
+exists, which the first asset sync creates. Locally nothing needs creating: the tests and `wrangler dev` use a local
+bucket, which serves no public URL, so product views show no image. For `wrangler dev`, also put `ANTHROPIC_API_KEY` in `.dev.vars` to try the real model.
+
+### Private photo storage
+
+Users' product photos go to the private R2 bucket `deepertones-private` (binding `PRIVATE_PHOTOS`), one bucket for every
+environment, keys under `photos/<environment>/`. The bucket already exists (created 2026-10-15), so there is nothing to do:
+no bucket, domain or secret to create. Keep it private: never attach a custom domain or enable r2.dev. Design in
+"Private photos" in `docs/architecture.md`.
+
+### AI spend cap
+
+Every Claude request is counted against a daily dollar cap, `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (a `var` in each
+environment: `1` locally, `5` on staging, `30` on production; it must be a positive number). It resets at 00:00 UTC. It is
+the app's only spend cap: there is no Console limit behind it, by decision, so change it in the config. The
+`ai_usage` table (migration 0008) holds the record, so run the migrations on an environment before deploying to it. To see
+what has been spent:
+
+```
+npm run ai:spend -- --env staging          # also --env production; local by default; --days N (default 30)
+```
+
+It prints today, the last 7 days and the last N days in dollars, then each job and model. The models per job are
+`ANTHROPIC_MODEL_RESEARCH`, `_VISION`, `_JUDGE` (Haiku) and `_ANALYSIS` (Sonnet) in the same file. Design in "AI cost
+tracking" in `docs/architecture.md`.
+
+To measure the research and analysis steps against fixed cases, run `npm run eval:catalog` (it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
 
 ## ZeptoMail setup
 
@@ -283,6 +329,7 @@ In `wrangler.jsonc`, the top level is local development. Deployed Workers come o
 `env.staging` and `env.production` (named `deepertones-be-staging` / `deepertones-be-production`).
 Env blocks do not inherit `vars`, bindings or `triggers`, so add each one to both.
 The daily guest-cleanup cron (`triggers.crons`, 03:17 UTC) is deployed with the Worker; see Guest cleanup in `docs/architecture.md`.
+The scan reaper cron (`*/10 * * * *`, same `triggers.crons`) is deployed with the Worker too and needs no setup: no queue, binding or secret to create. It queues scan steps that were lost again and fails items stuck for over 2 hours; see Scan module in `docs/architecture.md`.
 
 Each deploy applies D1 migrations first, then deploys the Worker: the schema leads the code. A
 migration that drops a column or table must therefore ship one release *after* the code that
@@ -300,14 +347,18 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the job queues (two per environment: the delivery queue and its dead-letter queue). A
-   deploy that binds a missing queue fails:
+3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery and
+   the scan items). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
    npx wrangler queues create deepertones-otp-delivery-dlq-staging
    npx wrangler queues create deepertones-otp-delivery-production
    npx wrangler queues create deepertones-otp-delivery-dlq-production
+   npx wrangler queues create deepertones-scan-items-staging
+   npx wrangler queues create deepertones-scan-items-dlq-staging
+   npx wrangler queues create deepertones-scan-items-production
+   npx wrangler queues create deepertones-scan-items-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

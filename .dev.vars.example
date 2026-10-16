@@ -19,3 +19,6 @@ JWT_SECRET=
 JWT_SECRET_PREVIOUS=
 # Keys the hash of device ids. Generate with: openssl rand -hex 32. NEVER rotate it: that orphans every device's guest.
 DEVICE_ID_KEY=
+# Anthropic API key for product research and analysis (Claude Console → API keys). Required.
+# Use a separate key or workspace per environment, so spend limits and revocation are per environment.
+ANTHROPIC_API_KEY=

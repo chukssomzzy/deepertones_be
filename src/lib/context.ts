@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import type { Actor, TokenProblem } from './actor'
-import { ForbiddenError, UnauthorizedError } from './errors'
+import { type Actor, type TokenProblem, notSignedIn } from './actor'
+import { ForbiddenError } from './errors'
 
 export type { Actor, TokenProblem }
 
@@ -47,13 +47,7 @@ export const currentActor = (): Actor => currentContext().actor
 export const requireUser = (): Extract<Actor, { kind: 'user' }> => {
   const { actor, tokenProblem } = currentContext()
   if (actor.kind === 'user') return actor
-  if (actor.kind === 'public' && tokenProblem === 'expired') {
-    throw new UnauthorizedError('TOKEN_EXPIRED', 'Your session has expired')
-  }
-  if (actor.kind === 'public' && tokenProblem === 'invalid') {
-    throw new UnauthorizedError('TOKEN_INVALID', 'Your session is not valid')
-  }
-  throw new UnauthorizedError('AUTH_REQUIRED', 'Sign in to do this')
+  throw notSignedIn(actor.kind === 'public' ? tokenProblem : undefined)
 }
 
 /** requireUser, and the account must be verified: a guest gets 403 VERIFICATION_REQUIRED. */

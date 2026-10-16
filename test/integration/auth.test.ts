@@ -47,6 +47,17 @@ const freshIp = () => {
   const n = next()
   return `10.${Number(runSalt) % 250}.${Math.floor(n / 250) % 250}.${(n % 250) + 1}`
 }
+
+// Miniflare's rate-limit windows are aligned to the wall clock (epoch = floor(now / 60 s)), so a test that
+// spends part of a budget and straddles a minute boundary sees its counter reset and never reaches 429.
+// Rate-limit tests call this first: it waits for the next window when fewer than SAFE_WINDOW_MS remain.
+const RATE_WINDOW_MS = 60 * 1000
+const SAFE_WINDOW_MS = 20 * 1000
+const RATE_TEST_TIMEOUT_MS = RATE_WINDOW_MS + 30 * 1000
+const startOfRateWindow = async () => {
+  const remaining = RATE_WINDOW_MS - (Date.now() % RATE_WINDOW_MS)
+  if (remaining < SAFE_WINDOW_MS) await new Promise((resolve) => setTimeout(resolve, remaining + 50))
+}
 const freshEmail = () => `Auth-${runSalt}-${next()}@Example.com`
 const canonical = (email: string) => email.toLowerCase()
 
@@ -411,6 +422,7 @@ describe('POST /auth/logout', () => {
 // rate-limit simulation. The counter lives in the local runtime and keeps its window in real time.
 describe('rate limits', () => {
   it('answers 429 RATE_LIMITED with Retry-After after 10 bootstraps in a minute from one IP, while another IP still works', async () => {
+    await startOfRateWindow()
     const ip = freshIp()
     const statuses: number[] = []
     let limited: Reply | undefined
@@ -426,7 +438,7 @@ describe('rate limits', () => {
     expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
 
     expect((await newDevice().bootstrap()).status).toBe(200)
-  })
+  }, RATE_TEST_TIMEOUT_MS)
 })
 
 describe('OpenAPI', () => {
@@ -454,6 +466,7 @@ describe('OpenAPI', () => {
 
 describe('review fixes', () => {
   it('rate limits /auth/logout with the bootstrap budget: 429 RATE_LIMITED after 10 from one IP', async () => {
+    await startOfRateWindow()
     const device = newDevice()
     const { tokens } = await sessionOf(await device.bootstrap())
 
@@ -470,7 +483,7 @@ describe('review fixes', () => {
     expect(statuses[9]).toBe(429)
     expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
     expect(Number(limited!.headers.get('Retry-After'))).toBeGreaterThan(0)
-  })
+  }, RATE_TEST_TIMEOUT_MS)
 
   it('refuses a verified caller an address nobody owns, before any code is sent or consumed', async () => {
     const owner = await seedVerifiedUser(freshEmail())

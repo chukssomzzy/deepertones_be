@@ -46,6 +46,10 @@ export const SECRETS: Record<string, SecretSpec> = {
       'MetaWhatsAppOtpDelivery calls the Meta Cloud API with it. Optional until whatsapp is in OTP_CHANNELS.',
     required: false,
   },
+  ANTHROPIC_API_KEY: {
+    reason: 'src/container.ts builds the AnthropicClient with it, for product research and analysis.',
+    required: true,
+  },
 }
 
 const VAR = 'a var in wrangler.jsonc; a secret of the same name is shadowed on deploy'
@@ -65,6 +69,12 @@ export const NOT_SECRETS: Record<string, string> = {
   WHATSAPP_PHONE_NUMBER_ID: VAR,
   WHATSAPP_OTP_TEMPLATE: VAR,
   WHATSAPP_OTP_LANGUAGE: VAR,
+  ANTHROPIC_MODEL_RESEARCH: VAR,
+  ANTHROPIC_MODEL_VISION: VAR,
+  ANTHROPIC_MODEL_JUDGE: VAR,
+  ANTHROPIC_MODEL_ANALYSIS: VAR,
+  AI_DAILY_BUDGET_USD: VAR,
+  CATALOG_IMAGES_PUBLIC_URL: VAR,
 }
 
 /**
