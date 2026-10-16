@@ -1,11 +1,6 @@
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
 import { assertPhotoKey, assertPhotoMedia, type PhotoEnvironment, type PhotoStore } from './photo-store.provider'
 
-// R2 takes at most this many keys in one delete.
-const R2_DELETE_LIMIT = 1000
-// Never shared or cached: a deleted photo must be gone, and a signed link must not be replayable from a cache.
-const CACHE_CONTROL = 'private, no-store'
-
 export type R2PhotoStoreConfig = {
   /** The private bucket, deepertones-private. */
   bucket: R2Bucket
@@ -21,17 +16,28 @@ export type R2PhotoStoreConfig = {
  * would expose every user's photos.
  */
 export class R2PhotoStore implements PhotoStore {
-  constructor(private readonly config: R2PhotoStoreConfig) {}
+  // R2 takes at most this many keys in one delete.
+  static readonly #DELETE_LIMIT = 1000
+  // Never shared or cached: a deleted photo must be gone, and a signed link must not be replayable from a cache.
+  static readonly #CACHE_CONTROL = 'private, no-store'
+
+  readonly #bucket: R2Bucket
+  readonly #environment: PhotoEnvironment
+
+  constructor({ bucket, environment }: R2PhotoStoreConfig) {
+    this.#bucket = bucket
+    this.#environment = environment
+  }
 
   async put(key: string, image: ProductImage): Promise<void> {
-    this.assertKey(key)
+    this.#assertKey(key)
     assertPhotoMedia(key, image)
-    await this.config.bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mediaType, cacheControl: CACHE_CONTROL } })
+    await this.#bucket.put(key, image.bytes, { httpMetadata: { contentType: image.mediaType, cacheControl: R2PhotoStore.#CACHE_CONTROL } })
   }
 
   async get(key: string): Promise<ProductImage | null> {
-    this.assertKey(key)
-    const object = await this.config.bucket.get(key)
+    this.#assertKey(key)
+    const object = await this.#bucket.get(key)
     if (!object) return null
     // The stored type decides, never the extension; anything but a JPEG or WebP is not a photo we wrote.
     const mediaType = object.httpMetadata?.contentType
@@ -40,19 +46,19 @@ export class R2PhotoStore implements PhotoStore {
   }
 
   async delete(key: string): Promise<void> {
-    this.assertKey(key)
-    await this.config.bucket.delete(key)
+    this.#assertKey(key)
+    await this.#bucket.delete(key)
   }
 
   async deleteMany(keys: string[]): Promise<void> {
     // All keys first, so one bad key cannot leave a half-done delete.
-    for (const key of keys) this.assertKey(key)
-    for (let i = 0; i < keys.length; i += R2_DELETE_LIMIT) {
-      await this.config.bucket.delete(keys.slice(i, i + R2_DELETE_LIMIT))
+    for (const key of keys) this.#assertKey(key)
+    for (let i = 0; i < keys.length; i += R2PhotoStore.#DELETE_LIMIT) {
+      await this.#bucket.delete(keys.slice(i, i + R2PhotoStore.#DELETE_LIMIT))
     }
   }
 
-  private assertKey(key: string): void {
-    assertPhotoKey(key, this.config.environment)
+  #assertKey(key: string): void {
+    assertPhotoKey(key, this.#environment)
   }
 }
