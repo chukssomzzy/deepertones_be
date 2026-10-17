@@ -718,7 +718,7 @@ there is no Console spend limit behind it, so the code is the backstop.
 
 ### Catalog images
 `providers/catalog-images` fetches a product's stock image and keeps it. The port is
-`CatalogImageStore` (`fetchImage`, `put`, `delete`, `publicUrl`); `R2CatalogImageStore` and
+`CatalogImageStore` (`pageImageUrl`, `fetchImage`, `put`, `delete`, `publicUrl`); `R2CatalogImageStore` and
 `MemoryCatalogImageStore` implement it. A failed download is `null`, never an error.
 
 - **Safe-URL rules.** `isSafePublicHttpsUrl` accepts only https URLs of at most 2048 characters with no
@@ -727,6 +727,14 @@ there is no Console spend limit behind it, so the code is the backstop.
   single-label host. The adapter checks the start URL and every redirect target, resolves a relative
   `location` against the URL that sent it, and follows at most 2 redirects (3 requests), each with its
   own 10 s timeout.
+- **Image from the source page.** `pageImageUrl(pageUrl)` finds the product's image on the page the researcher
+  cited. The researcher cannot supply an image URL itself: web_search never exposes image URLs, so the model always
+  answered null. Source pages carry the packshot in `og:image`. The adapter fetches the page through the same safe path as
+  `fetchImage` (safe-URL check and blocked hosts on every hop, at most 2 redirects, 10 s timeout), accepts only a 2xx
+  `text/html` answer, reads at most 512 KB of it (`requestHeadBytes$` stops pulling at the cap), and scans the `<meta>`
+  tags (`property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
+  `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. The value is resolved against the
+  page URL and returned only if it is a safe public https URL. Any failure is `null`; nothing from the page or its URL is logged.
 - **Blocked hosts.** `blockedHostSuffixes` (default none) refuses any hop whose hostname equals a
   suffix or ends with `.`+suffix. The container passes our own zones, so a redirect cannot point the
   Worker back at us; the suffixes are not hard-coded in the adapter.
@@ -909,7 +917,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   or symbols with a space ("less than 1 ppm"). It also states a tighter length budget (`why` at most 450 characters,
   `whoShouldTakeCare` at most 200, repeated in the schema descriptions) so a slightly long answer still clears the gate.
 - **Stock image import** runs after the formulation is stored, only when the product has no image and none was looked
-  for in the last `FRESH_FOR_DAYS`. Gates, in order: the image store's safe download (see "Catalog images"; `null`
+  for in the last `FRESH_FOR_DAYS`. The image URL comes from `pageImageUrl(sourceUrl)` (see "Catalog images"), looked up only after the freshness and
+  has-image guard passes. Gates, in order: the image store's safe download (see "Catalog images"; `null`
   for a bad URL, type or size), then `imageShowsProduct` (the vision match), and only then `put` to
   `<imageKeyPrefix>/products/<productId>.<jpg|png|webp>` (for example
   `catalog/staging/products/<productId>.jpg`) and the product's image key, source page and time. A missing URL, a failed

@@ -187,7 +187,8 @@ const scanOne = async (ctx: Ctx, photo: ProductImage = markedJpeg(1)) => {
 /** Puts a catalog product into the state a scan of it will find: researched and analysed (ready), or only researched (needs-analysis). */
 const catalogued = async (ctx: Ctx, who: ProductIdentity = CERAVE, over: { ingredients?: string[]; analysed?: boolean; imageUrl?: string } = {}) => {
   const { ingredients = CLEAN, analysed = true, imageUrl } = over
-  ctx.researcher.respondWith(() => ({ found: true, ingredients, sourceUrl: SOURCE_URL, ...(imageUrl ? { imageUrl } : {}) }))
+  ctx.researcher.respondWith(() => ({ found: true, ingredients, sourceUrl: SOURCE_URL }))
+  if (imageUrl) ctx.images.respondToPage(SOURCE_URL, imageUrl)
   const resolved = await ctx.catalog.resolve(who)
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
   const found = await ctx.catalog.research(resolved.productId)

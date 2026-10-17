@@ -14,7 +14,7 @@ export type ProductIdentity = {
 
 export type ResearchResult =
   /** `sourceUrl` is a page the search actually returned; `ingredients` are in label (INCI) order. */
-  | { found: true; ingredients: string[]; sourceUrl: string; imageUrl?: string }
+  | { found: true; ingredients: string[]; sourceUrl: string }
   /** Nothing usable and sourced: no list, no trustworthy page, or an answer that could not be read. */
   | { found: false }
 

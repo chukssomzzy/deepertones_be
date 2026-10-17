@@ -1,12 +1,11 @@
 import { z } from 'zod'
-import { isSafePublicHttpsUrl } from '../../lib/url-safety'
 import { productResearcherResearchPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
 
 // A type outside the class cannot read its private members (TS2341), so the answer shape is spelled out beside the schema it mirrors.
-type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null; imageUrl?: unknown }
+type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null }
 
 /** Researches a product's ingredients with Claude and its web search tool. */
 export class AnthropicProductResearcher implements ProductResearcher {
@@ -17,7 +16,6 @@ export class AnthropicProductResearcher implements ProductResearcher {
     found: z.boolean(),
     ingredients: z.array(z.string()),
     sourceUrl: z.string().nullish(),
-    imageUrl: z.unknown().optional(),
   })
 
   private static readonly NOT_FOUND: ResearchResult = { found: false }
@@ -52,10 +50,7 @@ export class AnthropicProductResearcher implements ProductResearcher {
     const ingredients = answer.ingredients.map((name) => name.trim()).filter((name) => name !== '')
     const { sourceUrl } = answer
     if (!AnthropicProductResearcher.withinBounds(ingredients) || !sourceUrl || !sourceUrlsOf(message).has(sourceUrl)) return notFound
-
-    // A first filter only: the image store checks again when it downloads.
-    const imageUrl = isSafePublicHttpsUrl(answer.imageUrl) ? answer.imageUrl : undefined
-    return { found: true, ingredients, sourceUrl, ...(imageUrl !== undefined && { imageUrl }) }
+    return { found: true, ingredients, sourceUrl }
   }
 
   private static withinBounds(ingredients: string[]): boolean {

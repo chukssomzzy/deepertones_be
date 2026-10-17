@@ -277,7 +277,7 @@ export class ProductCatalogService {
     }
     await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    await this.importStockImage(product, result.imageUrl, now)
+    await this.importStockImage(product, result.sourceUrl, now)
     return { kind: 'found', formulationId }
   }
 
@@ -505,11 +505,12 @@ export class ProductCatalogService {
    * may fail the research: the ingredients are already stored, and a missing image is normal. The log carries the
    * product id only, never a URL, which came from a web page.
    */
-  private async importStockImage(product: Product, imageUrl: string | undefined, now: Date): Promise<void> {
+  private async importStockImage(product: Product, sourceUrl: string, now: Date): Promise<void> {
     const checkedAt = product.imageCheckedAt
     if (product.imageKey !== null || (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.DAY))
       return
     try {
+      const imageUrl = await this.images.pageImageUrl(sourceUrl)
       const image = imageUrl ? await this.images.fetchImage(imageUrl) : null
       if (!imageUrl || !image || !(await this.analyst.imageShowsProduct(image, ProductCatalogService.identityOf(product)))) {
         await this.repository.markImageChecked(product.id, now)
