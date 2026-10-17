@@ -110,6 +110,12 @@ Every success response is `{ success, status, message, data }`; `data` below is 
 5. **To log out** call `POST /api/v1/auth/logout` with `{ deviceId, platform }` and the bearer token. It signs the user out
    on every device (their other devices' refresh then fails with `TOKEN_INVALID`) and returns a fresh guest session
    to store.
+6. **For push notifications**, after every sign-in, logout, profile switch and token refresh, call `PUT /api/v1/me/push-token` with
+   `{ deviceId, platform, token }` (the same `deviceId`; `token` is the Expo push token) and the bearer token. It answers 204.
+   `DELETE /api/v1/me/push-token` with `{ deviceId }` stops them for this phone (204 even if nothing was registered). Logout and
+   signing a guest in to an existing account delete the tokens they leave behind, so register again after them.
+   `GET`/`PATCH /api/v1/me/notification-settings` read and change `{ scanFinished, scanNeedsYou }` (both on by default; PATCH names at
+   least one).
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
@@ -119,6 +125,7 @@ Error codes to handle (in `error.code`):
 - `AUTH_REQUIRED` (401): no token. `TOKEN_EXPIRED` (401): refresh. `TOKEN_INVALID` (401): start over from step 1.
 - `USER_NOT_FOUND` (404, on `/api/v1/me` and logout): the account is gone; re-bootstrap.
 - `RATE_LIMITED` (429): wait `Retry-After` seconds.
+- `PUSH_TOKEN_INVALID` (400): the token is not an Expo push token.
 - `ACCOUNT_LINKING_UNAVAILABLE` (409): a verified user tried to add a different, unowned email. Not supported yet;
   no code is sent or used. `NOT_A_GUEST` (409) should now be unreachable in practice.
 - `VALIDATION_FAILED` (400), and from the code flow `INVALID_EMAIL`, `OTP_CHANNEL_UNAVAILABLE`, `OTP_COOLDOWN` (429)

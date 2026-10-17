@@ -410,7 +410,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
   holds no valid refresh token (60-day lifetime) and no device re-links to an old guest.
 - **How much:** batches of 500, at most 5000 per run; the next day's run takes the rest.
 - **Cleaners:** a module that stores per-user data adds a `GuestDataCleaner` (`{ name, deleteFor(userIds) }`)
-  to `guestDataCleaners` in the container. Every cleaner sees each batch BEFORE the user rows are deleted, so
+  to `guestDataCleaners` in the container (data whose foreign key cascades from `users`, like profiles, push tokens and notification settings, needs none). Every cleaner sees each batch BEFORE the user rows are deleted, so
   data never outlives its owner; make them safe to repeat. A cleaner that throws aborts the run and that
   batch's users stay for the next run.
 - **Failure:** logged as `{ job: 'guest-cleanup', outcome: 'failed', error }` and rethrown so Cloudflare
@@ -453,12 +453,15 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `POST /api/v1/auth/refresh` | public: `{ refreshToken }`; the Authorization header is ignored | 30 per IP |
 | `POST /api/v1/auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
 | `GET /api/v1/me` | bearer | none |
+| `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
   profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
 - **`GET /api/v1/me`** answers `{ user, profile, profiles }`: the user, the profile the session is on, and every profile of the
   account (default first). A session whose `pid` is not among the user's profiles gets 401 `TOKEN_EXPIRED`.
 - **Device ids are HMAC'd** with `DEVICE_ID_KEY` before they reach the database; the raw id is never stored.
+- **Logout and a guest's sign-in drop push tokens** (see "Push tokens and notification settings"): logout deletes every push token of
+  the account, and signing in as an existing owner deletes the leaving guest's.
 - **Verify and logout unlink the user's devices**, so the device's next bootstrap creates a new guest rather than
   returning data that belonged to the pre-login (or just logged-out) identity.
 - **Linking is refused up front.** A verified caller using an address nobody owns gets 409 `ACCOUNT_LINKING_UNAVAILABLE` from send and verify, before a code is sent or consumed (checked against the user's row, not the token's status). A guest that signs in as an existing owner has its token version bumped, retiring its refresh token.
@@ -552,8 +555,9 @@ because later modules will send email too.
 ### Push notifications (Expo)
 Push notifications go through the Expo Push Service, behind a `PushSender` port (`providers/push/push.provider.ts`) with one
 adapter, `ExpoPushSender` (`expo.push.ts`), and a memory fake, `MemoryPushSender`. The port file also exports
-`isExpoPushToken`, a pure token-shape check, because services may not import an adapter. Nothing is wired yet: the container,
-the token and settings tables, the routes, the send and receipt jobs and the triggers come in the following PRs of #54.
+`isExpoPushToken`, a pure token-shape check, because services may not import an adapter. The tokens and settings
+(see "Push tokens and notification settings") are stored and routed, but nothing is sent yet: the container does not build a `PushSender`, and the send and
+receipt jobs and the triggers come in the next PR of #54.
 
 - **Why Expo.** The app is an Expo (React Native) app and registers an Expo push token; Expo's service then reaches Apple
   and Google with the credentials uploaded to Expo/EAS. The backend never talks to APNs or FCM.
@@ -591,6 +595,44 @@ the token and settings tables, the routes, the send and receipt jobs and the tri
 - **Tests** stub `fetch` at the global (the adapter) or use the fake directly. `MemoryPushSender` records `sent`, answers every message
   with an `ok` ticket numbered `ticket-1`, `ticket-2`, ..., and can script a ticket per token (`ticketFor`; a scripted ok ticket's id is known
   to `receipts()`), a receipt per ticket id (`receiptFor`) and the next failure of `send` (`failNextWith`) or `receipts` (`failNextReceiptsWith`).
+
+### Push tokens and notification settings
+`modules/notifications` holds `push_tokens` and `notification_settings` (migration 0013), `D1PushTokensRepository`,
+`D1NotificationSettingsRepository` and `NotificationsService`. It stores who may be notified and what they want; sending comes later.
+
+- **One row per phone.** `push_tokens` is keyed by `device_hash`, the HMAC of the device id with `DEVICE_ID_KEY`, the same hash as
+  `devices` (the container gives `NotificationsService` the same key, held in a `#` field), so a phone is one row however often it registers.
+  The row has the Expo `token` (unique), `platform`, `user_id`, `profile_id` (both cascade) and `created_at`/`updated_at`. A raw device id is never stored.
+- **The profile comes from the session's `pid`.** The app never says whose phone it is: `register` reads the account and profile from the actor, so
+  a profile switch moves the phone by registering again. The app registers after every sign-in, logout, profile switch and token refresh.
+- **A token moves.** The repository's `upsert` is ONE `db.batch`: delete any OTHER row holding the token (the unique column would refuse the
+  insert), then insert the device's row or update it to the new token, platform, account, profile and time. `created_at` is kept on update. If the
+  write fails the delete rolls back, so a token is never lost half-moved. So registering the same device from another account moves it, and a
+  reinstalled app (new device id, same token) takes the token from the old row.
+- **Token shape is checked in the service**: `isExpoPushToken` (from the push provider's port file) else 400 `PUSH_TOKEN_INVALID`; the schema
+  separately caps it at 256 characters (`VALIDATION_FAILED`).
+- **Logout drops the whole account's tokens.** Logout signs out every phone of the account (token version bump, devices unlinked), so
+  `AuthService.logout` calls `accountSignedOut(userId)`, which deletes every row of the user on all profiles. Each phone registers again under the
+  guest it is handed next; none keeps receiving the old account's notifications.
+- **A guest's sign-in drops the guest's tokens.** `verifyOtp` carries no device id, so the phone cannot be named. But at that moment its row still
+  belongs to the calling guest, so when the outcome is `existing` and the caller was a guest, `guestSignedIn(actor.userId)` deletes the guest's rows. The
+  phone registers again under the account it signed in to. A guest promoted in place, and a verified user signing in again with their own address,
+  keep their rows.
+- **A signed-out phone can register again for up to 15 minutes.** Access tokens are not version-checked (see "Tokens and the auth middleware"),
+  so after logout the old session still passes `PUT /push-token` until its access token expires, and the row it writes belongs to the old
+  account. It is cleaned up when the phone registers again under its new session (the same device hash moves to the new account) or when
+  Expo reports the token dead.
+- **Register moves, unregister only deletes your own.** `register` moves any device's row to the caller, by design: one row per device,
+  whoever held it. `unregister` deletes the row only when it belongs to the caller; another account's row is left alone.
+- **Settings are per account**, shared by its profiles: `notification_settings` (`user_id` PK, cascade, `scan_finished`, `scan_needs_you`, default on,
+  `updated_at`). There is no row until the first change, so reading writes nothing and answers both on. A change is one upsert that writes only the
+  switches named, so a second change is not undone by a stale read.
+- **Routes**, all bearer (guests included), under `/api/v1/me` and tagged "Notifications": `PUT /push-token` `{ deviceId, platform, token }` (204),
+  `DELETE /push-token` `{ deviceId }` (204, idempotent; another account's row is left alone and still 204), `GET /notification-settings` and
+  `PATCH /notification-settings` (at least one of `scanFinished`, `scanNeedsYou`). Both answer `{ scanFinished, scanNeedsYou }`.
+  They are a second `.route('/me', ...)` in `src/app.ts`, next to `GET /me`.
+- **No cleaner and no rate limiter.** Rows cascade from `users`, so guest cleanup deletes them. The routes need a session, and a row is only ever
+  written for the caller.
 
 ### Claude (Anthropic) providers
 Product research, analysis and photo reading call Claude through one `AnthropicClient`, and thin adapters

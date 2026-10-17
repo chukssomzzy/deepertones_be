@@ -9,6 +9,8 @@ import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
+import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
+import { NotificationsService } from './modules/notifications/notifications.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
@@ -156,6 +158,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
+  // (push_tokens and notification_settings are not listed: their foreign keys cascade from users.)
   const users = once(
     () =>
       new UsersService({
@@ -168,8 +171,26 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const tokens = once(() => new TokenService({ secret: env.JWT_SECRET, previousSecret: env.JWT_SECRET_PREVIOUS || undefined }))
 
+  // The same DEVICE_ID_KEY as the auth service, so a token row's device hash is the `devices` table's hash of that phone.
+  const notifications = once(
+    () =>
+      new NotificationsService({
+        pushTokens: new D1PushTokensRepository(db()),
+        settings: new D1NotificationSettingsRepository(db()),
+        deviceIdKey: env.DEVICE_ID_KEY,
+      }),
+  )
+
   const auth = once(
-    () => new AuthService({ users: users(), profiles: profiles(), otp: otp(), tokens: tokens(), deviceIdKey: env.DEVICE_ID_KEY }),
+    () =>
+      new AuthService({
+        users: users(),
+        profiles: profiles(),
+        otp: otp(),
+        tokens: tokens(),
+        notifications: notifications(),
+        deviceIdKey: env.DEVICE_ID_KEY,
+      }),
   )
 
   return {
@@ -184,6 +205,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get health() {
       return health()
+    },
+    get notifications() {
+      return notifications()
     },
     get otp() {
       return otp()

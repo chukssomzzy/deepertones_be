@@ -1,6 +1,7 @@
 import { hmacSha256Hex } from '../../lib/crypto'
 import { requireUser } from '../../lib/context'
 import { ConflictError, NotFoundError, UnauthorizedError } from '../../lib/errors'
+import type { NotificationsService } from '../notifications/notifications.service'
 import type { OtpChannel, OtpRecipient } from '../otp/otp.types'
 import { type OtpService, parseRecipient } from '../otp/otp.service'
 import type { ProfilesService } from '../profiles/profiles.service'
@@ -19,6 +20,7 @@ export type AuthServiceDeps = {
   profiles: ProfilesService
   otp: OtpService
   tokens: TokenService
+  notifications: NotificationsService
   /** Keys the HMAC of device ids, so a leaked devices table cannot be matched against known device ids. */
   deviceIdKey: string
   now?: () => Date
@@ -39,6 +41,7 @@ export class AuthService {
   private readonly profiles: ProfilesService
   private readonly otp: OtpService
   private readonly tokens: TokenService
+  private readonly notifications: NotificationsService
   // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
   readonly #deviceIdKey: string
 
@@ -47,6 +50,7 @@ export class AuthService {
     this.profiles = deps.profiles
     this.otp = deps.otp
     this.tokens = deps.tokens
+    this.notifications = deps.notifications
     this.#deviceIdKey = deps.deviceIdKey
   }
 
@@ -76,7 +80,9 @@ export class AuthService {
    * caller's devices are then unlinked: after a sign-in as someone else, a later logout must not
    * land the device back on the pre-login guest's data. A new session is issued. Promotion bumps
    * the token version itself; when the guest is left behind ('existing') we bump it here, so the
-   * guest's old refresh token stops working in both cases. A promoted guest stays on the profile it was on (same row,
+   * guest's old refresh token stops working in both cases. When the guest is left behind its push tokens are deleted too,
+   * last of all, once the devices are unlinked: the request carries no device id, so the guest's rows are the only way to
+   * name this phone, and it registers again under the account it signed in to. A promoted guest stays on the profile it was on (same row,
    * so its scans stay readable); signing in as an existing account starts on that account's default profile.
    */
   async verifyOtp(recipient: { channel: OtpChannel; address: string }, code: string): Promise<Session> {
@@ -84,8 +90,11 @@ export class AuthService {
     const caller = await this.rejectLinking(actor.userId, recipient)
     const verified = await this.otp.verify(recipient, code)
     const { outcome, user } = await this.users.promote(actor.userId, identifierOf(verified))
-    if (outcome === 'existing' && caller.status === 'anonymous') await this.users.bumpTokenVersion(actor.userId)
+    const guestLeftBehind = outcome === 'existing' && caller.status === 'anonymous'
+    if (guestLeftBehind) await this.users.bumpTokenVersion(actor.userId)
     await this.users.unlinkDevices(actor.userId)
+    // After the unlink, so a failure here cannot skip it once the code is consumed.
+    if (guestLeftBehind) await this.notifications.guestSignedIn(actor.userId)
     return this.session(user, outcome === 'promoted' ? actor.profileId : (await this.profiles.defaultFor(user.id)).id)
   }
 
@@ -118,12 +127,14 @@ export class AuthService {
   /**
    * Signs the user out everywhere (version bump) and hands the device a fresh guest session. The
    * user's devices are unlinked first: a guest still linked to this device would otherwise be
-   * handed straight back by bootstrap, and logout would leave the same identity signed in.
+   * handed straight back by bootstrap, and logout would leave the same identity signed in. Every push token of the account is
+   * deleted as well: logout signs out all its phones, and each one registers again under the guest it gets next.
    */
   async logout(deviceId: string, platform: Device['platform']): Promise<Session> {
     const actor = requireUser()
     await this.users.bumpTokenVersion(actor.userId)
     await this.users.unlinkDevices(actor.userId)
+    await this.notifications.accountSignedOut(actor.userId)
     return this.bootstrap(deviceId, platform)
   }
 
