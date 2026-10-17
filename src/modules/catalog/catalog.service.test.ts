@@ -549,8 +549,11 @@ describe('ProductCatalogService.research', () => {
   })
 
   describe('stock image', () => {
-    const withImage = (ctx: Ctx, imageUrl: string | undefined = IMAGE_URL) =>
-      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL, ...(imageUrl ? { imageUrl } : {}) }))
+    // The researcher cannot see image urls; the image comes from the og:image of the page it cited.
+    const withImage = (ctx: Ctx, pageImage: string | null = IMAGE_URL) => {
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      ctx.images.respondToPage(SOURCE_URL, pageImage)
+    }
 
     it.each([
       ['image/jpeg', 'jpg'],
@@ -616,14 +619,54 @@ describe('ProductCatalogService.research', () => {
       expect(ctx.images.stored.size).toBe(0)
     })
 
-    it('does not look for an image when the result has no image URL', async () => {
+    it('marks the image as checked without fetching or judging anything when the source page has no image', async () => {
       const ctx = setup()
       const productId = await productFor(ctx)
-      withImage(ctx, '')
+      withImage(ctx, null)
 
       await ctx.service.research(productId)
 
+      expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
       expect(ctx.images.fetched).toHaveLength(0)
+      expect(ctx.analyst.calls.imageShowsProduct).toHaveLength(0)
+      expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageSourceUrl: null, imageCheckedAt: T0 })
+    })
+
+    it('does not look at the source page again for a product that already has an image', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.images.respondTo(IMAGE_URL, JPEG)
+      ctx.analyst.imageShowsProductWith(() => true)
+      withImage(ctx)
+      await ctx.service.research(productId)
+      ctx.advance(FRESH_FOR_DAYS * DAY + 1)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toHaveLength(1)
+    })
+
+    it('does not look at the source page while the image check is still fresh', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY))
+      withImage(ctx)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toHaveLength(0)
+      expect(ctx.images.fetched).toHaveLength(0)
+    })
+
+    it('looks at the source page again once the image check is older than FRESH_FOR_DAYS', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY - 1))
+      withImage(ctx)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
     })
 
     it('does not fetch another image for a product that already has one', async () => {
@@ -978,7 +1021,8 @@ describe('ProductCatalogService.productView', () => {
     ctx.analyst.imageShowsProductWith(() => true)
     const resolved = await ctx.service.resolve(who)
     const productId = resolved.productId
-    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL, imageUrl: IMAGE_URL }))
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
+    ctx.images.respondToPage(SOURCE_URL, IMAGE_URL)
     const found = await ctx.service.research(productId)
     const formulationId = (found as { formulationId: string }).formulationId
     ctx.analyst.analyseWith(() => [draft()])
