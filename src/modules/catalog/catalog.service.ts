@@ -4,9 +4,9 @@ import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
-import type { ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
+import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandKey, identityKey, nearMissCandidates, normaliseText } from './catalog.identity'
+import { brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -98,6 +98,7 @@ export type ProductView = {
     brand: string
     name: string
     variant: string | null
+    form: ProductForm | null
     category: Product['category']
     imageUrl: string | null
   }
@@ -143,6 +144,7 @@ export class ProductCatalogService {
     name: product.name,
     category: product.category,
     ...(product.variant === null ? {} : { variant: product.variant }),
+    ...(product.form === null ? {} : { form: product.form }),
   })
 
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
@@ -182,7 +184,7 @@ export class ProductCatalogService {
     const brandProducts = await this.repository.productsByBrandKey(brandKey(identity.brand), this.policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
-      (p) => p.category === identity.category && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
+      (p) => p.category === identity.category && sameForm(p, identity) && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
       threshold: this.policy.nearMissThreshold,
@@ -203,6 +205,7 @@ export class ProductCatalogService {
       brand: identity.brand,
       name: identity.name,
       variant: identity.variant ?? null,
+      form: identity.form ?? null,
       category: identity.category,
       createdAt: this.now(),
     })
@@ -386,6 +389,7 @@ export class ProductCatalogService {
         brand: product.brand,
         name: product.name,
         variant: product.variant,
+        form: product.form,
         category: product.category,
         imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
       },

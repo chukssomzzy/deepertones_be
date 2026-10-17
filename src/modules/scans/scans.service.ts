@@ -13,7 +13,7 @@ import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/photo-store.provider'
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
-import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
+import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
@@ -58,7 +58,7 @@ export type ScanItemView = {
   state: ItemState
   reason: ItemReason | null
   /** What the photo was read as (or what the user corrected it to); absent until it has been read. */
-  recognised?: { brand: string; name: string; variant: string | null; category: ProductCategory }
+  recognised?: { brand: string; name: string; variant: string | null; form: ProductForm | null; category: ProductCategory }
   /** Only on a ready item. */
   product?: ProductView
   /** The product's stock image if it has one, else the user's own photo through a signed link, else none. */
@@ -67,7 +67,7 @@ export type ScanItemView = {
 
 export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
 
-export type ConfirmedProduct = { brand: string; name: string; variant?: string; category: ProductCategory }
+export type ConfirmedProduct = { brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory }
 
 export type ScanServiceDeps = {
   repository: ScansRepository
@@ -280,6 +280,7 @@ export class ScanService {
         recognisedBrand: product.brand,
         recognisedName: product.name,
         recognisedVariant: variant === '' ? null : variant,
+        recognisedForm: fields.form ?? null,
         recognisedCategory: fields.category,
       },
       next: 'match',
@@ -504,6 +505,7 @@ export class ScanService {
           recognisedBrand: seen.brand,
           recognisedName: seen.name,
           recognisedVariant: seen.variant || null,
+          recognisedForm: seen.form ?? null,
           recognisedCategory: seen.category,
           recognisedConfidence: seen.confidence,
         },
@@ -531,6 +533,7 @@ export class ScanService {
       category: item.recognisedCategory,
       confidence: item.recognisedConfidence,
       ...(item.recognisedVariant === null ? {} : { variant: item.recognisedVariant }),
+      ...(item.recognisedForm === null ? {} : { form: item.recognisedForm }),
     }
   }
 
@@ -547,6 +550,7 @@ export class ScanService {
         name: item.recognisedName,
         category: item.recognisedCategory,
         ...(item.recognisedVariant === null ? {} : { variant: item.recognisedVariant }),
+        ...(item.recognisedForm === null ? {} : { form: item.recognisedForm }),
       })
     } catch (error) {
       if (!(error instanceof CatalogBusyError)) throw error
@@ -797,7 +801,15 @@ export class ScanService {
       state: item.state,
       reason: item.reason,
       ...(item.recognisedBrand !== null && item.recognisedName !== null && item.recognisedCategory !== null
-        ? { recognised: { brand: item.recognisedBrand, name: item.recognisedName, variant: item.recognisedVariant, category: item.recognisedCategory } }
+        ? {
+            recognised: {
+              brand: item.recognisedBrand,
+              name: item.recognisedName,
+              variant: item.recognisedVariant,
+              form: item.recognisedForm,
+              category: item.recognisedCategory,
+            },
+          }
         : {}),
       ...(product ? { product } : {}),
       image,

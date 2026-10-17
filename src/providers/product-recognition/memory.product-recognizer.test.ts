@@ -17,6 +17,14 @@ describe('MemoryProductRecognizer', () => {
     await expect(recognizer.recognize({ ...IMAGE, mediaType: 'image/jpeg' })).resolves.toEqual({ classification: 'other-product' })
   })
 
+  it('passes a form through with the rest of the recognition', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    const spray: Recognition = { ...SERUM, form: 'spray' }
+    recognizer.respondWith(() => spray)
+
+    await expect(recognizer.recognize(IMAGE)).resolves.toStrictEqual(spray)
+  })
+
   it('records every image it was shown, in order', async () => {
     const recognizer = new MemoryProductRecognizer()
     const other: ProductImage = { bytes: new Uint8Array([9]), mediaType: 'image/jpeg' }

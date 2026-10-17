@@ -113,6 +113,7 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
           recognisedBrand: null,
           recognisedName: null,
           recognisedVariant: null,
+          recognisedForm: null,
           recognisedCategory: null,
           recognisedConfidence: null,
           productId: null,
@@ -189,6 +190,17 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         })
         expect(item!.updatedAt.getTime()).toBe(at(5 * MINUTE).getTime())
         expect(item!.createdAt.getTime()).toBe(BASE.getTime())
+      })
+
+      it('stores the recognised form, and clears it when the patch sets it to null', async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+
+        await repository.updateItem(id, 'recognising', { recognisedForm: 'spray', updatedAt: at(5 * MINUTE) })
+        expect((await repository.findItem(id))!.recognisedForm).toBe('spray')
+
+        await repository.updateItem(id, 'recognising', { recognisedForm: null, updatedAt: at(6 * MINUTE) })
+        expect((await repository.findItem(id))!.recognisedForm).toBeNull()
       })
 
       it('leaves a field the patch does not mention as it was, and clears one the patch sets to null', async () => {
