@@ -17,6 +17,7 @@ import type { ProductCategory, ProductForm } from '../../providers/product-resea
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
+import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
 import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewScanItem, Scan, ScanItem } from './scans.types'
 
@@ -27,6 +28,8 @@ export type ScanPolicy = {
   maxPhotoEdge: number
   dailyPhotosPerUser: number
   dailyPhotosPerIp: number
+  /** An item that has had this many back photos, and still has no readable label, fails as `label-unreadable` instead of asking again. */
+  maxBackPhotos: number
   /** A read below this confidence waits for the user to confirm it. */
   confirmBelowConfidence: number
   /**
@@ -43,6 +46,7 @@ export const SCAN_POLICY: ScanPolicy = {
   maxPhotoEdge: 1600,
   dailyPhotosPerUser: 30,
   dailyPhotosPerIp: 100,
+  maxBackPhotos: 3,
   confirmBelowConfidence: 0.6,
   doneRepairWindowMs: 3 * 60 * 60 * 1000,
 }
@@ -613,7 +617,7 @@ export class ScanService {
     const photo = key === null ? null : await this.photos.get(key)
     if (key === null || !photo) {
       // Nothing to read, and no way to know what the label said: ask for the photo again.
-      await this.transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
+      await this.labelUnreadable(item)
       return
     }
 
@@ -641,7 +645,7 @@ export class ScanService {
     if (formulationId === null) {
       // The back photo is deleted; the upload stays counted against the daily quota in its own record.
       await this.photos.delete(key)
-      await this.transition(item, { from: 'reading-label', change: { state: 'needs-back-photo', reason: 'label-unreadable', backPhotoKey: null } })
+      await this.labelUnreadable(item)
       return
     }
     // The photo is deleted after the move, not before: if the next step cannot be queued the move is undone, and the retry needs it.
@@ -652,6 +656,18 @@ export class ScanService {
       undo: { backPhotoKey: key },
     })
     if (moved) await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId: item.scanId, itemId: item.id }))
+  }
+
+  /**
+   * The back photo could not give a label. Asks for another, unless the item has had `maxBackPhotos` already: then it ends
+   * as failed, keeping its front photo like the other failures. Every upload is counted, so the count includes this one.
+   */
+  private async labelUnreadable(item: ScanItem): Promise<void> {
+    const ask = (await this.repository.countBackPhotos(item.id)) < this.policy.maxBackPhotos
+    await this.transition(item, {
+      from: 'reading-label',
+      change: { state: ask ? 'needs-back-photo' : 'failed', reason: 'label-unreadable', backPhotoKey: null },
+    })
   }
 
   private async analyse(item: ScanItem): Promise<void> {
@@ -777,7 +793,7 @@ export class ScanService {
     } else if (item.photoKey !== null) {
       const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
       const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
-      image = { kind: 'user', url: `/scans/photos/${token}` }
+      image = { kind: 'user', url: productPhotoUrl(token) }
     }
     return {
       id: item.id,

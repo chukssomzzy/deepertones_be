@@ -10,7 +10,7 @@ export type ScanEvent =
   /** Every item of the scan is in a final state. Sent once the last one gets there. */
   | { type: 'done' }
 
-/** The scan as a client first sees it: the full state, in the shape GET /scans/{scanId} responds with once serialised as JSON. */
+/** The scan as a client first sees it: the full state, in the shape GET /api/v1/scans/products/{scanId} responds with once serialised as JSON. */
 export type ScanSnapshot = { id: string; items: ScanEventItem[]; [field: string]: unknown }
 
 /**

@@ -35,6 +35,8 @@ const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) =>
   worker.fetch!(new Request(input, init) as never, WORKER_ENV, createExecutionContext())
 
 const api = hc<AppType>('http://deepertones.test', { fetch: fetchWorker as typeof fetch })
+// Every API route lives under /api/v1; /health, /docs and /openapi.json stay at the root.
+const v1 = api.api.v1
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -97,15 +99,15 @@ const newDevice = (ip = freshIp()) => {
     platform,
     ip,
     headers,
-    bootstrap: () => api.auth.anonymous.$post({ json: { deviceId, platform } }, { headers: headers() }),
+    bootstrap: () => v1.auth.anonymous.$post({ json: { deviceId, platform } }, { headers: headers() }),
     sendCode: (bearer: string, address: string) =>
-      api.auth.otp.send.$post({ json: { channel: 'email', address } }, { headers: headers(bearer) }),
+      v1.auth.otp.send.$post({ json: { channel: 'email', address } }, { headers: headers(bearer) }),
     verifyCode: (bearer: string, address: string, code: string) =>
-      api.auth.otp.verify.$post({ json: { channel: 'email', address, code } }, { headers: headers(bearer) }),
+      v1.auth.otp.verify.$post({ json: { channel: 'email', address, code } }, { headers: headers(bearer) }),
     refresh: (refreshToken: string, bearer?: string) =>
-      api.auth.refresh.$post({ json: { refreshToken } }, { headers: headers(bearer) }),
-    logout: (bearer: string) => api.auth.logout.$post({ json: { deviceId, platform } }, { headers: headers(bearer) }),
-    me: (bearer?: string) => api.me.$get({}, { headers: headers(bearer) }),
+      v1.auth.refresh.$post({ json: { refreshToken } }, { headers: headers(bearer) }),
+    logout: (bearer: string) => v1.auth.logout.$post({ json: { deviceId, platform } }, { headers: headers(bearer) }),
+    me: (bearer?: string) => v1.me.$get({}, { headers: headers(bearer) }),
   }
 }
 type Device = ReturnType<typeof newDevice>
@@ -151,7 +153,7 @@ const profiles = new ProfilesService({ repository: new D1ProfilesRepository(crea
 // Tokens for the user's own default profile, so they work against routes that read the profile.
 const tokensFor = async (user: Awaited<ReturnType<typeof seedVerifiedUser>>) => tokenService.issue(user, (await profiles.defaultFor(user.id)).id)
 
-describe('POST /auth/anonymous', () => {
+describe('POST /api/v1/auth/anonymous', () => {
   it('returns the same guest for the same device id, and a different guest for another device', async () => {
     const a = newDevice()
     const b = newDevice()
@@ -179,8 +181,8 @@ describe('POST /auth/anonymous', () => {
   it('rejects a missing device id and an unknown platform with 400 VALIDATION_FAILED', async () => {
     const headers = { 'cf-connecting-ip': freshIp() }
 
-    const noDevice = await api.auth.anonymous.$post({ json: { deviceId: '', platform: 'ios' } }, { headers })
-    const badPlatform = await api.auth.anonymous.$post({ json: { deviceId: 'x', platform: 'web' as 'ios' } }, { headers })
+    const noDevice = await v1.auth.anonymous.$post({ json: { deviceId: '', platform: 'ios' } }, { headers })
+    const badPlatform = await v1.auth.anonymous.$post({ json: { deviceId: 'x', platform: 'web' as 'ios' } }, { headers })
 
     expect(noDevice.status).toBe(400)
     expect(await errorCodeOf(noDevice)).toBe('VALIDATION_FAILED')
@@ -188,7 +190,7 @@ describe('POST /auth/anonymous', () => {
   })
 })
 
-describe('GET /me', () => {
+describe('GET /api/v1/me', () => {
   it('returns the guest for a valid access token', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
@@ -330,7 +332,7 @@ describe('promoting a guest by OTP', () => {
   })
 })
 
-describe('POST /auth/refresh', () => {
+describe('POST /api/v1/auth/refresh', () => {
   it('returns a new token pair for the same user', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
@@ -395,7 +397,7 @@ describe('POST /auth/refresh', () => {
   })
 })
 
-describe('POST /auth/logout', () => {
+describe('POST /api/v1/auth/logout', () => {
   it('returns a fresh guest for the device and signs the user out on every device', async () => {
     const owner = await seedVerifiedUser(freshEmail())
     const device1 = newDevice()
@@ -421,7 +423,7 @@ describe('POST /auth/logout', () => {
   })
 
   it('requires a bearer token', async () => {
-    const res = await api.auth.logout.$post(
+    const res = await v1.auth.logout.$post(
       { json: { deviceId: 'x'.repeat(16), platform: 'ios' } },
       { headers: { 'cf-connecting-ip': freshIp() } },
     )
@@ -466,19 +468,19 @@ describe('OpenAPI', () => {
     expect(doc.components.securitySchemes.bearerAuth).toMatchObject({ type: 'http', scheme: 'bearer' })
     const uses = (path: string, method: string) =>
       (doc.paths[path]?.[method]?.security ?? []).some((requirement) => 'bearerAuth' in requirement)
-    expect(uses('/auth/otp/send', 'post')).toBe(true)
-    expect(uses('/auth/otp/verify', 'post')).toBe(true)
-    expect(uses('/auth/logout', 'post')).toBe(true)
-    expect(uses('/me', 'get')).toBe(true)
-    expect(doc.paths['/auth/anonymous']?.post).toBeDefined()
-    expect(doc.paths['/auth/refresh']?.post).toBeDefined()
-    expect(uses('/auth/anonymous', 'post')).toBe(false)
-    expect(uses('/auth/refresh', 'post')).toBe(false)
+    expect(uses('/api/v1/auth/otp/send', 'post')).toBe(true)
+    expect(uses('/api/v1/auth/otp/verify', 'post')).toBe(true)
+    expect(uses('/api/v1/auth/logout', 'post')).toBe(true)
+    expect(uses('/api/v1/me', 'get')).toBe(true)
+    expect(doc.paths['/api/v1/auth/anonymous']?.post).toBeDefined()
+    expect(doc.paths['/api/v1/auth/refresh']?.post).toBeDefined()
+    expect(uses('/api/v1/auth/anonymous', 'post')).toBe(false)
+    expect(uses('/api/v1/auth/refresh', 'post')).toBe(false)
   })
 })
 
 describe('review fixes', () => {
-  it('rate limits /auth/logout with the bootstrap budget: 429 RATE_LIMITED after 10 from one IP', async () => {
+  it('rate limits /api/v1/auth/logout with the bootstrap budget: 429 RATE_LIMITED after 10 from one IP', async () => {
     await startOfRateWindow()
     const device = newDevice()
     const { tokens } = await sessionOf(await device.bootstrap())
@@ -541,7 +543,7 @@ describe('review fixes', () => {
     const device = newDevice()
     const { tokens } = await sessionOf(await device.bootstrap())
 
-    const short = await api.auth.anonymous.$post(
+    const short = await v1.auth.anonymous.$post(
       { json: { deviceId: 'x'.repeat(15), platform: 'ios' } },
       { headers: device.headers() },
     )

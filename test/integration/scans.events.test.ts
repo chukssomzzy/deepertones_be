@@ -17,7 +17,7 @@ import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memor
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import { parseFrame, sseReader, type SseReader } from './sse'
 
-// GET /scans/{scanId}/events through the real Worker: bearer auth, the ownership check, the snapshot, and the live
+// GET /api/v1/scans/products/{scanId}/events through the real Worker: bearer auth, the ownership check, the snapshot, and the live
 // frames a scan's background steps cause. The steps are driven the way production drives them, through the Worker's
 // queue handler, with only the outbound Anthropic call stubbed at fetch. Scans are created through the service (the
 // Worker's own container), so these tests do not depend on the upload route. SSE is read with plain fetch, because the
@@ -59,9 +59,9 @@ const startScan = async (guest: Guest, photos = [jpegPhoto()]) => {
 }
 
 const events = (scanId: string, token?: string) =>
-  exports.default.fetch(new Request(`${ORIGIN}/scans/${scanId}/events`, { headers: token ? { Authorization: `Bearer ${token}` } : {} }))
+  exports.default.fetch(new Request(`${ORIGIN}/api/v1/scans/products/${scanId}/events`, { headers: token ? { Authorization: `Bearer ${token}` } : {} }))
 const getScan = async (scanId: string, token: string) => {
-  const res = await exports.default.fetch(new Request(`${ORIGIN}/scans/${scanId}`, { headers: { Authorization: `Bearer ${token}` } }))
+  const res = await exports.default.fetch(new Request(`${ORIGIN}/api/v1/scans/products/${scanId}`, { headers: { Authorization: `Bearer ${token}` } }))
   const body = (await res.json()) as { success: true; data: { id: string; items: { id: string; state: string }[] } }
   return body.data
 }
@@ -120,7 +120,7 @@ afterEach(async () => {
   await abortAllDurableObjects()
 })
 
-describe('GET /scans/{scanId}/events: opening the stream', () => {
+describe('GET /api/v1/scans/products/{scanId}/events: opening the stream', () => {
   it('answers 200 as an event stream that no proxy buffers or rewrites', async () => {
     const guest = await newGuest()
     const { scanId } = await startScan(guest)
@@ -150,7 +150,7 @@ describe('GET /scans/{scanId}/events: opening the stream', () => {
     })
   })
 
-  it('makes the snapshot the same scan GET /scans/{scanId} returns', async () => {
+  it('makes the snapshot the same scan GET /api/v1/scans/products/{scanId} returns', async () => {
     const guest = await newGuest()
     const { scanId } = await startScan(guest, [markedJpeg(1), markedJpeg(2)])
     const { stream } = await watch(scanId, guest.token)
@@ -163,7 +163,7 @@ describe('GET /scans/{scanId}/events: opening the stream', () => {
   })
 })
 
-describe('GET /scans/{scanId}/events: who may watch', () => {
+describe('GET /api/v1/scans/products/{scanId}/events: who may watch', () => {
   it('answers 404 SCAN_NOT_FOUND, as a normal error and not a stream, to another user', async () => {
     const owner = await newGuest()
     const stranger = await newGuest()
@@ -196,7 +196,7 @@ describe('GET /scans/{scanId}/events: who may watch', () => {
   })
 })
 
-describe('GET /scans/{scanId}/events: live updates from the background steps', () => {
+describe('GET /api/v1/scans/products/{scanId}/events: live updates from the background steps', () => {
   it('sends each item change as an item event in the order it happened, then done, then ends the stream', async () => {
     const brand = freshBrand()
     await catalogued(brand, 'Hydrating Cleanser')
@@ -223,7 +223,7 @@ describe('GET /scans/{scanId}/events: live updates from the background steps', (
     expect(await stream.read(1)).toEqual({ frames: [], ended: true })
   })
 
-  it('sends an item exactly as GET /scans/{scanId} shows it', async () => {
+  it('sends an item exactly as GET /api/v1/scans/products/{scanId} shows it', async () => {
     const guest = await newGuest()
     const { scanId, itemIds } = await startScan(guest)
     const { stream } = await watch(scanId, guest.token)
@@ -317,7 +317,7 @@ describe('buildContainer scan events', () => {
   })
 })
 
-describe('GET /scans/{scanId}/events: a scan that is already finished', () => {
+describe('GET /api/v1/scans/products/{scanId}/events: a scan that is already finished', () => {
   it('sends the snapshot, then done, and ends the stream at once', async () => {
     const guest = await newGuest()
     const { scanId, itemIds } = await startScan(guest)

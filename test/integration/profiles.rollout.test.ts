@@ -22,6 +22,8 @@ const REFRESH_TTL_SECONDS = 60 * 24 * 60 * 60
 
 const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) => worker.fetch!(new Request(input, init) as never, env, createExecutionContext())
 const api = hc<AppType>('http://deepertones.test', { fetch: fetchWorker as typeof fetch })
+// Every API route lives under /api/v1; /health, /docs and /openapi.json stay at the root.
+const v1 = api.api.v1
 
 const runSalt = String(Math.floor(Math.random() * 1e6))
 let counter = 0
@@ -93,10 +95,10 @@ function newDevice(deviceId = `device-rollout-${runSalt}-${next()}`) {
     ...(bearer === undefined ? {} : { Authorization: `Bearer ${bearer}` }),
   })
   return {
-    bootstrap: () => api.auth.anonymous.$post({ json: { deviceId, platform: 'ios' } }, { headers: headers() }),
-    refresh: (refreshToken: string) => api.auth.refresh.$post({ json: { refreshToken } }, { headers: headers() }),
-    me: (bearer: string) => api.me.$get({}, { headers: headers(bearer) }),
-    getScan: (bearer: string, scanId: string) => api.scans[':scanId'].$get({ param: { scanId } }, { headers: headers(bearer) }),
+    bootstrap: () => v1.auth.anonymous.$post({ json: { deviceId, platform: 'ios' } }, { headers: headers() }),
+    refresh: (refreshToken: string) => v1.auth.refresh.$post({ json: { refreshToken } }, { headers: headers() }),
+    me: (bearer: string) => v1.me.$get({}, { headers: headers(bearer) }),
+    getScan: (bearer: string, scanId: string) => v1.scans.products[':scanId'].$get({ param: { scanId } }, { headers: headers(bearer) }),
   }
 }
 

@@ -96,7 +96,7 @@ export const ScanItemResponse = z
     reason: z
       .enum(['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable'])
       .nullable()
-      .openapi({ description: 'Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`).' }),
+      .openapi({ description: 'Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read).' }),
     recognised: z
       .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), form: z.enum(PRODUCT_FORMS).nullable(), category: Category })
       .optional()

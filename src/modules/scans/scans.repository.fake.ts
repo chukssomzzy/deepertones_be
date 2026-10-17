@@ -190,6 +190,10 @@ export class FakeScansRepository implements ScansRepository {
     }
   }
 
+  async countBackPhotos(itemId: string): Promise<number> {
+    return [...this.backPhotos.values()].filter((upload) => upload.itemId === itemId).length
+  }
+
   private photoTimes(ownsItem: (item: ScanItem) => boolean, ownsUpload: (upload: NewBackPhoto) => boolean, since: Date) {
     const times: number[] = []
     for (const item of this.items.values()) {

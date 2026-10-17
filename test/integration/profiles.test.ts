@@ -14,7 +14,7 @@ import { UsersService } from '../../src/modules/users/users.service'
 
 // Profiles through the Worker's public surface, as the app sees them: the typed client against the real entrypoint and
 // real local D1. Every account has one default profile from the moment it exists; the active profile travels in the
-// session tokens as the `pid` claim and is shown by GET /me. There is no route to make a second profile, so the tests that
+// session tokens as the `pid` claim and is shown by GET /api/v1/me. There is no route to make a second profile, so the tests that
 // need one insert it through the profiles repository, the way a future "add profile" feature would.
 // (Which scans a profile may see, and the shared daily quota, are in scans.routes.test.ts, next to the scan helpers.)
 
@@ -42,6 +42,8 @@ const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) =>
   worker.fetch!(new Request(input, init) as never, WORKER_ENV, createExecutionContext())
 
 const api = hc<AppType>('http://deepertones.test', { fetch: fetchWorker as typeof fetch })
+// Every API route lives under /api/v1; /health, /docs and /openapi.json stay at the root.
+const v1 = api.api.v1
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -98,17 +100,17 @@ const newDevice = (ip = freshIp()) => {
   return {
     deviceId,
     headers,
-    bootstrap: () => api.auth.anonymous.$post({ json: { deviceId, platform } }, { headers: headers() }),
+    bootstrap: () => v1.auth.anonymous.$post({ json: { deviceId, platform } }, { headers: headers() }),
     sendCode: (bearer: string, address: string) =>
-      api.auth.otp.send.$post({ json: { channel: 'email', address } }, { headers: headers(bearer) }),
+      v1.auth.otp.send.$post({ json: { channel: 'email', address } }, { headers: headers(bearer) }),
     verifyCode: (bearer: string, address: string, code: string) =>
-      api.auth.otp.verify.$post({ json: { channel: 'email', address, code } }, { headers: headers(bearer) }),
-    refresh: (refreshToken: string) => api.auth.refresh.$post({ json: { refreshToken } }, { headers: headers() }),
-    logout: (bearer: string) => api.auth.logout.$post({ json: { deviceId, platform } }, { headers: headers(bearer) }),
-    me: (bearer: string) => api.me.$get({}, { headers: headers(bearer) }),
+      v1.auth.otp.verify.$post({ json: { channel: 'email', address, code } }, { headers: headers(bearer) }),
+    refresh: (refreshToken: string) => v1.auth.refresh.$post({ json: { refreshToken } }, { headers: headers() }),
+    logout: (bearer: string) => v1.auth.logout.$post({ json: { deviceId, platform } }, { headers: headers(bearer) }),
+    me: (bearer: string) => v1.me.$get({}, { headers: headers(bearer) }),
     createScan: (bearer: string) =>
-      api.scans.$post({ form: { photos: [new File([markedJpeg(next()).bytes], 'p.jpg', { type: 'image/jpeg' })] } }, { headers: headers(bearer) }),
-    getScan: (bearer: string, scanId: string) => api.scans[':scanId'].$get({ param: { scanId } }, { headers: headers(bearer) }),
+      v1.scans.products.$post({ form: { photos: [new File([markedJpeg(next()).bytes], 'p.jpg', { type: 'image/jpeg' })] } }, { headers: headers(bearer) }),
+    getScan: (bearer: string, scanId: string) => v1.scans.products[':scanId'].$get({ param: { scanId } }, { headers: headers(bearer) }),
   }
 }
 type Device = ReturnType<typeof newDevice>
@@ -180,7 +182,7 @@ describe('a new guest', () => {
     expect(me.user.id).toBe(user.id)
   })
 
-  it('answers GET /me with the user, the active profile and the list of profiles', async () => {
+  it('answers GET /api/v1/me with the user, the active profile and the list of profiles', async () => {
     const device = newDevice()
     const { tokens, user } = await sessionOf(await device.bootstrap())
 
@@ -222,7 +224,7 @@ describe('a new guest', () => {
   })
 })
 
-describe('GET /me with a profile', () => {
+describe('GET /api/v1/me with a profile', () => {
   it('shows the profile named in the token as the active one, and lists the default profile first', async () => {
     const device = newDevice()
     const { user, tokens } = await sessionOf(await device.bootstrap())
@@ -259,7 +261,7 @@ describe('GET /me with a profile', () => {
   })
 })
 
-describe('POST /auth/refresh with a profile', () => {
+describe('POST /api/v1/auth/refresh with a profile', () => {
   it('keeps the profile: the new tokens carry the same pid', async () => {
     const device = newDevice()
     const session = await sessionOf(await device.bootstrap())
@@ -296,7 +298,7 @@ describe('POST /auth/refresh with a profile', () => {
     expect(me.profile.id).toBe(pidOf(tokens.accessToken))
   })
 
-  it('moves an app from before profiles existed over without logging it out: expired access token, then refresh, then /me', async () => {
+  it('moves an app from before profiles existed over without logging it out: expired access token, then refresh, then /api/v1/me', async () => {
     const device = newDevice()
     const { user, tokens } = await sessionOf(await device.bootstrap())
 

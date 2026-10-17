@@ -153,6 +153,12 @@ export class D1ScansRepository {
     return this.photoCounts(inArray(scanItems.scanId, recentFromThisIp), eq(scanBackPhotos.ipHash, ipHash), since)
   }
 
+  /** How many back photos have been uploaded for the item, deleted ones included (their records stay). */
+  async countBackPhotos(itemId: string): Promise<number> {
+    const [row] = await this.db.select({ count: count() }).from(scanBackPhotos).where(eq(scanBackPhotos.itemId, itemId))
+    return row?.count ?? 0
+  }
+
   /** Every photo key and back-photo key still stored for these users' items (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const keys: string[] = []

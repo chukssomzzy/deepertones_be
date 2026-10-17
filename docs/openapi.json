@@ -21,7 +21,7 @@
         "type": "http",
         "scheme": "bearer",
         "bearerFormat": "JWT",
-        "description": "The access token from /auth/anonymous, /auth/otp/verify or /auth/refresh."
+        "description": "The access token from /api/v1/auth/anonymous, /api/v1/auth/otp/verify or /api/v1/auth/refresh."
       }
     },
     "schemas": {
@@ -121,7 +121,7 @@
               },
               "refreshToken": {
                 "type": "string",
-                "description": "Send only to `/auth/refresh`. Lives 60 days from each use."
+                "description": "Send only to `/api/v1/auth/refresh`. Lives 60 days from each use."
               },
               "accessExpiresAt": {
                 "type": "string",
@@ -394,7 +394,7 @@
               "label-unreadable",
               null
             ],
-            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`)."
+            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read)."
           },
           "recognised": {
             "type": "object",
@@ -835,7 +835,7 @@
         }
       }
     },
-    "/auth/anonymous": {
+    "/api/v1/auth/anonymous": {
       "post": {
         "operationId": "bootstrapGuest",
         "tags": [
@@ -934,7 +934,7 @@
         }
       }
     },
-    "/auth/otp/send": {
+    "/api/v1/auth/otp/send": {
       "post": {
         "operationId": "sendOtp",
         "tags": [
@@ -1067,7 +1067,7 @@
         }
       }
     },
-    "/auth/otp/verify": {
+    "/api/v1/auth/otp/verify": {
       "post": {
         "operationId": "verifyOtp",
         "tags": [
@@ -1200,7 +1200,7 @@
         }
       }
     },
-    "/auth/refresh": {
+    "/api/v1/auth/refresh": {
       "post": {
         "operationId": "refreshSession",
         "tags": [
@@ -1309,7 +1309,7 @@
         }
       }
     },
-    "/auth/logout": {
+    "/api/v1/auth/logout": {
       "post": {
         "operationId": "logout",
         "tags": [
@@ -1432,7 +1432,7 @@
         }
       }
     },
-    "/me": {
+    "/api/v1/me": {
       "get": {
         "operationId": "getMe",
         "tags": [
@@ -1514,14 +1514,14 @@
         }
       }
     },
-    "/scans": {
+    "/api/v1/scans/products": {
       "post": {
-        "operationId": "createScan",
+        "operationId": "createProductScan",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
-        "summary": "Start a scan from 1 to 10 photos",
-        "description": "Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /scans/{scanId}` for progress. One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).",
+        "summary": "Start a product scan from 1 to 10 photos",
+        "description": "Multipart, one `photos` part per photo. Each photo becomes an item that is recognised in the background: poll `GET /api/v1/scans/products/{scanId}` for progress. One bad photo refuses the whole scan. Counts toward a daily limit of 30 photos per user and 100 per address (429 SCAN_DAILY_LIMIT).",
         "security": [
           {
             "bearerAuth": []
@@ -1637,13 +1637,13 @@
         }
       }
     },
-    "/scans/{scanId}": {
+    "/api/v1/scans/products/{scanId}": {
       "get": {
-        "operationId": "getScan",
+        "operationId": "getProductScan",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
-        "summary": "A scan and where each of its items has got to",
+        "summary": "A product scan and where each of its items has got to",
         "description": "Another user's scan is 404, the same as one that does not exist.",
         "security": [
           {
@@ -1740,14 +1740,14 @@
         }
       }
     },
-    "/scans/{scanId}/events": {
+    "/api/v1/scans/products/{scanId}/events": {
       "get": {
-        "operationId": "watchScan",
+        "operationId": "watchProductScan",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
-        "summary": "Follow a scan live, as server-sent events",
-        "description": "A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as `GET /scans/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is `ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another user's scan is 404, the same as one that does not exist.",
+        "summary": "Follow a product scan live, as server-sent events",
+        "description": "A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as `GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is `ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another user's scan is 404, the same as one that does not exist.",
         "security": [
           {
             "bearerAuth": []
@@ -1818,11 +1818,11 @@
         }
       }
     },
-    "/scans/{scanId}/items/{itemId}/confirmation": {
+    "/api/v1/scans/products/{scanId}/items/{itemId}/confirmation": {
       "post": {
-        "operationId": "confirmScanItem",
+        "operationId": "confirmProductScanItem",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
         "summary": "Correct what a doubtful photo was read as",
         "description": "For an item in `needs-confirmation`. The item goes on to matching with the product given.",
@@ -1959,11 +1959,11 @@
         }
       }
     },
-    "/scans/{scanId}/items/{itemId}/back-photo": {
+    "/api/v1/scans/products/{scanId}/items/{itemId}/back-photo": {
       "post": {
-        "operationId": "addScanItemBackPhoto",
+        "operationId": "addProductScanItemBackPhoto",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
         "summary": "Send a photo of the ingredient list",
         "description": "For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.",
@@ -2120,13 +2120,13 @@
         }
       }
     },
-    "/scans/photos/{token}": {
+    "/api/v1/scans/products/photos/{token}": {
       "get": {
-        "operationId": "getScanPhoto",
+        "operationId": "getProductScanPhoto",
         "tags": [
-          "Scans"
+          "Product scans"
         ],
-        "summary": "The photo a link from a scan opens",
+        "summary": "The photo a link from a product scan opens",
         "description": "Public: the signed link is the credential, and it works for 5 minutes for whoever holds it. Any Authorization header is ignored. A link that is malformed, tampered with, expired or to a photo since deleted is 404 PHOTO_NOT_FOUND.",
         "security": [],
         "parameters": [
