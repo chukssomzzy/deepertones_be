@@ -50,16 +50,6 @@ export class FakeCatalogRepository implements CatalogRepository {
     this.aliases.set(aliasKey, productId)
   }
 
-  async productsByBrandKey(brandKey: string, limit: number): Promise<Product[]> {
-    // Map order is insert order; reversing first makes a later insert win a tie in createdAt (the sort is stable).
-    return [...this.products.values()]
-      .filter((p) => p.brandKey === brandKey)
-      .reverse()
-      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
-      .slice(0, limit)
-      .map((p) => ({ ...p }))
-  }
-
   async productsByBrandFamily(firstWord: string, limit: number): Promise<Product[]> {
     return [...this.products.values()]
       .filter((p) => p.brandKey === firstWord || p.brandKey.startsWith(`${firstWord} `))

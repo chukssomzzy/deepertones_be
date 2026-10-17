@@ -1607,6 +1607,21 @@ describe('ProductCatalogService.resolve brand families', () => {
     expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
   })
 
+  it('leaves the call to the judge for two different same-brand products at exactly 0.6, and makes a new product with no alias', async () => {
+    const ctx = setup()
+    const sun = identity({ brand: 'NIVEA', name: 'Sun Protect Moisture', category: 'body', form: 'spray' })
+    const men = identity({ brand: 'NIVEA', name: 'Men Protect Moisture', category: 'body', form: 'spray' })
+    const existing = await ctx.service.resolve(sun)
+    ctx.analyst.sameProductWith(() => false)
+
+    const result = await ctx.service.resolve(men)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).not.toBe(existing.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(men))).toMatchObject({ id: result.productId })
+    expect(await ctx.repository.findProductByKey(identityKey(sun))).toMatchObject({ id: existing.productId })
+  })
+
   it('asks the judge about at most nearMissLimit candidates when the family is large, and then makes a new product', async () => {
     const ctx = setup()
     const flavours = ['Fresh', 'Cool', 'Sport', 'Active', 'Black', 'White', 'Silver', 'Protect', 'Sensitive', 'Original']

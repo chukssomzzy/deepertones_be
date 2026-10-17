@@ -61,7 +61,7 @@ export const nameSimilarity = (a: Named, b: Named): number => {
 }
 
 /**
- * Products of the same brand family (first word) whose words nearly matches but whose identity key differs: the cases for the model
+ * Products of the same brand family (first word) whose words nearly match but whose identity key differs: the cases for the model
  * to decide (same product or not). Best first, equal similarity by id.
  */
 export const nearMissCandidates = <P extends Branded & { id: string }>(

@@ -815,6 +815,8 @@ described in "Product catalog service"; routes come later.
   (brand_key >= w || ' ' and brand_key < w || '!')`; a brand key holds only letters, digits, dots and single spaces,
   and a space sorts just below `!`; `LIKE` is case-insensitive in SQLite and cannot use the index). The model, not the
   code, decides whether one is the same product; its answer is stored as an alias.
+  The range cannot give index order, so the lookup reads and sorts the whole family before `LIMIT`; that is bounded by the
+  family size and acceptable at the current scale.
 - **Aliases** map another key to a product. An alias never shadows an identity key, and the first product to take
   one keeps it (`addAlias` is one `insert or ignore` statement; an unknown product throws). `createProduct` is an
   insert-or-ignore on the identity key that returns the stored row, so two scans of one new product both carry on
