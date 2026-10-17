@@ -1,0 +1,1 @@
+CREATE INDEX `scan_back_photos_item_id_idx` ON `scan_back_photos` (`item_id`);

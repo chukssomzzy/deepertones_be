@@ -53,7 +53,7 @@ const freshIp = () => {
   const n = next()
   return `10.${Number(runSalt) % 250}.${Math.floor(n / 250) % 250}.${(n % 250) + 1}`
 }
-const freshBrand = () => `RoutesBrand${runSalt}x${next()}`
+const freshBrand = () => `${runSalt}${next()}x RoutesBrand`
 
 type Envelope<T> = { success: true; status: number; message: string; data: T } | { success: false; status: number; error: { code: string } }
 type Reply = { json(): Promise<unknown>; status: number; headers: Headers }
