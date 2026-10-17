@@ -556,8 +556,8 @@ because later modules will send email too.
 Push notifications go through the Expo Push Service, behind a `PushSender` port (`providers/push/push.provider.ts`) with one
 adapter, `ExpoPushSender` (`expo.push.ts`), and a memory fake, `MemoryPushSender`. The port file also exports
 `isExpoPushToken`, a pure token-shape check, because services may not import an adapter. The tokens and settings
-(see "Push tokens and notification settings") are stored and routed, but nothing is sent yet: the container does not build a `PushSender`, and the send and
-receipt jobs and the triggers come in the next PR of #54.
+(see "Push tokens and notification settings") are stored and routed, and the container builds the `ExpoPushSender` with `EXPO_ACCESS_TOKEN`.
+The send and receipt jobs are in "Sending push notifications"; the triggers that queue them come in the last PR of #54.
 
 - **Why Expo.** The app is an Expo (React Native) app and registers an Expo push token; Expo's service then reaches Apple
   and Google with the credentials uploaded to Expo/EAS. The backend never talks to APNs or FCM.
@@ -598,7 +598,7 @@ receipt jobs and the triggers come in the next PR of #54.
 
 ### Push tokens and notification settings
 `modules/notifications` holds `push_tokens` and `notification_settings` (migration 0013), `D1PushTokensRepository`,
-`D1NotificationSettingsRepository` and `NotificationsService`. It stores who may be notified and what they want; sending comes later.
+`D1NotificationSettingsRepository` and `NotificationsService`. It stores who may be notified and what they want; sending is in "Sending push notifications".
 
 - **One row per phone.** `push_tokens` is keyed by `device_hash`, the HMAC of the device id with `DEVICE_ID_KEY`, the same hash as
   `devices` (the container gives `NotificationsService` the same key, held in a `#` field), so a phone is one row however often it registers.
@@ -633,6 +633,66 @@ receipt jobs and the triggers come in the next PR of #54.
   They are a second `.route('/me', ...)` in `src/app.ts`, next to `GET /me`.
 - **No cleaner and no rate limiter.** Rows cascade from `users`, so guest cleanup deletes them. The routes need a session, and a row is only ever
   written for the caller.
+
+### Sending push notifications
+Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, handlers in `notifications.jobs.ts`, logic in
+`NotificationsService`), each on its own queue with its own dead-letter queue like every job: `send-push` on `push-delivery` and
+`check-push-receipts` on `push-receipts`. That is four more queues per environment, in all three `wrangler.jsonc` blocks
+(env blocks do not inherit), created before the first deploy that binds them (README, "Before the first deploy").
+
+- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou` and `newSignIn` queue a `send-push` job
+  and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId? }` and return: a scan step or a sign-in must not fail
+  because a push could not be queued. (The triggers are wired into the scan and sign-in flows in the last PR of #54.)
+- **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
+  profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
+  (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
+  `back-photo` or `confirm`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
+- **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
+  `scan-needs-you:<scanId>:<need>` (ten items needing a back photo are ONE notification, linking to the first item that asked);
+  `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
+  first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
+  sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
+  deduplicated by the key. The receipt job's key is its ticket ids.
+- **Targeting is decided at send time.** Scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
+  account the message names); the sign-in alert goes to the account's phones (`forUser`), on any profile, EXCEPT the phone that signed
+  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on); the sign-in alert has no switch.
+- **The sign-in alert skips the phone that signed in, by time.** The body carries `at`, when the sign-in happened (epoch ms; `newSignIn`
+  defaults it to now). `deliver` alerts only the account's rows with `createdAt < at`. Why: the signing-in phone gets a session first and
+  registers its push token after, so any row created at or after `at` is that phone registering under the account (a guest's row is
+  deleted at sign-in, and the phone's new row is a new row), and alerting it would tell a person about their own sign-in. A phone that
+  registers again after `at` but whose row was created earlier is another phone and is still alerted (`createdAt` is kept on update).
+  Scan notifications ignore `at`.
+- **The text is generic** and is built in the service: it shows on a lock screen, so it names no product and no skin detail ("Your scan
+  is ready", "3 products analysed", "We need a photo of the back of a product", "New sign-in to your Deeper Tones account", "on an
+  iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, profileId? }`; the sign-in alert has only `url` and `kind`.
+- **Deep links are a JSON file.** `deep-links.json` maps each kind to an Expo Router path template (`/scans/{scanId}`,
+  `/scans/{scanId}/items/{itemId}`, `/settings/security`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
+  with the URL-encoded id, so an id cannot add a path segment or a query. Changing a path is a PR and goes live with the next deploy.
+  `deep-links.test.ts` fails when a kind has no path, a path starts without `/`, or it uses a placeholder its kind does not provide;
+  adding a kind means updating that test's table on purpose.
+- **At most once.** `deliver` sends one message per phone in one `push.send` call and never sends a message again: a ticket that is
+  rate-limited, unavailable or otherwise failed is logged and left, because retrying the job would resend the phones that did get
+  theirs. Only a failure of the whole call is retried: `PushUnavailableError` is rethrown for the dispatcher's backoff (nothing went
+  out). Any other send error, or every ticket `misconfigured`, throws `PermanentJobError` (the run is recorded failed and acked, since
+  retrying cannot fix our credentials). Once the messages are out nothing may throw, so deleting a dead token and queuing the receipt
+  check each log and swallow their own failure, and the token hashes the receipt job needs are computed BEFORE the send.
+  This holds for our own retries only. The job system is at-least-once (see "Background jobs"): if the dispatcher's `markDone` fails after
+  a handler succeeded, the message is retried and the claim is free again; and if Expo times out on the FIRST request, the adapter
+  cannot know whether it was accepted, so the retry may resend. Both can duplicate a push; neither is something this module can close.
+- **Dead tokens, in two steps.** A ticket `device-not-registered` deletes the phone at once. For every accepted ticket the job queues
+  ONE `check-push-receipts` job with `delaySeconds: 900` (15 minutes: Expo needs that long before a receipt exists), carrying
+  `{ ticketId, deviceHash, tokenHash }` per ticket: the device hash and the SHA-256 of the token, never the token.
+  `checkReceipts` asks Expo for those ids (a receipt not there yet is skipped) and deletes the phones reported dead.
+- **The token-hash guard.** Both deletions go through `deleteIfToken(deviceHash, token)`, ONE conditional DELETE that applies only while
+  the device's row still holds that token. A phone that registered a new token since the send keeps it. The receipt job has only the
+  hash, so it reads the row, compares `sha256Hex(row.token)` with the message's `tokenHash`, and only then deletes with the row's token.
+- **Dead letters.** `onDeadLetter` logs `{ job, outcome: 'dead-lettered' }` and nothing else; a lost notification needs no repair.
+- **Logs** are `{ job, kind?, outcome, count }` (`push-enqueue-failed` aside): no token, text, link or account, profile, scan or item id,
+  and no error text. The outcomes are `sent`, `not-sent`, `misconfigured`, `dead-token-deleted`, `dead-token-delete-failed` and
+  `receipt-enqueue-failed`.
+- **Queue settings.** `push-delivery` is modelled on `otp-delivery` (batch 10, a 1 second batch timeout since a person waits, 5 attempts,
+  backoff 5 s x3 up to 135 s). `push-receipts` is not urgent, so it lets a batch fill (25, up to 30 seconds), 5 attempts, backoff 30 s x3
+  up to 600 s.
 
 ### Claude (Anthropic) providers
 Product research, analysis and photo reading call Claude through one `AnthropicClient`, and thin adapters

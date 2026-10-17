@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it } from 'vitest'
 import { hmacSha256Hex } from '../../lib/crypto'
 import { type Actor, runAs } from '../../lib/context'
 import { ValidationError } from '../../lib/errors'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
+import { MemoryPushSender } from '../../providers/push/memory.push'
 import { FakeNotificationSettingsRepository } from './notification-settings.repository.fake'
 import { NotificationsService } from './notifications.service'
 import { FakePushTokensRepository } from './push-tokens.repository.fake'
@@ -46,7 +48,7 @@ beforeEach(() => {
   clock = T0
   pushTokens = new FakePushTokensRepository()
   settings = new FakeNotificationSettingsRepository()
-  service = new NotificationsService({ pushTokens, settings, deviceIdKey: DEVICE_KEY, now: () => clock })
+  service = new NotificationsService({ pushTokens, settings, push: new MemoryPushSender(), jobs: new MemoryJobQueue(), deviceIdKey: DEVICE_KEY, now: () => clock })
 })
 
 describe('NotificationsService secrets', () => {

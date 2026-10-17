@@ -39,6 +39,15 @@ export class D1PushTokensRepository {
     return gone.length > 0
   }
 
+  /** Deletes the device's row only while it still holds `token`, so a phone that registered a new token meanwhile keeps it; true when a row went. */
+  async deleteIfToken(deviceHash: string, token: string): Promise<boolean> {
+    const gone = await this.db
+      .delete(pushTokens)
+      .where(and(eq(pushTokens.deviceHash, deviceHash), eq(pushTokens.token, token)))
+      .returning({ deviceHash: pushTokens.deviceHash })
+    return gone.length > 0
+  }
+
   /** Deletes every row of the user, on all its profiles, and returns how many went. */
   async deleteForUser(userId: string): Promise<number> {
     const gone = await this.db.delete(pushTokens).where(eq(pushTokens.userId, userId)).returning({ deviceHash: pushTokens.deviceHash })

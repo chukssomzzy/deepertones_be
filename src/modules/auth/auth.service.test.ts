@@ -5,6 +5,7 @@ import { signJwt } from '../../lib/jwt'
 import { MemoryEmailSender } from '../../providers/email/memory.email'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../providers/otp-delivery/memory.otp-delivery'
+import { MemoryPushSender } from '../../providers/push/memory.push'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { NotificationsService } from '../notifications/notifications.service'
 import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
@@ -61,7 +62,7 @@ const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users) => {
     generateCode: () => CODE,
   })
   const profiles = new ProfilesService({ repository: profilesRepo })
-  const notifications = new NotificationsService({ pushTokens, settings: new FakeNotificationSettingsRepository(), deviceIdKey, now: () => clock })
+  const notifications = new NotificationsService({ pushTokens, settings: new FakeNotificationSettingsRepository(), push: new MemoryPushSender(), jobs: new MemoryJobQueue(), deviceIdKey, now: () => clock })
   return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, notifications, deviceIdKey, now: () => clock }), usersSvc, notifications }
 }
 

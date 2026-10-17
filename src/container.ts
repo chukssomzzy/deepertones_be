@@ -31,6 +31,7 @@ import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
 import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductRecognizer } from './providers/product-recognition/anthropic.product-recognizer'
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
+import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
@@ -113,7 +114,15 @@ export const buildContainer = (env: CloudflareBindings) => {
   )
 
   // One producer for every job: each job's `queue` name picks its binding.
-  const jobQueue = once(() => new CloudflareQueuesJobQueue({ 'otp-delivery': env.OTP_DELIVERY_QUEUE, 'scan-items': env.SCAN_ITEMS_QUEUE }))
+  const jobQueue = once(
+    () =>
+      new CloudflareQueuesJobQueue({
+        'otp-delivery': env.OTP_DELIVERY_QUEUE,
+        'scan-items': env.SCAN_ITEMS_QUEUE,
+        'push-delivery': env.PUSH_DELIVERY_QUEUE,
+        'push-receipts': env.PUSH_RECEIPTS_QUEUE,
+      }),
+  )
 
   const otp = once(
     () =>
@@ -177,6 +186,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       new NotificationsService({
         pushTokens: new D1PushTokensRepository(db()),
         settings: new D1NotificationSettingsRepository(db()),
+        push: new ExpoPushSender({ accessToken: env.EXPO_ACCESS_TOKEN }),
+        jobs: jobQueue(),
         deviceIdKey: env.DEVICE_ID_KEY,
       }),
   )

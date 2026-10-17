@@ -30,6 +30,14 @@ export class FakePushTokensRepository implements PushTokensRepository {
     return true
   }
 
+  /** Deletes the device's row only when it still holds `token` (a phone that registered again keeps its new one); true when a row went. */
+  async deleteIfToken(deviceHash: string, token: string): Promise<boolean> {
+    const row = this.rows.get(deviceHash)
+    if (!row || row.token !== token) return false
+    this.rows.delete(deviceHash)
+    return true
+  }
+
   async deleteForUser(userId: string): Promise<number> {
     let count = 0
     for (const [deviceHash, row] of this.rows) {

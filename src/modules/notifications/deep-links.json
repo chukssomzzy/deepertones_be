@@ -1,0 +1,5 @@
+{
+  "scan-finished": "/scans/{scanId}",
+  "scan-needs-you": "/scans/{scanId}/items/{itemId}",
+  "new-sign-in": "/settings/security"
+}

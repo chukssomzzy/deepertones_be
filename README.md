@@ -229,10 +229,11 @@ live (it invalidates outstanding codes; harmless once 10 minutes have passed).
 
 ## Expo push setup
 
-Push notifications go out through the Expo Push Service. The code is in `src/providers/push`; nothing sends yet,
-because wiring, token registration and the jobs come in later PRs of issue #54 (see "Push notifications (Expo)" in
-`docs/architecture.md`). Tests never call Expo and need no secrets. What is left for the account owner, once per
-environment (a separate access token per environment is fine but not required):
+Push notifications go out through the Expo Push Service. The provider is in `src/providers/push`, the send and receipt
+jobs in `src/modules/notifications` (see "Push notifications (Expo)" and "Sending push notifications" in
+`docs/architecture.md`); the triggers that queue them come in the last PR of issue #54. Tests never call Expo and need no
+secrets. What is left for the account owner, once per environment (a separate access token per environment is fine but not
+required):
 
 1. In Expo, create a robot user and an access token for it (expo.dev → account → Access tokens).
 2. In the Expo project's settings, turn on **Enhanced security for push notifications**. Expo then refuses a
@@ -247,8 +248,12 @@ environment (a separate access token per environment is fine but not required):
    npm run secrets:push -- --env production --apply
    ```
 
+5. Create the four push queues for each environment (`push-delivery`, `push-delivery-dlq`, `push-receipts`,
+   `push-receipts-dlq`); the commands are in [Before the first deploy](#before-the-first-deploy), step 3. A deploy that binds
+   a missing queue fails.
+
 Deploys fail until `EXPO_ACCESS_TOKEN` is set on the environment's Worker (it is in `secrets.required`), so do steps 1
-to 4 before merging to `staging` or `main`.
+to 5 before merging to `staging` or `main`.
 
 ## WhatsApp OTP setup
 
@@ -378,8 +383,8 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery and
-   the scan items). A deploy that binds a missing queue fails:
+3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery,
+   the scan items, push delivery and push receipts). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
@@ -390,6 +395,14 @@ stopped using it.
    npx wrangler queues create deepertones-scan-items-dlq-staging
    npx wrangler queues create deepertones-scan-items-production
    npx wrangler queues create deepertones-scan-items-dlq-production
+   npx wrangler queues create deepertones-push-delivery-staging
+   npx wrangler queues create deepertones-push-delivery-dlq-staging
+   npx wrangler queues create deepertones-push-delivery-production
+   npx wrangler queues create deepertones-push-delivery-dlq-production
+   npx wrangler queues create deepertones-push-receipts-staging
+   npx wrangler queues create deepertones-push-receipts-dlq-staging
+   npx wrangler queues create deepertones-push-receipts-production
+   npx wrangler queues create deepertones-push-receipts-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

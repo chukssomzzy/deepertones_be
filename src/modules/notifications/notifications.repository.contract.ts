@@ -231,6 +231,64 @@ export const pushTokensRepositoryContract = (name: string, make: () => PushToken
       })
     })
 
+    describe('deleteIfToken', () => {
+      it('deletes the device\'s row when it still holds that token, and says so', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const row = rowOf(account)
+        await repository.upsert(row)
+
+        expect(await repository.deleteIfToken(row.deviceHash, row.token)).toBe(true)
+
+        expect(await repository.find(row.deviceHash)).toBeNull()
+      })
+
+      it('leaves a row that holds a different token (the phone registered again), and says nothing was deleted', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const row = rowOf(account)
+        await repository.upsert(row)
+        const fresh = rowOf(account, { deviceHash: row.deviceHash, updatedAt: at(MINUTE) })
+        await repository.upsert(fresh)
+
+        expect(await repository.deleteIfToken(row.deviceHash, row.token)).toBe(false)
+
+        expect(await repository.find(row.deviceHash)).toMatchObject({ token: fresh.token })
+      })
+
+      it('does not delete the row of another device that happens to be given the token', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const a = rowOf(account)
+        const b = rowOf(account)
+        await repository.upsert(a)
+        await repository.upsert(b)
+
+        expect(await repository.deleteIfToken(a.deviceHash, b.token)).toBe(false)
+
+        expect(hashesOf(await repository.forUser(account.userId))).toEqual([a.deviceHash, b.deviceHash].sort())
+      })
+
+      it('answers false for a device with no row', async () => {
+        const { repository } = await make()
+
+        expect(await repository.deleteIfToken(`device-${crypto.randomUUID()}`, 'ExponentPushToken[nobody]')).toBe(false)
+      })
+
+      it('deletes only the one device\'s row, whichever account it is on', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const gone = rowOf(account)
+        const kept = rowOf(account)
+        await repository.upsert(gone)
+        await repository.upsert(kept)
+
+        await repository.deleteIfToken(gone.deviceHash, gone.token)
+
+        expect(hashesOf(await repository.forUser(account.userId))).toEqual([kept.deviceHash])
+      })
+    })
+
     describe('deleteForUser', () => {
       it('deletes every row of the user across profiles and returns how many, leaving other users\' rows', async () => {
         const { repository, newAccount, newProfile } = await make()
