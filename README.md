@@ -15,6 +15,7 @@ Serverless API for deepertones: [Hono](https://hono.dev) on Cloudflare Workers.
 | `npm run lint:arch`           | Architecture rules (dependency-cruiser); see docs/architecture.md     |
 | `npm run openapi`             | Regenerate `docs/openapi.json` from the routes (commit the result)    |
 | `npm run openapi:lint`        | Lint `docs/openapi.json` (Redocly; exceptions in `redocly.yaml`)      |
+| `npm run prompts`             | Regenerate `src/prompts/prompts.generated.ts` (commit the result)     |
 | `npm run db:generate`         | Generate a SQL migration from changed `*.table.ts` files              |
 | `npm run db:migrate:local`    | Apply migrations to the local D1 used by `npm run dev`                |
 | `npm run cf-typegen`          | Regenerate `worker-configuration.d.ts` after editing bindings         |
@@ -314,7 +315,8 @@ There are only two long-lived branches. "production" is the name of the deploy t
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
 unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
-and valid), and a dry-run build of both environments.
+and valid), the prompts (CI regenerates `src/prompts/prompts.generated.ts` and fails if it is stale),
+and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.
 
 Production goes through a release: merging `staging` into `main` makes release-please open a
