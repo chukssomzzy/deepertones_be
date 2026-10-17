@@ -92,5 +92,10 @@ export const scanBackPhotos = sqliteTable(
     ipHash: text('ip_hash').notNull(),
     uploadedAt: integer('uploaded_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (t) => [index('scan_back_photos_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt), index('scan_back_photos_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt)],
+  (t) => [
+    // The per-item count and the cascade delete from scan_items both filter on item_id.
+    index('scan_back_photos_item_id_idx').on(t.itemId),
+    index('scan_back_photos_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt),
+    index('scan_back_photos_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt),
+  ],
 )

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "87a3af79-3811-4b8a-b4fb-0f7f7aa547fd",
+  "id": "6454f60c-7e8e-4800-804a-f06221bb7dcd",
   "prevId": "a6cbb842-8e94-4840-8b40-e446b407be08",
   "tables": {
     "job_runs": {
@@ -739,168 +739,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "notification_settings": {
-      "name": "notification_settings",
-      "columns": {
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "scan_finished": {
-          "name": "scan_finished",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": true
-        },
-        "scan_needs_you": {
-          "name": "scan_needs_you",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": true
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {},
-      "foreignKeys": {
-        "notification_settings_user_id_users_id_fk": {
-          "name": "notification_settings_user_id_users_id_fk",
-          "tableFrom": "notification_settings",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "push_tokens": {
-      "name": "push_tokens",
-      "columns": {
-        "device_hash": {
-          "name": "device_hash",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "token": {
-          "name": "token",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "platform": {
-          "name": "platform",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "profile_id": {
-          "name": "profile_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "push_tokens_token_unique": {
-          "name": "push_tokens_token_unique",
-          "columns": [
-            "token"
-          ],
-          "isUnique": true
-        },
-        "push_tokens_user_id_idx": {
-          "name": "push_tokens_user_id_idx",
-          "columns": [
-            "user_id"
-          ],
-          "isUnique": false
-        },
-        "push_tokens_profile_id_idx": {
-          "name": "push_tokens_profile_id_idx",
-          "columns": [
-            "profile_id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "push_tokens_user_id_users_id_fk": {
-          "name": "push_tokens_user_id_users_id_fk",
-          "tableFrom": "push_tokens",
-          "tableTo": "users",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        },
-        "push_tokens_profile_id_profiles_id_fk": {
-          "name": "push_tokens_profile_id_profiles_id_fk",
-          "tableFrom": "push_tokens",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "otp_challenges": {
       "name": "otp_challenges",
       "columns": {
@@ -1115,6 +953,13 @@
         }
       },
       "indexes": {
+        "scan_back_photos_item_id_idx": {
+          "name": "scan_back_photos_item_id_idx",
+          "columns": [
+            "item_id"
+          ],
+          "isUnique": false
+        },
         "scan_back_photos_user_id_uploaded_at_idx": {
           "name": "scan_back_photos_user_id_uploaded_at_idx",
           "columns": [
