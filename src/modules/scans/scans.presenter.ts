@@ -4,6 +4,18 @@ import type { ProductView } from '../catalog/catalog.service'
 import type { ScanItemResponse, ScanResponse } from './scans.schemas'
 import type { ScanItemView, ScanView } from './scans.service'
 
+type ConcernResponse = NonNullable<z.infer<typeof ScanItemResponse>['product']>['concerns'][number]
+
+const toConcernResponse = (concern: ConcernResponse): ConcernResponse => ({
+  kind: concern.kind,
+  severity: concern.severity,
+  ingredients: concern.ingredients,
+  why: concern.why,
+  whoShouldTakeCare: concern.whoShouldTakeCare,
+  traits: concern.traits,
+  sources: concern.sources,
+})
+
 // Every field is named, so a field added to the catalog's view is not published by accident.
 const toProductResponse = ({ product, formulation, concerns, reference }: ProductView): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
   product: {
@@ -22,16 +34,17 @@ const toProductResponse = ({ product, formulation, concerns, reference }: Produc
     foundAt: formulation.foundAt.toISOString(),
     analysedAt: formulation.analysedAt?.toISOString() ?? null,
   },
-  concerns: concerns.map((concern) => ({
-    kind: concern.kind,
-    severity: concern.severity,
-    ingredients: concern.ingredients,
-    why: concern.why,
-    whoShouldTakeCare: concern.whoShouldTakeCare,
-    traits: concern.traits,
-    sources: concern.sources,
-  })),
+  concerns: concerns.map(toConcernResponse),
   reference: { version: reference.version, coverage: reference.coverage },
+})
+
+const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, rulesVersion }: NonNullable<ScanItemView['noLabel']>): NonNullable<z.infer<typeof ScanItemResponse>['noLabel']> => ({
+  source,
+  purpose,
+  usedFor,
+  ...(description === undefined ? {} : { description }),
+  concerns: concerns.map(toConcernResponse),
+  rulesVersion,
 })
 
 export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemResponse> => ({
@@ -44,6 +57,7 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
     ? { recognised: { brand: item.recognised.brand, name: item.recognised.name, variant: item.recognised.variant, category: item.recognised.category } }
     : {}),
   ...(item.product ? { product: toProductResponse(item.product) } : {}),
+  ...(item.noLabel ? { noLabel: toNoLabelResponse(item.noLabel) } : {}),
   image: item.image ? { kind: item.image.kind, url: item.image.url } : null,
 })
 

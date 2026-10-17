@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm'
 import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
 import { users } from '../users/users.table'
 import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
+import { NO_LABEL_PURPOSES, NO_LABEL_SOURCES, NO_LABEL_USED_FOR } from './scans.vocabulary'
 
 /**
  * One upload of photos. `ip_hash` is an HMAC of the caller's IP (the raw address is never stored), for the per-IP daily
@@ -44,7 +45,7 @@ export const scanItems = sqliteTable(
     userId: text('user_id').notNull(),
     position: integer('position').notNull(),
     state: text('state', {
-      enum: ['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification'],
+      enum: ['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification', 'unidentified'],
     })
       .notNull()
       .default('recognising'),
@@ -63,6 +64,12 @@ export const scanItems = sqliteTable(
     recognisedConfidence: real('recognised_confidence'),
     productId: text('product_id'),
     formulationId: text('formulation_id'),
+    // The user's answers when the product has no label to read (state `unidentified`); null in every other state. The cautions they
+    // earn are not stored: they are worked out from these when the item is shown, so a change to the rules reaches items already answered.
+    noLabelSource: text('no_label_source', { enum: NO_LABEL_SOURCES }),
+    noLabelPurpose: text('no_label_purpose', { enum: NO_LABEL_PURPOSES }),
+    noLabelUsedFor: text('no_label_used_for', { enum: NO_LABEL_USED_FOR }),
+    noLabelDescription: text('no_label_description'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },

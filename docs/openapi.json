@@ -433,9 +433,10 @@
               "rejected",
               "failed",
               "needs-retake",
-              "needs-identification"
+              "needs-identification",
+              "unidentified"
             ],
-            "description": "`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); `needs-identification` is where an item lands once its 3rd front photo could not be read; the others are being worked on."
+            "description": "`ready`, `rejected`, `failed` and `unidentified` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); `needs-identification` is where an item lands once its 3rd front photo could not be read; `unidentified` is where it ends when the user says the product has no label (see `noLabel`); the others are being worked on."
           },
           "reason": {
             "type": [
@@ -497,6 +498,106 @@
           },
           "product": {
             "$ref": "#/components/schemas/ProductResult"
+          },
+          "noLabel": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "market-vendor",
+                  "pharmacy",
+                  "online",
+                  "gift",
+                  "not-sure"
+                ],
+                "description": "Where the product came from."
+              },
+              "purpose": {
+                "type": "string",
+                "enum": [
+                  "lighten",
+                  "moisturise",
+                  "treat-spots",
+                  "not-sure"
+                ],
+                "description": "What the product is used for."
+              },
+              "usedFor": {
+                "type": "string",
+                "enum": [
+                  "under-1-month",
+                  "1-6-months",
+                  "6-months-2-years",
+                  "over-2-years"
+                ],
+                "description": "How long the product has been used."
+              },
+              "description": {
+                "type": "string",
+                "description": "What the user noted, if anything."
+              },
+              "concerns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string"
+                    },
+                    "ingredients": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "why": {
+                      "type": "string"
+                    },
+                    "whoShouldTakeCare": {
+                      "type": "string"
+                    },
+                    "traits": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sources": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "severity",
+                    "ingredients",
+                    "why",
+                    "whoShouldTakeCare",
+                    "traits",
+                    "sources"
+                  ]
+                },
+                "description": "Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label."
+              },
+              "rulesVersion": {
+                "type": "integer",
+                "description": "Which version of the caution rules wrote `concerns`."
+              }
+            },
+            "required": [
+              "source",
+              "purpose",
+              "usedFor",
+              "concerns",
+              "rulesVersion"
+            ],
+            "description": "Only on an `unidentified` item: what the user said about the product, and the cautions that earns."
           },
           "image": {
             "type": [
@@ -817,6 +918,51 @@
             ],
             "additionalProperties": false
           }
+        ]
+      },
+      "NoLabelBody": {
+        "type": "object",
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "market-vendor",
+              "pharmacy",
+              "online",
+              "gift",
+              "not-sure"
+            ],
+            "description": "Where the product came from."
+          },
+          "purpose": {
+            "type": "string",
+            "enum": [
+              "lighten",
+              "moisturise",
+              "treat-spots",
+              "not-sure"
+            ],
+            "description": "What the product is used for."
+          },
+          "usedFor": {
+            "type": "string",
+            "enum": [
+              "under-1-month",
+              "1-6-months",
+              "6-months-2-years",
+              "over-2-years"
+            ],
+            "description": "How long the product has been used."
+          },
+          "description": {
+            "type": "string",
+            "description": "Anything else the user wants to note, at most 200 characters once trimmed, with no link, markup or hidden character. Blank is the same as left out."
+          }
+        },
+        "required": [
+          "source",
+          "purpose",
+          "usedFor"
         ]
       }
     },
@@ -1911,7 +2057,7 @@
           "Product scans"
         ],
         "summary": "Follow a product scan live, as server-sent events",
-        "description": "A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as `GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is `ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another user's scan is 404, the same as one that does not exist.",
+        "description": "A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as `GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is `ready`, `rejected`, `failed` or `unidentified`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another user's scan is 404, the same as one that does not exist.",
         "security": [
           {
             "bearerAuth": []
@@ -2595,6 +2741,157 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scans/products/{scanId}/items/{itemId}/no-label": {
+      "post": {
+        "operationId": "markProductScanItemNoLabel",
+        "tags": [
+          "Product scans"
+        ],
+        "summary": "Say a product has no label to read",
+        "description": "For an item in `needs-identification` (its 3rd front photo could not be read), and no other state: 409 `ITEM_NOT_AWAITING_NO_LABEL`. Send where the product came from, what it is used for and for how long (fixed words), and optionally a short `description` (400 `INVALID_PRODUCT_TEXT` when it is over 200 characters or carries a link, markup or hidden character). The item ends as `unidentified`, which is final, with `noLabel` holding the answers and the cautions for a product of unknown contents. It sends no photo and calls no model, so no photo quota or retake is used.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "itemId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NoLabelBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The item, now unidentified",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ScanItem"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {

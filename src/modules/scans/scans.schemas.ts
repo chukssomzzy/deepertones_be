@@ -1,5 +1,6 @@
 import { z } from '@hono/zod-openapi'
 import { SCAN_POLICY } from './scans.service'
+import { NO_LABEL_PURPOSES, NO_LABEL_SOURCES, NO_LABEL_USED_FOR } from './scans.vocabulary'
 
 const Category = z.enum(['skin', 'hair', 'body', 'makeup', 'other'])
 
@@ -56,6 +57,30 @@ export const IdentifyProductBody = z
   ])
   .openapi('IdentifyProductBody')
 
+const Source = z.enum(NO_LABEL_SOURCES).openapi({ description: 'Where the product came from.' })
+const Purpose = z.enum(NO_LABEL_PURPOSES).openapi({ description: 'What the product is used for.' })
+const UsedFor = z.enum(NO_LABEL_USED_FOR).openapi({ description: 'How long the product has been used.' })
+
+// The user's answers for a product with no label. The description's length and content are the service's to judge (INVALID_PRODUCT_TEXT, field `description`).
+export const NoLabelBody = z
+  .object({
+    source: Source,
+    purpose: Purpose,
+    usedFor: UsedFor,
+    description: z.string().optional().openapi({ description: 'Anything else the user wants to note, at most 200 characters once trimmed, with no link, markup or hidden character. Blank is the same as left out.' }),
+  })
+  .openapi('NoLabelBody')
+
+const Concern = z.object({
+  kind: z.string(),
+  severity: z.string(),
+  ingredients: z.array(z.string()),
+  why: z.string(),
+  whoShouldTakeCare: z.string(),
+  traits: z.array(z.string()),
+  sources: z.array(z.string()),
+})
+
 const ProductResult = z
   .object({
     product: z.object({
@@ -76,17 +101,7 @@ const ProductResult = z
       foundAt: z.iso.datetime(),
       analysedAt: z.iso.datetime().nullable(),
     }),
-    concerns: z.array(
-      z.object({
-        kind: z.string(),
-        severity: z.string(),
-        ingredients: z.array(z.string()),
-        why: z.string(),
-        whoShouldTakeCare: z.string(),
-        traits: z.array(z.string()),
-        sources: z.array(z.string()),
-      }),
-    ),
+    concerns: z.array(Concern),
     reference: z.object({
       version: z.string(),
       coverage: z.string().openapi({ description: 'How much of the regulatory lists the checks cover. A result with no concerns is not an all-clear unless this says so.' }),
@@ -99,11 +114,11 @@ export const ScanItemResponse = z
     id: z.string(),
     position: z.number().int().openapi({ description: 'The photo\'s place in the upload, from 0.' }),
     state: z
-      .enum(['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification'])
+      .enum(['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification', 'unidentified'])
       .openapi({
         description:
-          '`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); ' +
-          '`needs-identification` is where an item lands once its 3rd front photo could not be read; the others are being worked on.',
+          '`ready`, `rejected`, `failed` and `unidentified` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); ' +
+          '`needs-identification` is where an item lands once its 3rd front photo could not be read; `unidentified` is where it ends when the user says the product has no label (see `noLabel`); the others are being worked on.',
       }),
     reason: z
       .enum(['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable', 'label-not-visible'])
@@ -119,6 +134,17 @@ export const ScanItemResponse = z
       .optional()
       .openapi({ description: 'What the photo was read as, or what the user corrected it to. Absent until it has been read.' }),
     product: ProductResult.optional().openapi({ description: 'Only on a `ready` item.' }),
+    noLabel: z
+      .object({
+        source: Source,
+        purpose: Purpose,
+        usedFor: UsedFor,
+        description: z.string().optional().openapi({ description: 'What the user noted, if anything.' }),
+        concerns: z.array(Concern).openapi({ description: 'Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label.' }),
+        rulesVersion: z.number().int().openapi({ description: 'Which version of the caution rules wrote `concerns`.' }),
+      })
+      .optional()
+      .openapi({ description: 'Only on an `unidentified` item: what the user said about the product, and the cautions that earns.' }),
     image: z
       .object({
         kind: z.enum(['stock', 'user']),

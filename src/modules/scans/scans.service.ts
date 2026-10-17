@@ -12,15 +12,17 @@ import type { LabelReader, LabelReading } from '../../providers/label-reading/la
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { NameSplit, NameSplitter } from '../../providers/name-splitting/name-splitter.provider'
 import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/photo-store.provider'
-import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
+import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
+import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
 import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { NoLabelPurpose, NoLabelSource, NoLabelUsedFor } from './scans.vocabulary'
 
 export type ScanPolicy = {
   maxPhotosPerScan: number
@@ -67,6 +69,8 @@ export type ScanItemView = {
   recognised?: { brand: string; name: string; variant: string | null; category: ProductCategory }
   /** Only on a ready item. */
   product?: ProductView
+  /** Only on an unidentified item: what the user said about a product with no label, and the cautions those answers earn (worked out now, not stored). */
+  noLabel?: { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string; concerns: DraftConcern[]; rulesVersion: number }
   /** The product's stock image if it has one, else the user's own photo through a signed link, else none. */
   image: { kind: 'stock' | 'user'; url: string } | null
 }
@@ -74,6 +78,9 @@ export type ScanItemView = {
 export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
 
 export type ConfirmedProduct = { brand: string; name: string; variant?: string; category: ProductCategory }
+
+/** What a user says about a product with no label to read. */
+export type NoLabelInput = { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string }
 
 /** How a user names the product of an item they could not photograph: one picked from the catalog (by search), or a name they typed. */
 export type ProductNaming = { productId: string } | { text: string }
@@ -109,9 +116,10 @@ export class ScanService {
   private static readonly DAY = 24 * ScanService.HOUR
   private static readonly MAX_TEXT_LENGTH = 120
   private static readonly MIN_TYPED_NAME_LENGTH = 2
+  private static readonly MAX_DESCRIPTION_LENGTH = 200
   // Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
   private static readonly IP_HASH_INFO = 'deepertones/ip-hash/v1'
-  private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed']
+  private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
   // A control character or an invisible format character (a right-to-left override, a zero-width space).
   private static readonly HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
 
@@ -416,6 +424,34 @@ export class ScanService {
     const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_IDENTIFICATION', 'This item is not waiting to be identified')
     if (item.state !== 'needs-retake' && item.state !== 'needs-identification') throw notAwaiting()
     const moved = 'productId' in naming ? await this.identifyByChoice(item, item.state, naming.productId) : await this.identifyByText(item, item.state, naming.text)
+    if (!moved) throw notAwaiting()
+    return this.itemViewOf(itemId)
+  }
+
+  /**
+   * The user has no label to give: the product is not known and will not be looked up. For an item that offers identification (its 3rd front
+   * photo could not be read) and no other, the item ends as `unidentified` with the user's answers. Its cautions are not stored: they are
+   * worked out from the answers whenever the item is shown. Sends no photo and calls no model, so no quota, retake or job is used.
+   *
+   * Checked in this order: the scan is the caller's (SCAN_NOT_FOUND), the item is offering identification (ITEM_NOT_AWAITING_NO_LABEL), the
+   * description is clean (INVALID_PRODUCT_TEXT, field `description`: at most 200 characters, no link, markup or hidden character). A blank one is none.
+   */
+  async noLabel(scanId: string, itemId: string, answers: NoLabelInput): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_NO_LABEL', 'This item is not waiting to say it has no label')
+    if (item.state !== 'needs-identification') throw notAwaiting()
+    const description = answers.description === undefined ? '' : this.cleanText(answers.description, 'description', false, ScanService.MAX_DESCRIPTION_LENGTH)
+    const moved = await this.transition(item, {
+      from: 'needs-identification',
+      change: {
+        state: 'unidentified',
+        reason: null,
+        noLabelSource: answers.source,
+        noLabelPurpose: answers.purpose,
+        noLabelUsedFor: answers.usedFor,
+        noLabelDescription: description === '' ? null : description,
+      },
+    })
     if (!moved) throw notAwaiting()
     return this.itemViewOf(itemId)
   }
@@ -986,7 +1022,21 @@ export class ScanService {
         ? { recognised: { brand: item.recognisedBrand, name: item.recognisedName, variant: item.recognisedVariant, category: item.recognisedCategory } }
         : {}),
       ...(product ? { product } : {}),
+      ...this.noLabelView(item),
       image,
+    }
+  }
+
+  private noLabelView(item: ScanItem): Pick<ScanItemView, 'noLabel'> {
+    if (item.state !== 'unidentified' || item.noLabelSource === null || item.noLabelPurpose === null || item.noLabelUsedFor === null) return {}
+    const answers = { source: item.noLabelSource, purpose: item.noLabelPurpose, usedFor: item.noLabelUsedFor }
+    return {
+      noLabel: {
+        ...answers,
+        ...(item.noLabelDescription === null ? {} : { description: item.noLabelDescription }),
+        concerns: cautionFor(answers),
+        rulesVersion: CAUTION_RULES_VERSION,
+      },
     }
   }
 
@@ -1005,9 +1055,9 @@ export class ScanService {
     return { image: { bytes: photo.bytes, mediaType: header.mediaType }, extension: header.mediaType === 'image/webp' ? 'webp' : 'jpg' }
   }
 
-  private cleanText(text: string, field: 'brand' | 'name' | 'variant' | 'text', required: boolean): string {
+  private cleanText(text: string, field: 'brand' | 'name' | 'variant' | 'text' | 'description', required: boolean, maxLength = ScanService.MAX_TEXT_LENGTH): string {
     const trimmed = text.trim()
-    if ((required && trimmed === '') || trimmed.length > ScanService.MAX_TEXT_LENGTH || hasLinkOrMarkup(trimmed) || ScanService.HIDDEN_CHARACTER.test(trimmed)) {
+    if ((required && trimmed === '') || trimmed.length > maxLength || hasLinkOrMarkup(trimmed) || ScanService.HIDDEN_CHARACTER.test(trimmed)) {
       throw new ValidationError('INVALID_PRODUCT_TEXT', `The ${field} is not valid`, { field })
     }
     return trimmed

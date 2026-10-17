@@ -961,7 +961,7 @@ comes in a later PR.
   `scan_items`, one per photo: id, `scan_id` (references scans, cascade), `user_id` (the scan's owner, copied so quotas and
   guest cleanup need no join; an item is owned through its scan, not through this column), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
   once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_category` / `_confidence`, `product_id` and
-  `formulation_id` (plain text, no foreign key: the catalog is not this module's; `product_id` may name an unnamed product that adoption has since deleted, so read the product through `formulation_id`), `created_at`, `updated_at`; indexed by
+  `formulation_id` (plain text, no foreign key: the catalog is not this module's; `product_id` may name an unnamed product that adoption has since deleted, so read the product through `formulation_id`), `no_label_source` / `_purpose` / `_used_for` / `_description` (migration 0016: nullable text, set together only by the move to `unidentified`; the three answers are enums in `scans.vocabulary.ts`, the description is free text of at most 200 characters), `created_at`, `updated_at`; indexed by
   `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
   per back photo ever uploaded: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own),
   `uploaded_at`; indexed by `(user_id, uploaded_at)` and `(ip_hash, uploaded_at)`. The row outlives the photo. `scan_retakes` (migration 0013) is the same for
@@ -984,6 +984,7 @@ comes in a later PR.
   needs-retake | needs-identification → matching  (a typed name, split by a model: `identifyByName`, queues `match`)
   needs-retake | needs-identification → ready | analysing | researching | failed (analysis-failed)
                                                   (a product picked from search: `identifyByName`, the same moves as `match`)
+  needs-identification → unidentified                        (the user says the product has no label: `noLabel`; no job, no model, no photo)
   needs-identification → reading-label                       (a back photo is uploaded for an item with no product)
   reading-label (no product) → ready                         (`catalog.fromLabel` found its list already analysed)
   reading-label (no product) → analysing → ready             (otherwise)
@@ -991,8 +992,9 @@ comes in a later PR.
   reading-label (no product) → failed                        (label-unreadable, on the 3rd back photo)
   any step    → failed
   ```
-  `ready`, `rejected` and `failed` are final. `needs-retake` and `needs-identification` wait for the user and are not final: an item in
-  either keeps its scan from being done. **Reasons**: rejected is `face-or-person` or `not-a-beauty-product`;
+  `ready`, `rejected`, `failed` and `unidentified` are final (`FINAL_STATES`): an item in any of them lets its scan be done, and the reaper's lost-`done` repair counts it.
+  `needs-retake` and `needs-identification` wait for the user and are not final: an item in
+  either keeps its scan from being done. An `unidentified` item has no reason (the move clears it), no photo and no product, and nothing moves it again: the reaper and the dead-letter hook ignore it, since it is not a working state. **Reasons**: rejected is `face-or-person` or `not-a-beauty-product`;
   `needs-retake` and `needs-identification` carry `unreadable` or `label-not-visible`, the reason of the latest photo; failed is `photo-missing` (the stored photo is gone), `analysis-failed` (the catalog gave up),
   `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
   later) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
@@ -1000,7 +1002,7 @@ comes in a later PR.
   when the last back photo could not be read, was refused by the model, or is gone.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `retakesLeft` (only in `needs-retake`: 2, then 1; the key is absent in every
   other state, not undefined or null), `recognised` (once read), `product` (a
-  `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
+  `ProductView`, only when ready), `noLabel` (only when `unidentified`: `{ source, purpose, usedFor, description?, concerns, rulesVersion }`; the key is absent in every other state, and `description` is absent when none was given) and `image`: the product's stock image, else the user's own photo through a signed link
   (`/api/v1/scans/products/photos/<token>`), else `null` (the photo of a rejected item, or one waiting for a retake or identification, is deleted). The stream's events carry the same item.
 - **create.** Every photo is checked before any is stored, and one bad photo refuses the whole scan: 1 to 10 photos
   (`NO_IMAGES`, `TOO_MANY_IMAGES`), at most 2,000,000 bytes and 1600 pixels on the longest side (`IMAGE_TOO_LARGE`), JPEG
@@ -1120,6 +1122,20 @@ comes in a later PR.
   - **Known limits.** `stripSizes` is not applied to a typed name or to search (a pack size in a name is matched as typed). A typed name with
     no brand is not a product: the splitter answers `not-a-product`, and so does an empty name. Products made before search text existed are searchable only once the reaper
     has filled them (see "Product catalog data"), within a few runs.
+- **noLabel.** `ScanService.noLabel(scanId, itemId, { source, purpose, usedFor, description? })` ends an item that offers identification as
+  `unidentified`: the user has no label to give and the product stays unknown. It runs in this order: the scan is the caller's (404 `SCAN_NOT_FOUND`), the item
+  is in `needs-identification` and no other state (409 `ITEM_NOT_AWAITING_NO_LABEL`; an item in `needs-retake` still has tries left, so it must keep trying), then the description
+  (`cleanText`, at most 200 characters, 400 `INVALID_PRODUCT_TEXT` with `details.field = 'description'`; a blank one is stored as null, any other is stored trimmed). Then one guarded
+  `transition` to `unidentified` clears the reason and writes the four answers, and publishes the item (and `done` if it was the scan's last). It sends no photo, calls no model and queues
+  no job, so no quota, retake or spend is used. A repeated call, or two at once, is 409 for all but the winner.
+  - **Cautions are computed at view time.** `scans.cautions.ts` is a pure module (no I/O, no clock, no model): `cautionFor({ source, purpose, usedFor })` returns the item's
+    `DraftConcern`s in a fixed order, and the service calls it each time the item is shown (`itemView`), so nothing the rules produce is stored. The order is: (1) purpose `lighten`:
+    `banned-substance`, high, naming mercury, hydroquinone and corticosteroids, in stronger words for source `market-vendor` or `not-sure` and weaker ones for `pharmacy`, `online` and
+    `gift`; (2) `lighten` or `treat-spots` for `6-months-2-years` or `over-2-years`: `hyperpigmentation-risk`, medium (skin thinning, and darkening from ochronosis); (3) always: `irritation`, medium
+    (contents unknown, patch-test, treat with caution). The description is not an input and is never echoed. The text is about the product, never the user, and stays within the analysis path's
+    concern vocabulary and its `MAX_WHY_LENGTH` and `MAX_WHO_LENGTH`, with no link or markup. The concerns carry no `sources`: there is no label to match a regulatory listing to.
+  - **Versioning.** `CAUTION_RULES_VERSION` (1) is published on the item as `noLabel.rulesVersion`. Change the wording or a rule, bump it: because the cautions are not stored, every item already
+    answered shows the new rules at once, and a client uses the number to tell which rules wrote what it holds. It is separate from `ANALYSIS_VERSION`, which makes analyses of labels stale.
 - **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
@@ -1142,7 +1158,7 @@ comes in a later PR.
 - **The reaper.** A message can still be lost (the queue accepted a send that never arrived; a Worker died between the write
   and the send, with the undo never run), and the dead-letter hook only covers messages that reached the queue. A cron every
   10 minutes runs `ScanService.reap(now)`: items in `recognising`, `matching`, `researching`, `reading-label` or `analysing`
-  (never `needs-confirmation`, `needs-back-photo`, `needs-retake` or `needs-identification`, which wait for the user, nor a final state;
+  (never `needs-confirmation`, `needs-back-photo`, `needs-retake` or `needs-identification`, which wait for the user, nor a final state, `unidentified` included;
   the two new ones are not final either, so they never get a `done` and their scan's `done_at` stays null) whose `updated_at` is
   older than 15 minutes (`staleItems`, oldest first, at most 100 per sweep, by `(state, updated_at)`) have their step
   queued again with `at` = that `updated_at`, the key of the message that first queued it: if that run is done the
@@ -1195,6 +1211,7 @@ comes in a later PR.
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/retake` | bearer; multipart, one `photo` part | 202 the item, now `recognising`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_RETAKE`, 413, 415, 429 | 20 per IP, 10 per user |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/identification` | bearer; JSON, exactly one of `{ productId }` or `{ text }` | 202 the item (`matching`, `ready`, `analysing`, `researching` or `failed`); 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`, `NOT_A_PRODUCT_NAME`), 401, 404 `SCAN_NOT_FOUND` or `PRODUCT_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_IDENTIFICATION`, 415, 429, 503 `CATALOG_BUSY` or `AI_UNAVAILABLE` | 20 per IP, 10 per user |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label` | bearer; JSON `{ source, purpose, usedFor, description? }` (fixed words; see `scans.vocabulary.ts`) | 202 the item, now `unidentified` with `noLabel`; 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`), 401, 404 `SCAN_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_NO_LABEL`, 415, 429 | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
   | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
 
@@ -1208,6 +1225,8 @@ comes in a later PR.
   - **Identification body and order.** The body is a union of two closed objects, so `{}`, both fields, an extra field or a non-string is
     `VALIDATION_FAILED`; the text's length and content are the service's (`INVALID_PRODUCT_TEXT`). The route runs the IP limiter,
     `signedIn()`, then the user limiter, then validates the body, so an unsigned caller with a bad or non-JSON body is 401 and a model is never called past the limits.
+  - **No-label body and order.** `source`, `purpose` and `usedFor` are required and each one of its fixed words (anything else, or a missing one, is `VALIDATION_FAILED`); `description` is an optional string
+    whose length and content are the service's (`INVALID_PRODUCT_TEXT`). The middleware order is the identification route's (IP limiter, `signedIn()`, user limiter) and there is no `bodyLimit`: the body is a few short fields.
   - **Order and size.** All three upload routes run, in this order: the IP limiter, `signedIn()`, the user limiter, `bodyLimit`.
     The IP limiter counts every caller, signed in or not. `signedIn()` (`middleware/signed-in.ts`) answers 401 `AUTH_REQUIRED`,
     `TOKEN_EXPIRED` or `TOKEN_INVALID` from `c.var.auth` (the same codes as `requireUser`, through `notSignedIn` in
@@ -1218,10 +1237,10 @@ comes in a later PR.
     framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
-    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake, `SCAN_IDENTIFY_IP_LIMITER` (20) and `SCAN_IDENTIFY_USER_LIMITER` (10) on the identification (each may cost a model call); 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
+    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake, `SCAN_IDENTIFY_IP_LIMITER` (20) and `SCAN_IDENTIFY_USER_LIMITER` (10) on the identification (each may cost a model call), `SCAN_NO_LABEL_IP_LIMITER` (20) and `SCAN_NO_LABEL_USER_LIMITER` (10) on the no-label answer (no model, but a write each); 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
     read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
     do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
-    underneath. Namespace ids are 1006 to 1015 at the top level, 2006 to 2015 in staging and 3006 to 3015 in production (the retake limiters are 1010/1011, 2010/2011, 3010/3011; the identification limiters 1012/1013, 2012/2013, 3012/3013; the product search limiters 1014/1015, 2014/2015, 3014/3015).
+    underneath. Namespace ids are 1006 to 1017 at the top level, 2006 to 2017 in staging and 3006 to 3017 in production (the retake limiters are 1010/1011, 2010/2011, 3010/3011; the identification limiters 1012/1013, 2012/2013, 3012/3013; the product search limiters 1014/1015, 2014/2015, 3014/3015; the no-label limiters 1016/1017, 2016/2017, 3016/3017).
   - **Client address.** The service is handed `cf-connecting-ip` as the address for the per-address daily quota (`unknown` where the
     header is absent, as for the rate limiter).
   - **The public photo route** ignores the Authorization header altogether (a broken or expired one changes nothing), answers 200
@@ -1274,7 +1293,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   check its return type; the integration tests do. A browser `EventSource` cannot send the bearer token; clients read the body of a `fetch`.
 - **Frames.** Headers `text/event-stream; charset=utf-8`, `Cache-Control: no-cache, no-transform`, `X-Accel-Buffering: no`.
   `event: snapshot` first (the scan as `GET /api/v1/scans/products/{scanId}` shows it), then `event: item` per change (data: the item as that
-  response shows it) and `event: done` with data `{}` when every item is final, after which the object closes every stream of the scan.
+  response shows it) and `event: done` with data `{}` when every item is final (`ready`, `rejected`, `failed` or `unidentified`), after which the object closes every stream of the scan.
   Photo links inside `image.url` are minted per view, so two views of the same item differ in that token only.
 - **Snapshot on reconnect.** There is no replay and no event ids: a client that reconnects gets a fresh snapshot, which is
   the whole state.

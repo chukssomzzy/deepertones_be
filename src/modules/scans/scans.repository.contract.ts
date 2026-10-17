@@ -126,6 +126,10 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
           recognisedConfidence: null,
           productId: null,
           formulationId: null,
+          noLabelSource: null,
+          noLabelPurpose: null,
+          noLabelUsedFor: null,
+          noLabelDescription: null,
         })
         expect(item!.createdAt.getTime()).toBe(at(3 * MINUTE).getTime())
         expect(item!.updatedAt.getTime()).toBe(at(3 * MINUTE).getTime())
@@ -260,6 +264,82 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
 
         expect((await repository.findItem(items[1]!.id))!.state).toBe('recognising')
+      })
+    })
+
+    describe('the answers to an item with no label', () => {
+      const ANSWERS = { noLabelSource: 'market-vendor', noLabelPurpose: 'lighten', noLabelUsedFor: '6-months-2-years', noLabelDescription: 'A tub with no name on it' } as const
+
+      /** An item that has reached needs-identification, the only state the no-label answers are given in. */
+      const awaiting = async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-identification', reason: 'unreadable', photoKey: null, updatedAt: at(MINUTE) })
+        return { repository, id }
+      }
+
+      it('stores all four answers together with the move to unidentified, and gives them back', async () => {
+        const { repository, id } = await awaiting()
+
+        const applied = await repository.updateItem(id, 'needs-identification', { state: 'unidentified', reason: null, ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(applied).toBe(true)
+        const item = await repository.findItem(id)
+        expect(item).toMatchObject({ state: 'unidentified', reason: null, ...ANSWERS })
+        expect(item!.updatedAt.getTime()).toBe(at(2 * MINUTE).getTime())
+      })
+
+      it('leaves the answers null on an item that has not been given any', async () => {
+        const { repository, id } = await awaiting()
+
+        expect(await repository.findItem(id)).toMatchObject({ noLabelSource: null, noLabelPurpose: null, noLabelUsedFor: null, noLabelDescription: null })
+      })
+
+      it('keeps an answer a later patch does not mention, and clears one the patch sets to null', async () => {
+        const { repository, id } = await awaiting()
+        await repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        const applied = await repository.updateItem(id, 'unidentified', { noLabelDescription: null, updatedAt: at(3 * MINUTE) })
+
+        expect(applied).toBe(true)
+        expect(await repository.findItem(id)).toMatchObject({
+          state: 'unidentified',
+          noLabelSource: 'market-vendor',
+          noLabelPurpose: 'lighten',
+          noLabelUsedFor: '6-months-2-years',
+          noLabelDescription: null,
+        })
+      })
+
+      it('stores nothing when the item is in another state: the answers are written only by the guarded move', async () => {
+        const { repository, id } = await awaiting()
+        const before = await repository.findItem(id)
+
+        const applied = await repository.updateItem(id, 'needs-retake', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(applied).toBe(false)
+        expect(await repository.findItem(id)).toEqual(before)
+      })
+
+      it('lets exactly one of two simultaneous moves to unidentified win, and keeps the winner\'s answers', async () => {
+        const { repository, id } = await awaiting()
+
+        const results = await Promise.all([
+          repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, noLabelSource: 'pharmacy', updatedAt: at(2 * MINUTE) }),
+          repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, noLabelSource: 'gift', updatedAt: at(2 * MINUTE) }),
+        ])
+
+        expect(results.filter(Boolean)).toHaveLength(1)
+        expect((await repository.findItem(id))!.noLabelSource).toBe(results[0] ? 'pharmacy' : 'gift')
+      })
+
+      it('only writes the answers to the item it was asked about', async () => {
+        const { repository, items } = await seeded(2)
+        await repository.updateItem(items[0]!.id, 'recognising', { state: 'needs-identification', updatedAt: at(MINUTE) })
+
+        await repository.updateItem(items[0]!.id, 'needs-identification', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(await repository.findItem(items[1]!.id)).toMatchObject({ state: 'recognising', noLabelSource: null, noLabelDescription: null })
       })
     })
 
@@ -1064,7 +1144,7 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
     })
 
     describe('settledScansNotDone', () => {
-      const FINAL: ItemState[] = ['ready', 'rejected', 'failed']
+      const FINAL: ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
       // Far enough back to take in every scan these tests make, so only the test about the bound narrows it.
       const LONG_AGO = at(-30 * 24 * HOUR)
       const freshUser = async () => {
@@ -1089,6 +1169,14 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         const found = await repository.settledScansNotDone(FINAL, at(0), LONG_AGO, 1000)
 
         expect(found.find((s) => s.id === settled)).toMatchObject({ id: settled, userId, doneAt: null })
+      })
+
+      it('lists a scan whose items are all final when one of them is unidentified', async () => {
+        const { repository, userId } = await freshUser()
+        const settled = await scanWith(repository, userId, [['unidentified', -HOUR], ['ready', -HOUR]])
+        const only = await scanWith(repository, userId, [['unidentified', -HOUR]])
+
+        expect(await listed(repository, [settled, only])).toEqual([settled, only])
       })
 
       it('leaves out a scan with an item that is not final, even if the others are', async () => {

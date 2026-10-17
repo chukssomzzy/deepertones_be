@@ -3,7 +3,7 @@ import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
-import { BackPhotoBody, ConfirmProductBody, CreateScanBody, IdentifyProductBody, ItemParams, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
+import { BackPhotoBody, ConfirmProductBody, CreateScanBody, IdentifyProductBody, ItemParams, NoLabelBody, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
 import { SCAN_POLICY } from './scans.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -57,7 +57,7 @@ const watchScan = defineRoute({
   description:
     'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as ' +
     '`GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
-    '`ready`, `rejected` or `failed`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. ' +
+    '`ready`, `rejected`, `failed` or `unidentified`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. ' +
     'A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
     'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
     'Another user\'s scan is 404, the same as one that does not exist.',
@@ -135,6 +135,25 @@ const identifyItem = defineRoute({
   responses: { 202: success(ScanItemResponse, 'The item, now on its way'), ...errorResponses(401, 404, 409, 429, 503) },
 })
 
+const noLabelItem = defineRoute({
+  method: 'post',
+  path: '/{scanId}/items/{itemId}/no-label',
+  operationId: 'markProductScanItemNoLabel',
+  tags: ['Product scans'],
+  summary: 'Say a product has no label to read',
+  description:
+    'For an item in `needs-identification` (its 3rd front photo could not be read), and no other state: 409 `ITEM_NOT_AWAITING_NO_LABEL`. ' +
+    'Send where the product came from, what it is used for and for how long (fixed words), and optionally a short `description` (400 `INVALID_PRODUCT_TEXT` when it is over 200 characters or carries a link, markup or hidden character). ' +
+    'The item ends as `unidentified`, which is final, with `noLabel` holding the answers and the cautions for a product of unknown contents. ' +
+    'It sends no photo and calls no model, so no photo quota or retake is used.',
+  security: bearer,
+  // In this order, as for the identification route: the address limit counts every caller, signedIn turns the unsigned away before the body is read,
+  // and the user limit comes last.
+  middleware: [rateLimit('SCAN_NO_LABEL_IP_LIMITER', 'ip'), signedIn(), rateLimit('SCAN_NO_LABEL_USER_LIMITER', 'user')],
+  request: { params: ItemParams, body: jsonBody(NoLabelBody) },
+  responses: { 202: success(ScanItemResponse, 'The item, now unidentified'), ...errorResponses(401, 404, 409, 429) },
+})
+
 const getPhoto = defineRoute({
   method: 'get',
   path: '/photos/{token}',
@@ -184,6 +203,11 @@ export const scanRoutes = openapiApp()
     const { scanId, itemId } = c.req.valid('param')
     const item = await c.var.services.scans.identifyByName(scanId, itemId, c.req.valid('json'))
     return ok(c, toScanItemResponse(item), 'Product identified', 202)
+  })
+  .openapi(noLabelItem, async (c) => {
+    const { scanId, itemId } = c.req.valid('param')
+    const item = await c.var.services.scans.noLabel(scanId, itemId, c.req.valid('json'))
+    return ok(c, toScanItemResponse(item), 'Marked as having no label', 202)
   })
   .openapi(getPhoto, async (c) => {
     const photo = await c.var.services.scans.photoForLink(c.req.valid('param').token)

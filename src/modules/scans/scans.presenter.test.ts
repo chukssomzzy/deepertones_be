@@ -115,4 +115,92 @@ describe('toScanItemResponse', () => {
 
     expect(parsed.success).toBe(false)
   })
+  describe('an unidentified item', () => {
+    const CONCERNS = [
+      { kind: 'banned-substance', severity: 'high', ingredients: ['mercury', 'hydroquinone', 'corticosteroids'], why: 'w1', whoShouldTakeCare: 'x1', traits: [], sources: [] },
+      { kind: 'irritation', severity: 'medium', ingredients: [], why: 'w2', whoShouldTakeCare: 'x2', traits: ['sensitive'], sources: [] },
+    ]
+    const unidentifiedItem = (over: Partial<NonNullable<ScanItemView['noLabel']>> = {}): ScanItemView => ({
+      id: 'item-4',
+      position: 2,
+      state: 'unidentified',
+      reason: null,
+      noLabel: { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years', concerns: CONCERNS, rulesVersion: 1, ...over },
+      image: null,
+    })
+
+    it('publishes the answers, the cautions field by field and the rules version, with a null image and no product', () => {
+      const response = toScanItemResponse(unidentifiedItem({ description: 'A pink tub' }))
+
+      expect(response).toEqual({
+        id: 'item-4',
+        position: 2,
+        state: 'unidentified',
+        reason: null,
+        noLabel: { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years', description: 'A pink tub', concerns: CONCERNS, rulesVersion: 1 },
+        image: null,
+      })
+      expect(response).not.toHaveProperty('product')
+      expect(ScanItemResponse.safeParse(response).success).toBe(true)
+    })
+
+    it('leaves description out of the block, not undefined, when the user gave none', () => {
+      const response = toScanItemResponse(unidentifiedItem())
+
+      expect(response.noLabel).not.toHaveProperty('description')
+      expect(Object.keys(response.noLabel!)).not.toContain('description')
+    })
+
+    it('leaves out a field the view gains that the response schema does not name, in the block and in each caution', () => {
+      const item = unidentifiedItem()
+      const grown = {
+        ...item,
+        noLabel: { ...item.noLabel!, internalNote: 'n', concerns: [{ ...CONCERNS[0]!, internalNote: 'n' }, CONCERNS[1]!] },
+      } as unknown as ScanItemView
+
+      expect(toScanItemResponse(item)).toHaveProperty('noLabel')
+      expect(toScanItemResponse(grown)).toEqual(toScanItemResponse(item))
+    })
+
+    it('leaves noLabel out of the response, not undefined, for every other state', () => {
+      for (const item of [readyItem(), { id: 'i', position: 0, state: 'needs-identification', reason: 'unreadable', image: null } as ScanItemView]) {
+        expect(toScanItemResponse(item)).not.toHaveProperty('noLabel')
+        expect(Object.keys(toScanItemResponse(item))).not.toContain('noLabel')
+      }
+    })
+
+    // Written out, not made by the presenter, so a refusal below is the schema's and not an artefact of a missing block.
+    const wire = (over: Record<string, unknown> = {}, without: string[] = []) => {
+      const noLabel: Record<string, unknown> = { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years', concerns: CONCERNS, rulesVersion: 1, ...over }
+      for (const key of without) delete noLabel[key]
+      return { id: 'item-4', position: 2, state: 'unidentified', reason: null, noLabel, image: null }
+    }
+
+    it('accepts a block with every field, and one with a description', () => {
+      expect(ScanItemResponse.safeParse(wire()).success).toBe(true)
+      expect(ScanItemResponse.safeParse(wire({ description: 'A pink tub' })).success).toBe(true)
+    })
+
+    it.each([
+      ['source', { source: 'a stall' }],
+      ['purpose', { purpose: 'bleach' }],
+      ['usedFor', { usedFor: 'a while' }],
+    ])('rejects a %s the response schema does not name', (_field, over) => {
+      expect(ScanItemResponse.safeParse(wire()).success).toBe(true)
+
+      expect(ScanItemResponse.safeParse(wire(over)).success).toBe(false)
+    })
+
+    it('accepts every source, purpose and time used the response schema names', () => {
+      for (const source of ['market-vendor', 'pharmacy', 'online', 'gift', 'not-sure']) expect(ScanItemResponse.safeParse(wire({ source })).success, source).toBe(true)
+      for (const purpose of ['lighten', 'moisturise', 'treat-spots', 'not-sure']) expect(ScanItemResponse.safeParse(wire({ purpose })).success, purpose).toBe(true)
+      for (const usedFor of ['under-1-month', '1-6-months', '6-months-2-years', 'over-2-years']) expect(ScanItemResponse.safeParse(wire({ usedFor })).success, usedFor).toBe(true)
+    })
+
+    it.each(['source', 'purpose', 'usedFor', 'concerns', 'rulesVersion'])('requires %s in the block', (field) => {
+      expect(ScanItemResponse.safeParse(wire()).success).toBe(true)
+
+      expect(ScanItemResponse.safeParse(wire({}, [field])).success).toBe(false)
+    })
+  })
 })

@@ -164,6 +164,9 @@ describe('wrangler.jsonc scan and product search route rate limits', () => {
     // Typing a name: each identification may cost a model call, so these are as tight as the retake's.
     ['SCAN_IDENTIFY_IP_LIMITER', 20],
     ['SCAN_IDENTIFY_USER_LIMITER', 10],
+    // Saying a product has no label: no photo and no model, so no cost, but a write each; as tight as the other item routes that move an item on.
+    ['SCAN_NO_LABEL_IP_LIMITER', 20],
+    ['SCAN_NO_LABEL_USER_LIMITER', 10],
     // Search runs as the user types (a request every keystroke or two, and no AI), so it is far looser than the routes that cost something.
     ['PRODUCT_SEARCH_IP_LIMITER', 120],
     ['PRODUCT_SEARCH_USER_LIMITER', 60],

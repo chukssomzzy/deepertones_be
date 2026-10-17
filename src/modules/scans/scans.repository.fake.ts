@@ -43,6 +43,10 @@ export class FakeScansRepository implements ScansRepository {
         recognisedConfidence: null,
         productId: null,
         formulationId: null,
+        noLabelSource: null,
+        noLabelPurpose: null,
+        noLabelUsedFor: null,
+        noLabelDescription: null,
         updatedAt: item.createdAt,
       })
     }
