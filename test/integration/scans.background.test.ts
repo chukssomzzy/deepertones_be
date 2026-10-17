@@ -37,7 +37,7 @@ afterEach(() => {
 // The database is shared by the whole file, so every product and user gets a name no other test has.
 const runSalt = String(Math.floor(Math.random() * 1e5)).padStart(5, '0')
 let counter = 0
-const freshBrand = () => `Brand${runSalt}x${counter++}`
+const freshBrand = () => `${runSalt}${counter++}x Brand`
 
 const users = new D1UsersRepository(createDb(env.DB))
 const guest = async () => {
