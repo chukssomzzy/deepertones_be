@@ -106,6 +106,13 @@
       "when": 1792219760025,
       "tag": "0014_magical_eternals",
       "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "6",
+      "when": 1792275316489,
+      "tag": "0015_lowly_obadiah_stane",
+      "breakpoints": true
     }
   ]
 }

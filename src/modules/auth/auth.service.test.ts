@@ -1,10 +1,15 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { hmacSha256Hex } from '../../lib/crypto'
 import { runAs } from '../../lib/context'
 import { signJwt } from '../../lib/jwt'
 import { MemoryEmailSender } from '../../providers/email/memory.email'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryOtpDelivery } from '../../providers/otp-delivery/memory.otp-delivery'
+import { MemoryPushSender } from '../../providers/push/memory.push'
+import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
+import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
+import { NotificationsService } from '../notifications/notifications.service'
+import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
 import { FakeOtpRepository } from '../otp/otp.repository.fake'
 import { OtpService } from '../otp/otp.service'
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
@@ -36,6 +41,8 @@ const errorOf = async (promise: Promise<unknown>) => {
 let clock: Date
 let users: FakeUsersRepository
 let profilesRepo: FakeProfilesRepository
+let pushTokens: FakePushTokensRepository
+let pushJobs: MemoryJobQueue
 let usersService: UsersService
 let tokens: TokenService
 let n: number
@@ -57,21 +64,26 @@ const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users) => {
     generateCode: () => CODE,
   })
   const profiles = new ProfilesService({ repository: profilesRepo })
-  return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, deviceIdKey, now: () => clock }), usersSvc }
+  const notifications = new NotificationsService({ pushTokens, settings: new FakeNotificationSettingsRepository(), push: new MemoryPushSender(), jobs: pushJobs, deviceIdKey, now: () => clock })
+  return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, notifications, deviceIdKey, now: () => clock }), usersSvc, notifications }
 }
 
 beforeEach(() => {
   clock = T0
   n = 0
   profilesRepo = new FakeProfilesRepository()
+  pushTokens = new FakePushTokensRepository()
+  pushJobs = new MemoryJobQueue()
   users = new FakeUsersRepository({ profiles: profilesRepo })
   tokens = new TokenService({ secret: JWT_SECRET, now: () => clock })
   const built = buildAuth()
   auth = built.auth
   usersService = built.usersSvc
+  notifications = built.notifications
 })
 
 let auth: AuthService
+let notifications: NotificationsService
 
 describe('AuthService secrets', () => {
   it('keeps the device id key out of the service when it is spread or listed', () => {
@@ -400,5 +412,199 @@ describe('AuthService account linking and switching', () => {
 
     expect(session.user.id).toBe(owner.user.id)
     expect(await errorOf(auth.refresh(guest.tokens.refreshToken))).toMatchObject({ code: 'TOKEN_INVALID' })
+  })
+})
+
+describe('AuthService and push tokens', () => {
+  const email = (address: string) => ({ channel: 'email', address }) as const
+  const TOKEN_A = 'ExponentPushToken[aaaaaaaaaaaaaaaaaaaaaa]'
+  const TOKEN_B = 'ExponentPushToken[bbbbbbbbbbbbbbbbbbbbbb]'
+  const TOKEN_C = 'ExponentPushToken[cccccccccccccccccccccc]'
+
+  /** A phone registering its token the way the app does, as the given signed-in actor. */
+  const registerPhone = (actor: Awaited<ReturnType<typeof actorOf>>, deviceId: string, token: string, platform: 'ios' | 'android' = 'ios') =>
+    runAs(actor, () => notifications.register({ deviceId, platform, token }))
+  const tokensOf = async (userId: string) => (await pushTokens.forUser(userId)).map((row) => row.token).sort()
+
+  /** A verified account that owns `address`, as it is after a past sign-in. */
+  const verifiedOwner = async (address: string) => {
+    const owner = await auth.bootstrap('device-owner', 'ios')
+    await usersService.promote(owner.user.id, { kind: 'email', email: address as never })
+    return owner.user.id
+  }
+
+  it('logout deletes every push token of the account, on all its profiles and devices, and no other account\'s', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const second = await addProfile(guest.user.id, 'profile-second')
+    const stranger = await auth.bootstrap('device-2', 'android')
+    await registerPhone(await actorOf(guest.user.id), 'device-phone-1', TOKEN_A)
+    await registerPhone(await actorOf(guest.user.id, 'anonymous', second), 'device-phone-2', TOKEN_B)
+    await registerPhone(await actorOf(stranger.user.id), 'device-phone-3', TOKEN_C)
+
+    await runAs(await actorOf(guest.user.id), () => auth.logout('device-1', 'ios'))
+
+    expect(await tokensOf(guest.user.id)).toEqual([])
+    expect(await tokensOf(stranger.user.id)).toEqual([TOKEN_C])
+  })
+
+  it('a guest signing in to an existing account loses its push tokens, and the account keeps its own', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    await registerPhone(await actorOf(ownerId, 'verified'), 'device-owner-phone', TOKEN_A)
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+    await registerPhone(actor, 'device-phone-1', TOKEN_B)
+
+    const session = await runAs(actor, async () => {
+      await auth.sendOtp(email('ada@example.com'))
+      return auth.verifyOtp(email('ada@example.com'), CODE)
+    })
+
+    expect(session.user.id).toBe(ownerId)
+    expect(await tokensOf(guest.user.id)).toEqual([])
+    expect(await tokensOf(ownerId)).toEqual([TOKEN_A])
+  })
+
+  it('a guest that is promoted in place keeps its push token on the same account and profile', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+    await registerPhone(actor, 'device-phone-1', TOKEN_A)
+
+    await runAs(actor, async () => {
+      await auth.sendOtp(email('ada@example.com'))
+      return auth.verifyOtp(email('ada@example.com'), CODE)
+    })
+
+    expect(await pushTokens.forUser(guest.user.id)).toMatchObject([{ token: TOKEN_A, userId: guest.user.id, profileId: actor.profileId }])
+  })
+
+  it('a verified user signing in again with their own address keeps their push tokens', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    const actor = await actorOf(ownerId, 'verified')
+    await registerPhone(actor, 'device-phone-1', TOKEN_A)
+    await registerPhone(actor, 'device-phone-2', TOKEN_B)
+
+    const session = await runAs(actor, async () => {
+      await auth.sendOtp(email('ada@example.com'))
+      return auth.verifyOtp(email('ada@example.com'), CODE)
+    })
+
+    expect(session.user.id).toBe(ownerId)
+    expect(await tokensOf(ownerId)).toEqual([TOKEN_A, TOKEN_B])
+  })
+
+  it('a code that fails leaves the guest\'s push token alone', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+    await registerPhone(actor, 'device-phone-1', TOKEN_A)
+
+    const error = await errorOf(
+      runAs(actor, async () => {
+        await auth.sendOtp(email('ada@example.com'))
+        return auth.verifyOtp(email('ada@example.com'), '000000')
+      }),
+    )
+
+    expect(error.code).toBeDefined()
+    expect(await tokensOf(guest.user.id)).toEqual([TOKEN_A])
+    expect(await tokensOf(ownerId)).toEqual([])
+  })
+})
+
+describe('AuthService.verifyOtp: the new sign-in alert', () => {
+  const email = (address: string) => ({ channel: 'email', address }) as const
+  const TOKEN_OWNER = 'ExponentPushToken[oooooooooooooooooooooo]'
+  const TOKEN_GUEST = 'ExponentPushToken[gggggggggggggggggggggg]'
+  const alerts = () => pushJobs.enqueued.map((e) => e.body as SendPushMessage)
+
+  const verifiedOwner = async (address: string) => {
+    const owner = await auth.bootstrap('device-owner', 'ios')
+    await usersService.promote(owner.user.id, { kind: 'email', email: address as never })
+    return owner.user.id
+  }
+  const signIn = (actor: Awaited<ReturnType<typeof actorOf>>, address: string, code = CODE) =>
+    runAs(actor, async () => {
+      await auth.sendOtp(email(address))
+      return auth.verifyOtp(email(address), code)
+    })
+
+  it('alerts the account signed in to, once, with the platform of the guest\'s phone and the instant of the sign-in', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+    // The guest's phone is an Android one; the owner's own phone is an iPhone, so the platform can only have come from the guest's row.
+    await runAs(await actorOf(ownerId, 'verified'), () => notifications.register({ deviceId: 'device-owner-phone', platform: 'ios', token: TOKEN_OWNER }))
+    await runAs(actor, () => notifications.register({ deviceId: 'device-guest-phone', platform: 'android', token: TOKEN_GUEST }))
+    at(7 * SECOND)
+
+    await signIn(actor, 'ada@example.com')
+
+    expect(alerts()).toEqual([{ kind: 'new-sign-in', userId: ownerId, platform: 'android', eventId: expect.any(String), at: T0.getTime() + 7 * SECOND }])
+    expect(pushJobs.enqueued[0]!.job).toBe('send-push')
+    expect(sendPushSpec.key(alerts()[0]!)).toBe(`new-sign-in:${(alerts()[0] as { eventId: string }).eventId}`)
+  })
+
+  it('alerts with no platform when the guest had no phone registered', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    const guest = await auth.bootstrap('device-1', 'ios')
+
+    await signIn(await actorOf(guest.user.id), 'ada@example.com')
+
+    expect(alerts()).toEqual([{ kind: 'new-sign-in', userId: ownerId, platform: null, eventId: expect.any(String), at: T0.getTime() }])
+  })
+
+  it('alerts again, as a separate notification, for a second sign-in to the same account', async () => {
+    await verifiedOwner('ada@example.com')
+    const first = await auth.bootstrap('device-1', 'ios')
+    const second = await auth.bootstrap('device-2', 'ios')
+
+    await signIn(await actorOf(first.user.id), 'ada@example.com')
+    // Past the cooldown between codes to one address.
+    at(10 * 60 * SECOND)
+    await signIn(await actorOf(second.user.id), 'ada@example.com')
+
+    const keys = alerts().map((body) => sendPushSpec.key(body))
+    expect(keys).toHaveLength(2)
+    expect(new Set(keys).size).toBe(2)
+  })
+
+  it('does not alert when a guest is promoted in place', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const actor = await actorOf(guest.user.id)
+    await runAs(actor, () => notifications.register({ deviceId: 'device-guest-phone', platform: 'ios', token: TOKEN_GUEST }))
+
+    await signIn(actor, 'ada@example.com')
+
+    expect(alerts()).toEqual([])
+  })
+
+  it('does not alert when a verified user signs in again with their own address', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+
+    await signIn(await actorOf(ownerId, 'verified'), 'ada@example.com')
+
+    expect(alerts()).toEqual([])
+  })
+
+  it('does not alert when the code is wrong', async () => {
+    await verifiedOwner('ada@example.com')
+    const guest = await auth.bootstrap('device-1', 'ios')
+
+    const error = await errorOf(signIn(await actorOf(guest.user.id), 'ada@example.com', '000000'))
+
+    expect(error.code).toBeDefined()
+    expect(alerts()).toEqual([])
+  })
+
+  it('still signs the guest in to the account when the alert cannot be queued', async () => {
+    const ownerId = await verifiedOwner('ada@example.com')
+    const guest = await auth.bootstrap('device-1', 'ios')
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    pushJobs.failNextWith(new Error('queue is down'))
+
+    const session = await signIn(await actorOf(guest.user.id), 'ada@example.com')
+
+    expect(session.user.id).toBe(ownerId)
+    logged.mockRestore()
   })
 })

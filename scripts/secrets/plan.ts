@@ -50,6 +50,11 @@ export const SECRETS: Record<string, SecretSpec> = {
     reason: 'src/container.ts builds the AnthropicClient with it, for product research and analysis.',
     required: true,
   },
+  EXPO_ACCESS_TOKEN: {
+    reason:
+      'ExpoPushSender sends push notifications with it. Enhanced push security must be on in Expo, which then refuses sends without it.',
+    required: true,
+  },
 }
 
 const VAR = 'a var in wrangler.jsonc; a secret of the same name is shadowed on deploy'

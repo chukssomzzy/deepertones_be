@@ -16,6 +16,7 @@ import type { ProductRecognizer, Recognition } from '../../providers/product-rec
 import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
+import type { NotificationsService } from '../notifications/notifications.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
@@ -77,6 +78,7 @@ export type ScanServiceDeps = {
   photos: PhotoStore
   jobs: JobQueue
   events: ScanEvents
+  notifications: NotificationsService
   /** Signs the photo links. photo-link.ts derives its own key from it. */
   photoLinkSecret: string
   /** Keys the IP hash, so a leaked table cannot be reversed by hashing every address. */
@@ -134,6 +136,7 @@ export class ScanService {
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly events: ScanEvents
+  private readonly notifications: NotificationsService
   readonly #photoLinkSecret: string
   readonly #ipHashSecret: string
   private readonly environment: PhotoEnvironment
@@ -149,6 +152,7 @@ export class ScanService {
     this.photos = deps.photos
     this.jobs = deps.jobs
     this.events = deps.events
+    this.notifications = deps.notifications
     this.#photoLinkSecret = deps.photoLinkSecret
     this.#ipHashSecret = deps.ipHashSecret
     this.environment = deps.environment
@@ -258,7 +262,7 @@ export class ScanService {
     }
     if (!items.every((item) => ScanService.isFinal(item.state))) return
     try {
-      await this.sendDone(scanId, { always: true })
+      await this.sendDone(scanId, { always: true, items })
     } catch {
       console.error({ outcome: 'publish-failed', scanId })
     }
@@ -451,19 +455,76 @@ export class ScanService {
    * Marks the scan done and publishes `done`. Normally only the call whose guarded update sets the time publishes; `always`
    * publishes whether or not this call set it (for a client that has not had it yet).
    *
-   * If the publish throws after this call set the time, the time is cleared again, so that `done` is still owed and the
-   * reaper finds the scan. The clear applies only while the time is still the one set here, so it never undoes another
-   * call's mark. The publish error is rethrown for the caller to log.
+   * The call that sets the time also queues "your scan is ready", BEFORE the publish: the person may have closed the app, so the
+   * push must not depend on a live stream that is down or on the publish succeeding. The push is keyed by the scan, so the repeat
+   * a cleared and set-again time causes is sent once. A call that did not set the time queues nothing, however many clients ask.
+   *
+   * A push that cannot be prepared (its reads throw) is logged as `push-failed` and never keeps `done` from going out; the time is
+   * cleared again so the reaper re-claims it and queues the push again under the same key. If the publish throws after this call
+   * set the time, the time is cleared too, so that `done` is still owed and the reaper finds the scan. The clear applies only while
+   * the time is still the one set here, so it never undoes another call's mark. A publish error is rethrown for the caller to log.
+   *
+   * `items` is the list the caller has just read, every one final; the reaper has none and it is read here. Reusing it keeps this
+   * a single read of the scan per call, and the winner of a race makes no read of the items beyond its caller's.
    */
-  private async sendDone(scanId: string, { always }: { always: boolean }): Promise<void> {
+  private async sendDone(scanId: string, { always, items }: { always: boolean; items?: ScanItem[] }): Promise<void> {
     const at = this.now()
     const applied = await this.repository.markScanDone(scanId, at)
     if (!applied && !always) return
+    let pushFailed = false
+    if (applied) {
+      try {
+        await this.notifyFinished(scanId, items)
+      } catch {
+        // Ids only: the error may carry what the database said.
+        console.error({ outcome: 'push-failed', scanId })
+        pushFailed = true
+      }
+    }
+    const undo = () => this.repository.clearScanDone(scanId, at).catch(() => console.error({ outcome: 'done-undo-failed', scanId }))
     try {
       await this.events.publish(scanId, { type: 'done' })
     } catch (error) {
-      if (applied) await this.repository.clearScanDone(scanId, at).catch(() => console.error({ outcome: 'done-undo-failed', scanId }))
+      if (applied) await undo()
       throw error
+    }
+    if (pushFailed) await undo()
+  }
+
+  /** Queues the finished push for the scan's profile. Only the reads can throw; queuing the push never does (NotificationsService swallows it). */
+  private async notifyFinished(scanId: string, known: ScanItem[] | undefined): Promise<void> {
+    const [scan, items] = await Promise.all([this.repository.findScan(scanId), known ?? this.repository.itemsOf(scanId)])
+    if (!scan) return
+    // An orphan, written by the old Worker, has no profile whose phones could be told.
+    if (scan.profileId === null) return void console.log({ outcome: 'push-skipped-no-profile', scanId })
+    await this.notifications.scanFinished({
+      userId: scan.userId,
+      profileId: scan.profileId,
+      scanId,
+      readyCount: items.filter((item) => item.state === 'ready').length,
+    })
+  }
+
+  /**
+   * Queues "your scan needs you" after the guarded update that put the item in a waiting state applied. The scan row is read
+   * for its profile (a step runs as a system actor, so there is no session to take it from); that read is guarded, because the
+   * item has already moved and a throw would only be retried into a no-op. Nothing here fails the step.
+   */
+  private async notifyNeedsYou(item: ScanItem, need: 'back-photo' | 'confirm', ask?: number): Promise<void> {
+    try {
+      const scan = await this.repository.findScan(item.scanId)
+      if (!scan) return
+      if (scan.profileId === null) return void console.log({ outcome: 'push-skipped-no-profile', scanId: item.scanId })
+      await this.notifications.scanNeedsYou({
+        userId: scan.userId,
+        profileId: scan.profileId,
+        scanId: item.scanId,
+        itemId: item.id,
+        need,
+        ...(ask === undefined ? {} : { ask }),
+      })
+    } catch {
+      console.error({ outcome: 'push-failed', scanId: item.scanId, itemId: item.id })
     }
   }
 
@@ -498,7 +559,7 @@ export class ScanService {
 
     if (seen.classification === 'beauty-product') {
       const sure = seen.confidence >= this.policy.confirmBelowConfidence
-      await this.transition(item, {
+      const moved = await this.transition(item, {
         from: 'recognising',
         change: {
           state: sure ? 'matching' : 'needs-confirmation',
@@ -511,6 +572,7 @@ export class ScanService {
         },
         next: sure ? 'match' : undefined,
       })
+      if (moved && !sure) await this.notifyNeedsYou(item, 'confirm')
       return
     }
 
@@ -601,7 +663,7 @@ export class ScanService {
       // New ingredients could not be had, but an earlier analysed list can still be shown.
       await this.transition(item, { from: 'researching', change: { state: 'ready', formulationId: result.fallbackFormulationId } })
     } else if (result.kind === 'not-found') {
-      await this.transition(item, { from: 'researching', change: { state: 'needs-back-photo' } })
+      if (await this.transition(item, { from: 'researching', change: { state: 'needs-back-photo' } })) await this.notifyNeedsYou(item, 'back-photo')
     } else {
       await this.fail(item, 'researching', 'research-busy')
     }
@@ -663,11 +725,14 @@ export class ScanService {
    * as failed, keeping its front photo like the other failures. Every upload is counted, so the count includes this one.
    */
   private async labelUnreadable(item: ScanItem): Promise<void> {
-    const ask = (await this.repository.countBackPhotos(item.id)) < this.policy.maxBackPhotos
-    await this.transition(item, {
+    const uploads = await this.repository.countBackPhotos(item.id)
+    const ask = uploads < this.policy.maxBackPhotos
+    const moved = await this.transition(item, {
       from: 'reading-label',
       change: { state: ask ? 'needs-back-photo' : 'failed', reason: 'label-unreadable', backPhotoKey: null },
     })
+    // The number of uploads so far is which time the item asks again, and the push's key.
+    if (moved && ask) await this.notifyNeedsYou(item, 'back-photo', uploads)
   }
 
   private async analyse(item: ScanItem): Promise<void> {
@@ -760,7 +825,7 @@ export class ScanService {
       const item = items.find((i) => i.id === itemId)
       if (!item) return
       await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now()) })
-      if (ScanService.isFinal(item.state) && items.every((i) => ScanService.isFinal(i.state))) await this.sendDone(scanId, { always: false })
+      if (ScanService.isFinal(item.state) && items.every((i) => ScanService.isFinal(i.state))) await this.sendDone(scanId, { always: false, items })
     } catch {
       console.error({ outcome: 'publish-failed', scanId, itemId })
     }
