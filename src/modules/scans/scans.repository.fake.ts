@@ -38,6 +38,7 @@ export class FakeScansRepository implements ScansRepository {
         recognisedBrand: null,
         recognisedName: null,
         recognisedVariant: null,
+        recognisedForm: null,
         recognisedCategory: null,
         recognisedConfidence: null,
         productId: null,
