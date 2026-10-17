@@ -10,6 +10,7 @@ import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.reposi
 import { ProfilesService } from '../../src/modules/profiles/profiles.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
+import { RATE_TEST_TIMEOUT_MS, startOfRateWindow } from './rate-window'
 
 // The Worker's public surface, as the app uses it: the typed client against the real entrypoint and
 // real local D1. OTP codes are read from the ZeptoMail request the delivery job makes.
@@ -52,16 +53,6 @@ const freshIp = () => {
   return `10.${Number(runSalt) % 250}.${Math.floor(n / 250) % 250}.${(n % 250) + 1}`
 }
 
-// Miniflare's rate-limit windows are aligned to the wall clock (epoch = floor(now / 60 s)), so a test that
-// spends part of a budget and straddles a minute boundary sees its counter reset and never reaches 429.
-// Rate-limit tests call this first: it waits for the next window when fewer than SAFE_WINDOW_MS remain.
-const RATE_WINDOW_MS = 60 * 1000
-const SAFE_WINDOW_MS = 20 * 1000
-const RATE_TEST_TIMEOUT_MS = RATE_WINDOW_MS + 30 * 1000
-const startOfRateWindow = async () => {
-  const remaining = RATE_WINDOW_MS - (Date.now() % RATE_WINDOW_MS)
-  if (remaining < SAFE_WINDOW_MS) await new Promise((resolve) => setTimeout(resolve, remaining + 50))
-}
 const freshEmail = () => `Auth-${runSalt}-${next()}@Example.com`
 const canonical = (email: string) => email.toLowerCase()
 
