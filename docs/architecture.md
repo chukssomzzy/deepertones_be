@@ -595,7 +595,7 @@ prompts and the answer shapes.
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
-  in a photo: a beauty or personal-care product (with brand, name, optional variant, category and a 0 to 1 confidence),
+  in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
   or `other-product`, `face-or-person` or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory. Both run on the vision
   model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
@@ -749,7 +749,7 @@ there is no Console spend limit behind it, so the code is the backstop.
 concerns and traits, research attempts, and the pure rules that feed them. The service on top of it is
 described in "Product catalog service"; routes come later.
 
-- **Identity keys** (`catalog.identity.ts`) are `brand|name|variant`, each part normalised: lower case, accents and
+- **Identity keys** (`catalog.identity.ts`) are `brand|name|variant|form`, the first three normalised and the form (one of `PRODUCT_FORMS`: spray, roll-on, stick, cream and so on) empty when unknown, so a key always ends in a bar. Form is part of identity because a NIVEA MEN Dry Impact spray and its roll-on are different products with different ingredient lists, and researching without the form found the wrong one. Each part is normalised: lower case, accents and
   apostrophes dropped, `&` read as "and", other marks turned into spaces. Pack sizes are removed (`ml`, `mg`, `kg`,
   `oz`, `fl oz` at any number; a bare `g` or `l` only from 10 up, so "Shade 4 L" is kept). A `+` touching a letter or
   digit is read as "plus" ("SPF 50+" and "Hydro Boost+"; a standalone " + " is just a space). A space is put between a
@@ -821,7 +821,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   becomes `CatalogBusyError`. The answer is unknown: merging would guess, and creating the product would risk a duplicate
   of one that exists, so the scan waits and asks again later.
 - **Alias guard.** A near miss is put to the model only if it has the same category as the scanned label and its
-  variant does not conflict: two non-empty variants that differ (compared normalised, so case and spacing do not matter)
+  variant does not conflict, and it has the identical form (none counts as a value, so a formless product and its spray are never put to the model): two non-empty variants that differ (compared normalised, so case and spacing do not matter)
   are different products (a night cream is not its day cream), while a missing variant on either side still compares. This
   keeps a shampoo from being merged into its conditioner on the model's word alone. `CATALOG_POLICY` sets the rest: the
   brand's newest 50 products, similarity 0.6, at most 3 asks; the first "same" is remembered as an alias.
@@ -909,7 +909,7 @@ comes in a later PR.
   reaper's lost-`done` repair, `created_at` where `done_at IS NULL` (a partial index, so it holds only the scans still without a done time).
   `scan_items`, one per photo: id, `scan_id` (references scans, cascade), `user_id` (the scan's owner, copied so quotas and
   guest cleanup need no join; an item is owned through its scan, not through this column), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
-  once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_category` / `_confidence`, `product_id` and
+  once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_form` / `_category` / `_confidence`, `product_id` and
   `formulation_id` (plain text, no foreign key: the catalog is not this module's), `created_at`, `updated_at`; indexed by
   `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
   per back photo ever uploaded: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own),
@@ -1013,7 +1013,7 @@ comes in a later PR.
     as its `at`, which is the key of the FIRST message, and that run is already done (it was the one that queued the wait). The
     dispatcher therefore acks the reaper's message as a duplicate and the step does not run again, so the item is failed as
     `unavailable` by the reaper's 2 hour limit instead of re-running. Left as it is: it needs a lost message on top of a busy catalog.
-- **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
+- **The user's steps.** `confirm` takes the corrected brand, name, variant, optional form (never `unknown`) and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
   of an item in `needs-back-photo` (same photo rules and quotas as a front photo) and queues `read-label`. A wrong state is
@@ -1083,7 +1083,7 @@ comes in a later PR.
   | --- | --- | --- | --- |
   | `POST /api/v1/scans/products` | bearer; multipart, 1 to 10 `photos` parts | 202 the scan, every item `recognising`; 400, 401, 413, 415, 429 | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
-  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, form?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
   | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |

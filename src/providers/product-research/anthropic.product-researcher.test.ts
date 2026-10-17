@@ -344,6 +344,34 @@ describe('AnthropicProductResearcher.research', () => {
     expect(prompt).toContain('skin')
   })
 
+  it('puts the form in the identity JSON of the user message when the product has one', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research({ ...PRODUCT, form: 'spray' })
+
+    expect(calls[0]!.body.messages[0].content).toContain('"form":"spray"')
+  })
+
+  it('leaves the form out of the identity JSON when the product has none', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research(PRODUCT)
+
+    expect(calls[0]!.body.messages[0].content).not.toContain('"form"')
+  })
+
+  it('tells the model the form is part of the exact product, and to say not found rather than pick a form when the product has none and is sold in several', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research(PRODUCT)
+
+    const system = String(requestText({ system: calls[0]!.body.system }))
+    expect(system).toMatch(/\bform\b/i)
+    expect(system).toMatch(/different ingredient list/i)
+    expect(system).toMatch(/several forms/i)
+    expect(system).toMatch(/found to false/i)
+  })
+
   it('researches a product that has no variant', async () => {
     const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
     const { variant: _variant, ...withoutVariant } = PRODUCT

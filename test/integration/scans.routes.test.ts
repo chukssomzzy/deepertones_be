@@ -62,7 +62,7 @@ type ItemView = {
   state: string
   reason: string | null
   image: { kind: string; url: string } | null
-  recognised?: { brand: string; name: string; variant?: string | null; category: string }
+  recognised?: { brand: string; name: string; variant?: string | null; form?: string | null; category: string }
 }
 type ScanView = { id: string; createdAt: string; items: ItemView[] }
 
@@ -133,7 +133,7 @@ const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
 }
 const recognisedAs = (brand: string, name: string, confidence: number) => () =>
   messageResponse({
-    content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence }))],
+    content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence }))],
   })
 const researchFindsNothing = () =>
   messageResponse({ content: [textBlock(JSON.stringify({ found: false, ingredients: [], sourceUrl: null, imageUrl: null }))] })
@@ -406,6 +406,43 @@ describe('GET /api/v1/scans/products/{scanId}', () => {
 
     expect(res.status).toBe(404)
     expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+  })
+})
+
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation product form', () => {
+  it('accepts a form, with 202, and shows it on the item', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId, { brand: 'Glow Co', name: 'Bright Tone Serum', form: 'spray', category: 'skin' })
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, data: { id: itemId, state: 'matching', recognised: { form: 'spray' } } })
+  })
+
+  it('shows a null form on the item when the confirmation has none', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId)
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, data: { recognised: { form: null } } })
+  })
+
+  it.each([
+    ['a form that is not one of the twelve', 'perfume'],
+    ['an empty form', ''],
+    ['unknown, which only the recognizer may say', 'unknown'],
+  ])('refuses %s with 400 VALIDATION_FAILED, leaving the item waiting', async (_label, form) => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId, { brand: 'Glow Co', name: 'Bright Tone Serum', form, category: 'skin' })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    expect(await stateOf(guest, scanId, itemId)).toBe('needs-confirmation')
   })
 })
 

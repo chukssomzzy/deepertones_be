@@ -77,52 +77,68 @@ describe('stripSizes', () => {
 
 describe('identityKey', () => {
   it.each([
-    [{ brand: 'L\'Oréal Paris', name: 'Revitalift Night Cream', variant: '50 ml' }, 'loreal paris|revitalift night cream|'],
-    [{ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: '236ml' }, 'cerave|hydrating facial cleanser|'],
+    [{ brand: 'L\'Oréal Paris', name: 'Revitalift Night Cream', variant: '50 ml' }, 'loreal paris|revitalift night cream||'],
+    [{ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: '236ml' }, 'cerave|hydrating facial cleanser||'],
     [
       { brand: 'NIVEA', name: 'Perfect & Radiant Even Tone Day Cream', variant: 'SPF 15' },
-      'nivea|perfect and radiant even tone day cream|spf 15',
+      'nivea|perfect and radiant even tone day cream|spf 15|',
     ],
-    [{ brand: 'The Ordinary.', name: 'Niacinamide 10% + Zinc 1%', variant: undefined }, 'the ordinary|niacinamide 10 zinc 1|'],
-    [{ brand: 'Dove', name: 'Beauty Bar — Original 100g', variant: undefined }, 'dove|beauty bar original|'],
+    [{ brand: 'The Ordinary.', name: 'Niacinamide 10% + Zinc 1%', variant: undefined }, 'the ordinary|niacinamide 10 zinc 1||'],
+    [{ brand: 'Dove', name: 'Beauty Bar — Original 100g', variant: undefined }, 'dove|beauty bar original||'],
   ])('builds the key for %j', (product, expected) => {
     expect(identityKey(product)).toBe(expected)
   })
 
   it('keeps a shade or level written with a bare L or G', () => {
-    expect(identityKey({ brand: 'Fenty', name: 'Foundation', variant: 'Shade 4 L' })).toBe('fenty|foundation|shade 4 l')
-    expect(identityKey({ brand: 'Fenty', name: 'Foundation', variant: '7 G' })).toBe('fenty|foundation|7 g')
-    expect(identityKey({ brand: 'Fenty', name: 'Level 6 G Cream' })).toBe('fenty|level 6 g cream|')
+    expect(identityKey({ brand: 'Fenty', name: 'Foundation', variant: 'Shade 4 L' })).toBe('fenty|foundation|shade 4 l|')
+    expect(identityKey({ brand: 'Fenty', name: 'Foundation', variant: '7 G' })).toBe('fenty|foundation|7 g|')
+    expect(identityKey({ brand: 'Fenty', name: 'Level 6 G Cream' })).toBe('fenty|level 6 g cream||')
   })
 
   it('still drops a 100 g or 250ml size', () => {
-    expect(identityKey({ brand: 'Dove', name: 'Bar', variant: '100 g' })).toBe('dove|bar|')
-    expect(identityKey({ brand: 'Dove', name: 'Lotion 250ml' })).toBe('dove|lotion|')
+    expect(identityKey({ brand: 'Dove', name: 'Bar', variant: '100 g' })).toBe('dove|bar||')
+    expect(identityKey({ brand: 'Dove', name: 'Lotion 250ml' })).toBe('dove|lotion||')
   })
 
   it('reads a plus sign touching a word or number as "plus"', () => {
-    expect(identityKey({ brand: 'Nivea', name: 'Sun', variant: 'SPF 50+' })).toBe('nivea|sun|spf 50 plus')
-    expect(identityKey({ brand: 'Neutrogena', name: 'Hydro Boost+' })).toBe('neutrogena|hydro boost plus|')
+    expect(identityKey({ brand: 'Nivea', name: 'Sun', variant: 'SPF 50+' })).toBe('nivea|sun|spf 50 plus|')
+    expect(identityKey({ brand: 'Neutrogena', name: 'Hydro Boost+' })).toBe('neutrogena|hydro boost plus||')
   })
 
   it('gives the same key whether or not a space separates a letter from its number', () => {
     expect(identityKey({ brand: 'MAC', name: 'Studio Fix', variant: 'NC15' })).toBe(identityKey({ brand: 'MAC', name: 'Studio Fix', variant: 'NC 15' }))
     expect(identityKey({ brand: 'Nivea', name: 'Sun', variant: 'SPF15' })).toBe(identityKey({ brand: 'Nivea', name: 'Sun', variant: 'SPF 15' }))
-    expect(identityKey({ brand: 'MAC', name: 'Studio Fix', variant: 'NC15' })).toBe('mac|studio fix|nc 15')
+    expect(identityKey({ brand: 'MAC', name: 'Studio Fix', variant: 'NC15' })).toBe('mac|studio fix|nc 15|')
   })
 
   it('strips a decimal pack size', () => {
-    expect(identityKey({ brand: 'Brand', name: 'Serum 1.5 oz' })).toBe('brand|serum|')
+    expect(identityKey({ brand: 'Brand', name: 'Serum 1.5 oz' })).toBe('brand|serum||')
   })
 
   it('keeps a decimal that is not a pack size', () => {
-    expect(identityKey({ brand: 'X', name: 'Vitamin C 2.5% Serum' })).toBe('x|vitamin c 2.5 serum|')
+    expect(identityKey({ brand: 'X', name: 'Vitamin C 2.5% Serum' })).toBe('x|vitamin c 2.5 serum||')
   })
 
   it('gives the same key for case, spacing and an empty variant differences', () => {
     const canonical = identityKey({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: '236ml' })
 
     expect(identityKey({ brand: '  cerave ', name: 'HYDRATING   facial cleanser', variant: '' })).toBe(canonical)
+  })
+
+  it('ends the key with the form, so a spray and a roll-on of one name have different keys', () => {
+    const spray = identityKey({ brand: 'NIVEA MEN', name: 'Dry Impact', form: 'spray' })
+    const rollOn = identityKey({ brand: 'NIVEA MEN', name: 'Dry Impact', form: 'roll-on' })
+
+    expect(spray).toBe('nivea men|dry impact||spray')
+    expect(rollOn).toBe('nivea men|dry impact||roll-on')
+    expect(identityKey({ brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Fresh', form: 'stick' })).toBe('nivea men|dry impact|fresh|stick')
+  })
+
+  it('gives a formless product a key ending in a bar, different from the same product with a form', () => {
+    const formless = identityKey({ brand: 'NIVEA MEN', name: 'Dry Impact' })
+
+    expect(formless).toBe('nivea men|dry impact||')
+    expect(formless).not.toBe(identityKey({ brand: 'NIVEA MEN', name: 'Dry Impact', form: 'spray' }))
   })
 
   it('gives different keys to different variants of one product', () => {

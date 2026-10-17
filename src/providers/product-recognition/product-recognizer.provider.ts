@@ -1,9 +1,9 @@
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
-import type { ProductCategory } from '../product-research/product-researcher.provider'
+import type { ProductCategory, ProductForm } from '../product-research/product-researcher.provider'
 
 export type Recognition =
   /** A beauty or personal-care product whose brand and name were read. `confidence` is 0 to 1. */
-  | { classification: 'beauty-product'; brand: string; name: string; variant?: string; category: ProductCategory; confidence: number }
+  | { classification: 'beauty-product'; brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory; confidence: number }
   /** A product, but not beauty or personal care. */
   | { classification: 'other-product' }
   /** A person or a face and no readable product. */
