@@ -4,7 +4,7 @@ import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { productRecognizerRecognizePrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
-import type { ProductCategory } from '../product-research/product-researcher.provider'
+import { PRODUCT_FORMS, type ProductCategory, type ProductForm } from '../product-research/product-researcher.provider'
 import type { ProductRecognizer, Recognition } from './product-recognizer.provider'
 
 type Answer = {
@@ -12,6 +12,7 @@ type Answer = {
   brand: string
   name: string
   variant: string
+  form: ProductForm | 'unknown'
   category: ProductCategory
   confidence: number
 }
@@ -27,6 +28,7 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
 
   private static readonly CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable'] as const
   private static readonly CATEGORIES = ['skin', 'hair', 'body', 'makeup', 'other'] as const satisfies readonly ProductCategory[]
+  private static readonly FORMS = [...PRODUCT_FORMS, 'unknown'] as const
 
   // Every field is required and the object is closed, as structured outputs need. The three text fields also accept a
   // missing value, read as empty, so a model that leaves one out gets `unreadable` rather than a failed call.
@@ -35,6 +37,8 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     brand: AnthropicProductRecognizer.orEmpty(z.string()),
     name: AnthropicProductRecognizer.orEmpty(z.string()),
     variant: AnthropicProductRecognizer.orEmpty(z.string().describe('Empty when the packaging prints no variant')),
+    // A missing form is read as unknown; the JSON schema sent to the API still requires it.
+    form: z.preprocess((value) => value ?? 'unknown', z.enum(AnthropicProductRecognizer.FORMS)),
     category: z.enum(AnthropicProductRecognizer.CATEGORIES),
     confidence: z.number().describe('From 0 to 1'),
   })
@@ -90,6 +94,7 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
       brand,
       name,
       ...(variant === '' ? {} : { variant }),
+      ...(answer.form === 'unknown' ? {} : { form: answer.form }),
       category: answer.category,
       confidence: Math.min(1, Math.max(0, answer.confidence)),
     }

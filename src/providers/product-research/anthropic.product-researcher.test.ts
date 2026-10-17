@@ -344,6 +344,34 @@ describe('AnthropicProductResearcher.research', () => {
     expect(prompt).toContain('skin')
   })
 
+  it('puts the form in the identity JSON of the user message when the product has one', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research({ ...PRODUCT, form: 'spray' })
+
+    expect(calls[0]!.body.messages[0].content).toContain('"form":"spray"')
+  })
+
+  it('leaves the form out of the identity JSON when the product has none', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research(PRODUCT)
+
+    expect(calls[0]!.body.messages[0].content).not.toContain('"form"')
+  })
+
+  it('tells the model the form is part of the exact product, and to say not found rather than pick a form when the product has none and is sold in several', async () => {
+    const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await researcher.research(PRODUCT)
+
+    const system = String(requestText({ system: calls[0]!.body.system }))
+    expect(system).toMatch(/\bform\b/i)
+    expect(system).toMatch(/different ingredient list/i)
+    expect(system).toMatch(/several forms/i)
+    expect(system).toMatch(/found to false/i)
+  })
+
   it('researches a product that has no variant', async () => {
     const { calls, researcher } = researcherOver(respondWith(searched(JSON.stringify(answer()))))
     const { variant: _variant, ...withoutVariant } = PRODUCT
@@ -386,6 +414,7 @@ describe('AnthropicProductResearcher.research', () => {
 const RESEARCH_SYSTEM_PROMPT = `You find the official ingredient list of one beauty or personal-care product, using web search.
 
 - Search for the exact product: brand, name and variant. Prefer the brand's own website, then a major retailer's page for the same product. Never use a different variant or a similar-looking product.
+- The form (spray, roll-on, stick, cream and so on) is part of the exact product, because the same name in another form has a different ingredient list. If the product has no form and is sold in several forms, set found to false rather than pick one.
 - Copy the full INCI ingredient list in label order, one ingredient per entry, exactly as printed. Do not add, reorder, translate or complete it from memory.
 - sourceUrl is the page you copied the list from. It must be a URL that your search returned.
 - imageUrl is a direct https link to a clean image of the product (the brand's own site first, then a retailer), or null.

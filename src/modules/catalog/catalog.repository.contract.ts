@@ -22,6 +22,7 @@ const newProduct = (over: Partial<NewProduct> = {}): NewProduct => {
     brand: 'CeraVe',
     name: 'Hydrating Facial Cleanser',
     variant: null,
+    form: null,
     category: 'skin',
     createdAt: BASE,
     ...over,
@@ -76,6 +77,27 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           imageCheckedAt: null,
         })
         expect(product.createdAt.getTime()).toBe(BASE.getTime())
+      })
+
+      it('createProduct stores the form, and findProductByKey and findProductById read it back', async () => {
+        const repo = await make()
+        const input = newProduct({ form: 'roll-on' })
+
+        const created = await repo.createProduct(input)
+
+        expect(created.form).toBe('roll-on')
+        expect(await repo.findProductByKey(input.identityKey)).toMatchObject({ id: input.id, form: 'roll-on' })
+        expect(await repo.findProductById(input.id)).toMatchObject({ form: 'roll-on' })
+      })
+
+      it('createProduct stores no form as null', async () => {
+        const repo = await make()
+        const input = newProduct({ form: null })
+
+        const created = await repo.createProduct(input)
+
+        expect(created.form).toBeNull()
+        expect((await repo.findProductById(input.id))!.form).toBeNull()
       })
 
       it('createProduct with an identity key that is already stored creates nothing and returns the existing product', async () => {

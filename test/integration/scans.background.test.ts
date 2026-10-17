@@ -93,8 +93,8 @@ const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
 
 const recognised = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))] })
 const beautyProduct = (brand: string, name: string) =>
-  recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
-const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+  recognised({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence: 0.92 })
+const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
 
 const runQueue = async (queue: string, body: unknown, attempts = 1) => {
   const batch = createMessageBatch(queue, [{ id: 'm', timestamp: new Date(), attempts, body }])
