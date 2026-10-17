@@ -647,7 +647,7 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   them, and product details are passed as JSON, not spliced into prose.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
-  or `other-product`, `face-or-person` or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  or `other-product`, `face-or-person` or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory. Both run on the vision
   model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
   as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
