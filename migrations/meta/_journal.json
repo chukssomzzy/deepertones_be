@@ -99,6 +99,13 @@
       "when": 1792191902316,
       "tag": "0013_chubby_ender_wiggin",
       "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "6",
+      "when": 1792219760025,
+      "tag": "0014_magical_eternals",
+      "breakpoints": true
     }
   ]
 }
