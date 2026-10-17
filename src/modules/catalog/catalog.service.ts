@@ -6,7 +6,7 @@ import type { CatalogImageStore } from '../../providers/catalog-images/catalog-i
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -181,7 +181,7 @@ export class ProductCatalogService {
     const known = await this.repository.findProductByKey(key)
     if (known) return this.nextStep(known)
 
-    const brandProducts = await this.repository.productsByBrandKey(brandKey(identity.brand), this.policy.brandScanLimit)
+    const brandProducts = await this.repository.productsByBrandFamily(brandFirstWord(identity.brand), this.policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
       (p) => p.category === identity.category && sameForm(p, identity) && !ProductCatalogService.variantsConflict(p.variant, identity.variant),

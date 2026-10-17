@@ -807,9 +807,14 @@ described in "Product catalog service"; routes come later.
   letter and the digit after it ("NC15" is "nc 15"), never between a digit and a letter, so "250ml" still reaches the
   size rule. A dot survives only between two digits ("2.5"). **Brand spellings are not merged yet**: two spellings of
   one brand make two brand keys, so a product under the other spelling is not found as a near miss.
-- **Near-miss candidates** are same-brand products with a different identity key whose name and variant words overlap
-  (Jaccard similarity, default threshold 0.6, at most 3). They are looked up newest first (`productsByBrandKey`), and
-  the model, not the code, decides whether one is the same product; its answer is stored as an alias.
+- **Near-miss candidates** are products of the same brand family with a different identity key whose words overlap
+  (Jaccard similarity, default threshold 0.6, at most 3). The family is the first word of the normalised brand
+  (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
+  differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
+  looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
+  (brand_key >= w || ' ' and brand_key < w || '!')`; a brand key holds only letters, digits, dots and single spaces,
+  and a space sorts just below `!`; `LIKE` is case-insensitive in SQLite and cannot use the index). The model, not the
+  code, decides whether one is the same product; its answer is stored as an alias.
 - **Aliases** map another key to a product. An alias never shadows an identity key, and the first product to take
   one keeps it (`addAlias` is one `insert or ignore` statement; an unknown product throws). `createProduct` is an
   insert-or-ignore on the identity key that returns the stored row, so two scans of one new product both carry on

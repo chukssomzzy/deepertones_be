@@ -60,6 +60,15 @@ export class FakeCatalogRepository implements CatalogRepository {
       .map((p) => ({ ...p }))
   }
 
+  async productsByBrandFamily(firstWord: string, limit: number): Promise<Product[]> {
+    return [...this.products.values()]
+      .filter((p) => p.brandKey === firstWord || p.brandKey.startsWith(`${firstWord} `))
+      .reverse()
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .slice(0, limit)
+      .map((p) => ({ ...p }))
+  }
+
   async createFormulation(input: NewFormulation): Promise<Formulation> {
     // A product has one formulation per ingredient list: a second create for the same list returns the first.
     const existing = this.formulations.find((f) => f.productId === input.productId && f.ingredientsKey === input.ingredientsKey)

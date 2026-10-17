@@ -241,6 +241,65 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
       })
     })
 
+    describe('productsByBrandFamily', () => {
+      it('returns the products whose brand key is the first word or starts with it and a space, and no others', async () => {
+        const repo = await make()
+        const word = fresh('nivea')
+        const plain = newProduct({ brandKey: word })
+        const men = newProduct({ brandKey: `${word} men` })
+        const sun = newProduct({ brandKey: `${word} sun` })
+        const longer = newProduct({ brandKey: `${word} men sport` })
+        const lookalike = newProduct({ brandKey: `${word}ux` })
+        const suffixed = newProduct({ brandKey: `${word}2` })
+        const elsewhere = newProduct()
+        const endsWithIt = newProduct({ brandKey: `body ${word}` })
+        for (const p of [plain, lookalike, men, elsewhere, sun, suffixed, endsWithIt, longer]) await repo.createProduct(p)
+
+        const found = await repo.productsByBrandFamily(word, 10)
+
+        expect(found.map((p) => p.id).sort()).toEqual([plain.id, men.id, sun.id, longer.id].sort())
+      })
+
+      it('finds a family that has no product with the bare first word as its brand key', async () => {
+        const repo = await make()
+        const word = fresh('garnier')
+        const fructis = newProduct({ brandKey: `${word} fructis` })
+        await repo.createProduct(fructis)
+
+        expect((await repo.productsByBrandFamily(word, 10)).map((p) => p.id)).toEqual([fructis.id])
+      })
+
+      it('returns the newest products first across the family, a later insert before an earlier one created at the same time', async () => {
+        const repo = await make()
+        const word = fresh('nivea')
+        const oldest = newProduct({ brandKey: word, createdAt: at(-HOUR) })
+        const middle = newProduct({ brandKey: `${word} men`, createdAt: at(HOUR) })
+        const tiedLater = newProduct({ brandKey: `${word} sun`, createdAt: at(HOUR) })
+        const newest = newProduct({ brandKey: word, createdAt: at(2 * HOUR) })
+        for (const p of [middle, oldest, newest, tiedLater]) await repo.createProduct(p)
+
+        expect((await repo.productsByBrandFamily(word, 10)).map((p) => p.id)).toEqual([newest.id, tiedLater.id, middle.id, oldest.id])
+      })
+
+      it('returns at most limit products, the newest ones', async () => {
+        const repo = await make()
+        const word = fresh('nivea')
+        const old = newProduct({ brandKey: word, createdAt: at(-HOUR) })
+        const mid = newProduct({ brandKey: `${word} men`, createdAt: at(0) })
+        const recent = newProduct({ brandKey: `${word} sun`, createdAt: at(HOUR) })
+        for (const p of [old, mid, recent]) await repo.createProduct(p)
+
+        expect((await repo.productsByBrandFamily(word, 2)).map((p) => p.id)).toEqual([recent.id, mid.id])
+        expect(await repo.productsByBrandFamily(word, 3)).toHaveLength(3)
+      })
+
+      it('returns an empty list for an unknown first word', async () => {
+        const repo = await make()
+
+        expect(await repo.productsByBrandFamily(fresh('nivea'), 10)).toEqual([])
+      })
+    })
+
     describe('formulations', () => {
       const withProduct = async (repo: CatalogRepository) => {
         const product = newProduct()
