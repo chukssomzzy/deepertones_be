@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brandKey, identityKey, nameSimilarity, nearMissCandidates, normaliseText, stripSizes } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
 
 // stripSizes may leave a space where the token was; the identity key is what trims it.
 const tidy = (s: string) => s.replace(/\s+/g, ' ').trim()
@@ -156,6 +156,40 @@ describe('brandKey', () => {
   })
 })
 
+describe('brandFirstWord', () => {
+  it.each([
+    ['NIVEA MEN', 'nivea'],
+    ['NIVEA', 'nivea'],
+    ['  The Ordinary. ', 'the'],
+    ['L\'Oréal Paris', 'loreal'],
+    ['Dr. Jart+', 'dr'],
+  ])('reads %j as the family word %j', (brand, word) => {
+    expect(brandFirstWord(brand)).toBe(word)
+  })
+})
+
+describe('sameBrandFamily', () => {
+  it.each([
+    ['NIVEA', 'NIVEA MEN'],
+    ['NIVEA MEN', 'NIVEA SUN'],
+    ['nivea', ' Nivea® '],
+    ['The Ordinary', 'The Body Shop'],
+  ])('puts %j and %j in one family', (a, b) => {
+    expect(sameBrandFamily(a, b)).toBe(true)
+    expect(sameBrandFamily(b, a)).toBe(true)
+  })
+
+  it.each([
+    ['NIVEA', 'NIVEAUX'],
+    ['NIVEA', 'Dove'],
+    ['Body NIVEA', 'NIVEA'],
+    ['NIVEA', 'Johnson Nivea'],
+  ])('keeps %j and %j in different families', (a, b) => {
+    expect(sameBrandFamily(a, b)).toBe(false)
+    expect(sameBrandFamily(b, a)).toBe(false)
+  })
+})
+
 describe('nameSimilarity', () => {
   it('is 1 for identical names', () => {
     expect(nameSimilarity({ name: 'Hydrating Facial Cleanser' }, { name: 'hydrating FACIAL cleanser' })).toBe(1)
@@ -184,6 +218,20 @@ describe('nameSimilarity', () => {
   it('pools the name and the variant', () => {
     expect(nameSimilarity({ name: 'Day Cream', variant: 'SPF 15' }, { name: 'Day Cream SPF 15' })).toBe(1)
   })
+
+  it('pools the brand, the name and the variant, so a word that moved between brand and name still counts', () => {
+    expect(nameSimilarity({ brand: 'NIVEA MEN', name: 'DRY IMPACT' }, { brand: 'NIVEA', name: 'MEN DRY IMPACT' })).toBe(1)
+    expect(nameSimilarity({ brand: 'NIVEA', name: 'MEN', variant: 'Dry Impact' }, { brand: 'NIVEA MEN', name: 'DRY IMPACT' })).toBe(1)
+    expect(nameSimilarity({ brand: 'NIVEA', name: 'MEN', variant: 'Dry Impact' }, { brand: 'NIVEA', name: 'MEN DRY IMPACT' })).toBe(1)
+  })
+
+  it('counts the brand words, so brands that differ lower the ratio: 4 shared of 7 distinct is 4/7', () => {
+    const a = { brand: 'The Ordinary', name: 'Tea Tree Oil' }
+    const b = { brand: 'The Body Shop', name: 'Tea Tree Oil' }
+
+    expect(nameSimilarity(a, b)).toBeCloseTo(4 / 7, 10)
+    expect(nameSimilarity(b, a)).toBeCloseTo(4 / 7, 10)
+  })
 })
 
 describe('nearMissCandidates', () => {
@@ -191,11 +239,12 @@ describe('nearMissCandidates', () => {
   const product = (id: string, name: string, variant?: string, brand = 'CeraVe') => ({ id, brand, name, variant })
 
   const exact = product('exact', 'Hydrating Facial Cleanser 236ml')
-  const plusInName = product('a', 'Hydrating Facial Cleanser Plus') // 3/4 = 0.75
-  const plusInVariant = product('b', 'Hydrating Facial Cleanser', 'Plus') // 3/4 = 0.75
-  const shorter = product('d', 'Hydrating Cleanser') // 2/3
-  const atThreshold = product('c', 'Hydrating Facial Cleanser for Normal') // 3/5 = 0.6
-  const belowThreshold = product('e', 'Hydrating Facial Cleanser for Normal Dry') // 3/6 = 0.5
+  // Similarities include the brand word: the target is {cerave, hydrating, facial, cleanser}.
+  const plusInName = product('a', 'Hydrating Facial Cleanser Plus') // 4/5 = 0.8
+  const plusInVariant = product('b', 'Hydrating Facial Cleanser', 'Plus') // 4/5 = 0.8
+  const shorter = product('d', 'Hydrating Cleanser') // 3/4 = 0.75
+  const atThreshold = product('c', 'Hydrating Facial Cleanser for Normal') // 4/6 = 0.667
+  const belowThreshold = product('e', 'Hydrating Facial Cleanser for Normal Dry') // 4/7 = 0.571
   const otherBrand = product('f', 'Hydrating Facial Cleanser Plus', undefined, 'Nivea')
   const unrelated = product('g', 'Foaming Body Wash')
 
@@ -215,11 +264,20 @@ describe('nearMissCandidates', () => {
     expect(ids(nearMissCandidates(target, all, { limit: 10 }))).not.toContain('f')
   })
 
-  it('includes a product at exactly the default threshold of 0.6 and excludes one just under', () => {
+  it('includes a product above the default threshold of 0.6 and excludes one just under', () => {
     const found = ids(nearMissCandidates(target, all, { limit: 10 }))
 
     expect(found).toContain('c')
     expect(found).not.toContain('e')
+  })
+
+  it('includes a product whose combined brand, name and variant words are at exactly the default threshold of 0.6', () => {
+    // {acme, serum, glow} against {acme, serum, glow, night, oil}: 3/5.
+    const atBoundary = product('at', 'Serum Glow Night Oil', undefined, 'Acme')
+    // {acme, serum, glow} against {acme, serum, glow, night, oil, mask}: 3/6.
+    const justUnder = product('under', 'Serum Glow Night Oil Mask', undefined, 'Acme')
+
+    expect(ids(nearMissCandidates({ brand: 'Acme', name: 'Serum Glow' }, [atBoundary, justUnder]))).toEqual(['at'])
   })
 
   it('returns at most 3 by default', () => {
@@ -231,15 +289,53 @@ describe('nearMissCandidates', () => {
   })
 
   it('honours a custom threshold', () => {
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.65, limit: 10 }))).toEqual(['a', 'b', 'd'])
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.7, limit: 10 }))).toEqual(['a', 'b'])
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.75, limit: 10 }))).toEqual(['a', 'b'])
+    expect(ids(nearMissCandidates(target, all, { threshold: 0.65, limit: 10 }))).toEqual(['a', 'b', 'd', 'c'])
+    expect(ids(nearMissCandidates(target, all, { threshold: 0.7, limit: 10 }))).toEqual(['a', 'b', 'd'])
+    expect(ids(nearMissCandidates(target, all, { threshold: 0.75, limit: 10 }))).toEqual(['a', 'b', 'd'])
+    expect(ids(nearMissCandidates(target, all, { threshold: 0.76, limit: 10 }))).toEqual(['a', 'b'])
   })
 
   it('matches the brand by its normalised key', () => {
     const sameBrandSpelled = product('h', 'Hydrating Facial Cleanser Plus', undefined, ' CERAVE® ')
 
     expect(ids(nearMissCandidates(target, [sameBrandSpelled]))).toEqual(['h'])
+  })
+
+  describe('across a brand family', () => {
+    const nivea = { brand: 'NIVEA', name: 'MEN DRY IMPACT' }
+
+    it('returns a product whose brand shares the first word and whose words moved between brand and name', () => {
+      const split = product('men', 'DRY IMPACT', undefined, 'NIVEA MEN')
+
+      expect(ids(nearMissCandidates(nivea, [split]))).toEqual(['men'])
+    })
+
+    it('returns the same product under the other split of the third form, with the words in the variant', () => {
+      const split = product('variant', 'MEN', 'Dry Impact', 'NIVEA')
+
+      expect(ids(nearMissCandidates(nivea, [split]))).toEqual(['variant'])
+    })
+
+    it('leaves out a family member whose combined words overlap too little', () => {
+      const sun = product('sun', 'Protect & Moisture', undefined, 'NIVEA SUN')
+
+      expect(nearMissCandidates(nivea, [sun])).toEqual([])
+    })
+
+    it('leaves out a brand that shares only a first word, even with the same product name', () => {
+      const target = { brand: 'The Ordinary', name: 'Tea Tree Oil' }
+      const other = product('shop', 'Tea Tree Oil', undefined, 'The Body Shop')
+
+      expect(nearMissCandidates(target, [other])).toEqual([])
+    })
+
+    it('leaves out a brand that merely starts with the same letters', () => {
+      expect(nearMissCandidates(nivea, [product('ux', 'MEN DRY IMPACT', undefined, 'NIVEAUX')])).toEqual([])
+    })
+
+    it('leaves out a product whose identity key is the target\'s', () => {
+      expect(nearMissCandidates(nivea, [product('same', 'MEN DRY IMPACT', undefined, ' nivea ')])).toEqual([])
+    })
   })
 
   it('returns nothing when there are no products', () => {
