@@ -8,6 +8,8 @@ export type Recognition =
   | { classification: 'other-product' }
   /** A person or a face and no readable product. */
   | { classification: 'face-or-person' }
+  /** A beauty or personal-care product is in view, but its label is turned away, covered or out of frame, so no brand or name can be read. */
+  | { classification: 'label-not-visible' }
   /** Nothing usable: blurry, dark, no product, or an answer that could not be accepted. */
   | { classification: 'unreadable' }
 

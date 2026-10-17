@@ -3,7 +3,7 @@ import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
-import { BackPhotoBody, ConfirmProductBody, CreateScanBody, ItemParams, PhotoLinkParams, ScanItemResponse, ScanParams, ScanResponse } from './scans.schemas'
+import { BackPhotoBody, ConfirmProductBody, CreateScanBody, ItemParams, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
 import { SCAN_POLICY } from './scans.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -12,6 +12,7 @@ const bearer = [{ bearerAuth: [] }]
 const FRAMING_BYTES = 1_000_000
 const MAX_SCAN_BODY_BYTES = SCAN_POLICY.maxPhotosPerScan * SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 const MAX_BACK_PHOTO_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+const MAX_RETAKE_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 
 const createScan = defineRoute({
   method: 'post',
@@ -95,6 +96,26 @@ const addBackPhoto = defineRoute({
   responses: { 202: success(ScanItemResponse, 'The item, now reading the label'), ...errorResponses(401, 404, 409, 413, 429) },
 })
 
+const retakeItem = defineRoute({
+  method: 'post',
+  path: '/{scanId}/items/{itemId}/retake',
+  operationId: 'retakeProductScanItem',
+  tags: ['Product scans'],
+  summary: 'Send the front photo again',
+  description:
+    'For an item in `needs-retake`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo. ' +
+    'An item is sent at most 3 front photos: when the 3rd cannot be read it moves to `needs-identification` instead.',
+  security: bearer,
+  middleware: [
+    rateLimit('SCAN_RETAKE_IP_LIMITER', 'ip'),
+    signedIn(),
+    rateLimit('SCAN_RETAKE_USER_LIMITER', 'user'),
+    bodyLimit({ maxSize: MAX_RETAKE_BODY_BYTES }),
+  ],
+  request: { params: ItemParams, body: multipartBody(RetakeBody) },
+  responses: { 202: success(ScanItemResponse, 'The item, recognising the new photo'), ...errorResponses(401, 404, 409, 413, 429) },
+})
+
 const getPhoto = defineRoute({
   method: 'get',
   path: '/photos/{token}',
@@ -133,6 +154,12 @@ export const scanRoutes = openapiApp()
     const photo = await toProductImage(c.req.valid('form').photo)
     const item = await c.var.services.scans.addBackPhoto(scanId, itemId, photo, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
     return ok(c, toScanItemResponse(item), 'Back photo received', 202)
+  })
+  .openapi(retakeItem, async (c) => {
+    const { scanId, itemId } = c.req.valid('param')
+    const photo = await toProductImage(c.req.valid('form').photo)
+    const item = await c.var.services.scans.retake(scanId, itemId, photo, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
+    return ok(c, toScanItemResponse(item), 'Retaken photo received', 202)
   })
   .openapi(getPhoto, async (c) => {
     const photo = await c.var.services.scans.photoForLink(c.req.valid('param').token)

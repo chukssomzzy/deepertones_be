@@ -596,7 +596,7 @@ prompts and the answer shapes.
   them, and product details are passed as JSON, not spliced into prose.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, category and a 0 to 1 confidence),
-  or `other-product`, `face-or-person` or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory. Both run on the vision
   model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
   as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
@@ -913,7 +913,10 @@ comes in a later PR.
   `formulation_id` (plain text, no foreign key: the catalog is not this module's), `created_at`, `updated_at`; indexed by
   `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
   per back photo ever uploaded: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own),
-  `uploaded_at`; indexed by `(user_id, uploaded_at)` and `(ip_hash, uploaded_at)`. The row outlives the photo.
+  `uploaded_at`; indexed by `(user_id, uploaded_at)` and `(ip_hash, uploaded_at)`. The row outlives the photo. `scan_retakes` (migration 0013) is the same for
+  retaken front photos: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own), `uploaded_at`, with the same two indexes. A retake
+  reuses the item's row, which counts only its first photo, so each retake has a row of its own. The state and reason enums are text with no CHECK, so the new
+  states and reason needed no change to `scan_items`.
 - **Item states.**
   ```
   recognising → matching → ready
@@ -924,18 +927,22 @@ comes in a later PR.
                                                           ← needs-back-photo (label-unreadable)
                                                           → failed (label-unreadable, after the 3rd back photo)
   recognising → needs-confirmation → matching     (confidence below 0.6, until the user confirms)
-  recognising → rejected                          (face-or-person, not-a-beauty-product, unreadable)
+  recognising → rejected                          (face-or-person, not-a-beauty-product)
+  recognising → needs-retake → recognising        (unreadable or label-not-visible, fewer than 3 front photos so far; the user retakes)
+  recognising → needs-identification              (unreadable or label-not-visible on the 3rd front photo; nothing leaves this state yet)
   any step    → failed
   ```
-  `ready`, `rejected` and `failed` are final. **Reasons**: rejected is `face-or-person`, `not-a-beauty-product` or
-  `unreadable`; failed is `photo-missing` (the stored photo is gone), `analysis-failed` (the catalog gave up),
+  `ready`, `rejected` and `failed` are final. `needs-retake` and `needs-identification` wait for the user and are not final: an item in
+  either keeps its scan from being done. **Reasons**: rejected is `face-or-person` or `not-a-beauty-product`;
+  `needs-retake` and `needs-identification` carry `unreadable` or `label-not-visible`, the reason of the latest photo; failed is `photo-missing` (the stored photo is gone), `analysis-failed` (the catalog gave up),
   `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
   later) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
   when the last back photo could not be read, was refused by the model, or is gone.
-- **What the app is shown** (`ScanItemView`): id, position, state, reason, `recognised` (once read), `product` (a
+- **What the app is shown** (`ScanItemView`): id, position, state, reason, `retakesLeft` (only in `needs-retake`: 2, then 1; the key is absent in every
+  other state, not undefined or null), `recognised` (once read), `product` (a
   `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
-  (`/api/v1/scans/products/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
+  (`/api/v1/scans/products/photos/<token>`), else `null` (the photo of a rejected item, or one waiting for a retake or identification, is deleted). The stream's events carry the same item.
 - **create.** Every photo is checked before any is stored, and one bad photo refuses the whole scan: 1 to 10 photos
   (`NO_IMAGES`, `TOO_MANY_IMAGES`), at most 2,000,000 bytes and 1600 pixels on the longest side (`IMAGE_TOO_LARGE`), JPEG
   or WebP (`UNSUPPORTED_IMAGE`). The type is read from the bytes with `readImageHeader`, never from what the caller
@@ -944,10 +951,13 @@ comes in a later PR.
   missing photo; if saving fails they are deleted again. One `recognise` job is queued per item; an item whose job cannot
   be queued is marked `failed` / `unavailable` rather than left recognising for ever.
 - **Photo keys.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, and for the back of the pack
-  `<item id>-back.<jpg|webp>` (see "Private photos").
+  `<item id>-back.<jpg|webp>` (see "Private photos"). A retaken front photo uses the front photo's own key: the photo it replaces was deleted when it
+  failed, and a concurrent loser never removes a key the winner wrote.
 - **Daily quotas.** 30 photos per user and 100 per IP in the last 24 hours (`SCAN_POLICY`). A photo counts from the moment
-  it is stored: one per item by `created_at`, plus one `scan_back_photos` row per back photo by `uploaded_at`, and the
-  oldest counted time is the minimum over both. Every upload is a row, so an item asked three times for its back photo
+  it is stored: one per item by `created_at`, plus one `scan_back_photos` row per back photo and one `scan_retakes` row per retake by `uploaded_at`,
+  and the oldest counted time is the minimum over all three. A retake is written by the same `db.batch` as the item's move back to `recognising`,
+  by the same rule as a back photo (`updateItem(id, expected, patch, backPhoto?, retake?)`: the insert runs first and only while the item is still in
+  the expected state), is kept when its photo is deleted, and is not undone by a failed queueing. Every upload is a row, so an item asked three times for its back photo
   counts three (three is also the item's cap, `SCAN_POLICY.maxBackPhotos`); a row is written by the same `db.batch` as the item's move to `reading-label` (the insert runs first and
   only when the item is still in the state the move expects, so it exists exactly when the move applied) and is kept when
   the photo is deleted, as is a rejected item's front photo, so deleting cannot refill the quota. A failed queueing of the
@@ -955,7 +965,7 @@ comes in a later PR.
   when the count plus its photos would pass the limit: 429 `SCAN_DAILY_LIMIT` with `details.retryAfterSeconds` until the
   oldest counted photo leaves the window. The check and the write are separate statements, so simultaneous scans can pass
   it together by a few photos; the route's burst limits bound that. The per-IP count adds the items of scans made from that
-  `ip_hash` to the back-photo rows with that `ip_hash`, so a back photo is counted against the address that uploaded it,
+  `ip_hash` to the back-photo and retake rows with that `ip_hash`, so a back photo or retake is counted against the address that uploaded it,
   which may not be the scan's. The per-IP query reads only scans made in the window, through `(ip_hash, created_at)`, however long the
   address's history.
 - **IP hashing.** `ip_hash` is HMAC-SHA-256 of the address under a key derived from `DEVICE_ID_KEY`
@@ -971,8 +981,12 @@ comes in a later PR.
   `ScanService.advance` runs the step, which first checks the item is in its start state (a mismatch is a silent no-op: a
   late or repeated message):
   - `recognise` (`recognising`): reads the stored photo with the recognizer. A beauty product goes to `matching`
-    (queues `match`), or to `needs-confirmation` below confidence 0.6. Anything else is rejected, with the photo deleted at
-    once (before the row is updated, so a failure is retried while the item is still recognising). A missing photo fails the
+    (queues `match`), or to `needs-confirmation` below confidence 0.6. `face-or-person` and `other-product` are rejected. A photo that is
+    `unreadable`, `label-not-visible` or refused by the model (treated as `unreadable`) is a failed front photo. Whatever the result, the photo is deleted at
+    once (before the row is updated, so a failure is retried while the item is still recognising) and `photo_key` is cleared. The item has had
+    `tries = 1 + countRetakes(itemId)` front photos (every retake is a `scan_retakes` row, kept after its photo goes). Below
+    `SCAN_POLICY.maxFrontPhotos` (3) tries it goes to `needs-retake`, with the reason the recognizer gave; at 3 it goes to `needs-identification`,
+    keeping the 3rd photo's reason. Neither queues anything. A face or a non-beauty product is still rejected at once on any try. A missing photo fails the
     item. **An earlier answer is reused:** if the item already holds recognised fields and a confidence (a previous attempt's
     answer survived a failed enqueue, which the undo does not clear), the recognizer is not called again, and the stored
     confidence decides `matching` or `needs-confirmation`.
@@ -998,7 +1012,7 @@ comes in a later PR.
   - **A step that needs an id the item lacks** (`research` and `read-label` without a `productId`, `analyse` without a
     `formulationId`) fails the item as `unavailable`, as `match` does, instead of returning silently and leaving it for ever.
   - **What the model can do to a photo.** Imports are of the `*.provider.ts` ports only. `recognise`: `AnthropicRefusalError`
-    rejects the item as `unreadable` and deletes the photo (as for any rejection); `AnthropicRequestError` (not JSON, cut off
+    counts as an `unreadable` photo (a retake, or identification on the 3rd, with the photo deleted); `AnthropicRequestError` (not JSON, cut off
     at `max_tokens`: the same photo would get the same answer) fails it as `unavailable` and throws `PermanentJobError`, so the run is
     recorded failed and there is no paid retry; `AiBudgetExceededError` fails it as `research-busy`, keeping the photo, without
     throwing, which is what `research-busy` means everywhere else. `read-label`: refusal and unusable answer are the same as
@@ -1013,6 +1027,13 @@ comes in a later PR.
     as its `at`, which is the key of the FIRST message, and that run is already done (it was the one that queued the wait). The
     dispatcher therefore acks the reaper's message as a duplicate and the step does not run again, so the item is failed as
     `unavailable` by the reaper's 2 hour limit instead of re-running. Left as it is: it needs a lost message on top of a busy catalog.
+- **retake.** `ScanService.retake(scanId, itemId, photo, clientIp)` takes a new front photo for an item in `needs-retake` (any other state, a
+  rejected item included, is 409 `ITEM_NOT_AWAITING_RETAKE`; an item in `needs-identification` is past its 3rd photo and gets the same 409). It
+  checks the photo like a front photo, counts one against both daily quotas (`SCAN_DAILY_LIMIT`), stores it under the front photo key, then one
+  guarded write moves the item `needs-retake → recognising`, clears the reason and the recognised fields, sets `photo_key`, writes the
+  `scan_retakes` row and queues `recognise` with `at` = the time of the move. If the queueing fails the move is undone to `needs-retake` with the old reason and a null
+  `photo_key`, the new photo is deleted and the error rethrown (the retake row stays: the photo was sent). Of two retakes at once one wins and the other is 409;
+  a loser deletes only its own key, and only when it differs from the winner's. The route answers 202 with the item.
 - **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
@@ -1028,14 +1049,15 @@ comes in a later PR.
   puts back the state and, by default, the previous `reason` (so an item that asked again with `label-unreadable` has it
   again), plus the extra fields a caller names (a back photo's key). The retry's next message gets a new `at`, so a
   step queued after an undo is not mistaken for one that was already run. `transition` takes `{ from, change, next?, undo?,
-  backPhoto? }`. Errors thrown by a vendor leave the item where it was for the queue's retry. `markItemFailed`, the
+  backPhoto?, retake? }`. Errors thrown by a vendor leave the item where it was for the queue's retry. `markItemFailed`, the
   dead-letter hook, fails an item as `unavailable` only while it is in a state the system is working in (`recognising`,
   `matching`, `researching`, `reading-label`, `analysing`); an item waiting for the user (`needs-confirmation`,
-  `needs-back-photo`) or a finished one is left alone, since a dead letter for either is a stale message from an earlier state.
+  `needs-back-photo`, `needs-retake`, `needs-identification`) or a finished one is left alone, since a dead letter for either is a stale message from an earlier state.
 - **The reaper.** A message can still be lost (the queue accepted a send that never arrived; a Worker died between the write
   and the send, with the undo never run), and the dead-letter hook only covers messages that reached the queue. A cron every
   10 minutes runs `ScanService.reap(now)`: items in `recognising`, `matching`, `researching`, `reading-label` or `analysing`
-  (never `needs-confirmation` or `needs-back-photo`, which wait for the user, nor a final state) whose `updated_at` is
+  (never `needs-confirmation`, `needs-back-photo`, `needs-retake` or `needs-identification`, which wait for the user, nor a final state;
+  the two new ones are not final either, so they never get a `done` and their scan's `done_at` stays null) whose `updated_at` is
   older than 15 minutes (`staleItems`, oldest first, at most 100 per sweep, by `(state, updated_at)`) have their step
   queued again with `at` = that `updated_at`, the key of the message that first queued it: if that run is done the
   dispatcher acks the duplicate, if it was lost it runs. An item older than 2 hours is failed as `unavailable` with an event
@@ -1065,7 +1087,7 @@ comes in a later PR.
 - **Guest cleanup.** The container registers a cleaner `{ name: 'scans', deleteFor }` with the users service, backed by
   `ScanDataCleaner` (`scans.cleaner.ts`), which depends only on the repository and the photo store, so the cleanup does not
   build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos and back
-  photos from the bucket first, then their back-photo rows, items and scans, so a bucket failure leaves the rows (and so
+  photos from the bucket first, then their back-photo and retake rows, items and scans, so a bucket failure leaves the rows (and so
   the keys) for the next run; both halves are safe to repeat, and the repository chunks the ids under D1's bound-parameter limit.
 - **Public signed photo links.** `photoForLink(token)` takes no user and reads no request context: an app image component
   cannot send an Authorization header, so the link is the capability. The token is the signed, 5-minute photo link from
@@ -1085,6 +1107,7 @@ comes in a later PR.
   | `GET /api/v1/scans/products/{scanId}` | bearer | 200 the scan; 401, 404 `SCAN_NOT_FOUND` | none |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/retake` | bearer; multipart, one `photo` part | 202 the item, now `recognising`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_RETAKE`, 413, 415, 429 | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
   | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
 
@@ -1095,20 +1118,20 @@ comes in a later PR.
     the bytes, so the service sniffs them and answers `UNSUPPORTED_IMAGE` (a PNG that says it is a JPEG included) or
     `IMAGE_TOO_LARGE` (over 2,000,000 bytes or 1600 px) with a code the app can act on. The route turns each `File` into the
     service's `ProductImage` (bytes plus the declared type, which the service never trusts).
-  - **Order and size.** Both upload routes run, in this order: the IP limiter, `signedIn()`, the user limiter, `bodyLimit`.
+  - **Order and size.** All three upload routes run, in this order: the IP limiter, `signedIn()`, the user limiter, `bodyLimit`.
     The IP limiter counts every caller, signed in or not. `signedIn()` (`middleware/signed-in.ts`) answers 401 `AUTH_REQUIRED`,
     `TOKEN_EXPIRED` or `TOKEN_INVALID` from `c.var.auth` (the same codes as `requireUser`, through `notSignedIn` in
     `lib/actor.ts`), so an unsigned caller costs no body read, no 413, 415 or 400; it is an early exit, and the service's
     `requireUser` is still the guard. The user limiter needs a user, so it follows. `bodyLimit` comes last: with a
     `Content-Length` over the limit it answers 413 from the header alone, and without one it counts the stream and cuts it
     off, so an oversized upload is never buffered whole. The limit is 10 x 2,000,000 bytes plus 1,000,000 for the multipart
-    framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo. Over it is 413 `HTTP_413` in
+    framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
-    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
+    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
     read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
     do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
-    underneath. Namespace ids are 1006 to 1009 at the top level, 2006 to 2009 in staging and 3006 to 3009 in production.
+    underneath. Namespace ids are 1006 to 1011 at the top level, 2006 to 2011 in staging and 3006 to 3011 in production (the retake limiters are 1010/1011, 2010/2011, 3010/3011).
   - **Client address.** The service is handed `cf-connecting-ip` as the address for the per-address daily quota (`unknown` where the
     header is absent, as for the rate limiter).
   - **The public photo route** ignores the Authorization header altogether (a broken or expired one changes nothing), answers 200

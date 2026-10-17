@@ -115,6 +115,7 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/scans/products/{scanId}/events',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo',
+        'POST /api/v1/scans/products/{scanId}/items/{itemId}/retake',
         'GET /api/v1/scans/products/photos/{token}',
       ].sort(),
     )
@@ -129,6 +130,7 @@ describe('the OpenAPI document', () => {
       watchProductScan: paths[`${base}/{scanId}/events`]?.get,
       confirmProductScanItem: paths[`${base}/{scanId}/items/{itemId}/confirmation`]?.post,
       addProductScanItemBackPhoto: paths[`${base}/{scanId}/items/{itemId}/back-photo`]?.post,
+      retakeProductScanItem: paths[`${base}/{scanId}/items/{itemId}/retake`]?.post,
       getProductScanPhoto: paths[`${base}/photos/{token}`]?.get,
     }
 

@@ -108,7 +108,7 @@ describe('AnthropicProductRecognizer request', () => {
     expect(decoded.every((byte, i) => byte === bytes[i])).toBe(true)
   })
 
-  it('asks for a closed json_schema answer the API accepts, with the four classifications and the five categories', async () => {
+  it('asks for a closed json_schema answer the API accepts, with the five classifications and the five categories', async () => {
     const { calls, recognizer } = recognizerOver(structured(product()))
 
     await recognizer.recognize(JPEG)
@@ -116,7 +116,7 @@ describe('AnthropicProductRecognizer request', () => {
     const schema = schemaOf(calls[0]!.body)
     expect(schema.type).toBe('object')
     assertApiSafe(schema)
-    expect([...schema.properties.classification.enum].sort()).toEqual(['beauty-product', 'face-or-person', 'other-product', 'unreadable'])
+    expect([...schema.properties.classification.enum].sort()).toEqual(['beauty-product', 'face-or-person', 'label-not-visible', 'other-product', 'unreadable'])
     expect([...schema.properties.category.enum].sort()).toEqual(['body', 'hair', 'makeup', 'other', 'skin'])
     for (const field of ['brand', 'name', 'variant']) expect(schema.properties[field].type, field).toBe('string')
     expect(schema.properties.confidence.type).toBe('number')
@@ -144,6 +144,22 @@ describe('AnthropicProductRecognizer request', () => {
     for (const kind of [/hair/i, /body/i, /makeup/i]) expect(prompt).toMatch(kind)
     expect(prompt).toMatch(/person/i)
     expect(prompt).toContain('face-or-person')
+  })
+})
+
+describe('AnthropicProductRecognizer label-not-visible', () => {
+  it('tells the model to use label-not-visible when a beauty product is in view but its label is turned away or covered', async () => {
+    const { calls, recognizer } = recognizerOver(structured(product()))
+    await recognizer.recognize(JPEG)
+    const prompt = requestText(calls[0]!.body)
+    expect(prompt).toContain('label-not-visible')
+    expect(prompt).toMatch(/turned away/i)
+    expect(prompt).toMatch(/covered/i)
+  })
+
+  it('returns label-not-visible when the model says a product is in view but its label cannot be seen', async () => {
+    const { recognizer } = recognizerOver(structured(product({ classification: 'label-not-visible', brand: '', name: '', variant: '', category: 'other', confidence: 0 })))
+    await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification: 'label-not-visible' })
   })
 })
 
@@ -230,7 +246,7 @@ describe('AnthropicProductRecognizer answers', () => {
     expect(result).not.toHaveProperty('variant')
   })
 
-  it.each(['other-product', 'face-or-person', 'unreadable'])('returns only the classification for %s, even if the model also wrote product fields', async (classification) => {
+  it.each(['other-product', 'face-or-person', 'unreadable', 'label-not-visible'])('returns only the classification for %s, even if the model also wrote product fields', async (classification) => {
     const { recognizer } = recognizerOver(structured(product({ classification })))
 
     await expect(recognizer.recognize(JPEG)).resolves.toStrictEqual({ classification })

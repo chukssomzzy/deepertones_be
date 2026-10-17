@@ -24,6 +24,8 @@ const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 const SOURCE_URL = 'https://shop.example/product'
 const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
 const SCAN_IP = '203.0.113.50'
+// The retakes come from an address of their own, so they are counted apart from the scans' in the per-address daily quota.
+const RETAKE_IP = '203.0.113.51'
 // Every message carries the time the item entered the state its step works on, which keys the run; a hand-built one needs
 // only to be the same for the same delivery (the real value is the item's updatedAt, as ScanService stamps it).
 const AT = 1_900_000_000_000
@@ -95,6 +97,8 @@ const recognised = (answer: Record<string, unknown>) => () => messageResponse({ 
 const beautyProduct = (brand: string, name: string) =>
   recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
 const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+const labelNotVisible = recognised({ classification: 'label-not-visible', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
 
 const runQueue = async (queue: string, body: unknown, attempts = 1) => {
   const batch = createMessageBatch(queue, [{ id: 'm', timestamp: new Date(), attempts, body }])
@@ -192,15 +196,75 @@ describe('scan items advanced through the Worker queue handler', () => {
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'recognising' })
   })
 
-  it('rejects a photo the model refuses as unreadable and deletes it, acking the message', async () => {
+  it('asks for a retake of a photo the model refuses to look at, as unreadable, and deletes it, acking the message', async () => {
     const { userId, scanId, itemId, key } = await startScan()
     stubAnthropic(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
 
     const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
 
     expect(result.explicitAcks).toEqual(['m'])
-    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'rejected', reason: 'unreadable', image: null })
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable', retakesLeft: 2, image: null })
     expect(await env.PRIVATE_PHOTOS.get(key)).toBeNull()
+  })
+
+  it.each([
+    ['unreadable', unreadable],
+    ['label-not-visible', labelNotVisible],
+  ])('asks for a retake of a photo the model classes as %s, deleting it at once and acking the message', async (reason, answer) => {
+    const { userId, scanId, itemId, key } = await startScan()
+    expect(await env.PRIVATE_PHOTOS.get(key)).not.toBeNull()
+    stubAnthropic(answer)
+
+    const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason, retakesLeft: 2, image: null })
+    expect(await env.PRIVATE_PHOTOS.get(key)).toBeNull()
+  })
+
+  it('takes an item through three unreadable photos, counted in D1, to needs-identification: the retaken photo is stored, read and deleted each time', async () => {
+    const { userId, scanId, itemId, key } = await startScan()
+    stubAnthropic(unreadable, labelNotVisible, unreadable)
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable', retakesLeft: 2 })
+
+    for (const [n, expected] of [
+      [1, { state: 'needs-retake', reason: 'label-not-visible', retakesLeft: 1 }],
+      [2, { state: 'needs-identification', reason: 'unreadable' }],
+    ] as const) {
+      const retaken = await asUser(userId, () => container.scans.retake(scanId, itemId, jpegPhoto(), RETAKE_IP))
+      expect(retaken).toMatchObject({ state: 'recognising', reason: null })
+      expect(await env.PRIVATE_PHOTOS.get(key)).not.toBeNull()
+
+      await runQueue(MAIN, { itemId, step: 'recognise', at: AT + n })
+
+      expect(await itemOf(userId, scanId, itemId)).toMatchObject({ ...expected, image: null })
+      expect(await env.PRIVATE_PHOTOS.get(key)).toBeNull()
+    }
+    expect(await itemOf(userId, scanId, itemId)).not.toHaveProperty('retakesLeft')
+  })
+
+  it('leaves an item asking for a retake or for identification as it was when a dead letter arrives for it', async () => {
+    const asking = await startScan()
+    stubAnthropic(unreadable)
+    await runQueue(MAIN, { itemId: asking.itemId, step: 'recognise', at: AT })
+
+    const dead = await runQueue(DEAD_LETTER, { itemId: asking.itemId, step: 'recognise', at: AT }, 5)
+
+    expect(dead.explicitAcks).toEqual(['m'])
+    expect(await itemOf(asking.userId, asking.scanId, asking.itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable' })
+
+    const identifying = await startScan()
+    stubAnthropic(unreadable)
+    await runQueue(MAIN, { itemId: identifying.itemId, step: 'recognise', at: AT })
+    for (const n of [1, 2]) {
+      await asUser(identifying.userId, () => container.scans.retake(identifying.scanId, identifying.itemId, jpegPhoto(), RETAKE_IP))
+      await runQueue(MAIN, { itemId: identifying.itemId, step: 'recognise', at: AT + n })
+    }
+    const deadAgain = await runQueue(DEAD_LETTER, { itemId: identifying.itemId, step: 'recognise', at: AT + 2 }, 5)
+
+    expect(deadAgain.explicitAcks).toEqual(['m'])
+    expect(await itemOf(identifying.userId, identifying.scanId, identifying.itemId)).toMatchObject({ state: 'needs-identification', reason: 'unreadable' })
   })
 
   it('fails the item as unavailable and acks without a retry when the model\'s answer cannot be used, so the photo is not paid for again', async () => {

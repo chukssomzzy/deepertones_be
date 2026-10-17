@@ -38,6 +38,7 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
   position: item.position,
   state: item.state,
   reason: item.reason,
+  ...(item.retakesLeft === undefined ? {} : { retakesLeft: item.retakesLeft }),
   ...(item.recognised
     ? { recognised: { brand: item.recognised.brand, name: item.recognised.name, variant: item.recognised.variant, category: item.recognised.category } }
     : {}),

@@ -374,9 +374,11 @@
               "analysing",
               "ready",
               "rejected",
-              "failed"
+              "failed",
+              "needs-retake",
+              "needs-identification"
             ],
-            "description": "`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product and `needs-back-photo` for a photo of the ingredient list; the others are being worked on."
+            "description": "`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); `needs-identification` is where an item lands once its 3rd front photo could not be read; the others are being worked on."
           },
           "reason": {
             "type": [
@@ -392,9 +394,15 @@
               "research-busy",
               "unavailable",
               "label-unreadable",
+              "label-not-visible",
               null
             ],
-            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read)."
+            "description": "Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read), or why its front photo could not be used (`unreadable`, or `label-not-visible` when a product is in view but its label is turned away or covered), in `needs-retake` and `needs-identification`."
+          },
+          "retakesLeft": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Only on an item in `needs-retake`: how many more front photos it may be sent. Absent in every other state."
           },
           "recognised": {
             "type": "object",
@@ -689,6 +697,19 @@
         ]
       },
       "BackPhotoBody": {
+        "type": "object",
+        "properties": {
+          "photo": {
+            "type": "string",
+            "format": "binary",
+            "description": "A JPEG or WebP photo, at most 2,000,000 bytes and 1600 pixels on the longest side."
+          }
+        },
+        "required": [
+          "photo"
+        ]
+      },
+      "RetakeBody": {
         "type": "object",
         "properties": {
           "photo": {
@@ -1942,6 +1963,167 @@
         "responses": {
           "202": {
             "description": "The item, now reading the label",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ScanItem"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scans/products/{scanId}/items/{itemId}/retake": {
+      "post": {
+        "operationId": "retakeProductScanItem",
+        "tags": [
+          "Product scans"
+        ],
+        "summary": "Send the front photo again",
+        "description": "For an item in `needs-retake`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo. An item is sent at most 3 front photos: when the 3rd cannot be read it moves to `needs-identification` instead.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "itemId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/RetakeBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The item, recognising the new photo",
             "content": {
               "application/json": {
                 "schema": {

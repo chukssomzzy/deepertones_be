@@ -61,6 +61,7 @@ type ItemView = {
   position: number
   state: string
   reason: string | null
+  retakesLeft?: number
   image: { kind: string; url: string } | null
   recognised?: { brand: string; name: string; variant?: string | null; category: string }
 }
@@ -108,6 +109,8 @@ const confirm = (guest: Guest, scanId: string, itemId: string, body: Record<stri
   scansApi[':scanId'].items[':itemId'].confirmation.$post({ param: { scanId, itemId }, json: body as never }, { headers: guest.headers() })
 const addBackPhoto = (guest: Guest, scanId: string, itemId: string, photo: File = fileOf(markedJpeg(9), 'back')) =>
   scansApi[':scanId'].items[':itemId']['back-photo'].$post({ param: { scanId, itemId }, form: { photo } }, { headers: guest.headers() })
+const retake = (guest: Guest, scanId: string, itemId: string, photo: File = fileOf(markedJpeg(21), 'retake'), from?: string) =>
+  scansApi[':scanId'].items[':itemId'].retake.$post({ param: { scanId, itemId }, form: { photo } }, { headers: guest.headers(from) })
 const openPhoto = (token: string, headers: Record<string, string> = {}) => scansApi.photos[':token'].$get({ param: { token } }, { headers })
 const tokenOf = (item: ItemView) => item.image!.url.replace('/api/v1/scans/products/photos/', '')
 const bytesOf = async (res: { arrayBuffer(): Promise<ArrayBuffer> }) => new Uint8Array(await res.arrayBuffer())
@@ -118,8 +121,12 @@ const plainPost = (path: string, body: BodyInit, headers: Record<string, string>
 
 // --- driving an item to a state, by the real steps ---
 
+// A step is keyed by item, step and `at`, and a run with a key already seen is acknowledged and skipped: every run gets its own time, even
+// when two land in the same millisecond (a retake runs `recognise` on one item again and again).
+let lastAt = 0
+const nextAt = () => (lastAt = Math.max(Date.now(), lastAt + 1))
 const runStep = async (itemId: string, step: string) => {
-  const batch = createMessageBatch(SCAN_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body: { itemId, step, at: Date.now() } }])
+  const batch = createMessageBatch(SCAN_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body: { itemId, step, at: nextAt() } }])
   const ctx = createExecutionContext()
   await worker.queue!(batch, WORKER_ENV, ctx)
   const result = await getQueueResult(batch, ctx)
@@ -135,6 +142,11 @@ const recognisedAs = (brand: string, name: string, confidence: number) => () =>
   messageResponse({
     content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence }))],
   })
+// What the recognizer answers for a photo it cannot use: nothing to read, or a product whose label is turned away.
+const classifiedAs = (classification: string) => () =>
+  messageResponse({ content: [textBlock(JSON.stringify({ classification, brand: '', name: '', variant: '', category: 'other', confidence: 0 }))] })
+const unreadable = classifiedAs('unreadable')
+const labelNotVisible = classifiedAs('label-not-visible')
 const researchFindsNothing = () =>
   messageResponse({ content: [textBlock(JSON.stringify({ found: false, ingredients: [], sourceUrl: null, imageUrl: null }))] })
 
@@ -150,6 +162,19 @@ const awaitingConfirmation = async (guest: Guest) => {
   expect(await stateOf(guest, scan.id, itemId)).toBe('needs-confirmation')
   return { scanId: scan.id, itemId }
 }
+
+/** A one-photo scan whose photo the recognizer could not read: the item asks for a retake. */
+const awaitingRetake = async (guest: Guest, answer: typeof unreadable = unreadable) => {
+  const scan = await createdScan(guest)
+  const itemId = scan.items[0]!.id
+  stubAnthropic(answer)
+  await runStep(itemId, 'recognise')
+  expect(await stateOf(guest, scan.id, itemId)).toBe('needs-retake')
+  vi.unstubAllGlobals()
+  return { scanId: scan.id, itemId }
+}
+const itemNow = async (guest: Guest, scanId: string, itemId: string) =>
+  (await dataOf<ScanView>(await getScan(guest, scanId))).items.find((i) => i.id === itemId)!
 
 /** A one-photo scan of a product nobody has the ingredients for: recognised, matched, researched without luck, so it asks for the back of the pack. */
 const awaitingBackPhoto = async (guest: Guest) => {
@@ -631,6 +656,208 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () =>
   })
 })
 
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', () => {
+  it('takes the retaken photo with 202, moves the item to recognising with no reason and queues the recognise', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest, labelNotVisible)
+    queued.length = 0
+
+    const res = await retake(guest, scanId, itemId, fileOf(webpPhoto(), 'retake'))
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, status: 202, data: { id: itemId, state: 'recognising', reason: null, image: { kind: 'user' } } })
+    expect(queued).toEqual([{ itemId, step: 'recognise', at: expect.any(Number) }])
+    expect(await stateOf(guest, scanId, itemId)).toBe('recognising')
+  })
+
+  it('says how many retakes are left while the item asks for one, and asks for identification after the third unreadable photo', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest, unreadable)
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable', retakesLeft: 2, image: null })
+
+    expect((await retake(guest, scanId, itemId, fileOf(markedJpeg(22), 'retake'))).status).toBe(202)
+    stubAnthropic(labelNotVisible)
+    await runStep(itemId, 'recognise')
+    vi.unstubAllGlobals()
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'label-not-visible', retakesLeft: 1, image: null })
+
+    expect((await retake(guest, scanId, itemId, fileOf(markedJpeg(23), 'retake'))).status).toBe(202)
+    stubAnthropic(unreadable)
+    await runStep(itemId, 'recognise')
+    vi.unstubAllGlobals()
+    const identifying = await itemNow(guest, scanId, itemId)
+    expect(identifying).toMatchObject({ state: 'needs-identification', reason: 'unreadable', image: null })
+    expect(identifying).not.toHaveProperty('retakesLeft')
+
+    const fourth = await retake(guest, scanId, itemId, fileOf(markedJpeg(24), 'retake'))
+    expect(fourth.status).toBe(409)
+    expect(await errorCodeOf(fourth)).toBe('ITEM_NOT_AWAITING_RETAKE')
+  })
+
+  it('goes on to matching when the retaken photo reads', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest)
+    expect((await retake(guest, scanId, itemId)).status).toBe(202)
+    stubAnthropic(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.92))
+
+    await runStep(itemId, 'recognise')
+
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'matching', reason: null })
+  })
+
+  it('answers 409 ITEM_NOT_AWAITING_RETAKE for an item that is not asking for one, and again for a second retake', async () => {
+    const guest = await newGuest()
+    const fresh = await createdScan(guest)
+    const waiting = await awaitingRetake(guest)
+
+    const notAsking = await retake(guest, fresh.id, fresh.items[0]!.id)
+    expect(notAsking.status).toBe(409)
+    expect(await errorCodeOf(notAsking)).toBe('ITEM_NOT_AWAITING_RETAKE')
+
+    expect((await retake(guest, waiting.scanId, waiting.itemId)).status).toBe(202)
+    const again = await retake(guest, waiting.scanId, waiting.itemId)
+    expect(again.status).toBe(409)
+    expect(await errorCodeOf(again)).toBe('ITEM_NOT_AWAITING_RETAKE')
+  })
+
+  it('answers 404 SCAN_NOT_FOUND to another user, changing nothing', async () => {
+    const owner = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(owner)
+
+    const res = await retake(await newGuest(), scanId, itemId)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    expect(await stateOf(owner, scanId, itemId)).toBe('needs-retake')
+  })
+
+  describe('what it refuses', () => {
+    const waiting = async () => {
+      const guest = await newGuest()
+      return { guest, ...(await awaitingRetake(guest)) }
+    }
+    const path = (scanId: string, itemId: string) => `/api/v1/scans/products/${scanId}/items/${itemId}/retake`
+
+    it('refuses a JSON body with 415', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await plainPost(path(scanId, itemId), JSON.stringify({ photo: 'x' }), { ...guest.headers(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(415)
+    })
+
+    it('refuses two photos, and no photo, with 400 VALIDATION_FAILED, leaving the item waiting', async () => {
+      const { guest, scanId, itemId } = await waiting()
+      const two = new FormData()
+      two.append('photo', fileOf(markedJpeg(1)))
+      two.append('photo', fileOf(markedJpeg(2)))
+
+      const tooMany = await plainPost(path(scanId, itemId), two, guest.headers())
+      const none = await plainPost(path(scanId, itemId), new FormData(), guest.headers())
+
+      for (const res of [tooMany, none]) {
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      }
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('answers 413 on a Content-Length over 3,000,000 bytes, without reading the body', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await plainPost(path(scanId, itemId), new FormData(), { ...guest.headers(), 'Content-Length': String(MAX_PHOTO_BYTES + 1_000_000 + 1) })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+
+    it('refuses a PNG with 400 UNSUPPORTED_IMAGE, leaving the item waiting', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await retake(guest, scanId, itemId, fileOf(pngPhoto(), 'retake', 'image/png'))
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('UNSUPPORTED_IMAGE')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('refuses a photo with an edge of 1601 pixels as IMAGE_TOO_LARGE, and accepts one of 1600', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const tooBig = await retake(guest, scanId, itemId, fileOf(jpegPhoto({ width: 1601, height: 100 }), 'retake'))
+      expect(tooBig.status).toBe(400)
+      expect(await errorCodeOf(tooBig)).toBe('IMAGE_TOO_LARGE')
+
+      expect((await retake(guest, scanId, itemId, fileOf(jpegPhoto({ width: 1600, height: 100 }), 'retake'))).status).toBe(202)
+    })
+  })
+
+  describe('daily quota', () => {
+    it('counts a retake as one of the 30 photos a day: the 30th is accepted and the 31st answers 429 SCAN_DAILY_LIMIT with Retry-After', async () => {
+      const guest = await newGuest()
+      const photos = (count: number) => Array.from({ length: count }, (_, i) => fileOf(markedJpeg(i + 1), `p${i}`))
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      const last = await dataOf<ScanView>(await createScan(guest, photos(9), freshIp()))
+      const itemId = last.items[0]!.id
+      stubAnthropic(unreadable)
+      await runStep(itemId, 'recognise')
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+
+      const thirtieth = await retake(guest, last.id, itemId, fileOf(markedJpeg(31), 'retake'), freshIp())
+      expect(thirtieth.status).toBe(202)
+      await runStep(itemId, 'recognise')
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+      const refused = await retake(guest, last.id, itemId, fileOf(markedJpeg(32), 'retake'), freshIp())
+
+      expect(refused.status).toBe(429)
+      expect(await errorCodeOf(refused)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(refused)).toBeGreaterThan(0)
+      expect(retryAfterOf(refused)).toBeLessThanOrEqual(DAY_SECONDS + 1)
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+    })
+  })
+
+  describe('rate limits', () => {
+    const unknownItem = () => ({ scanId: crypto.randomUUID(), itemId: crypto.randomUUID() })
+
+    it('answers 429 RATE_LIMITED to the 11th retake of one user in a minute, from any address', async () => {
+      const guest = await newGuest()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof retake>> | undefined
+      for (let i = 0; i < 11; i++) {
+        // Not the user's scan: the limit is counted before the route looks at which scan it is.
+        const { scanId, itemId } = unknownItem()
+        const res = await retake(guest, scanId, itemId, fileOf(markedJpeg(i)), freshIp())
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 10)).not.toContain(429)
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('answers 429 RATE_LIMITED to the 21st retake from one address in a minute, whoever sends it', async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof retake>> | undefined
+      for (let i = 0; i < 21; i++) {
+        const { scanId, itemId } = unknownItem()
+        const res = await retake(await newGuest(), scanId, itemId, fileOf(markedJpeg(i)), shared)
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 20)).not.toContain(429)
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+  })
+})
+
 describe('GET /api/v1/scans/products/photos/{token}', () => {
   it.each([
     ['JPEG', () => markedJpeg(5), 'image/jpeg'],
@@ -703,6 +930,8 @@ describe('signing in', () => {
       scansApi[':scanId'].items[':itemId'].confirmation.$post({ ...ids(), json: { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as never }, { headers })],
     ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', (headers) =>
       scansApi[':scanId'].items[':itemId']['back-photo'].$post({ ...ids(), form: { photo: fileOf(markedJpeg(9)) } }, { headers })],
+    ['POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', (headers) =>
+      scansApi[':scanId'].items[':itemId'].retake.$post({ ...ids(), form: { photo: fileOf(markedJpeg(9)) } }, { headers })],
   ]
 
   it.each(bearerRoutes)('%s answers 401 AUTH_REQUIRED without a token', async (_route, call) => {
@@ -726,9 +955,11 @@ describe('signing in', () => {
   // so what would otherwise be 413, 415 or 400 is 401.
   describe('on the upload routes, before the body is looked at', () => {
     const itemPath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/back-photo`
+    const retakePath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/retake`
     const uploads: [string, () => string, number][] = [
       ['POST /api/v1/scans/products', () => '/api/v1/scans/products', OVER_SCAN_BODY_BYTES],
       ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
+      ['POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', retakePath, MAX_PHOTO_BYTES + 1_000_000 + 1],
     ]
     const textPart = () => { const form = new FormData(); form.append('photos', 'not a file'); form.append('photo', 'not a file'); return form }
 
@@ -810,6 +1041,7 @@ describe('OpenAPI', () => {
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}']?.get)).toBe(true)
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post)).toBe(true)
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/retake']?.post)).toBe(true)
     expect(paths['/api/v1/scans/products/photos/{token}']?.get).toBeDefined()
     expect(usesBearer(paths['/api/v1/scans/products/photos/{token}']?.get)).toBe(false)
   })
@@ -819,6 +1051,7 @@ describe('OpenAPI', () => {
 
     expect(paths['/api/v1/scans/products']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
+    expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/retake']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
     expect(Object.keys(paths['/api/v1/scans/products/photos/{token}']!.get!.responses['200']!.content!).sort()).toEqual(['image/jpeg', 'image/webp'])
   })
@@ -831,6 +1064,7 @@ describe('OpenAPI', () => {
     expect(statuses('/api/v1/scans/products/{scanId}', 'get')).toEqual(expect.arrayContaining(['200', '401', '404']))
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
+    expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/retake', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
     expect(statuses('/api/v1/scans/products/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
   })
 })
@@ -912,6 +1146,16 @@ describe('profiles', () => {
     await expectNotFound(await addBackPhoto(second, scanId, itemId))
     expect(await stateOf(first, scanId, itemId)).toBe('needs-back-photo')
     expect((await addBackPhoto(first, scanId, itemId)).status).toBe(202)
+  })
+
+  it('refuses another profile\'s retake with 404 SCAN_NOT_FOUND and changes nothing; the maker\'s retake is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingRetake(first)
+
+    await expectNotFound(await retake(second, scanId, itemId))
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-retake')
+    expect((await retake(first, scanId, itemId)).status).toBe(202)
   })
 
   describe('the daily quota', () => {

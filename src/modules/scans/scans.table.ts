@@ -44,13 +44,13 @@ export const scanItems = sqliteTable(
     userId: text('user_id').notNull(),
     position: integer('position').notNull(),
     state: text('state', {
-      enum: ['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed'],
+      enum: ['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification'],
     })
       .notNull()
       .default('recognising'),
-    // Why the item is rejected or failed, or why it asks for the back photo again.
+    // Why the item is rejected or failed, or why it asks for the back photo or a retake again.
     reason: text('reason', {
-      enum: ['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable'],
+      enum: ['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable', 'label-not-visible'],
     }),
     // Null once the photo is deleted.
     photoKey: text('photo_key'),
@@ -91,4 +91,24 @@ export const scanBackPhotos = sqliteTable(
     uploadedAt: integer('uploaded_at', { mode: 'timestamp_ms' }).notNull(),
   },
   (t) => [index('scan_back_photos_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt), index('scan_back_photos_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt)],
+)
+
+/**
+ * One row per retaken front photo, kept after the photo is deleted, so the daily quotas count every retake however many
+ * the item has had (a retake reuses the item's row, which counts only its first photo). `ip_hash` is the uploader's own,
+ * which may differ from the scan's.
+ */
+export const scanRetakes = sqliteTable(
+  'scan_retakes',
+  {
+    id: text('id').primaryKey(),
+    itemId: text('item_id')
+      .notNull()
+      .references(() => scanItems.id, { onDelete: 'cascade' }),
+    // Kept here, like scan_items.user_id, so the quotas and the guest cleanup need no join.
+    userId: text('user_id').notNull(),
+    ipHash: text('ip_hash').notNull(),
+    uploadedAt: integer('uploaded_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [index('scan_retakes_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt), index('scan_retakes_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt)],
 )

@@ -36,6 +36,8 @@ export const CreateScanBody = z
 
 export const BackPhotoBody = z.object({ photo: PhotoFile }).openapi('BackPhotoBody')
 
+export const RetakeBody = z.object({ photo: PhotoFile }).openapi('RetakeBody')
+
 export const ConfirmProductBody = z
   .object({
     brand: z.string().min(1),
@@ -85,15 +87,21 @@ export const ScanItemResponse = z
     id: z.string(),
     position: z.number().int().openapi({ description: 'The photo\'s place in the upload, from 0.' }),
     state: z
-      .enum(['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed'])
+      .enum(['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification'])
       .openapi({
         description:
-          '`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product and `needs-back-photo` for a photo of the ingredient list; the others are being worked on.',
+          '`ready`, `rejected` and `failed` are final. `needs-confirmation` waits for the corrected product, `needs-back-photo` for a photo of the ingredient list and `needs-retake` for a new photo of the front (see `retakesLeft`); ' +
+          '`needs-identification` is where an item lands once its 3rd front photo could not be read; the others are being worked on.',
       }),
     reason: z
-      .enum(['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable'])
+      .enum(['face-or-person', 'not-a-beauty-product', 'unreadable', 'photo-missing', 'analysis-failed', 'research-busy', 'unavailable', 'label-unreadable', 'label-not-visible'])
       .nullable()
-      .openapi({ description: 'Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read).' }),
+      .openapi({
+        description:
+          'Why the item is `rejected` or `failed`, or why it asks for the back photo again (`label-unreadable`; also the reason it fails once the 3rd back photo cannot be read), ' +
+          'or why its front photo could not be used (`unreadable`, or `label-not-visible` when a product is in view but its label is turned away or covered), in `needs-retake` and `needs-identification`.',
+      }),
+    retakesLeft: z.number().int().min(0).optional().openapi({ description: 'Only on an item in `needs-retake`: how many more front photos it may be sent. Absent in every other state.' }),
     recognised: z
       .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), category: Category })
       .optional()

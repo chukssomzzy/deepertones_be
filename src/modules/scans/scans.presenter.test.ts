@@ -62,4 +62,35 @@ describe('toScanItemResponse', () => {
     expect(response).toMatchObject({ state: 'failed', reason: 'label-unreadable' })
     expect(ScanItemResponse.safeParse(response).success).toBe(true)
   })
+
+  it.each([
+    ['needs-retake', 'unreadable'],
+    ['needs-retake', 'label-not-visible'],
+    ['needs-identification', 'unreadable'],
+    ['needs-identification', 'label-not-visible'],
+  ] as const)('shows an item in %s with the reason %s, which the response schema allows', (state, reason) => {
+    const item: ScanItemView = { id: 'item-3', position: 0, state, reason, image: null }
+
+    const response = toScanItemResponse(item)
+
+    expect(response).toMatchObject({ state, reason })
+    expect(ScanItemResponse.safeParse(response).success).toBe(true)
+  })
+
+  it('publishes retakesLeft on an item asking for a retake, as the response schema allows', () => {
+    const item: ScanItemView = { id: 'item-3', position: 0, state: 'needs-retake', reason: 'label-not-visible', retakesLeft: 2, image: null }
+
+    const response = toScanItemResponse(item)
+
+    expect(response.retakesLeft).toBe(2)
+    expect(ScanItemResponse.safeParse(response).success).toBe(true)
+  })
+
+  it('leaves retakesLeft out of the response, not undefined, when the item has none (needs-identification, or any other state)', () => {
+    const item: ScanItemView = { id: 'item-3', position: 0, state: 'needs-identification', reason: 'unreadable', image: null }
+
+    expect(toScanItemResponse(item)).not.toHaveProperty('retakesLeft')
+    expect(Object.keys(toScanItemResponse(item))).not.toContain('retakesLeft')
+    expect(Object.keys(toScanItemResponse(readyItem()))).not.toContain('retakesLeft')
+  })
 })

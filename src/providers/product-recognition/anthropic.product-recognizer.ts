@@ -7,7 +7,7 @@ import type { ProductCategory } from '../product-research/product-researcher.pro
 import type { ProductRecognizer, Recognition } from './product-recognizer.provider'
 
 type Answer = {
-  classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable'
+  classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable' | 'label-not-visible'
   brand: string
   name: string
   variant: string
@@ -24,7 +24,7 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
   private static readonly HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
   private static readonly UNREADABLE: Recognition = { classification: 'unreadable' }
 
-  private static readonly CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable'] as const
+  private static readonly CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable', 'label-not-visible'] as const
   private static readonly CATEGORIES = ['skin', 'hair', 'body', 'makeup', 'other'] as const satisfies readonly ProductCategory[]
 
   private static readonly SYSTEM_PROMPT = `You identify the product in a photo for Deeper Tones, an app for people with deeper skin tones.
@@ -33,6 +33,7 @@ Classify the photo:
 - beauty-product: a beauty or personal-care product (skin care, hair, body, makeup, fragrance, deodorant) whose brand and name you can read on the packaging.
 - other-product: a product that is not beauty or personal care.
 - face-or-person: a person or a face, with no product you can read.
+- label-not-visible: a beauty or personal-care product is in the photo, but its label is turned away, covered (by a hand, a cap or a wrapper) or out of frame, so no brand or name can be seen.
 - unreadable: blurry, dark, cropped or empty, or the brand or name is not legible.
 
 For a beauty-product, give the brand and name exactly as printed, the variant (shade, scent, skin type) only if it is printed, a category (skin, hair, body, makeup or other) and your confidence from 0 to 1. For anything else use empty strings, category other and confidence 0.

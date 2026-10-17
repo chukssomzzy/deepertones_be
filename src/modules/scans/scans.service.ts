@@ -19,7 +19,7 @@ import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, 
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, Scan, ScanItem } from './scans.types'
 
 export type ScanPolicy = {
   maxPhotosPerScan: number
@@ -28,6 +28,8 @@ export type ScanPolicy = {
   maxPhotoEdge: number
   dailyPhotosPerUser: number
   dailyPhotosPerIp: number
+  /** A front photo that cannot be read is retaken until the item has had this many; the last one sends it to `needs-identification` instead of asking again. */
+  maxFrontPhotos: number
   /** An item that has had this many back photos, and still has no readable label, fails as `label-unreadable` instead of asking again. */
   maxBackPhotos: number
   /** A read below this confidence waits for the user to confirm it. */
@@ -46,6 +48,7 @@ export const SCAN_POLICY: ScanPolicy = {
   maxPhotoEdge: 1600,
   dailyPhotosPerUser: 30,
   dailyPhotosPerIp: 100,
+  maxFrontPhotos: 3,
   maxBackPhotos: 3,
   confirmBelowConfidence: 0.6,
   doneRepairWindowMs: 3 * 60 * 60 * 1000,
@@ -57,6 +60,8 @@ export type ScanItemView = {
   position: number
   state: ItemState
   reason: ItemReason | null
+  /** Only on an item in `needs-retake`: how many more photos it may be sent. */
+  retakesLeft?: number
   /** What the photo was read as (or what the user corrected it to); absent until it has been read. */
   recognised?: { brand: string; name: string; variant: string | null; category: ProductCategory }
   /** Only on a ready item. */
@@ -326,6 +331,52 @@ export class ScanService {
   }
 
   /**
+   * A new front photo for an item whose photo could not be read. Counts as one photo against both daily quotas (recorded, for
+   * the address it came from, in the same write that moves the item on), is checked like a first photo, and is kept under the
+   * front photo's own key scheme, so the photo it replaces (deleted when it failed) never shares a place with it.
+   */
+  async retake(scanId: string, itemId: string, photo: ProductImage, clientIp: string): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_RETAKE', 'This item is not waiting for a retaken photo')
+    if (item.state !== 'needs-retake') throw notAwaiting()
+    const valid = this.checkPhoto(photo)
+    const now = this.now()
+    const ipHash = await this.hashIp(clientIp)
+    await this.assertWithinQuota(item.userId, ipHash, 1, now)
+
+    const key = this.photoKey(item.userId, scanId, itemId, valid.extension)
+    await this.photos.put(key, valid.image)
+    let moved = false
+    try {
+      moved = await this.transition(item, {
+        from: 'needs-retake',
+        change: {
+          state: 'recognising',
+          reason: null,
+          photoKey: key,
+          recognisedBrand: null,
+          recognisedName: null,
+          recognisedVariant: null,
+          recognisedCategory: null,
+          recognisedConfidence: null,
+        },
+        next: 'recognise',
+        undo: { photoKey: null },
+        retake: { id: this.newId(), itemId, userId: item.userId, ipHash, uploadedAt: now },
+      })
+    } catch (error) {
+      await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId, itemId }))
+      throw error
+    }
+    if (!moved) {
+      // Lost a race with another retake. When both wrote the same key the winner owns it, so only a different key is ours to remove.
+      if ((await this.repository.findItem(itemId))?.photoKey !== key) await this.photos.delete(key)
+      throw notAwaiting()
+    }
+    return this.itemViewOf(itemId)
+  }
+
+  /**
    * The photo a signed link opens: its bytes and media type. The link is the capability: an app image component
    * cannot send an Authorization header, so this takes no user and reads no request context. A link that is
    * malformed, tampered with, signed with another secret or expired, and a link to a photo that has since been
@@ -514,7 +565,16 @@ export class ScanService {
 
     // A photo we will not use is deleted at once, before the row says so: a failure here is retried while the item is still recognising.
     if (item.photoKey !== null) await this.photos.delete(item.photoKey)
-    const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product', unreadable: 'unreadable' } as const
+    if (seen.classification === 'unreadable' || seen.classification === 'label-not-visible') {
+      // Every photo sent is a try, the first included: the retakes recorded so far plus this one.
+      const tries = 1 + (await this.repository.countRetakes(item.id))
+      await this.transition(item, {
+        from: 'recognising',
+        change: { state: tries < this.policy.maxFrontPhotos ? 'needs-retake' : 'needs-identification', reason: seen.classification, photoKey: null },
+      })
+      return
+    }
+    const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product' } as const
     await this.transition(item, { from: 'recognising', change: { state: 'rejected', reason: reason[seen.classification], photoKey: null } })
   }
 
@@ -714,22 +774,23 @@ export class ScanService {
    * find the item moved on and do nothing, and the item would wait for ever. The undo puts back the item's reason, and
    * whatever else `undo` names (fields the change set that the old state must not keep).
    *
-   * `backPhoto` is the upload this move records for the daily quotas, written with the update. It is not undone: the
-   * photo was stored and sent, and the quota counts what was sent.
+   * `backPhoto` and `retake` are the upload this move records for the daily quotas, written with the update. Neither is
+   * undone: the photo was stored and sent, and the quota counts what was sent.
    */
   private async transition(
     item: ScanItem,
-    { from, change, next, undo = {}, backPhoto }: {
+    { from, change, next, undo = {}, backPhoto, retake }: {
       from: ItemState
       change: Omit<ItemPatch, 'updatedAt'> & { state: ItemState }
       next?: ScanStep
       undo?: Omit<ItemPatch, 'updatedAt'>
       backPhoto?: NewBackPhoto
+      retake?: NewRetake
     },
   ): Promise<boolean> {
     // One reading of the clock for both: the reaper repeats the step with the stored updatedAt, which must be this very key.
     const at = this.now()
-    const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto)
+    const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto, retake)
     if (!applied) return false
     if (next) {
       try {
@@ -791,11 +852,14 @@ export class ScanService {
       const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
       image = { kind: 'user', url: productPhotoUrl(token) }
     }
+    // A retake whose queueing failed keeps its row (the photo was sent), so a user can retake past the limit and the count must stop at 0.
+    const retakesLeft = item.state === 'needs-retake' ? Math.max(0, this.policy.maxFrontPhotos - 1 - (await this.repository.countRetakes(item.id))) : undefined
     return {
       id: item.id,
       position: item.position,
       state: item.state,
       reason: item.reason,
+      ...(retakesLeft === undefined ? {} : { retakesLeft }),
       ...(item.recognisedBrand !== null && item.recognisedName !== null && item.recognisedCategory !== null
         ? { recognised: { brand: item.recognisedBrand, name: item.recognisedName, variant: item.recognisedVariant, category: item.recognisedCategory } }
         : {}),

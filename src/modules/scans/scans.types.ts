@@ -1,4 +1,4 @@
-import type { scanBackPhotos, scanItems, scans } from './scans.table'
+import type { scanBackPhotos, scanItems, scanRetakes, scans } from './scans.table'
 
 export type Scan = typeof scans.$inferSelect
 export type ScanItem = typeof scanItems.$inferSelect
@@ -11,6 +11,9 @@ export type NewScan = Omit<Scan, 'doneAt' | 'profileId'> & { profileId: string }
 
 /** A back photo upload, to be counted against the daily quotas. */
 export type NewBackPhoto = typeof scanBackPhotos.$inferInsert
+
+/** A retaken front photo, to be counted against the daily quotas. */
+export type NewRetake = typeof scanRetakes.$inferInsert
 
 /** What a new item needs: it always starts `recognising`, with no reason, no recognised fields, no product and no back photo. */
 export type NewScanItem = Pick<ScanItem, 'id' | 'scanId' | 'userId' | 'position' | 'createdAt'> & { photoKey: string }
