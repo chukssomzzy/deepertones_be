@@ -38,11 +38,12 @@
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
     "CATALOG_IMAGES_PUBLIC_URL": ""
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
+  // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
 
   // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -181,11 +182,12 @@
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
+      // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -288,11 +290,12 @@
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY and ANTHROPIC_API_KEY are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
+      // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production

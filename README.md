@@ -138,7 +138,7 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
 ## Product catalog setup
@@ -219,6 +219,29 @@ the setup below. Tests never call ZeptoMail and need no secrets.
 `OTP_CHANNELS` in `wrangler.jsonc` lists the channels people can sign in with; it is `email` today.
 Use a **different** `OTP_PEPPER` in each environment, and never change a pepper while codes are
 live (it invalidates outstanding codes; harmless once 10 minutes have passed).
+
+## Expo push setup
+
+Push notifications go out through the Expo Push Service. The code is in `src/providers/push`; nothing sends yet,
+because wiring, token registration and the jobs come in later PRs of issue #54 (see "Push notifications (Expo)" in
+`docs/architecture.md`). Tests never call Expo and need no secrets. What is left for the account owner, once per
+environment (a separate access token per environment is fine but not required):
+
+1. In Expo, create a robot user and an access token for it (expo.dev → account → Access tokens).
+2. In the Expo project's settings, turn on **Enhanced security for push notifications**. Expo then refuses a
+   send that does not carry the access token, so a leaked push token cannot be used to message our users.
+3. Upload the credentials Expo needs to reach the phones, to Expo/EAS (`eas credentials`, or the dashboard): the
+   **FCM v1 service-account key** (Android) and the **APNs key** (iOS).
+4. Put the access token in `.dev.vars.staging` and `.dev.vars.production` as `EXPO_ACCESS_TOKEN` (and in `.dev.vars`
+   to try it locally), then push it:
+
+   ```sh
+   npm run secrets:push -- --env staging --apply
+   npm run secrets:push -- --env production --apply
+   ```
+
+Deploys fail until `EXPO_ACCESS_TOKEN` is set on the environment's Worker (it is in `secrets.required`), so do steps 1
+to 4 before merging to `staging` or `main`.
 
 ## WhatsApp OTP setup
 

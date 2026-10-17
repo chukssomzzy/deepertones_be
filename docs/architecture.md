@@ -53,6 +53,7 @@ src/
      answers same-product and image-matches-product questions. See "Claude (Anthropic) providers" and "AI cost tracking".)
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
+    (push/ sends push notifications: a PushSender port, the Expo adapter, a memory fake. See "Push notifications (Expo)".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
 docs/openapi.json          the generated spec, committed (npm run openapi)
 scripts/                   build-time scripts (spec generation)
@@ -177,8 +178,10 @@ request. Queues deliver at least once, so the system is built around repeat-safe
 Provider adapters call vendors through `lib/http.ts`, built on rxjs `fromFetch`: `requestJson$` for JSON APIs
 and `requestBytes$` for binary downloads.
 It returns an Observable so an adapter can compose operators; the adapter converts at its own
-boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs. The one exception
-is Claude, which goes through its official SDK (see "Claude (Anthropic) providers").
+boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs. The rule: use a vendor's
+official SDK when it runs on Workers and does not retry on its own; otherwise write the adapter by hand on
+`requestJson$`. Claude is the one vendor that goes through its official SDK (see "Claude (Anthropic) providers"); Expo is the
+hand-written case (see "Push notifications (Expo)").
 
 - **Every call has a timeout** (`timeoutMs`); on expiry the request is aborted and the stream
   errors with `HttpTimeoutError`. Other transport failures are `HttpNetworkError`. Any HTTP status
@@ -545,6 +548,49 @@ because later modules will send email too.
   domain, no credits, an account not yet approved (and any other rejection that is not the recipient,
   or an empty setting) become `EmailDeliveryError` `misconfigured`: our own setup is wrong and a human
   must fix it, so retrying cannot help.
+
+### Push notifications (Expo)
+Push notifications go through the Expo Push Service, behind a `PushSender` port (`providers/push/push.provider.ts`) with one
+adapter, `ExpoPushSender` (`expo.push.ts`), and a memory fake, `MemoryPushSender`. The port file also exports
+`isExpoPushToken`, a pure token-shape check, because services may not import an adapter. Nothing is wired yet: the container,
+the token and settings tables, the routes, the send and receipt jobs and the triggers come in the following PRs of #54.
+
+- **Why Expo.** The app is an Expo (React Native) app and registers an Expo push token; Expo's service then reaches Apple
+  and Google with the credentials uploaded to Expo/EAS. The backend never talks to APNs or FCM.
+- **Why not the official `expo-server-sdk`.** This is an explicit exception to the preference for a vendor's official SDK over
+  hand-rolled HTTP (see "Claude (Anthropic) providers"). The SDK imports `fetch` from `undici`, which Workers cannot run, and it
+  retries internally, which the job system already does (see "Outbound HTTP": no retries in adapters). So the adapter calls Expo's
+  documented endpoints through `requestJson$` + `firstValueFrom`, and the access token is the only thing it sends beyond them.
+- **Two calls.** `send(messages)` posts to `https://exp.host/--/api/v2/push/send` and returns one ticket per message, in order: `ok`
+  with the id Expo assigned, or an error with a reason. `receipts(ids)` posts to `.../push/getReceipts` and returns receipts by ticket
+  id; an id Expo has no receipt for yet is left out. Every message is sent with the default sound.
+- **Batching, at-most-once.** Expo takes at most 100 messages per send and 1000 ids per receipts call, so the adapter splits a larger call
+  in order and merges the answers. A push cannot be taken back, so a retry must never resend what already went out. Only the FIRST
+  request's failure rejects `send()` or `receipts()`: nothing has gone out, so the job's retry resends safely. After that, a failed
+  request no longer throws. Its messages come back as error tickets (`unavailable` for transport, timeout, 429 and 5xx;
+  `misconfigured` for any other status) and, for receipts, its ids are left out, so the caller keeps the tickets of what was sent.
+  A notification targets a handful of phones, so one request is the normal case and this is the edge.
+- **Errors, in three kinds.** A problem with one message is a value: the ticket or receipt is `{ status: 'error', reason }` with
+  `device-not-registered` (Expo's `DeviceNotRegistered`: delete the token), `rate-limited` (`MessageRateExceeded`), `misconfigured`
+  (`InvalidCredentials`, `MismatchSenderId`: our credentials are wrong), `unavailable` (the request carrying it failed after the first) or
+  `other` (everything else, including codes Expo adds later). A problem with the first request that may pass is `PushUnavailableError`:
+  transport failure or timeout, 429, 5xx. A problem that will not pass is a plain `Error` (any other HTTP status: credentials, a bad
+  request; or `EXPO_ACCESS_TOKEN` empty or containing whitespace, which is refused before any request), for the job to fail permanently
+  and log. Messages carry the HTTP status and Expo's request-level codes (only code-shaped ones) and nothing else: never the access
+  token, a push token, the notification text or Expo's own `message`.
+- **A malformed 2xx reply never throws.** If Expo answers 2xx with something that is not a ticket for every message (not an array, the
+  wrong count, an unknown status, an ok ticket with no id, not JSON), Expo may well have sent them, so a throw would make the job's retry
+  send a duplicate. That batch's messages get `other` instead. For receipts, an unreadable reply leaves its ids out and one unreadable
+  entry leaves out just that id; the receipt check is advisory.
+- **Token shape.** `isExpoPushToken` accepts `ExponentPushToken[...]` and `ExpoPushToken[...]` with no whitespace anywhere and at most 256
+  characters.
+- **Enhanced security and `EXPO_ACCESS_TOKEN`.** With "Enhanced security for push notifications" on in the Expo project, Expo refuses a
+  send or receipts call without a robot-user access token, so a leaked push token cannot be used to message our users. The token
+  is the required secret `EXPO_ACCESS_TOKEN` (per environment, like the other required secrets; see README, "Expo push setup"). The
+  adapter holds it in a `#` field (see "Private members").
+- **Tests** stub `fetch` at the global (the adapter) or use the fake directly. `MemoryPushSender` records `sent`, answers every message
+  with an `ok` ticket numbered `ticket-1`, `ticket-2`, ..., and can script a ticket per token (`ticketFor`; a scripted ok ticket's id is known
+  to `receipts()`), a receipt per ticket id (`receiptFor`) and the next failure of `send` (`failNextWith`) or `receipts` (`failNextReceiptsWith`).
 
 ### Claude (Anthropic) providers
 Product research, analysis and photo reading call Claude through one `AnthropicClient`, and thin adapters
