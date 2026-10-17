@@ -814,4 +814,95 @@ describe('R2CatalogImageStore.pageImageUrl', () => {
     expect(await make().pageImageUrl(PAGE)).toBeNull()
     expect(pulled).toBeLessThan(PAGE_CAP * 4)
   })
+
+  describe('hostile pages', () => {
+    const htmlOf = (body: string) => new Response(body, { headers: { 'content-type': 'text/html' } })
+    const timed = async (body: string) => {
+      stubFetch(() => htmlOf(body))
+      const started = performance.now()
+      const result = await make().pageImageUrl(PAGE)
+      return { result, elapsed: performance.now() - started }
+    }
+
+    it('scans 512 KB of unclosed <meta in linear time', async () => {
+      const { result, elapsed } = await timed('<meta'.repeat(PAGE_CAP / 5))
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('scans a 512 KB single-token meta tag in linear time', async () => {
+      const { result, elapsed } = await timed(`<meta ${'a'.repeat(PAGE_CAP - 8)}>`)
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('scans 512 KB of attribute-like noise in linear time', async () => {
+      const { result, elapsed } = await timed(`<meta ${'a=" '.repeat(PAGE_CAP / 4)}`)
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('ignores a meta tag longer than 4 KB', async () => {
+      const { result } = await timed(`<meta data-x="${'a'.repeat(5000)}" property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBeNull()
+    })
+
+    it('stops at </head>', async () => {
+      const { result } = await timed(`<head></head><body><meta property="og:image" content="${PACKSHOT}"></body>`)
+
+      expect(result).toBeNull()
+    })
+
+    it('reads at most 200 meta tags', async () => {
+      const fillers = '<meta name="x" content="y">'.repeat(200)
+      const { result } = await timed(`${fillers}<meta property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBeNull()
+    })
+
+    it('still finds the image after a broken tag fragment', async () => {
+      const { result } = await timed(`<meta property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBe(PACKSHOT)
+    })
+  })
+
+  it('does not decode entities twice', async () => {
+    serving('<meta property="og:image" content="https://assets.brand.example/p.png?a=1&amp;#38;b=2"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/p.png?a=1&#38;b=2')
+  })
+
+  it('uses the first og:image when the page has several', async () => {
+    const other = 'https://assets.brand.example/media/other.png'
+    serving(`<meta property="og:image" content="${PACKSHOT}"/><meta property="og:image" content="${other}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('resolves a relative image url against the final url after a redirect', async () => {
+    const MOVED = 'https://shop.other.example/new/p.html'
+    stubFetch((url) => (url === PAGE ? redirect(MOVED, 301) : html('<meta property="og:image" content="/media/p.png"/>')))
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://shop.other.example/media/p.png')
+  })
+
+  it('gives up after 2 redirects (3 requests)', async () => {
+    const stub = stubFetch((url) => redirect(`${url}x`))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(stub).toHaveBeenCalledTimes(3)
+  })
+
+  it('returns null when a later hop of the redirect chain is unsafe', async () => {
+    const MID = 'https://www.nivea.example/mid'
+    const stub = stubFetch((url) => (url === PAGE ? redirect(MID) : redirect('https://127.0.0.1/p.html')))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(stub.mock.calls.map(([input]) => String(input))).toEqual([PAGE, MID])
+  })
 })

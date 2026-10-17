@@ -35,8 +35,10 @@ export class R2CatalogImageStore implements CatalogImageStore {
   private static readonly PAGE_MAX_BYTES = 512 * 1024
   // In preference order; the first rank with a non-empty value wins.
   private static readonly IMAGE_META_RANKS = [['og:image'], ['og:image:secure_url', 'og:image:url'], ['twitter:image']]
-  private static readonly META_TAG = /<meta\b[^>]*>/gi
-  private static readonly ATTRIBUTE = /([^\s"'<>/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))/g
+  // The scan is a forward-only walk, not a regex: the page is hostile and a backtracking pattern on it costs minutes of CPU.
+  private static readonly MAX_META_TAGS = 200
+  private static readonly MAX_META_TAG_LENGTH = 4096
+  private static readonly WHITESPACE = new Set([' ', '\t', '\n', '\r', '\f'])
   private static readonly ENTITY = /&(?:#x([0-9a-f]+)|#(\d+)|(amp|quot|apos|lt|gt));/gi
   private static readonly NAMED_ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
   private static readonly REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
@@ -119,15 +121,22 @@ export class R2CatalogImageStore implements CatalogImageStore {
     return base === '' ? null : `${base}/${key.split('/').map(encodeURIComponent).join('/')}`
   }
 
-  /** The content of the best-ranked image meta tag in `html`, or null. */
+  /** The content of the best-ranked image meta tag in `html`, or null. Linear in the length of `html`. */
   private static imageMetaValue(html: string): string | null {
     const found = new Map<string, string>()
-    for (const [tag] of html.matchAll(R2CatalogImageStore.META_TAG)) {
-      const attributes = new Map<string, string>()
-      for (const match of tag.matchAll(R2CatalogImageStore.ATTRIBUTE)) {
-        const name = match[1]!.toLowerCase()
-        if (!attributes.has(name)) attributes.set(name, match[2] ?? match[3] ?? match[4] ?? '')
-      }
+    // Lower-cased once, same length for ASCII tag names; offsets are only used to cut the original.
+    const lower = html.toLowerCase()
+    const headEnd = lower.indexOf('</head')
+    const end = lower.length === html.length && headEnd !== -1 ? headEnd : html.length
+    let position = 0
+    for (let tags = 0; tags < R2CatalogImageStore.MAX_META_TAGS; tags++) {
+      const start = lower.indexOf('<meta', position)
+      if (start === -1 || start >= end) break
+      const close = lower.indexOf('>', start)
+      if (close === -1) break
+      position = close + 1
+      if (close - start > R2CatalogImageStore.MAX_META_TAG_LENGTH || lower.length !== html.length) continue
+      const attributes = R2CatalogImageStore.attributesOf(html.slice(start + 5, close))
       const key = (attributes.get('property') ?? attributes.get('name'))?.trim().toLowerCase()
       const content = attributes.get('content')
       if (key && content !== undefined && !found.has(key)) found.set(key, R2CatalogImageStore.decodeEntities(content).trim())
@@ -139,6 +148,41 @@ export class R2CatalogImageStore implements CatalogImageStore {
       }
     }
     return null
+  }
+
+  /** The attributes of one tag's inside, names lower-cased, first occurrence kept. One forward pass; every iteration advances. */
+  private static attributesOf(inside: string): Map<string, string> {
+    const attributes = new Map<string, string>()
+    const space = R2CatalogImageStore.WHITESPACE
+    const length = inside.length
+    let i = 0
+    while (i < length) {
+      while (i < length && (space.has(inside[i]!) || inside[i] === '/')) i++
+      const nameStart = i
+      while (i < length && !space.has(inside[i]!) && inside[i] !== '=' && inside[i] !== '/') i++
+      const name = inside.slice(nameStart, i).toLowerCase()
+      while (i < length && space.has(inside[i]!)) i++
+      let value = ''
+      if (inside[i] === '=') {
+        i++
+        while (i < length && space.has(inside[i]!)) i++
+        const quote = inside[i]
+        if (quote === '"' || quote === "'") {
+          const closing = inside.indexOf(quote, i + 1)
+          const valueEnd = closing === -1 ? length : closing
+          value = inside.slice(i + 1, valueEnd)
+          i = valueEnd + 1
+        } else {
+          const valueStart = i
+          while (i < length && !space.has(inside[i]!)) i++
+          value = inside.slice(valueStart, i)
+        }
+      } else if (i === nameStart) {
+        i++
+      }
+      if (name !== '' && !attributes.has(name)) attributes.set(name, value)
+    }
+    return attributes
   }
 
   // One pass, so "&amp;#38;" decodes to "&#38;" and not further.

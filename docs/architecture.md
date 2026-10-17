@@ -176,7 +176,7 @@ request. Queues deliver at least once, so the system is built around repeat-safe
 
 ### Outbound HTTP
 Provider adapters call vendors through `lib/http.ts`, built on rxjs `fromFetch`: `requestJson$` for JSON APIs
-and `requestBytes$` for binary downloads.
+and `requestBytes$` for binary downloads (`requestHeadBytes$` for the start of a page).
 It returns an Observable so an adapter can compose operators; the adapter converts at its own
 boundary with `firstValueFrom`, so services stay Promise-based and never import rxjs. The one exception
 is Claude, which goes through its official SDK (see "Claude (Anthropic) providers").
@@ -190,6 +190,9 @@ is Claude, which goes through its official SDK (see "Claude (Anthropic) provider
   otherwise the body is streamed and cancelled as soon as the cap is passed, so an endless body cannot
   fill memory (never `arrayBuffer()`). Exceeding it is `HttpTooLargeError`, its own error and not a
   transport one, because the server did answer. `timeoutMs` covers the whole body.
+- **`requestHeadBytes$` is `requestBytes$` for when only the start of the body matters** (the `<head>` of a web
+  page). Same manual redirects and timeout, but a body past `maxBytes` is cut at the cap and the stream cancelled,
+  not an error, and a large `content-length` is not refused.
 - **No retries.** A retried OTP send could deliver, and bill, a second code. Retrying is each
   caller's decision.
 - **Provider-only.** The `http-only-in-providers` rule lets only `src/providers/**` import
@@ -732,9 +735,10 @@ there is no Console spend limit behind it, so the code is the backstop.
   answered null. Source pages carry the packshot in `og:image`. The adapter fetches the page through the same safe path as
   `fetchImage` (safe-URL check and blocked hosts on every hop, at most 2 redirects, 10 s timeout), accepts only a 2xx
   `text/html` answer, reads at most 512 KB of it (`requestHeadBytes$` stops pulling at the cap), and scans the `<meta>`
-  tags (`property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
+  tags with a linear forward-only scanner, not a regex, because the page is hostile (stops at `</head>`, after 200 tags,
+  skips a tag over 4 KB; `property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
   `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. The value is resolved against the
-  page URL and returned only if it is a safe public https URL. Any failure is `null`; nothing from the page or its URL is logged.
+  page URL (the final one, after redirects) and returned only if it is a safe public https URL. Any failure is `null`; nothing from the page or its URL is logged.
 - **Blocked hosts.** `blockedHostSuffixes` (default none) refuses any hop whose hostname equals a
   suffix or ends with `.`+suffix. The container passes our own zones, so a redirect cannot point the
   Worker back at us; the suffixes are not hard-coded in the adapter.
