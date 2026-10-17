@@ -26,6 +26,8 @@ const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
 const SCAN_IP = '203.0.113.50'
 // The retakes come from an address of their own, so they are counted apart from the scans' in the per-address daily quota.
 const RETAKE_IP = '203.0.113.51'
+// The back photos too.
+const BACK_IP = '203.0.113.52'
 // Every message carries the time the item entered the state its step works on, which keys the run; a hand-built one needs
 // only to be the same for the same delivery (the real value is the item's updatedAt, as ScanService stamps it).
 const AT = 1_900_000_000_000
@@ -290,5 +292,173 @@ describe('scan items advanced through the Worker queue handler', () => {
     expect(resent.explicitAcks).toEqual(['m'])
     expect(calls).toHaveLength(1)
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'rejected' })
+  })
+})
+
+// --- a back photo that identifies the product ---
+
+// These flows make many calls, so their answers report a small usage and no web search: the day's AI spend cap (a dollar here) is not what they test.
+const CHEAP_USAGE = { input_tokens: 100, output_tokens: 50 }
+const readLabel = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))], usage: CHEAP_USAGE })
+const cheapUnreadable = readLabel({ classification: 'unreadable', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+const noConcerns = readLabel({ concerns: [] })
+const unreadableBack = readLabel({ readable: false, ingredients: [] })
+/** A list no other test uses: the unnamed product for a list is shared by everyone, so a reused list would meet an earlier test's product. */
+const freshList = () => ['Aqua', 'Glycerin', `Cetearyl Alcohol ${runSalt}x${counter++}`]
+/** What a request to Claude is for, from the shape of the answer it asks for (or the web search it carries). */
+const jobOf = (call: { body: any }) => {
+  if ((call.body.tools ?? []).some((tool: { name: string }) => tool.name === 'web_search')) return 'research'
+  const properties = Object.keys(call.body.output_config?.format?.schema?.properties ?? {})
+  if (properties.includes('classification')) return 'recognize'
+  if (properties.includes('readable')) return 'read-label'
+  if (properties.includes('concerns')) return 'analysis'
+  if (properties.includes('same')) return 'same-product'
+  return 'other'
+}
+const hasWebSearch = (calls: { body: any }[]) => calls.some((call) => (call.body.tools ?? []).some((tool: { name: string }) => tool.name === 'web_search'))
+
+/** A one-photo scan whose front photo was unreadable three times, through the queue handler: the item offers identification. */
+const identifying = async () => {
+  const taken = await startScan()
+  stubAnthropic(cheapUnreadable)
+  await runQueue(MAIN, { itemId: taken.itemId, step: 'recognise', at: AT })
+  for (const n of [1, 2]) {
+    await asUser(taken.userId, () => container.scans.retake(taken.scanId, taken.itemId, jpegPhoto(), RETAKE_IP))
+    await runQueue(MAIN, { itemId: taken.itemId, step: 'recognise', at: AT + n })
+  }
+  vi.unstubAllGlobals()
+  expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'needs-identification' })
+  return { ...taken, backKey: `photos/${env.ENVIRONMENT}/${taken.userId}/${taken.scanId}/${taken.itemId}-back.jpg` }
+}
+type Identifying = Awaited<ReturnType<typeof identifying>>
+const sendBackPhoto = (taken: Identifying, photo = jpegPhoto()) => asUser(taken.userId, () => container.scans.addBackPhoto(taken.scanId, taken.itemId, photo, BACK_IP))
+const readBack = (taken: Identifying) => runQueue(MAIN, { itemId: taken.itemId, step: 'read-label', at: AT + 10 })
+const analyseItem = (taken: Identifying) => runQueue(MAIN, { itemId: taken.itemId, step: 'analyse', at: AT + 11 })
+
+describe('scan items identified by their back photo, through the Worker queue handler', () => {
+  it('takes a back photo that names a product the catalog holds to ready with one label read and no research, analysis or web search', async () => {
+    const brand = freshBrand()
+    const formulationId = await catalogued(brand, 'Hydrating Cleanser')
+    const taken = await identifying()
+    const back = jpegPhoto()
+    await sendBackPhoto(taken, back)
+    const calls = stubAnthropic(readLabel({ readable: true, ingredients: CLEAN, brand, name: 'Hydrating Cleanser', variant: '', category: 'skin' }))
+
+    const result = await readBack(taken)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({
+      state: 'ready',
+      reason: null,
+      recognised: { brand, name: 'Hydrating Cleanser', category: 'skin' },
+      product: { formulation: { id: formulationId }, product: { kind: 'named', brand, name: 'Hydrating Cleanser' } },
+    })
+    expect(calls.map(jobOf)).toEqual(['read-label'])
+    expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(back.bytes))
+    expect(hasWebSearch(calls)).toBe(false)
+    expect(await env.PRIVATE_PHOTOS.get(taken.backKey)).toBeNull()
+  })
+
+  it('creates the product a back photo names when the catalog does not hold it, analyses its label list once, and makes no web search', async () => {
+    const brand = freshBrand()
+    const list = freshList()
+    const taken = await identifying()
+    await sendBackPhoto(taken)
+    const calls = stubAnthropic(readLabel({ readable: true, ingredients: list, brand, name: 'Bright Tone Serum', variant: 'Night', category: 'skin' }), noConcerns)
+
+    const read = await readBack(taken)
+
+    expect(read.explicitAcks).toEqual(['m'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({
+      state: 'analysing',
+      recognised: { brand, name: 'Bright Tone Serum', variant: 'Night', category: 'skin' },
+    })
+    const analysed = await analyseItem(taken)
+
+    expect(analysed.explicitAcks).toEqual(['m'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({
+      state: 'ready',
+      product: { product: { kind: 'named', brand, name: 'Bright Tone Serum', variant: 'Night' }, formulation: { ingredients: list, source: { kind: 'label', url: null } } },
+    })
+    expect(calls.map(jobOf)).toEqual(['read-label', 'analysis'])
+    expect(hasWebSearch(calls)).toBe(false)
+  })
+
+  it('keeps a list with no name as an unnamed product, and answers a second item with the same list from the first one\'s analysis: one analysis call for both', async () => {
+    const list = freshList()
+    const first = await identifying()
+    await sendBackPhoto(first)
+    const firstCalls = stubAnthropic(readLabel({ readable: true, ingredients: list }), noConcerns)
+    await readBack(first)
+    await analyseItem(first)
+    const second = await identifying()
+    await sendBackPhoto(second)
+    const secondCalls = stubAnthropic(readLabel({ readable: true, ingredients: list }), noConcerns)
+
+    const result = await readBack(second)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    const [a, b] = [await itemOf(first.userId, first.scanId, first.itemId), await itemOf(second.userId, second.scanId, second.itemId)]
+    expect(a).toMatchObject({ state: 'ready', product: { product: { kind: 'unnamed', brand: '', name: '' } } })
+    expect(b).toMatchObject({ state: 'ready', product: { product: { kind: 'unnamed', brand: '', name: '' } } })
+    expect(b.product!.formulation.id).toBe(a.product!.formulation.id)
+    expect(a).not.toHaveProperty('recognised')
+    expect(firstCalls.map(jobOf)).toEqual(['read-label', 'analysis'])
+    expect(secondCalls.map(jobOf)).toEqual(['read-label'])
+    expect(hasWebSearch([...firstCalls, ...secondCalls])).toBe(false)
+  })
+
+  it('moves an item already shown as an unnamed product onto the product a later back photo names, without analysing again', async () => {
+    const brand = freshBrand()
+    const list = freshList()
+    const first = await identifying()
+    await sendBackPhoto(first)
+    const firstCalls = stubAnthropic(readLabel({ readable: true, ingredients: list }), noConcerns)
+    await readBack(first)
+    await analyseItem(first)
+    const second = await identifying()
+    await sendBackPhoto(second)
+    const secondCalls = stubAnthropic(readLabel({ readable: true, ingredients: list, brand, name: 'Bright Tone Serum', variant: '', category: 'skin' }), noConcerns)
+
+    await readBack(second)
+
+    const [a, b] = [await itemOf(first.userId, first.scanId, first.itemId), await itemOf(second.userId, second.scanId, second.itemId)]
+    expect(b).toMatchObject({ state: 'ready', product: { product: { kind: 'named', brand, name: 'Bright Tone Serum' } } })
+    expect(a).toMatchObject({ state: 'ready', product: { product: { kind: 'named', brand, id: b.product!.product.id } } })
+    expect(a.product!.formulation.id).toBe(b.product!.formulation.id)
+    expect(secondCalls.map(jobOf)).toEqual(['read-label'])
+    expect(hasWebSearch([...firstCalls, ...secondCalls])).toBe(false)
+  })
+
+  it('asks for identification again, as label-unreadable, deleting the back photo, until the 3rd unreadable back photo ends the item as failed', async () => {
+    const taken = await identifying()
+
+    for (const n of [1, 2, 3]) {
+      await sendBackPhoto(taken)
+      expect(await env.PRIVATE_PHOTOS.get(taken.backKey)).not.toBeNull()
+      const calls = stubAnthropic(unreadableBack)
+
+      const result = await runQueue(MAIN, { itemId: taken.itemId, step: 'read-label', at: AT + 20 + n })
+
+      expect(result.explicitAcks).toEqual(['m'])
+      expect(calls.map(jobOf)).toEqual(['read-label'])
+      expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject(
+        n < 3 ? { state: 'needs-identification', reason: 'label-unreadable' } : { state: 'failed', reason: 'label-unreadable' },
+      )
+      expect(await env.PRIVATE_PHOTOS.get(taken.backKey)).toBeNull()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('acks a repeated delivery of the read without calling Anthropic again', async () => {
+    const taken = await identifying()
+    await sendBackPhoto(taken)
+    const calls = stubAnthropic(readLabel({ readable: true, ingredients: freshList() }), noConcerns)
+    await readBack(taken)
+
+    const again = await readBack(taken)
+
+    expect(again.explicitAcks).toEqual(['m'])
+    expect(calls.map(jobOf)).toEqual(['read-label'])
   })
 })

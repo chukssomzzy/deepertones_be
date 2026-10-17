@@ -8,6 +8,7 @@ import type { ScanItemView, ScanView } from './scans.service'
 const toProductResponse = ({ product, formulation, concerns, reference }: ProductView): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
   product: {
     id: product.id,
+    kind: product.kind,
     brand: product.brand,
     name: product.name,
     variant: product.variant,

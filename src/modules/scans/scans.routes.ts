@@ -84,7 +84,7 @@ const addBackPhoto = defineRoute({
   operationId: 'addProductScanItemBackPhoto',
   tags: ['Product scans'],
   summary: 'Send a photo of the ingredient list',
-  description: 'For an item in `needs-back-photo`. Multipart with one `photo` part. Counts toward the same daily limits as a front photo.',
+  description: 'For an item in `needs-back-photo`, or in `needs-identification` (the back then identifies the product). Multipart with one `photo` part. Counts toward the same daily limits as a front photo.',
   security: bearer,
   middleware: [
     rateLimit('SCAN_BACK_PHOTO_IP_LIMITER', 'ip'),

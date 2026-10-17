@@ -3,8 +3,8 @@ import type { Trait } from './catalog.vocabulary'
 
 export type Product = typeof products.$inferSelect
 
-/** A product to create; it has no image yet. */
-export type NewProduct = Omit<Product, 'imageKey' | 'imageSourceUrl' | 'imageCheckedAt'>
+/** A product to create; it has no image yet. It is `named` unless it says otherwise. */
+export type NewProduct = Omit<Product, 'imageKey' | 'imageSourceUrl' | 'imageCheckedAt' | 'kind'> & { kind?: Product['kind'] }
 
 export type Formulation = typeof formulations.$inferSelect
 

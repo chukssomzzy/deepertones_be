@@ -597,7 +597,11 @@ prompts and the answer shapes.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, category and a 0 to 1 confidence),
   `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
-  ingredient list off a label photo, in label order and as printed, never completed from memory. Both run on the vision
+  ingredient list off a label photo, in label order and as printed, never completed from memory, and also the brand, name, variant
+  and category (one of the five) when the label prints them, never guessed. Only the ingredient list decides whether the reading is
+  readable: a bad entry (over 120 characters, a hidden character, a link or markup), an empty list or more than 150 entries is
+  `{ readable: false }`, while each of brand, name and variant that is empty or fails the same checks, and a category outside the five
+  (the request advertises the five, but the parse is lenient so it cannot fail the list), is dropped on its own and the rest is kept. Both run on the vision
   model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
   as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
   trimming), with a link, markup or a hidden character (a control character, `\p{Cc}`, or an invisible format character
@@ -759,6 +763,16 @@ described in "Product catalog service"; routes come later.
 - **Near-miss candidates** are same-brand products with a different identity key whose name and variant words overlap
   (Jaccard similarity, default threshold 0.6, at most 3). They are looked up newest first (`productsByBrandKey`), and
   the model, not the code, decides whether one is the same product; its answer is stored as an alias.
+- **Unnamed products.** `products.kind` (migration 0014, `NOT NULL DEFAULT 'named'`) is `named` or `unnamed`. An unnamed product holds an
+  ingredient list no label gave a brand and name for: its identity key is `unnamed:<ingredientsKey>` (so the same list from anyone's
+  scan is one product and one formulation, analysed once), its `brand_key`, brand and name are `''`, its variant is null and its category is
+  the label's, else `other`. A named product is never keyed that way. When a label later names that list for a product that does not
+  already have it, `adoptUnnamedFormulation(formulationId, productId)` moves the formulation to the named product and deletes the unnamed
+  product: the formulation keeps its id, so its analysis, concerns and attempts are not redone. It is one `db.batch` (the UPDATE, then a DELETE that
+  only ever removes an `unnamed` product), so the `(product_id, ingredients_key)` unique index rolls both back; it throws, changing nothing,
+  for an unknown formulation or product, a formulation of a named product, a product that already has the list, or a move another call
+  made first (the UPDATE changed no row). **Invariant:** `scan_items.product_id` may name an unnamed product that adoption has deleted; read
+  the product through `formulation_id`. **Known limit:** a bare-list scan after the adoption makes a new unnamed product and analyses the list again (once).
 - **Aliases** map another key to a product. An alias never shadows an identity key, and the first product to take
   one keeps it (`addAlias` is one `insert or ignore` statement; an unknown product throws). `createProduct` is an
   insert-or-ignore on the identity key that returns the stored row, so two scans of one new product both carry on
@@ -795,7 +809,13 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   `needs-analysis` (a formulation exists but is not analysed by the current versions), `analysis-failed` (see "Analysis
   attempts") or `needs-research` (no formulation, or the latest is stale). `research(productId)` stores the found
   ingredients as a formulation; `analyse(formulationId)` stores the concerns; `addLabelIngredients` stores a list read
-  from a back label. Callers (the scan jobs) run one of these per step.
+  from a back label for a product that has one; `fromLabel({ ingredients, brand?, name?, variant?, category? })` files a list for an item with
+  no product (never researches; the list is validated first, `LABEL_UNREADABLE`). With a brand and a name the product is found as `resolve`
+  finds it (a near miss goes to the model; a label with no category compares with the brand's products of every category, and a new product is
+  filed under `other`), the product's own formulation for the list is used if it has one, else an unnamed product's is adopted, else a new label
+  formulation is stored; if the adoption loses to another call, the product's own formulation is used or stored, never the other's. Without
+  both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and `REFERENCE_VERSION`) so the scan can
+  skip the analyse step. Callers (the scan jobs) run one of these per step.
 - **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest
   formulation as `found` when it is fresh, without calling the researcher or recording an attempt. `analyse` returns at
   once when the formulation is already analysed by the current `ANALYSIS_VERSION` and `REFERENCE_VERSION`.
@@ -910,7 +930,7 @@ comes in a later PR.
   `scan_items`, one per photo: id, `scan_id` (references scans, cascade), `user_id` (the scan's owner, copied so quotas and
   guest cleanup need no join; an item is owned through its scan, not through this column), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
   once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_category` / `_confidence`, `product_id` and
-  `formulation_id` (plain text, no foreign key: the catalog is not this module's), `created_at`, `updated_at`; indexed by
+  `formulation_id` (plain text, no foreign key: the catalog is not this module's; `product_id` may name an unnamed product that adoption has since deleted, so read the product through `formulation_id`), `created_at`, `updated_at`; indexed by
   `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
   per back photo ever uploaded: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own),
   `uploaded_at`; indexed by `(user_id, uploaded_at)` and `(ip_hash, uploaded_at)`. The row outlives the photo. `scan_retakes` (migration 0013) is the same for
@@ -929,7 +949,12 @@ comes in a later PR.
   recognising → needs-confirmation → matching     (confidence below 0.6, until the user confirms)
   recognising → rejected                          (face-or-person, not-a-beauty-product)
   recognising → needs-retake → recognising        (unreadable or label-not-visible, fewer than 3 front photos so far; the user retakes)
-  recognising → needs-identification              (unreadable or label-not-visible on the 3rd front photo; nothing leaves this state yet)
+  recognising → needs-identification              (unreadable or label-not-visible on the 3rd front photo)
+  needs-identification → reading-label                       (a back photo is uploaded for an item with no product)
+  reading-label (no product) → ready                         (`catalog.fromLabel` found its list already analysed)
+  reading-label (no product) → analysing → ready             (otherwise)
+  reading-label (no product) → needs-identification          (label-unreadable, fewer than 3 back photos so far)
+  reading-label (no product) → failed                        (label-unreadable, on the 3rd back photo)
   any step    → failed
   ```
   `ready`, `rejected` and `failed` are final. `needs-retake` and `needs-identification` wait for the user and are not final: an item in
@@ -996,21 +1021,28 @@ comes in a later PR.
   - `research` (`researching`): `catalog.research`. Found goes to `analysing`. Not found, or refused by the budget or spend cap,
     shows the earlier analysed formulation as `ready` when there is one; otherwise not-found asks for the back photo
     (`needs-back-photo`) and a refusal fails the item as `research-busy`.
-  - `read-label` (`reading-label`): reads the back photo and stores the list with `catalog.addLabelIngredients`. A list
-    that cannot be read, or that the catalog refuses (`LABEL_UNREADABLE`: empty, too long, a link or markup), deletes the back
-    photo and goes back to `needs-back-photo` with `label-unreadable`; so does a back photo that is missing (ask again,
-    rather than fail). That is so for the first `SCAN_POLICY.maxBackPhotos` (3) back photos: the item is allowed 3, counted
+  - `read-label` (`reading-label`): reads the back photo. A list the reader cannot read, or that the catalog refuses (`LABEL_UNREADABLE`:
+    empty, too long, a link or markup), deletes the back photo and asks again; so does a back photo that is missing (ask again, rather than
+    fail). What follows depends on the item:
+    - **An item with a product** (it came from `needs-back-photo`) stores the list with `catalog.addLabelIngredients`, then goes to
+      `analysing`; unreadable, it goes back to `needs-back-photo` with `label-unreadable`, or to `failed` after the 3rd back photo.
+    - **An item without one** (it came from `needs-identification`) files the list with `catalog.fromLabel`, sets `recognised` only when the label
+      printed a brand and a name, and goes to `ready` when the list is already analysed at the current versions, else to `analysing`; unreadable, it
+      goes back to `needs-identification` with `label-unreadable`, or to `failed` after the 3rd back photo. `CatalogBusyError` (the spend cap stopped a
+      same-product question) fails it as `research-busy` and keeps the back photo.
+
+    The limit is the first `SCAN_POLICY.maxBackPhotos` (3) back photos: the item is allowed 3, counted
     from its `scan_back_photos` rows (`countBackPhotos`), and when the 3rd cannot be read either the item ends `failed` with
     `label-unreadable` (front photo kept, back photo key cleared, nothing queued), so no 4th is asked for and `back-photo`
-    answers 409 `ITEM_NOT_AWAITING_BACK_PHOTO`. A list that is stored goes to `analysing` (queues `analyse`) with `back_photo_key` cleared, and then
+    answers 409 `ITEM_NOT_AWAITING_BACK_PHOTO`. A list that is stored moves the item on (to `analysing` and queues `analyse`, or straight to `ready` when `fromLabel` said it is analysed) with `back_photo_key` cleared, and then
     the back photo is deleted from the bucket; the delete comes after the move so an undone move still has its photo, and a
     delete that fails is logged (`photo-cleanup-failed`, ids) and does not fail the step (the object stays in the bucket
     with no row pointing at it). The upload's `scan_back_photos` row stays, so it still counts toward the quota.
   - `analyse` (`analysing`): `catalog.analyse`, then `ready`. `CatalogBusyError` fails the item as `research-busy` without
     throwing; the catalog's `PermanentJobError` (the third rejection) fails it as `analysis-failed` and is rethrown so the
     job runner records the run as failed; any other error is rethrown and the item waits for the retry.
-  - **A step that needs an id the item lacks** (`research` and `read-label` without a `productId`, `analyse` without a
-    `formulationId`) fails the item as `unavailable`, as `match` does, instead of returning silently and leaving it for ever.
+  - **A step that needs an id the item lacks** (`research` without a `productId`, `analyse` without a
+    `formulationId`; `read-label` needs none, an item without a product is identified by it) fails the item as `unavailable`, as `match` does, instead of returning silently and leaving it for ever.
   - **What the model can do to a photo.** Imports are of the `*.provider.ts` ports only. `recognise`: `AnthropicRefusalError`
     counts as an `unreadable` photo (a retake, or identification on the 3rd, with the photo deleted); `AnthropicRequestError` (not JSON, cut off
     at `max_tokens`: the same photo would get the same answer) fails it as `unavailable` and throws `PermanentJobError`, so the run is
@@ -1037,7 +1069,7 @@ comes in a later PR.
 - **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
-  of an item in `needs-back-photo` (same photo rules and quotas as a front photo) and queues `read-label`. A wrong state is
+  of an item in `needs-back-photo` or `needs-identification` (same photo rules and quotas as a front photo) and queues `read-label`. A wrong state is
   409 `ITEM_NOT_AWAITING_CONFIRMATION` or `ITEM_NOT_AWAITING_BACK_PHOTO`. A scan or item made by another profile (of the same
   account or another), or a scan/item mismatch, is 404 `SCAN_NOT_FOUND`, with no hint that it exists. The rule is on the
   scan: `ownedScan` needs `scan.userId` and `scan.profileId` to equal the actor's, and `ownedItem` is the item of an owned scan.

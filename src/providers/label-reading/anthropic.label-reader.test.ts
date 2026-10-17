@@ -277,3 +277,185 @@ describe('AnthropicLabelReader errors', () => {
     expect(await caught(reader.read(JPEG))).toBeInstanceOf(AnthropicUnavailableError)
   })
 })
+
+describe('AnthropicLabelReader brand, name, variant and category', () => {
+  const CATEGORIES = ['body', 'hair', 'makeup', 'other', 'skin']
+  const FIELDS = ['brand', 'name', 'variant'] as const
+  /** A readable answer that also carries what the back prints about the product. */
+  const named = (over: Record<string, unknown> = {}) => ({
+    readable: true,
+    ingredients: ['Aqua', 'Glycerin'],
+    brand: 'Glow Co',
+    name: 'Bright Tone Serum',
+    variant: 'Extra Strength',
+    category: 'skin',
+    ...over,
+  })
+
+  it('asks for the brand, name and variant as strings and the category from the five product categories, in a schema the API accepts', async () => {
+    const { calls, reader } = readerOver(structured(named()))
+
+    await reader.read(JPEG)
+
+    const schema = schemaOf(calls[0]!.body)
+    assertApiSafe(schema)
+    for (const field of FIELDS) expect(schema.properties[field].type, field).toBe('string')
+    expect([...schema.properties.category.enum].sort()).toEqual(CATEGORIES)
+    // Reading the ingredients is still the one thing every answer must carry.
+    expect(schema.required).toContain('ingredients')
+    expect(schema.required).toContain('readable')
+  })
+
+  it('tells the model to give the brand and name only when the back prints them, and never to guess them', async () => {
+    const { calls, reader } = readerOver(structured(named()))
+
+    await reader.read(JPEG)
+
+    const prompt = requestText(calls[0]!.body)
+    expect(prompt).toMatch(/brand/i)
+    expect(prompt).toMatch(/name/i)
+    expect(prompt).toMatch(/printed/i)
+    expect(prompt).toMatch(/never (guess|invent)|do not (guess|invent)|don't (guess|invent)/i)
+  })
+
+  it('returns the brand, name, variant and category the back printed, next to the ingredients', async () => {
+    const { reader } = readerOver(structured(named()))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual({
+      readable: true,
+      ingredients: ['Aqua', 'Glycerin'],
+      brand: 'Glow Co',
+      name: 'Bright Tone Serum',
+      variant: 'Extra Strength',
+      category: 'skin',
+    })
+  })
+
+  it.each(CATEGORIES)('keeps the category %s', async (category) => {
+    const { reader } = readerOver(structured(named({ category })))
+
+    await expect(reader.read(JPEG)).resolves.toMatchObject({ readable: true, category })
+  })
+
+  it('trims the brand, name and variant', async () => {
+    const { reader } = readerOver(structured(named({ brand: '  Glow Co ', name: '\tBright Tone Serum\n', variant: ' Extra Strength  ' })))
+
+    await expect(reader.read(JPEG)).resolves.toMatchObject({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength' })
+  })
+
+  it.each(FIELDS)('leaves the %s out of the result, rather than empty, when the model gives it empty or blank', async (field) => {
+    const { reader } = readerOver(structured(named({ [field]: '  ' })))
+
+    const result = await reader.read(JPEG)
+
+    expect(result).toMatchObject({ readable: true, ingredients: ['Aqua', 'Glycerin'] })
+    expect(result).not.toHaveProperty(field)
+  })
+
+  it.each(FIELDS)('leaves the %s out of the result when the model leaves it out altogether', async (field) => {
+    const answerWithout = named()
+    delete (answerWithout as Record<string, unknown>)[field]
+    const { reader } = readerOver(structured(answerWithout))
+
+    const result = await reader.read(JPEG)
+
+    expect(result).toMatchObject({ readable: true })
+    expect(result).not.toHaveProperty(field)
+  })
+
+  it('returns only the ingredients, with none of the four fields, for a back that prints no brand or name', async () => {
+    const { reader } = readerOver(structured({ readable: true, ingredients: ['Aqua', 'Glycerin'] }))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual({ readable: true, ingredients: ['Aqua', 'Glycerin'] })
+  })
+
+  it('reports a brand alone as the brand alone: deciding what is a name is the caller\'s', async () => {
+    const { reader } = readerOver(structured(named({ name: '', variant: '', category: undefined })))
+
+    const result = await reader.read(JPEG)
+
+    expect(result).toStrictEqual({ readable: true, ingredients: ['Aqua', 'Glycerin'], brand: 'Glow Co' })
+  })
+
+  it.each(FIELDS)('accepts a %s of exactly 120 characters and measures it after trimming', async (field) => {
+    const text = 'a'.repeat(120)
+    const { reader } = readerOver(structured(named({ [field]: `  ${text}  ` })))
+
+    await expect(reader.read(JPEG)).resolves.toMatchObject({ readable: true, [field]: text })
+  })
+
+  // The user has only 3 back photos and the ingredient list is what matters, so a name that fails validation is dropped on its own:
+  // the list and the other fields are kept.
+  const PRINTED = { brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength', category: 'skin' }
+  const keptWithout = (field: string) => ({
+    readable: true,
+    ingredients: ['Aqua', 'Glycerin'],
+    ...Object.fromEntries(Object.entries(PRINTED).filter(([key]) => key !== field)),
+  })
+
+  it.each(FIELDS)('drops the %s, keeping the list and the other fields, when it has 121 characters', async (field) => {
+    const { reader } = readerOver(structured(named({ [field]: 'a'.repeat(121) })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual(keptWithout(field))
+  })
+
+  describe.each(FIELDS)('the %s', (field) => {
+    it.each([
+      ['a NUL', 'Glow\u0000Co'],
+      ['a newline inside the text', 'Glow\nCo'],
+      ['a right-to-left override (U+202E)', 'Glow‮Co'],
+      ['a zero-width space (U+200B)', 'Glow​Co'],
+      ['a soft hyphen (U+00AD)', 'Glow­Co'],
+    ])('drops it, keeping the list and the other fields, when it has %s', async (_label, text) => {
+      const { reader } = readerOver(structured(named({ [field]: text })))
+
+      await expect(reader.read(JPEG)).resolves.toStrictEqual(keptWithout(field))
+    })
+
+    it.each(['https://evil.example/buy', 'Visit www.evil.example', '<b>Glow</b>', '<script>alert(1)</script>', 'Glow </div>', 'Glow <!-- hi -->'])(
+      'drops it, keeping the list and the other fields, when it carries a link or markup: %j',
+      async (text) => {
+        const { reader } = readerOver(structured(named({ [field]: text })))
+
+        await expect(reader.read(JPEG)).resolves.toStrictEqual(keptWithout(field))
+      },
+    )
+
+    it('accepts accents, symbols and non-Latin letters', async () => {
+      const text = 'Nuxe Crème Huile® 油 Néroli'
+      const { reader } = readerOver(structured(named({ [field]: text })))
+
+      await expect(reader.read(JPEG)).resolves.toMatchObject({ readable: true, [field]: text })
+    })
+  })
+
+  it('drops a bad brand and keeps a good name and the list: the brand alone is lost', async () => {
+    const { reader } = readerOver(structured(named({ brand: 'Glow <b>Co</b>', variant: '', category: undefined })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual({ readable: true, ingredients: ['Aqua', 'Glycerin'], name: 'Bright Tone Serum' })
+  })
+
+  it('drops every bad name field at once and still returns the list', async () => {
+    const { reader } = readerOver(structured(named({ brand: 'https://evil.example', name: 'a'.repeat(121), variant: 'Glow\u200bCo', category: 'skin' })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual({ readable: true, ingredients: ['Aqua', 'Glycerin'], category: 'skin' })
+  })
+
+  it.each(['perfume', 'SKIN', '', 'face'])('drops a category that is not one of the five (%j), keeping the list and the other fields', async (category) => {
+    const { reader } = readerOver(structured(named({ category })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual(keptWithout('category'))
+  })
+
+  it('still reads a bad list as not readable, whatever the name fields: the list is what must be good', async () => {
+    const { reader } = readerOver(structured(named({ ingredients: ['Aqua', 'see https://evil.example'] })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual(NOT_READABLE)
+  })
+
+  it('is still not readable when the ingredients are unreadable, even though the back printed a brand and name', async () => {
+    const { reader } = readerOver(structured(named({ readable: false, ingredients: [] })))
+
+    await expect(reader.read(JPEG)).resolves.toStrictEqual(NOT_READABLE)
+  })
+})

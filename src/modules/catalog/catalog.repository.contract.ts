@@ -19,6 +19,7 @@ const newProduct = (over: Partial<NewProduct> = {}): NewProduct => {
     id: freshId(),
     identityKey: `${brandKey}|${fresh('name')}|`,
     brandKey,
+    kind: 'named',
     brand: 'CeraVe',
     name: 'Hydrating Facial Cleanser',
     variant: null,
@@ -27,6 +28,20 @@ const newProduct = (over: Partial<NewProduct> = {}): NewProduct => {
     ...over,
   }
 }
+
+/** A product no label named: the catalog keys it by its ingredient list, and it has no brand or name. */
+const newUnnamedProduct = (over: Partial<NewProduct> = {}): NewProduct => ({
+  id: freshId(),
+  identityKey: `unnamed:${fresh('aqua')}\nglycerin`,
+  brandKey: '',
+  kind: 'unnamed',
+  brand: '',
+  name: '',
+  variant: null,
+  category: 'other',
+  createdAt: BASE,
+  ...over,
+})
 
 const newFormulation = (productId: string, over: Partial<NewFormulation> = {}): NewFormulation => {
   const ingredients = over.ingredients ?? ['Aqua', 'Glycerin', fresh('Parfum')]
@@ -116,6 +131,39 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         const repo = await make()
 
         expect(await repo.findProductById(freshId())).toBeNull()
+      })
+
+      it('createProduct keeps the kind it is given, named or unnamed, and reads it back by id and by key', async () => {
+        const repo = await make()
+        const named = newProduct()
+        const unnamed = newUnnamedProduct()
+
+        expect(await repo.createProduct(named)).toMatchObject({ kind: 'named' })
+        expect(await repo.createProduct(unnamed)).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', brandKey: '' })
+
+        expect(await repo.findProductById(named.id)).toMatchObject({ kind: 'named' })
+        expect(await repo.findProductById(unnamed.id)).toMatchObject({ kind: 'unnamed' })
+        expect(await repo.findProductByKey(unnamed.identityKey)).toMatchObject({ id: unnamed.id, kind: 'unnamed' })
+      })
+
+      it('finds an unnamed product by its identity key, "unnamed:" and the list\'s ingredients key, as written', async () => {
+        const repo = await make()
+        const listKey = fresh('aqua\nglycerin\ncetearyl alcohol')
+        const unnamed = newUnnamedProduct({ identityKey: `unnamed:${listKey}` })
+        await repo.createProduct(unnamed)
+
+        expect(await repo.findProductByKey(`unnamed:${listKey}`)).toMatchObject({ id: unnamed.id })
+        expect(await repo.findProductByKey(listKey)).toBeNull()
+      })
+
+      it('createProduct for an unnamed identity key that is already stored creates nothing and returns the existing product', async () => {
+        const repo = await make()
+        const first = newUnnamedProduct()
+        await repo.createProduct(first)
+
+        const second = await repo.createProduct(newUnnamedProduct({ identityKey: first.identityKey }))
+
+        expect(second).toMatchObject({ id: first.id, kind: 'unnamed' })
       })
     })
 
@@ -813,6 +861,177 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         const formulation = await withFormulation(repo)
 
         expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(0)
+      })
+    })
+
+    describe('adoptUnnamedFormulation', () => {
+      /** An unnamed product with its one analysed formulation (one concern), the way a list with no name is stored. */
+      const unnamedWithAnalysis = async (repo: CatalogRepository, over: Partial<NewFormulation> = {}) => {
+        const unnamed = newUnnamedProduct()
+        await repo.createProduct(unnamed)
+        const formulation = newFormulation(unnamed.id, { sourceKind: 'label', sourceUrl: null, foundAt: at(HOUR), ...over })
+        await repo.createFormulation(formulation)
+        await repo.saveAnalysis(formulation.id, {
+          concerns: [concern({ kind: 'banned-substance', severity: 'high', traits: ['sensitive'] })],
+          analysisVersion: 3,
+          referenceVersion: 'seed-9',
+          analysedAt: at(2 * HOUR),
+        })
+        return { unnamed, formulation }
+      }
+      const namedProduct = async (repo: CatalogRepository) => {
+        const named = newProduct()
+        await repo.createProduct(named)
+        return named
+      }
+
+      it('moves the formulation to the named product, keeping its id, its list and source, and its analysis with its concerns', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const concernsBefore = await repo.concernsFor(formulation.id)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        const moved = (await repo.findFormulation(formulation.id))!
+        expect(moved).toMatchObject({
+          id: formulation.id,
+          productId: named.id,
+          ingredients: formulation.ingredients,
+          ingredientsKey: formulation.ingredientsKey,
+          sourceKind: 'label',
+          sourceUrl: null,
+          analysisVersion: 3,
+          referenceVersion: 'seed-9',
+        })
+        expect(moved.foundAt.getTime()).toBe(at(HOUR).getTime())
+        expect(moved.analysedAt!.getTime()).toBe(at(2 * HOUR).getTime())
+        expect(await repo.concernsFor(formulation.id)).toEqual(concernsBefore)
+        expect(concernsBefore).toHaveLength(1)
+      })
+
+      it('makes the moved formulation the named product\'s own: found by its latest and by its ingredients key', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.latestFormulation(named.id)).toMatchObject({ id: formulation.id })
+        expect(await repo.findFormulationByIngredientsKey(named.id, formulation.ingredientsKey)).toMatchObject({ id: formulation.id })
+      })
+
+      it('removes the unnamed product, by id and by its identity key', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.findProductById(unnamed.id)).toBeNull()
+        expect(await repo.findProductByKey(unnamed.identityKey)).toBeNull()
+        expect(await repo.latestFormulation(unnamed.id)).toBeNull()
+      })
+
+      it('keeps the formulation\'s analysis attempts, so a rejection already counted still counts', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        await repo.recordAnalysisAttempt({ id: freshId(), formulationId: formulation.id, attemptedAt: BASE, outcome: 'rejected', analysisVersion: 3, referenceVersion: 'seed-9' })
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.rejectedAnalyses(formulation.id, 3, 'seed-9')).toBe(1)
+      })
+
+      it('leaves the named product\'s other formulations, with their analyses, as they were', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const web = newFormulation(named.id, { foundAt: at(30 * MINUTE) })
+        await repo.createFormulation(web)
+        await repo.saveAnalysis(web.id, { concerns: [concern()], analysisVersion: 3, referenceVersion: 'seed-9', analysedAt: at(45 * MINUTE) })
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.findFormulation(web.id)).toMatchObject({ productId: named.id, analysisVersion: 3 })
+        expect(await repo.concernsFor(web.id)).toHaveLength(1)
+        // Found after the web one, so the moved list is now the product's latest.
+        expect(await repo.latestFormulation(named.id)).toMatchObject({ id: formulation.id })
+      })
+
+      it('throws, and changes nothing, when the named product already has a formulation with that ingredients key', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const theirs = await repo.createFormulation(newFormulation(named.id, { ingredients: formulation.ingredients, ingredientsKey: formulation.ingredientsKey }))
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, named.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: unnamed.id, analysisVersion: 3 })
+        expect(await repo.concernsFor(formulation.id)).toHaveLength(1)
+        expect(await repo.findProductById(unnamed.id)).toMatchObject({ id: unnamed.id })
+        expect(await repo.findFormulationByIngredientsKey(named.id, formulation.ingredientsKey)).toMatchObject({ id: theirs.id })
+      })
+
+      it('throws, and changes nothing, for a product that does not exist', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, freshId())).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: unnamed.id })
+        expect(await repo.findProductById(unnamed.id)).not.toBeNull()
+      })
+
+      it('throws for a formulation that does not exist, leaving the named product as it was', async () => {
+        const repo = await make()
+        const named = await namedProduct(repo)
+
+        await expect(repo.adoptUnnamedFormulation(freshId(), named.id)).rejects.toThrow()
+
+        expect(await repo.findProductById(named.id)).toMatchObject({ id: named.id })
+      })
+
+      it('lets one of two adopters of the same formulation win: the second, for a different product, throws and the formulation stays with the first', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const first = await namedProduct(repo)
+        const second = await namedProduct(repo)
+        await repo.adoptUnnamedFormulation(formulation.id, first.id)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, second.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: first.id })
+        expect(await repo.findFormulationByIngredientsKey(second.id, formulation.ingredientsKey)).toBeNull()
+      })
+
+      it('lets exactly one of two adopters running at once win, whichever it is: the other throws instead of reporting a move that did not happen', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const a = await namedProduct(repo)
+        const b = await namedProduct(repo)
+
+        const results = await Promise.allSettled([repo.adoptUnnamedFormulation(formulation.id, a.id), repo.adoptUnnamedFormulation(formulation.id, b.id)])
+
+        expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+        const [winner, loser] = results[0]!.status === 'fulfilled' ? [a, b] : [b, a]
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: winner.id, analysisVersion: 3 })
+        expect(await repo.findFormulationByIngredientsKey(loser.id, formulation.ingredientsKey)).toBeNull()
+        expect(await repo.concernsFor(formulation.id)).toHaveLength(1)
+      })
+
+      it('throws, and removes nothing, for a formulation that belongs to a named product: only an unnamed product is ever given up', async () => {
+        const repo = await make()
+        const owner = await namedProduct(repo)
+        const formulation = await repo.createFormulation(newFormulation(owner.id))
+        const target = await namedProduct(repo)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, target.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: owner.id })
+        expect(await repo.findProductById(owner.id)).not.toBeNull()
+        expect(await repo.findProductById(target.id)).not.toBeNull()
       })
     })
   })

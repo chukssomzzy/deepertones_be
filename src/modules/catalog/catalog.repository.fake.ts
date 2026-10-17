@@ -27,7 +27,7 @@ export class FakeCatalogRepository implements CatalogRepository {
   async createProduct(input: NewProduct): Promise<Product> {
     const existing = [...this.products.values()].find((p) => p.identityKey === input.identityKey)
     if (existing) return { ...existing }
-    const product: Product = { ...input, imageKey: null, imageSourceUrl: null, imageCheckedAt: null }
+    const product: Product = { ...input, kind: input.kind ?? 'named', imageKey: null, imageSourceUrl: null, imageCheckedAt: null }
     this.products.set(product.id, product)
     return { ...product }
   }
@@ -67,6 +67,28 @@ export class FakeCatalogRepository implements CatalogRepository {
     const formulation: Formulation = { ...input, analysisVersion: null, referenceVersion: null, analysedAt: null }
     this.formulations.push(formulation)
     return copyFormulation(formulation)
+  }
+
+  /**
+   * Moves the formulation of an unnamed product to `productId` (id, analysis and concerns kept) and removes the unnamed product with its aliases, in one step.
+   * Throws, changing nothing, for an unknown formulation or product, a formulation of a named product, or a product that already has the list.
+   */
+  async adoptUnnamedFormulation(formulationId: string, productId: string): Promise<void> {
+    const formulation = this.formulations.find((f) => f.id === formulationId)
+    if (!formulation) throw new Error(`unknown formulation ${formulationId}`)
+    if (!this.products.has(productId)) throw new Error(`unknown product ${productId}`)
+    const owner = this.products.get(formulation.productId)
+    if (!owner || owner.kind !== 'unnamed') throw new Error(`formulation ${formulationId} does not belong to an unnamed product`)
+    if (this.formulations.some((f) => f.productId === productId && f.ingredientsKey === formulation.ingredientsKey)) {
+      throw new Error(`product ${productId} already has this ingredient list`)
+    }
+    formulation.productId = productId
+    this.products.delete(owner.id)
+    for (const [aliasKey, aliased] of this.aliases) if (aliased === owner.id) this.aliases.delete(aliasKey)
+    // Whatever else the unnamed product still held goes with it, as the foreign keys cascade in D1.
+    const gone = new Set(this.formulations.filter((f) => f.productId === owner.id).map((f) => f.id))
+    this.formulations = this.formulations.filter((f) => !gone.has(f.id))
+    for (const id of gone) this.concerns.delete(id)
   }
 
   async findFormulation(id: string): Promise<Formulation | null> {

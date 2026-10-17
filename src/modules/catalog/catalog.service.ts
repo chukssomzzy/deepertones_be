@@ -92,9 +92,13 @@ export type ResearchResult =
   | { kind: 'not-found'; fallbackFormulationId?: string }
   | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
+/** The product and formulation a label's list belongs to; `analysed` says whether that formulation is already analysed by the current versions. */
+export type LabelResult = { productId: string; formulationId: string; analysed: boolean }
+
 export type ProductView = {
   product: {
     id: string
+    kind: Product['kind']
     brand: string
     name: string
     variant: string | null
@@ -123,6 +127,8 @@ export type ProductView = {
 
 export class ProductCatalogService {
   private static readonly DAY = 24 * 60 * 60 * 1000
+  /** What the identity key of a product no label named starts with; the rest is the list's ingredients key. */
+  private static readonly UNNAMED_PREFIX = 'unnamed:'
   private static readonly MAX_LABEL_INGREDIENTS = 150
   private static readonly MAX_LABEL_INGREDIENT_LENGTH = 120
   private static readonly CONTROL_CHARACTER = /\p{Cc}/u
@@ -175,38 +181,47 @@ export class ProductCatalogService {
    * is put to the model against the brand's most similar products; a "same product" answer is remembered as an alias.
    */
   async resolve(identity: ProductIdentity): Promise<ResolveResult> {
+    return this.nextStep(await this.findOrCreateProduct(identity))
+  }
+
+  /**
+   * The product this label names: found by its key, else by a near miss the model says is the same, else created.
+   * A label that prints no category (`category` absent) is compared with the brand's products of every category, and
+   * a product made from it is filed under other.
+   */
+  private async findOrCreateProduct(identity: Omit<ProductIdentity, 'category'> & { category?: ProductIdentity['category'] }): Promise<Product> {
     const key = identityKey(identity)
     const known = await this.repository.findProductByKey(key)
-    if (known) return this.nextStep(known)
+    if (known) return known
 
     const brandProducts = await this.repository.productsByBrandKey(brandKey(identity.brand), this.policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
-      (p) => p.category === identity.category && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
+      (p) => (identity.category === undefined || p.category === identity.category) && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
       threshold: this.policy.nearMissThreshold,
       limit: this.policy.nearMissLimit,
     })
     for (const candidate of candidates) {
-      if (await this.isSameProduct(identity, candidate)) {
+      if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         await this.repository.addAlias(key, candidate.id)
-        return this.nextStep(candidate)
+        return candidate
       }
     }
 
     // Returns the stored row, so a concurrent scan of the same new product carries on with the winner.
-    const created = await this.repository.createProduct({
+    return this.repository.createProduct({
       id: this.newId(),
       identityKey: key,
       brandKey: brandKey(identity.brand),
+      kind: 'named',
       brand: identity.brand,
       name: identity.name,
       variant: identity.variant ?? null,
-      category: identity.category,
+      category: identity.category ?? 'other',
       createdAt: this.now(),
     })
-    return this.nextStep(created)
   }
 
   /**
@@ -281,6 +296,78 @@ export class ProductCatalogService {
   /** Stores the ingredient list read from a back-label photo; an identical list the product already has is reused. */
   async addLabelIngredients(productId: string, ingredients: string[]): Promise<string> {
     await this.requireProduct(productId)
+    return this.storeFormulation(productId, ProductCatalogService.readableList(ingredients), 'label', null, this.now())
+  }
+
+  /**
+   * Files a list read from the back of a product that has no product yet, and says which formulation it is. Researches nothing.
+   *
+   * With both a brand and a name the list belongs to the product they name (found as `resolve` finds it, so a near-miss
+   * spelling is put to the model; created if new). Otherwise it belongs to the unnamed product for that list, keyed by the list
+   * itself, so the same list from anyone's scan is one formulation, analysed once. When a named product is later given a list an
+   * unnamed product holds, that formulation moves to it (same id, so the analysis is kept and items already pointing at it
+   * now show the named product), unless the named product already has the list: then its own is used and the unnamed one is left
+   * for the items still pointing at it.
+   *
+   * The list is checked before anything is written (LABEL_UNREADABLE).
+   */
+  async fromLabel(label: { ingredients: string[]; brand?: string; name?: string; variant?: string; category?: Product['category'] }): Promise<LabelResult> {
+    const ingredients = ProductCatalogService.readableList(label.ingredients)
+    const listKey = ingredientsKey(ingredients)
+    const unnamedKey = `${ProductCatalogService.UNNAMED_PREFIX}${listKey}`
+    const brand = label.brand?.trim()
+    const name = label.name?.trim()
+    const variant = label.variant?.trim()
+
+    if (!brand || !name) {
+      const product = await this.repository.createProduct({
+        id: this.newId(),
+        identityKey: unnamedKey,
+        brandKey: '',
+        kind: 'unnamed',
+        brand: '',
+        name: '',
+        variant: null,
+        category: label.category ?? 'other',
+        createdAt: this.now(),
+      })
+      return this.labelResult(product.id, await this.formulationFor(product.id, ingredients, listKey))
+    }
+
+    const product = await this.findOrCreateProduct({ brand, name, ...(label.category ? { category: label.category } : {}), ...(variant ? { variant } : {}) })
+    const own = await this.repository.findFormulationByIngredientsKey(product.id, listKey)
+    if (own) return this.labelResult(product.id, own)
+
+    const unnamed = await this.repository.findProductByKey(unnamedKey)
+    const held = unnamed?.kind === 'unnamed' ? await this.repository.findFormulationByIngredientsKey(unnamed.id, listKey) : null
+    if (held) {
+      try {
+        await this.repository.adoptUnnamedFormulation(held.id, product.id)
+        return this.labelResult(product.id, held)
+      } catch {
+        // Whatever stopped the move (a concurrent adopter took the formulation, for this product or another; or a failed write), the
+        // formulation is not ours now: use this product's own formulation for the list, or store one. A real outage fails there too.
+      }
+    }
+    return this.labelResult(product.id, await this.formulationFor(product.id, ingredients, listKey))
+  }
+
+  /** The product's formulation for this list, as it is; stored as a new label formulation when it has none. */
+  private async formulationFor(productId: string, ingredients: string[], listKey: string): Promise<Formulation> {
+    const known = await this.repository.findFormulationByIngredientsKey(productId, listKey)
+    if (known) return known
+    const stored = await this.storeFormulation(productId, ingredients, 'label', null, this.now())
+    const formulation = await this.repository.findFormulation(stored)
+    if (!formulation) throw new Error(`formulation ${stored} was not stored`)
+    return formulation
+  }
+
+  private labelResult(productId: string, formulation: Formulation): LabelResult {
+    return { productId, formulationId: formulation.id, analysed: this.isAnalysed(formulation) }
+  }
+
+  /** The list trimmed, or LABEL_UNREADABLE when it is empty, over its bounds, or carries a link, markup or a control character. */
+  private static readableList(ingredients: string[]): string[] {
     const trimmed = ingredients.map((name) => name.trim())
     const readable =
       trimmed.length > 0 &&
@@ -293,7 +380,7 @@ export class ProductCatalogService {
           !hasLinkOrMarkup(name),
       )
     if (!readable) throw new ValidationError('LABEL_UNREADABLE', 'The ingredient list on the label could not be read')
-    return this.storeFormulation(productId, trimmed, 'label', null, this.now())
+    return trimmed
   }
 
   /**
@@ -383,6 +470,7 @@ export class ProductCatalogService {
     return {
       product: {
         id: product.id,
+        kind: product.kind,
         brand: product.brand,
         name: product.name,
         variant: product.variant,

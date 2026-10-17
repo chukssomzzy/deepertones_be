@@ -94,6 +94,8 @@ export type ScanServiceDeps = {
 
 // Spelled out because a type outside the class cannot read its private members (TS2341).
 type WorkingState = 'recognising' | 'matching' | 'researching' | 'reading-label' | 'analysing'
+/** What a read back photo changes on its item, and whether the list it gave is already analysed by the current versions. */
+type Filed = { analysed: boolean; patch: Omit<ItemPatch, 'updatedAt'> }
 type ValidPhoto = { image: ProductImage; extension: 'jpg' | 'webp' }
 
 export class ScanService {
@@ -294,14 +296,15 @@ export class ScanService {
   }
 
   /**
-   * The photo of the ingredient list, for an item that asked for one. It counts as one photo against both daily quotas,
+   * The photo of the ingredient list, for an item that asked for one, or one that offers identification (its front photo could not be read
+   * three times, so the back identifies the product). It counts as one photo against both daily quotas,
    * however many an item has had (each upload is recorded, for the address it came from, in the same write that moves the
    * item on), is checked like a front photo, and is kept next to the front one as `<item id>-back.<jpg|webp>`.
    */
   async addBackPhoto(scanId: string, itemId: string, photo: ProductImage, clientIp: string): Promise<ScanItemView> {
     const item = await this.ownedItem(scanId, itemId)
     const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_BACK_PHOTO', 'This item is not waiting for a photo of the back')
-    if (item.state !== 'needs-back-photo') throw notAwaiting()
+    if (item.state !== 'needs-back-photo' && item.state !== 'needs-identification') throw notAwaiting()
     const valid = this.checkPhoto(photo)
     const now = this.now()
     const ipHash = await this.hashIp(clientIp)
@@ -312,7 +315,7 @@ export class ScanService {
     let moved = false
     try {
       moved = await this.transition(item, {
-        from: 'needs-back-photo',
+        from: item.state,
         change: { state: 'reading-label', reason: null, backPhotoKey: key },
         next: 'read-label',
         undo: { backPhotoKey: null },
@@ -665,10 +668,6 @@ export class ScanService {
 
   private async readLabel(item: ScanItem): Promise<void> {
     if (item.state !== 'reading-label') return
-    if (item.productId === null) {
-      await this.fail(item, 'reading-label', 'unavailable')
-      return
-    }
     const key = item.backPhotoKey
     const photo = key === null ? null : await this.photos.get(key)
     if (key === null || !photo) {
@@ -689,16 +688,22 @@ export class ScanService {
       if (!(error instanceof AnthropicRefusalError || error instanceof AnthropicRequestError)) throw error
       reading = { readable: false }
     }
-    let formulationId: string | null = null
+    // An item with no product is being identified by this photo; one that has a product only needs its list.
+    const productId = item.productId
+    let filed: Filed | null = null
     if (reading.readable) {
       try {
-        formulationId = await this.catalog.addLabelIngredients(item.productId, reading.ingredients)
+        filed = productId === null ? await this.identify(reading) : { analysed: false, patch: { formulationId: await this.catalog.addLabelIngredients(productId, reading.ingredients) } }
       } catch (error) {
+        if (productId === null && error instanceof CatalogBusyError) {
+          await this.fail(item, 'reading-label', 'research-busy')
+          return
+        }
         // The catalog refuses a list that is empty, over its bounds, or carries a link or markup: the same as unreadable.
         if (!(error instanceof ValidationError && error.code === 'LABEL_UNREADABLE')) throw error
       }
     }
-    if (formulationId === null) {
+    if (filed === null) {
       // The back photo is deleted; the upload stays counted against the daily quota in its own record.
       await this.photos.delete(key)
       await this.labelUnreadable(item)
@@ -707,22 +712,45 @@ export class ScanService {
     // The photo is deleted after the move, not before: if the next step cannot be queued the move is undone, and the retry needs it.
     const moved = await this.transition(item, {
       from: 'reading-label',
-      change: { state: 'analysing', formulationId, backPhotoKey: null },
-      next: 'analyse',
+      change: { ...filed.patch, state: filed.analysed ? 'ready' : 'analysing', backPhotoKey: null },
+      next: filed.analysed ? undefined : 'analyse',
       undo: { backPhotoKey: key },
     })
     if (moved) await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId: item.scanId, itemId: item.id }))
   }
 
   /**
+   * Files what an item's back photo gave when the item has no product: the catalog finds or creates the product the label names,
+   * or keeps the bare list. The item shows what the label printed as what it was recognised as, but only when it printed both a
+   * brand and a name; a list with no name leaves it absent.
+   */
+  private async identify(reading: Extract<LabelReading, { readable: true }>): Promise<Filed> {
+    const filed = await this.catalog.fromLabel(reading)
+    const patch = { productId: filed.productId, formulationId: filed.formulationId }
+    if (reading.brand === undefined || reading.name === undefined) return { analysed: filed.analysed, patch }
+    return {
+      analysed: filed.analysed,
+      patch: {
+        ...patch,
+        recognisedBrand: reading.brand,
+        recognisedName: reading.name,
+        recognisedVariant: reading.variant ?? null,
+        recognisedCategory: reading.category ?? 'other',
+      },
+    }
+  }
+
+  /**
    * The back photo could not give a label. Asks for another, unless the item has had `maxBackPhotos` already: then it ends
    * as failed, keeping its front photo like the other failures. Every upload is counted, so the count includes this one.
+   * An item with no product asks by offering identification again; one with a product, for the photo of its ingredients.
    */
   private async labelUnreadable(item: ScanItem): Promise<void> {
     const ask = (await this.repository.countBackPhotos(item.id)) < this.policy.maxBackPhotos
+    const asking = item.productId === null ? 'needs-identification' : 'needs-back-photo'
     await this.transition(item, {
       from: 'reading-label',
-      change: { state: ask ? 'needs-back-photo' : 'failed', reason: 'label-unreadable', backPhotoKey: null },
+      change: { state: ask ? asking : 'failed', reason: 'label-unreadable', backPhotoKey: null },
     })
   }
 

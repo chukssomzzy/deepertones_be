@@ -10,7 +10,7 @@ const readyItem = (): ScanItemView => ({
   reason: null,
   recognised: { brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin' },
   product: {
-    product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
+    product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
     formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: new Date('2030-01-01T00:00:00Z'), analysedAt: null },
     concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
     reference: { version: 'v1', coverage: 'partial' },
@@ -27,7 +27,7 @@ describe('toScanItemResponse', () => {
       reason: null,
       recognised: { brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin' },
       product: {
-        product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
+        product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
         formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: '2030-01-01T00:00:00.000Z', analysedAt: null },
         concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
         reference: { version: 'v1', coverage: 'partial' },
@@ -92,5 +92,27 @@ describe('toScanItemResponse', () => {
     expect(toScanItemResponse(item)).not.toHaveProperty('retakesLeft')
     expect(Object.keys(toScanItemResponse(item))).not.toContain('retakesLeft')
     expect(Object.keys(toScanItemResponse(readyItem()))).not.toContain('retakesLeft')
+  })
+
+  it('publishes the product\'s kind, and an unnamed product with its empty brand and name, as the response schema allows', () => {
+    const named = readyItem()
+    const unnamed: ScanItemView = {
+      ...named,
+      product: { ...named.product!, product: { id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', imageUrl: null } },
+    }
+
+    const response = toScanItemResponse(unnamed)
+
+    expect(toScanItemResponse(named).product!.product).toMatchObject({ kind: 'named' })
+    expect(response.product!.product).toEqual({ id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', imageUrl: null })
+    expect(ScanItemResponse.safeParse(response).success).toBe(true)
+  })
+
+  it('rejects a product kind the response schema does not name', () => {
+    const response = toScanItemResponse(readyItem())
+
+    const parsed = ScanItemResponse.safeParse({ ...response, product: { ...response.product!, product: { ...response.product!.product, kind: 'mystery' } } })
+
+    expect(parsed.success).toBe(false)
   })
 })

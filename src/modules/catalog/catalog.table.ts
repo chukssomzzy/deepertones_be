@@ -8,6 +8,8 @@ export const products = sqliteTable(
     id: text('id').primaryKey(),
     identityKey: text('identity_key').notNull(),
     brandKey: text('brand_key').notNull(),
+    // An unnamed product is a list nobody named: its identity key is "unnamed:" and the list's ingredients key, and its brand and name are ''.
+    kind: text('kind', { enum: ['named', 'unnamed'] }).notNull().default('named'),
     brand: text('brand').notNull(),
     name: text('name').notNull(),
     variant: text('variant'),

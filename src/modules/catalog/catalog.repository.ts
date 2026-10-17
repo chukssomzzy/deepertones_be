@@ -24,7 +24,10 @@ export class D1CatalogRepository {
    * the race), stores nothing. Either way returns the stored row, so the caller carries on with the winner.
    */
   async createProduct(input: NewProduct): Promise<Product> {
-    await this.db.insert(products).values(input).onConflictDoNothing({ target: products.identityKey })
+    await this.db
+      .insert(products)
+      .values({ ...input, kind: input.kind ?? 'named' })
+      .onConflictDoNothing({ target: products.identityKey })
     const [row] = await this.db.select().from(products).where(eq(products.identityKey, input.identityKey))
     if (!row) throw new Error(`product ${input.id} was not stored`)
     return row
@@ -87,6 +90,31 @@ export class D1CatalogRepository {
       .where(and(eq(formulations.productId, input.productId), eq(formulations.ingredientsKey, input.ingredientsKey)))
     if (!row) throw new Error(`formulation ${input.id} was not stored`)
     return row
+  }
+
+  /**
+   * Moves the formulation of an unnamed product to `productId` and deletes the unnamed product, in ONE batch: if the
+   * target already has the list, the unique index refuses the move and the delete is rolled back with it. The formulation keeps
+   * its id, analysis, concerns and attempts. Throws, changing nothing, for an unknown formulation or product, a formulation
+   * of a named product (a named product is never deleted), or a product that already has the list.
+   */
+  async adoptUnnamedFormulation(formulationId: string, productId: string): Promise<void> {
+    const formulation = await this.findFormulation(formulationId)
+    if (!formulation) throw new Error(`unknown formulation ${formulationId}`)
+    if (!(await this.findProductById(productId))) throw new Error(`unknown product ${productId}`)
+    const owner = await this.findProductById(formulation.productId)
+    if (!owner || owner.kind !== 'unnamed') throw new Error(`formulation ${formulationId} does not belong to an unnamed product`)
+    // The move is first: it takes the formulation out of the owner before the owner's delete cascades.
+    const [moved] = await this.db.batch([
+      this.db
+        .update(formulations)
+        .set({ productId })
+        .where(and(eq(formulations.id, formulationId), eq(formulations.productId, owner.id))),
+      this.db.delete(products).where(and(eq(products.id, owner.id), eq(products.kind, 'unnamed'))),
+    ])
+    // The reads above can be stale: a concurrent adopter may have moved the formulation since, and then the guarded update matches no row
+    // and the batch succeeds. That is not our move, so it must not be reported as one.
+    if (moved.meta.changes === 0) throw new Error(`formulation ${formulationId} was moved by another call`)
   }
 
   async findFormulation(id: string): Promise<Formulation | null> {

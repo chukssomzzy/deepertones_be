@@ -51,6 +51,9 @@ const ProductResult = z
   .object({
     product: z.object({
       id: z.string(),
+      kind: z.enum(['named', 'unnamed']).openapi({
+        description: 'An `unnamed` product is an ingredient list the label gave no brand and name for: its `brand` and `name` are empty strings and its `category` is `other` unless the label said otherwise.',
+      }),
       brand: z.string(),
       name: z.string(),
       variant: z.string().nullable(),
