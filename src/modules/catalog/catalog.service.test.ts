@@ -7,7 +7,7 @@ import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.pr
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
-import { identityKey } from './catalog.identity'
+import { brandKey, identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
 import { AnalysisRejectedError, CATALOG_POLICY, CatalogBusyError, ProductCatalogService } from './catalog.service'
@@ -2626,3 +2626,404 @@ describe('ProductCatalogService.fromLabel: a named label that prints no category
   })
 })
 
+
+describe('ProductCatalogService: the search text of a product', () => {
+  const searchTextOf = async (ctx: Ctx, productId: string) => (await ctx.repository.findProductById(productId))!.searchText
+
+  it('is the brand, name and variant, lower case, with accents and punctuation folded and "+" read as plus', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }))
+
+    expect(await searchTextOf(ctx, productId)).toBe('loreal paris revitalift creme spf 50 plus')
+  })
+
+  it('is just the brand and name, with no trailing space, when the product has no variant', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await searchTextOf(ctx, productId)).toBe('cerave hydrating facial cleanser')
+  })
+
+  it('reads "&" as "and" and drops apostrophes, the way the identity key does', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity({ brand: "Johnson's", name: 'Baby Oil & Lotion', category: 'body' }))
+
+    expect(await searchTextOf(ctx, productId)).toBe('johnsons baby oil and lotion')
+  })
+
+  it('is set on a named product created from a back label too', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' })
+
+    expect(await searchTextOf(ctx, productId)).toBe('glow co bright tone serum night')
+  })
+
+  it('is empty for an unnamed product', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    expect(await searchTextOf(ctx, productId)).toBe('')
+  })
+})
+
+describe('ProductCatalogService.search', () => {
+  const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']
+  const callsToAi = (ctx: Ctx) => ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length
+  const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
+
+  it('finds a named product by a fragment of its brand, name and variant, as { id, brand, name, variant, category, imageUrl } and nothing more', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
+
+    const found = await ctx.service.search('facial cleanser')
+
+    expect(found).toEqual([{ id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin', imageUrl: null }])
+  })
+
+  it('gives a null variant for a product with none, and the stock image\'s public URL for one that has an image', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    await ctx.repository.setProductImage(productId, { key: 'catalog/test/products/cerave.jpg', sourceUrl: IMAGE_URL, checkedAt: T0 })
+
+    expect(await ctx.service.search('cerave')).toEqual([
+      { id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
+    ])
+  })
+
+  it.each([
+    ['upper case', 'CERAVE HYDRATING'],
+    ['surrounding and repeated spaces', '  cerave    hydrating  '],
+    ['an accent', 'céravé hydrating'],
+    ['punctuation', 'cerave, hydrating!'],
+  ])('normalises the query the way the search text is normalised: %s', async (_label, query) => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search(query))).toEqual([productId])
+  })
+
+  it('finds an accented, punctuated product by the plain text a user types', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème' }))
+
+    expect(idsOf(await ctx.service.search('loreal revitalift creme'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search("L'Oréal"))).toEqual([productId])
+  })
+
+  it('finds a product by words in another order, and by words that skip some of its own', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: 'La Roche-Posay', name: 'Effaclar Purifying Foaming Gel' }))
+
+    expect(idsOf(await ctx.service.search('gel effaclar'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('Roche foaming'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('effaclar sunscreen'))).toEqual([])
+  })
+
+  it.each([['nothing but spaces', '   '], ['nothing but punctuation', '!!'], ['an empty string', '']])('finds nothing, rather than every product, for %s', async (_label, query) => {
+    const ctx = setup()
+    await ctx.service.resolve(identity())
+
+    expect(await ctx.service.search(query)).toEqual([])
+  })
+
+  it.each([
+    ['one letter and punctuation', 'a!'],
+    ['one letter', 'a'],
+    ['one digit between spaces', ' 5 '],
+    ['punctuation around one letter', '...c...'],
+  ])('finds nothing for a query that is under 2 characters once normalised: %s', async (_label, query) => {
+    const ctx = setup()
+    await ctx.service.resolve(identity({ brand: 'Acme', name: 'Cleanser 5' }))
+
+    expect(await ctx.service.search(query)).toEqual([])
+  })
+
+  it('finds a product for a query of exactly 2 characters once normalised', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search('ce'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('!!ce!!'))).toEqual([productId])
+  })
+
+  it('finds nothing for text no product contains', async () => {
+    const ctx = setup()
+    await ctx.service.resolve(identity())
+
+    expect(await ctx.service.search('sunscreen')).toEqual([])
+  })
+
+  it('never returns an unnamed product, though its identity key holds the words of its list', async () => {
+    const ctx = setup()
+    await ctx.service.fromLabel({ ingredients: CLEAN })
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search('aqua'))).toEqual([])
+    expect(idsOf(await ctx.service.search('unnamed'))).toEqual([])
+    expect(idsOf(await ctx.service.search('cerave'))).toEqual([productId])
+  })
+
+  it('reaches a product through an alias it was given, once, though its own search text matches too', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    // A spelling the model confirms as the same product is remembered as an alias.
+    ctx.analyst.sameProductWith(() => true)
+    expect((await ctx.service.resolve(identity({ name: 'Hydrating Cleanser' }))).productId).toBe(productId)
+
+    expect(idsOf(await ctx.service.search('hydrating cleanser'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('cerave'))).toEqual([productId])
+  })
+
+  it('returns at most 10 products: ten matches give ten, eleven give the first ten in order', async () => {
+    const ctx = setup()
+    const ids: string[] = []
+    // One brand, names that differ in the last word only (3 of 4 words shared is below the near-miss threshold, so nothing asks the model).
+    for (const letter of LETTERS.slice(0, 10)) ids.push((await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${letter}` }))).productId)
+
+    expect(idsOf(await ctx.service.search('glow serum'))).toEqual(ids)
+
+    ids.push((await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${LETTERS[10]}` }))).productId)
+
+    // Same rank for all of them (none starts with the query), so the order is by name: the 11th, "... k", is the one left out.
+    expect(idsOf(await ctx.service.search('glow serum'))).toEqual(ids.slice(0, 10))
+  })
+
+  it('puts the products whose name starts with the query first, then the others by name', async () => {
+    const ctx = setup()
+    const wash = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Ceramide Wash' }))
+    const butter = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Cera Butter' }))
+    const cleanser = await ctx.service.resolve(identity({ brand: 'CeraVe', name: 'Hydrating Cleanser' }))
+
+    // "cerave ..." starts with "cera"; "acme cera butter" and "acme ceramide wash" only contain it, and Butter sorts before Wash.
+    expect(idsOf(await ctx.service.search('cera'))).toEqual([cleanser.productId, butter.productId, wash.productId])
+  })
+
+  it('makes no model or web call, however many products it looks at', async () => {
+    const ctx = setup()
+    for (const letter of LETTERS) await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${letter}` }))
+    const before = callsToAi(ctx)
+
+    await ctx.service.search('glow')
+    await ctx.service.search('zzz')
+
+    expect(callsToAi(ctx)).toBe(before)
+  })
+})
+
+describe('ProductCatalogService.choose', () => {
+  it('says ready, with the product and formulation, for a product with a fresh formulation analysed by the current version, calling no model', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+    const calls = ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.researcher.calls.length
+
+    const result = await ctx.service.choose(productId)
+
+    expect(result).toEqual({ kind: 'ready', productId, formulationId })
+    expect(ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.researcher.calls.length).toBe(calls)
+  })
+
+  it('says needs-analysis for a product whose formulation has not been analysed', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await researched(ctx)
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  it('says needs-research for a product that has no formulation yet', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-research', productId })
+  })
+
+  it('treats a formulation exactly FRESH_FOR_DAYS old as fresh and one a millisecond older as needing research', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+
+    ctx.advance(FRESH_FOR_DAYS * DAY)
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'ready', productId, formulationId })
+
+    ctx.advance(1)
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-research', productId })
+  })
+
+  it.each(OLDER_CODE)('asks for analysis again of a formulation analysed by %s', async (_label, over) => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+    await analysedByOlderCode(ctx, formulationId, over)
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  it('answers exactly what resolve answers for the same product', async () => {
+    const ctx = setup()
+    const { productId } = await analysed(ctx)
+
+    expect(await ctx.service.choose(productId)).toEqual(await ctx.service.resolve(identity()))
+  })
+
+  it('creates nothing and records no attempt', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx)
+    const attempts = await ctx.repository.researchAttemptsSince(new Date(0))
+
+    await ctx.service.choose(productId)
+
+    expect(await ctx.repository.researchAttemptsSince(new Date(0))).toBe(attempts)
+    expect(await ctx.repository.productsByBrandKey('cerave', 10)).toHaveLength(1)
+  })
+
+  it('throws PRODUCT_NOT_FOUND for a product id the catalog does not hold', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(ctx.service.choose('no-such-product'))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+
+  it('throws PRODUCT_NOT_FOUND for an unnamed product, which search never offers', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    const error = await errorOf(ctx.service.choose(productId))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+})
+
+describe('ProductCatalogService.fillSearchText', () => {
+  /** A named product as a Worker that did not know search text made it: the row is there and its search text is empty. */
+  const oldProduct = async (ctx: Ctx, who: { brand: string; name: string; variant?: string }, id: string, key = identityKey(who)) =>
+    ctx.repository.createProduct({
+      id,
+      identityKey: key,
+      brandKey: brandKey(who.brand),
+      kind: 'named',
+      brand: who.brand,
+      name: who.name,
+      variant: who.variant ?? null,
+      category: 'skin',
+      createdAt: T0,
+    })
+  const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
+
+  it.each([
+    ['Johnson & Johnson', 'Baby Oil', 'johnson & johnson'],
+    ['Dove', 'Men+Care Body Wash', 'men+care'],
+    ["Carol's Daughter", 'Black Vanilla Moisture', 'carols'],
+    ["L'Oréal", 'Revitalift Crème', 'loreal'],
+  ])('fills in the search text of %s %s the way a new product gets it, so plain typed text (%s) finds it', async (brand, name, typed) => {
+    const ctx = setup()
+    await oldProduct(ctx, { brand, name }, 'old-1')
+    expect(await ctx.service.search(typed)).toEqual([])
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect(idsOf(await ctx.service.search(typed))).toEqual(['old-1'])
+  })
+
+  it('fills in the exact same text resolve would have stored, variant included', async () => {
+    const ctx = setup()
+    const made = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }))
+    // The same product, as another key (a stored product with this key would be returned instead of created): the text must not depend on the key.
+    await oldProduct(ctx, { brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }, 'old-1', 'old-worker-key')
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe('')
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe((await ctx.repository.findProductById(made.productId))!.searchText)
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe('loreal paris revitalift creme spf 50 plus')
+  })
+
+  it('returns how many products it filled, fills each once, and then has nothing left to fill', async () => {
+    const ctx = setup()
+    for (const n of [1, 2, 3]) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${n}`)
+
+    expect(await ctx.service.fillSearchText()).toBe(3)
+    expect(await ctx.service.fillSearchText()).toBe(0)
+    expect(idsOf(await ctx.service.search('acme serum'))).toEqual(['old-1', 'old-2', 'old-3'])
+  })
+
+  it('does nothing, and returns 0, for a catalog where every product has search text', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    const before = (await ctx.repository.findProductById(productId))!.searchText
+
+    expect(await ctx.service.fillSearchText()).toBe(0)
+    expect((await ctx.repository.findProductById(productId))!.searchText).toBe(before)
+  })
+
+  it('leaves an unnamed product alone: its search text stays empty, and it is not counted', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+    await oldProduct(ctx, { brand: 'Acme', name: 'Serum' }, 'old-1')
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect((await ctx.repository.findProductById(productId))!.searchText).toBe('')
+  })
+
+  it('does not overwrite search text a product already has', async () => {
+    const ctx = setup()
+    const made = await ctx.service.resolve(identity())
+    await ctx.repository.setSearchText(made.productId, 'set by hand')
+
+    await ctx.service.fillSearchText()
+
+    expect((await ctx.repository.findProductById(made.productId))!.searchText).toBe('set by hand')
+  })
+
+  it('fills at most 500 products a call: 501 old products take two calls, 500 and then 1', async () => {
+    const ctx = setup()
+    for (let n = 0; n < 501; n++) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${String(n).padStart(3, '0')}`)
+
+    expect(await ctx.service.fillSearchText()).toBe(500)
+    expect(await ctx.service.fillSearchText()).toBe(1)
+    expect(await ctx.service.fillSearchText()).toBe(0)
+  })
+
+  it('writes what it fills through one setSearchTexts call per run, holding every filled row, and never row by row', async () => {
+    const ctx = setup()
+    for (const n of [1, 2, 3]) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${n}`)
+    const batch = vi.spyOn(ctx.repository, 'setSearchTexts')
+    const single = vi.spyOn(ctx.repository, 'setSearchText')
+
+    await ctx.service.fillSearchText()
+
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(batch.mock.calls[0]![0]).toEqual([
+      { id: 'old-1', searchText: 'acme serum 1' },
+      { id: 'old-2', searchText: 'acme serum 2' },
+      { id: 'old-3', searchText: 'acme serum 3' },
+    ])
+    expect(single).not.toHaveBeenCalled()
+  })
+
+  it('makes one setSearchTexts call of 500 rows for 501 old products, then one of 1, and none when there is nothing to fill', async () => {
+    const ctx = setup()
+    for (let n = 0; n < 501; n++) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${String(n).padStart(3, '0')}`)
+    const batch = vi.spyOn(ctx.repository, 'setSearchTexts')
+
+    await ctx.service.fillSearchText()
+    await ctx.service.fillSearchText()
+    await ctx.service.fillSearchText()
+
+    expect(batch.mock.calls.map(([rows]) => rows.length)).toEqual([500, 1])
+  })
+
+  it('makes no model or web call', async () => {
+    const ctx = setup()
+    await oldProduct(ctx, { brand: 'Acme', name: 'Serum' }, 'old-1')
+
+    await ctx.service.fillSearchText()
+
+    expect(ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length).toBe(0)
+  })
+})

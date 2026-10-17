@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PermanentJobError } from '../../jobs/job'
-import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, ValidationError } from '../../lib/errors'
+import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { runAs } from '../../lib/context'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
@@ -8,6 +8,7 @@ import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError
 import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.catalog-image-store'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryLabelReader } from '../../providers/label-reading/memory.label-reader'
+import { MemoryNameSplitter } from '../../providers/name-splitting/memory.name-splitter'
 import { MemoryPhotoStore } from '../../providers/photo-store/memory.photo-store'
 import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.product-analyst'
 import type { LabelReading } from '../../providers/label-reading/label-reader.provider'
@@ -19,7 +20,7 @@ import type { ProductIdentity } from '../../providers/product-research/product-r
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
-import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
+import { AnalysisInProgressError, CatalogBusyError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
 import { REFERENCE_VERSION } from '../catalog/catalog.reference'
 import { ANALYSIS_VERSION, FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
@@ -94,6 +95,7 @@ const setup = (options: SetupOptions = {}) => {
   const recognizer = new MemoryProductRecognizer()
   recognizer.respondWith(() => seen())
   const labelReader = new MemoryLabelReader()
+  const nameSplitter = new MemoryNameSplitter()
   const photos = options.photos ?? new MemoryPhotoStore({ environment: 'test' })
   const jobs = new MemoryJobQueue()
   const events = options.events?.(repository) ?? new MemoryScanEvents()
@@ -102,6 +104,7 @@ const setup = (options: SetupOptions = {}) => {
     catalog,
     recognizer,
     labelReader,
+    nameSplitter,
     photos,
     jobs,
     events,
@@ -122,6 +125,7 @@ const setup = (options: SetupOptions = {}) => {
     images,
     recognizer,
     labelReader,
+    nameSplitter,
     photos,
     jobs,
     events,
@@ -244,6 +248,8 @@ const failedFront = async (ctx: Ctx, reads: Recognition[]) => {
     }
     await run(ctx, itemId, 'recognise')
   }
+  // The steps above were run by hand, so the queue's messages for them are spent: a later `drain` must not run them again.
+  ctx.cursor.next = ctx.jobs.enqueued.length
   return { scanId, itemId }
 }
 
@@ -4240,3 +4246,538 @@ describe('ScanService.advance: read-label, an item with no product, when the AI 
   })
 })
 
+
+// --- identifying an item by typing its name: a product picked from the catalog, or free text split into a product ---
+
+// (ScanService already has a private `identify(reading)` for a back label's reading; this public one is `identifyByName`.)
+describe('ScanService.identifyByName', () => {
+  const SPLIT_CERAVE = { kind: 'product', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' } as const
+  type Input = { productId: string } | { text: string }
+  const identify = (ctx: Ctx, scanId: string, itemId: string, input: Input, userId = USER, profileId = PROFILE): Promise<any> =>
+    asUser(() => ctx.service.identifyByName(scanId, itemId, input), userId, profileId)
+
+  /** The two states a name may be typed in: while retakes are left, and once the 3rd front photo could not be read. */
+  const AWAITING = [
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])],
+  ] as const
+  /** Every call that could cost: the recognizer, the label reader, the splitter, the web researcher and the analyst. */
+  const aiCalls = (ctx: Ctx) =>
+    ctx.recognizer.calls.length + ctx.labelReader.calls.length + ctx.nameSplitter.calls.length + ctx.researcher.calls.length + ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length
+
+  describe.each(AWAITING)('a product picked from the catalog, for an item in %s', (state, arrange) => {
+    it('moves an item whose product is analysed straight to ready with its product, showing the chosen product as what it was recognised as, and queues nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, { ...CERAVE, variant: 'Night' })
+      const queuedBefore = queued(ctx)
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({
+        id: itemId,
+        state: 'ready',
+        reason: null,
+        recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin' },
+        product: { product: { id: productId, kind: 'named', brand: 'CeraVe' }, formulation: { id: formulationId } },
+      })
+      expect(view).not.toHaveProperty('retakesLeft')
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { variant: 'Night' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(queued(ctx)).toEqual(queuedBefore)
+    })
+
+    it('makes no AI call of any kind for an analysed product: no recognizer, splitter, researcher or analyst', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+      const before = aiCalls(ctx)
+
+      await identify(ctx, scanId, itemId, { productId })
+
+      expect(aiCalls(ctx)).toBe(before)
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('moves an item whose product has a formulation nobody analysed to analysing and queues the analyse step', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, CERAVE, { analysed: false })
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({ state: 'analysing', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, category: 'skin' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('moves an item whose product has no formulation yet to researching and queues the research step', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const resolved = await ctx.catalog.resolve(CERAVE)
+
+      const view = await identify(ctx, scanId, itemId, { productId: resolved.productId })
+
+      expect(view).toMatchObject({ state: 'researching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: resolved.productId, formulationId: null })
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'research'))
+    })
+
+    it('moves an item whose product\'s formulation is older than FRESH_FOR_DAYS to researching, and keeps one that is exactly that old ready', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+      ctx.advance(FRESH_FOR_DAYS * DAY)
+
+      expect((await identify(ctx, scanId, itemId, { productId })).state).toBe('ready')
+
+      const second = await arrange(ctx)
+      ctx.advance(1)
+      expect((await identify(ctx, second.scanId, second.itemId, { productId })).state).toBe('researching')
+    })
+
+    it('carries on through the queue: an item that was moved to analysing becomes ready once the analyse step runs', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      await identify(ctx, scanId, itemId, { productId })
+
+      const ran = await drain(ctx)
+
+      expect(ran.at(-1)).toBe('analyse')
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'ready', reason: null })
+    })
+
+    it('leaves the retake record as it is: the photos already sent still count, and none is added', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const retakes = await ctx.repository.countRetakes(itemId)
+      const { productId } = await catalogued(ctx)
+
+      await identify(ctx, scanId, itemId, { productId })
+
+      expect(await ctx.repository.countRetakes(itemId)).toBe(retakes)
+    })
+
+    it('answers PRODUCT_NOT_FOUND for a product the catalog does not hold, leaving the item where it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: 'no-such-product' }))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('answers PRODUCT_NOT_FOUND for an unnamed product, which search never offers, leaving the item where it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const unnamed = await ctx.catalog.fromLabel({ ingredients: CLEAN })
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: unnamed.productId }))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('puts the item back and rethrows when the next step cannot be queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      ctx.jobs.failNextWith(new Error('queue down'))
+
+      await expect(identify(ctx, scanId, itemId, { productId })).rejects.toThrow('queue down')
+
+      expect((await itemOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('fails the item as analysis-failed, exactly as the match step does, when the product\'s analysis has been rejected the maximum number of times', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, CERAVE, { ingredients: WITH_MERCURY, analysed: false })
+      // The analyst answers with nothing, which the catalog rejects (mercury must be explained): three rejections and it gives up.
+      for (let i = 0; i < 3; i++) await ctx.catalog.analyse(formulationId).catch(() => undefined)
+      const jobs = ctx.jobs.enqueued.length
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({ id: itemId, state: 'failed', reason: 'analysis-failed' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'analysis-failed' })
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+  })
+
+  describe.each(AWAITING)('typed text, for an item in %s', (state, arrange) => {
+    it('splits the text with exactly one call, then moves the item to matching as what the split found, and queues the match', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ ...SPLIT_CERAVE, variant: 'Night' }))
+
+      const view = await identify(ctx, scanId, itemId, { text: 'cerave hydrating facial cleanser night' })
+
+      expect(ctx.nameSplitter.calls).toEqual(['cerave hydrating facial cleanser night'])
+      expect(view).toMatchObject({ id: itemId, state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin' } })
+      expect(view).not.toHaveProperty('product')
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
+    })
+
+    it('does the matching in the queue, not in the request: nothing is looked up in the catalog until the match step runs', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).toBeNull()
+      expect(ctx.researcher.calls).toHaveLength(0)
+    })
+
+    it('trims the text before it is split', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: '  cerave cleanser \n' })
+
+      expect(ctx.nameSplitter.calls).toEqual(['cerave cleanser'])
+    })
+
+    it('answers a product the catalog already holds, once the match step runs, with no further model call: ready, and the one split call is all it cost', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const before = aiCalls(ctx)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      const ran = await drain(ctx)
+
+      expect(ran).toEqual(['match'])
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', product: { product: { id: productId }, formulation: { id: formulationId } } })
+      expect(aiCalls(ctx)).toBe(before + 1)
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+    })
+
+    it('researches a product the catalog does not hold, as a confirmation does, and creates it under the split\'s brand, name and variant', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ kind: 'product', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' }))
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      await identify(ctx, scanId, itemId, { text: 'glow co bright tone serum night' })
+
+      const ran = await drain(ctx)
+
+      expect(ran).toEqual(['match', 'research', 'analyse'])
+      expect(ctx.researcher.calls).toHaveLength(1)
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({
+        state: 'ready',
+        product: { product: { kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' } },
+      })
+      expect(await ctx.catalogRepository.findProductByKey(identityKey({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night' }))).not.toBeNull()
+    })
+
+    it('asks the user for the back of the pack, as a confirmation does, when the product is new and research finds nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      await drain(ctx)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: null })
+    })
+
+    it('leaves the retake record as it is', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const retakes = await ctx.repository.countRetakes(itemId)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      expect(await ctx.repository.countRetakes(itemId)).toBe(retakes)
+    })
+
+    it('answers NOT_A_PRODUCT_NAME, queues nothing and leaves the item where it was, when the split says the text is not a product name', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ kind: 'not-a-product' }))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'my cat is called Biscuit' }))
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('NOT_A_PRODUCT_NAME')
+      // A name is not always a beauty product's: the message says only that it could not be read as a name.
+      expect(error.message).not.toMatch(/not a beauty product/i)
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state, reason: expect.any(String) })
+      expect(await itemOf(ctx, scanId, itemId)).not.toHaveProperty('recognised')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('lets the user try again after NOT_A_PRODUCT_NAME', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith((text) => (text === 'cerave cleanser' ? SPLIT_CERAVE : { kind: 'not-a-product' }))
+      expect((await errorOf(identify(ctx, scanId, itemId, { text: 'hello' }))).code).toBe('NOT_A_PRODUCT_NAME')
+
+      expect((await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })).state).toBe('matching')
+    })
+
+    it('answers CatalogBusyError (CATALOG_BUSY), queues nothing and leaves the item where it was, when the AI spend cap stops the split', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(new AiBudgetExceededError('cap'))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(CatalogBusyError)
+      expect(error.code).toBe('CATALOG_BUSY')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('puts the item back and rethrows when the match cannot be queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      ctx.jobs.failNextWith(new Error('queue down'))
+
+      await expect(identify(ctx, scanId, itemId, { text: 'cerave cleanser' })).rejects.toThrow('queue down')
+
+      expect((await itemOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('answers NOT_A_PRODUCT_NAME, as for any text that is not a product name, when the model refuses the split; the item stays and nothing is queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(new AnthropicRefusalError('refused'))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('NOT_A_PRODUCT_NAME')
+      // A name is not always a beauty product's: the message says only that it could not be read as a name.
+      expect(error.message).not.toMatch(/not a beauty product/i)
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    // A provider outage is not the daily limit: the user is told to try again, and the message must not blame a limit. The budget error above stays CATALOG_BUSY.
+    it.each([
+      ['unavailable', () => new AnthropicUnavailableError('overloaded')],
+      ['rejects the request', () => new AnthropicRequestError('unusable answer')],
+    ])('answers AI_UNAVAILABLE (503), not CATALOG_BUSY, when the provider %s; the item stays and nothing is queued', async (_label, failure) => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(failure())
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error).not.toBeInstanceOf(CatalogBusyError)
+      expect(error.code).toBe('AI_UNAVAILABLE')
+      expect(error.message).not.toMatch(/limit/i)
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+  })
+
+  describe('the typed text', () => {
+    const typed = async (text: string) => {
+      const ctx = setup()
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      const jobs = ctx.jobs.enqueued.length
+      return { ctx, scanId, itemId, jobs, run: () => identify(ctx, scanId, itemId, { text }) }
+    }
+
+    it.each([
+      ['2 characters', 'ab'],
+      ['120 characters', 'a'.repeat(120)],
+      ['2 characters between spaces', '   ab   '],
+      ['120 characters between spaces', `  ${'a'.repeat(120)}  `],
+    ])('accepts %s', async (_label, text) => {
+      const { ctx, run } = await typed(text)
+
+      await run()
+
+      expect(ctx.nameSplitter.calls).toEqual([text.trim()])
+    })
+
+    it.each([
+      ['1 character', 'a'],
+      ['1 character between spaces', '   a   '],
+      ['nothing', ''],
+      ['only spaces', '     '],
+      ['121 characters', 'a'.repeat(121)],
+      ['121 characters between spaces', `  ${'a'.repeat(121)}  `],
+      ['a link', 'buy at https://evil.example now'],
+      ['a www link', 'see www.evil.example'],
+      ['markup', 'Glow <b>Co</b> serum'],
+      ['a script', '<script>evil()</script>'],
+      ['a closing tag', 'serum </i>'],
+      ['a zero-width space', 'cerave​ cleanser'],
+      ['a right-to-left override', 'cerave‮ cleanser'],
+      ['a newline inside it', 'cerave\ncleanser'],
+      ['a tab inside it', 'cerave\tcleanser'],
+      ['a NUL', 'cerave\u0000cleanser'],
+    ])('refuses %s with INVALID_PRODUCT_TEXT, without calling the splitter, leaving the item waiting', async (_label, text) => {
+      const { ctx, scanId, itemId, jobs, run } = await typed(text)
+
+      const error = await errorOf(run())
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('INVALID_PRODUCT_TEXT')
+      expect(ctx.nameSplitter.calls).toEqual([])
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('accepts ordinary punctuation and accents in a name', async () => {
+      const { ctx, run } = await typed("L'Oréal Paris Revitalift Crème SPF 50+ (night)")
+
+      await run()
+
+      expect(ctx.nameSplitter.calls).toEqual(["L'Oréal Paris Revitalift Crème SPF 50+ (night)"])
+    })
+  })
+
+  describe('an item that is not waiting for a name', () => {
+    const NOT_AWAITING = [
+      ['recognising', (ctx: Ctx) => scanOne(ctx)],
+      ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+      ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
+      ['researching', (ctx: Ctx) => reach(ctx, 'researching')],
+      ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+      ['reading-label', (ctx: Ctx) => reach(ctx, 'reading-label')],
+    ] as const
+
+    it.each(NOT_AWAITING)('refuses an item that is %s with ITEM_NOT_AWAITING_IDENTIFICATION, for a picked product and for text, calling nothing', async (state, arrange) => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      // Not the product the item was read as (some of these states have researched it already, and a researched product cannot be researched again for a week).
+      const { productId } = await catalogued(ctx, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const jobs = ctx.jobs.enqueued.length
+      const before = aiCalls(ctx)
+
+      for (const input of [{ productId }, { text: 'cerave cleanser' }]) {
+        const error = await errorOf(identify(ctx, scanId, itemId, input))
+        expect(error).toBeInstanceOf(ConflictError)
+        expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(aiCalls(ctx)).toBe(before)
+    })
+
+    it('refuses an item that is already ready or failed', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const ready = await scanOne(ctx)
+      await run(ctx, ready.itemId, 'recognise')
+      await drain(ctx)
+      expect((await stateOf(ctx, ready.scanId, ready.itemId)).state).toBe('ready')
+      const failed = await scanOne(ctx, markedJpeg(2))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+      await run(ctx, failed.itemId, 'recognise')
+      expect((await stateOf(ctx, failed.scanId, failed.itemId)).state).toBe('rejected')
+
+      for (const { scanId, itemId } of [ready, failed]) {
+        const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+        expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('checks the state before the product: a wrong-state item with an unknown product is 409, not PRODUCT_NOT_FOUND', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: 'no-such-product' }))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+    })
+
+    it('refuses a second identification of the same item: the first moved it on, and only one split is paid for', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+      expect(queued(ctx).filter((m) => m.step === 'match')).toHaveLength(1)
+    })
+  })
+
+  describe('ownership', () => {
+    const inputs = (productId: string): [string, Input][] => [
+      ['a picked product', { productId }],
+      ['typed text', { text: 'cerave cleanser' }],
+    ]
+
+    it.each([
+      ['another user\'s scan', (s: string, i: string) => [s, i, OTHER_USER, PROFILE] as const],
+      ['another profile of the same account\'s scan', (s: string, i: string) => [s, i, USER, OTHER_PROFILE] as const],
+      ['an unknown scan', (_s: string, i: string) => ['no-such-scan', i, USER, PROFILE] as const],
+      ['an unknown item', (s: string) => [s, 'no-such-item', USER, PROFILE] as const],
+    ])('answers SCAN_NOT_FOUND for %s, for a picked product and for text, changing and calling nothing', async (_label, aim) => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      const { productId } = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const [s, i, u, p] = aim(scanId, itemId)
+      const jobs = ctx.jobs.enqueued.length
+      const before = aiCalls(ctx)
+
+      for (const [, input] of inputs(productId)) {
+        const error = await errorOf(identify(ctx, s, i, input, u, p))
+        expect(error).toBeInstanceOf(NotFoundError)
+        expect(error.code).toBe('SCAN_NOT_FOUND')
+      }
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(aiCalls(ctx)).toBe(before)
+    })
+
+    it('answers SCAN_NOT_FOUND for an item that belongs to a different scan, even the caller\'s own', async () => {
+      const ctx = setup()
+      const mine = await failedFront(ctx, [BLURRY])
+      const other = await scanOne(ctx, markedJpeg(5))
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      const error = await errorOf(identify(ctx, other.scanId, mine.itemId, { text: 'cerave cleanser' }))
+
+      expect(error.code).toBe('SCAN_NOT_FOUND')
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('answers AUTH_REQUIRED to a public caller', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+
+      const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.identifyByName(scanId, itemId, { text: 'cerave cleanser' })))
+
+      expect(error).toBeInstanceOf(UnauthorizedError)
+      expect(error.code).toBe('AUTH_REQUIRED')
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+  })
+})

@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gte, inArray, ne, sql } from 'drizzle-orm'
+import { type SQL, and, asc, count, desc, eq, exists, gte, inArray, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -66,6 +66,66 @@ export class D1CatalogRepository {
       if (isForeignKeyFailure(error)) throw new Error(`unknown product ${productId}`, { cause: error })
       throw error
     }
+  }
+
+  /**
+   * The named products whose search text contains EVERY word of `query` (already normalised), or has an alias that does, at most
+   * `limit`. Words are the space-separated parts, at most the first 8; a query with none finds nothing. Products whose search text starts
+   * with the whole query come first, then by search text, then by id, so the order is the same every time. A product reachable more than
+   * one way appears once.
+   *
+   * `instr`, not LIKE: D1 refuses a LIKE pattern over 50 bytes ("pattern too complex") and a query may be 80 characters, and `instr` has
+   * no wildcard characters to escape. Like the fake's `includes`, it is case-sensitive: the search text and the query are both normalised.
+   * Every word is a bound parameter.
+   */
+  async search(query: string, limit: number): Promise<Product[]> {
+    const words = query.split(' ').filter((word) => word !== '').slice(0, 8)
+    if (words.length === 0) return []
+    const all = (column: SQL) => sql.join(words.map((word) => sql`instr(${column}, ${word}) > 0`), sql` and `)
+    return this.db
+      .select()
+      .from(products)
+      .where(
+        and(
+          eq(products.kind, 'named'),
+          or(
+            all(sql`${products.searchText}`),
+            // The AND is inside the subquery, so all the words must be in ONE alias, not spread over several.
+            exists(
+              this.db
+                .select({ one: sql`1` })
+                .from(productAliases)
+                .where(and(eq(productAliases.productId, products.id), all(sql`${productAliases.aliasKey}`))),
+            ),
+          ),
+        ),
+      )
+      .orderBy(sql`case when instr(${products.searchText}, ${query}) = 1 then 0 else 1 end`, asc(products.searchText), asc(products.id))
+      .limit(limit)
+  }
+
+  /** Up to `limit` named products whose search text is empty (made before the column existed, or by a Worker that did not know it), by id. Unnamed products never are. */
+  async namedWithoutSearchText(limit: number): Promise<Product[]> {
+    return this.db
+      .select()
+      .from(products)
+      .where(and(eq(products.kind, 'named'), eq(products.searchText, '')))
+      .orderBy(asc(products.id))
+      .limit(limit)
+  }
+
+  /** Sets the search text of one product, changing nothing else. An unknown id is ignored. */
+  async setSearchText(id: string, searchText: string): Promise<void> {
+    await this.db.update(products).set({ searchText }).where(eq(products.id, id))
+  }
+
+  /**
+   * Sets the search text of each product named, changing nothing else, in ONE batch: one subrequest however many rows, where a
+   * Worker invocation may make only so many (50 on the free plan). An unknown id is ignored; an empty list does nothing.
+   */
+  async setSearchTexts(rows: { id: string; searchText: string }[]): Promise<void> {
+    const [first, ...rest] = rows.map(({ id, searchText }) => this.db.update(products).set({ searchText }).where(eq(products.id, id)))
+    if (first) await this.db.batch([first, ...rest])
   }
 
   /** The brand's newest products first (the later insert wins a tie), so the most recent catalogue entries are compared. */

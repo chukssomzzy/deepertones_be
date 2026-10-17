@@ -1,21 +1,22 @@
 import { PermanentJobError } from '../../jobs/job'
 import { requireUser } from '../../lib/context'
 import { hmacSha256Hex } from '../../lib/crypto'
-import { ConflictError, NotFoundError, RateLimitedError, ValidationError } from '../../lib/errors'
+import { ConflictError, NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { describeUnexpectedError } from '../../lib/safe-error'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
-import { AnthropicRefusalError, AnthropicRequestError } from '../../providers/anthropic/anthropic.provider'
+import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import type { LabelReader, LabelReading } from '../../providers/label-reading/label-reader.provider'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
+import type { NameSplit, NameSplitter } from '../../providers/name-splitting/name-splitter.provider'
 import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/photo-store.provider'
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
-import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
+import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
@@ -74,11 +75,15 @@ export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
 
 export type ConfirmedProduct = { brand: string; name: string; variant?: string; category: ProductCategory }
 
+/** How a user names the product of an item they could not photograph: one picked from the catalog (by search), or a name they typed. */
+export type ProductNaming = { productId: string } | { text: string }
+
 export type ScanServiceDeps = {
   repository: ScansRepository
   catalog: ProductCatalogService
   recognizer: ProductRecognizer
   labelReader: LabelReader
+  nameSplitter: NameSplitter
   photos: PhotoStore
   jobs: JobQueue
   events: ScanEvents
@@ -103,6 +108,7 @@ export class ScanService {
   private static readonly HOUR = 60 * ScanService.MINUTE
   private static readonly DAY = 24 * ScanService.HOUR
   private static readonly MAX_TEXT_LENGTH = 120
+  private static readonly MIN_TYPED_NAME_LENGTH = 2
   // Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
   private static readonly IP_HASH_INFO = 'deepertones/ip-hash/v1'
   private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed']
@@ -130,6 +136,16 @@ export class ScanService {
   /** How long a step waits before it asks again whether work another call is doing has finished. */
   private static readonly WAIT_SECONDS = 30
 
+  /** What an item that was named by hand has set and a move back to waiting must clear. */
+  private static readonly NOT_NAMED: Omit<ItemPatch, 'updatedAt'> = {
+    productId: null,
+    formulationId: null,
+    recognisedBrand: null,
+    recognisedName: null,
+    recognisedVariant: null,
+    recognisedCategory: null,
+  }
+
   private static scanNotFound = () => new NotFoundError('SCAN_NOT_FOUND', 'Scan not found')
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static isFinal = (state: ItemState) => ScanService.FINAL_STATES.includes(state)
@@ -138,6 +154,7 @@ export class ScanService {
   private readonly catalog: ProductCatalogService
   private readonly recognizer: ProductRecognizer
   private readonly labelReader: LabelReader
+  private readonly nameSplitter: NameSplitter
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly events: ScanEvents
@@ -153,6 +170,7 @@ export class ScanService {
     this.catalog = deps.catalog
     this.recognizer = deps.recognizer
     this.labelReader = deps.labelReader
+    this.nameSplitter = deps.nameSplitter
     this.photos = deps.photos
     this.jobs = deps.jobs
     this.events = deps.events
@@ -377,6 +395,76 @@ export class ScanService {
       throw notAwaiting()
     }
     return this.itemViewOf(itemId)
+  }
+
+  /**
+   * Names the product of an item whose front photo could not be read (`needs-retake`, or `needs-identification` once the 3rd could not),
+   * either by a product picked from the catalog (`productId`, from search) or by free text. Sends no photo, so no quota and no retake
+   * is counted.
+   *
+   * Checked in this order, and nothing is paid for until all of it passes: the scan is the caller's (SCAN_NOT_FOUND), the item is waiting
+   * (ITEM_NOT_AWAITING_IDENTIFICATION), the text is clean (INVALID_PRODUCT_TEXT: 2 to 120 characters, no link, markup or hidden character).
+   *
+   * A picked product costs no model call: the item goes where the catalog says that product needs to go (`ready`, `analysing`,
+   * `researching`, or `failed` as `analysis-failed`), exactly as the match step would send it, and shows the product as what it was
+   * recognised as. Typed text costs one split by the model, then goes to `matching` and the match step as a confirmation does. Text the
+   * split says is no product's name, or the model refuses, is NOT_A_PRODUCT_NAME; over the AI spend cap is CatalogBusyError (CATALOG_BUSY), and a model that is down
+   * or whose answer cannot be used is UnavailableError AI_UNAVAILABLE (503). In every one of those the item stays where it was and nothing is queued, so the user can try again.
+   */
+  async identifyByName(scanId: string, itemId: string, naming: ProductNaming): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_IDENTIFICATION', 'This item is not waiting to be identified')
+    if (item.state !== 'needs-retake' && item.state !== 'needs-identification') throw notAwaiting()
+    const moved = 'productId' in naming ? await this.identifyByChoice(item, item.state, naming.productId) : await this.identifyByText(item, item.state, naming.text)
+    if (!moved) throw notAwaiting()
+    return this.itemViewOf(itemId)
+  }
+
+  private async identifyByChoice(item: ScanItem, from: ItemState, productId: string): Promise<boolean> {
+    const resolved = await this.catalog.choose(productId)
+    const product = await this.catalog.namedProduct(productId)
+    return this.moveOn(
+      item,
+      from,
+      resolved,
+      { reason: null, recognisedBrand: product.brand, recognisedName: product.name, recognisedVariant: product.variant, recognisedCategory: product.category },
+      ScanService.NOT_NAMED,
+    )
+  }
+
+  private async identifyByText(item: ScanItem, from: ItemState, text: string): Promise<boolean> {
+    const typed = this.cleanText(text, 'text', true)
+    if (typed.length < ScanService.MIN_TYPED_NAME_LENGTH) throw new ValidationError('INVALID_PRODUCT_TEXT', 'The text is not valid', { field: 'text' })
+    const split = await this.split(typed)
+    if (split.kind !== 'product') throw new ValidationError('NOT_A_PRODUCT_NAME', "We couldn't read that as a product name")
+    return this.transition(item, {
+      from,
+      change: {
+        state: 'matching',
+        reason: null,
+        recognisedBrand: split.brand,
+        recognisedName: split.name,
+        recognisedVariant: split.variant ?? null,
+        recognisedCategory: split.category,
+      },
+      next: 'match',
+      undo: ScanService.NOT_NAMED,
+    })
+  }
+
+  /** One paid split. A refusal is an answer (this is no product's name); the spend cap is the catalog being busy; a model that is down, or that cannot be used, is AI_UNAVAILABLE, which blames no limit. */
+  private async split(text: string): Promise<NameSplit> {
+    try {
+      return await this.nameSplitter.split(text)
+    } catch (error) {
+      if (error instanceof AnthropicRefusalError) return { kind: 'not-a-product' }
+      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
+      if (error instanceof AnthropicUnavailableError || error instanceof AnthropicRequestError) {
+        console.error({ outcome: 'split-name-failed', error: describeUnexpectedError(error) })
+        throw new UnavailableError('AI_UNAVAILABLE', "Couldn't read that name right now. Try again in a moment.")
+      }
+      throw error
+    }
   }
 
   /**
@@ -617,26 +705,32 @@ export class ScanService {
       return
     }
 
+    await this.moveOn(item, 'matching', resolved)
+  }
+
+  /**
+   * Moves an item out of `from` to where the catalog says its product needs to go. `also` is what else the move writes, and `undo` what
+   * puts it back if the next step cannot be queued.
+   */
+  private async moveOn(item: ScanItem, from: ItemState, resolved: ResolveResult, also: Omit<ItemPatch, 'updatedAt'> = {}, undo: Omit<ItemPatch, 'updatedAt'> = {}): Promise<boolean> {
     switch (resolved.kind) {
       case 'ready':
-        await this.transition(item, { from: 'matching', change: { state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId } })
-        return
+        return this.transition(item, { from, change: { ...also, state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId }, undo })
       case 'needs-analysis':
-        await this.transition(item, {
-          from: 'matching',
-          change: { state: 'analysing', productId: resolved.productId, formulationId: resolved.formulationId },
+        return this.transition(item, {
+          from,
+          change: { ...also, state: 'analysing', productId: resolved.productId, formulationId: resolved.formulationId },
           next: 'analyse',
+          undo,
         })
-        return
       case 'analysis-failed':
-        await this.transition(item, {
-          from: 'matching',
-          change: { state: 'failed', reason: 'analysis-failed', productId: resolved.productId, formulationId: resolved.formulationId },
+        return this.transition(item, {
+          from,
+          change: { ...also, state: 'failed', reason: 'analysis-failed', productId: resolved.productId, formulationId: resolved.formulationId },
+          undo,
         })
-        return
       case 'needs-research':
-        await this.transition(item, { from: 'matching', change: { state: 'researching', productId: resolved.productId }, next: 'research' })
-        return
+        return this.transition(item, { from, change: { ...also, state: 'researching', productId: resolved.productId }, next: 'research', undo })
     }
   }
 
@@ -911,7 +1005,7 @@ export class ScanService {
     return { image: { bytes: photo.bytes, mediaType: header.mediaType }, extension: header.mediaType === 'image/webp' ? 'webp' : 'jpg' }
   }
 
-  private cleanText(text: string, field: 'brand' | 'name' | 'variant', required: boolean): string {
+  private cleanText(text: string, field: 'brand' | 'name' | 'variant' | 'text', required: boolean): string {
     const trimmed = text.trim()
     if ((required && trimmed === '') || trimmed.length > ScanService.MAX_TEXT_LENGTH || hasLinkOrMarkup(trimmed) || ScanService.HIDDEN_CHARACTER.test(trimmed)) {
       throw new ValidationError('INVALID_PRODUCT_TEXT', `The ${field} is not valid`, { field })

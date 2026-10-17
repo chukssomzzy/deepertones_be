@@ -27,7 +27,7 @@ export class FakeCatalogRepository implements CatalogRepository {
   async createProduct(input: NewProduct): Promise<Product> {
     const existing = [...this.products.values()].find((p) => p.identityKey === input.identityKey)
     if (existing) return { ...existing }
-    const product: Product = { ...input, kind: input.kind ?? 'named', imageKey: null, imageSourceUrl: null, imageCheckedAt: null }
+    const product: Product = { ...input, kind: input.kind ?? 'named', searchText: input.searchText ?? '', imageKey: null, imageSourceUrl: null, imageCheckedAt: null }
     this.products.set(product.id, product)
     return { ...product }
   }
@@ -48,6 +48,49 @@ export class FakeCatalogRepository implements CatalogRepository {
     const isIdentityKey = [...this.products.values()].some((p) => p.identityKey === aliasKey)
     if (isIdentityKey || this.aliases.has(aliasKey)) return
     this.aliases.set(aliasKey, productId)
+  }
+
+  /**
+   * The named products that `query` (already normalised) reaches, at most `limit`. The query is split on spaces into at most 8 words (empty ones
+   * ignored; none at all finds nothing). A product matches when every word is contained in its search text, or every word is contained in one of
+   * its alias keys; the words may come in any order and some of the product's words may be left out. Products whose search text starts with the
+   * whole query come first, then by search text, then by id. A product reachable more than one way appears once.
+   */
+  async search(query: string, limit: number): Promise<Product[]> {
+    const words = query.split(' ').filter((word) => word !== '').slice(0, 8)
+    if (words.length === 0) return []
+    const containsAll = (text: string) => words.every((word) => text.includes(word))
+    const reaches = (p: Product) =>
+      containsAll(p.searchText) || [...this.aliases].some(([aliasKey, productId]) => productId === p.id && containsAll(aliasKey))
+    const prefixRank = (p: Product) => (p.searchText.startsWith(query) ? 0 : 1)
+    return [...this.products.values()]
+      .filter((p) => p.kind === 'named' && reaches(p))
+      .sort((a, b) => prefixRank(a) - prefixRank(b) || (a.searchText < b.searchText ? -1 : a.searchText > b.searchText ? 1 : 0) || (a.id < b.id ? -1 : 1))
+      .slice(0, limit)
+      .map((p) => ({ ...p }))
+  }
+
+  /** Up to `limit` named products whose search text is empty (made before the column existed, or by a Worker that did not know it), by id. Unnamed products never are. */
+  async namedWithoutSearchText(limit: number): Promise<Product[]> {
+    return [...this.products.values()]
+      .filter((p) => p.kind === 'named' && p.searchText === '')
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, limit)
+      .map((p) => ({ ...p }))
+  }
+
+  /** Sets the search text of one product, changing nothing else. An unknown id is ignored. */
+  async setSearchText(id: string, searchText: string): Promise<void> {
+    const product = this.products.get(id)
+    if (product) product.searchText = searchText
+  }
+
+  /** Sets the search text of many products in one call, changing nothing else. Ids that are not products are ignored; an empty list does nothing. */
+  async setSearchTexts(rows: { id: string; searchText: string }[]): Promise<void> {
+    for (const { id, searchText } of rows) {
+      const product = this.products.get(id)
+      if (product) product.searchText = searchText
+    }
   }
 
   async productsByBrandKey(brandKey: string, limit: number): Promise<Product[]> {

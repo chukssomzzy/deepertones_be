@@ -3,7 +3,7 @@ import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
-import { BackPhotoBody, ConfirmProductBody, CreateScanBody, ItemParams, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
+import { BackPhotoBody, ConfirmProductBody, CreateScanBody, IdentifyProductBody, ItemParams, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
 import { SCAN_POLICY } from './scans.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -116,6 +116,25 @@ const retakeItem = defineRoute({
   responses: { 202: success(ScanItemResponse, 'The item, recognising the new photo'), ...errorResponses(401, 404, 409, 413, 429) },
 })
 
+const identifyItem = defineRoute({
+  method: 'post',
+  path: '/{scanId}/items/{itemId}/identification',
+  operationId: 'identifyProductScanItem',
+  tags: ['Product scans'],
+  summary: 'Name the product of an item whose photo could not be read',
+  description:
+    'For an item in `needs-retake` or `needs-identification`. Send exactly one of `productId` (picked from `GET /api/v1/products/search`; no model is called) ' +
+    'or `text` (a name the user typed, which is split into brand, name and variant by a model: 400 `NOT_A_PRODUCT_NAME` when it is not a product\'s name, ' +
+    '503 `AI_UNAVAILABLE` when the model is unavailable, 503 `CATALOG_BUSY` when the daily AI budget is spent). The item goes on to matching, researching, analysing or ready. ' +
+    'It sends no photo, so no photo quota or retake is used.',
+  security: bearer,
+  // In this order, as for the photo routes: the address limit counts every caller, signedIn turns the unsigned away before the body is read,
+  // and the user limit comes before any model is called.
+  middleware: [rateLimit('SCAN_IDENTIFY_IP_LIMITER', 'ip'), signedIn(), rateLimit('SCAN_IDENTIFY_USER_LIMITER', 'user')],
+  request: { params: ItemParams, body: jsonBody(IdentifyProductBody) },
+  responses: { 202: success(ScanItemResponse, 'The item, now on its way'), ...errorResponses(401, 404, 409, 429, 503) },
+})
+
 const getPhoto = defineRoute({
   method: 'get',
   path: '/photos/{token}',
@@ -160,6 +179,11 @@ export const scanRoutes = openapiApp()
     const photo = await toProductImage(c.req.valid('form').photo)
     const item = await c.var.services.scans.retake(scanId, itemId, photo, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
     return ok(c, toScanItemResponse(item), 'Retaken photo received', 202)
+  })
+  .openapi(identifyItem, async (c) => {
+    const { scanId, itemId } = c.req.valid('param')
+    const item = await c.var.services.scans.identifyByName(scanId, itemId, c.req.valid('json'))
+    return ok(c, toScanItemResponse(item), 'Product identified', 202)
   })
   .openapi(getPhoto, async (c) => {
     const photo = await c.var.services.scans.photoForLink(c.req.valid('param').token)

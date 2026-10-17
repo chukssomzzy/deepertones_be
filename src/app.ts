@@ -12,6 +12,7 @@ import { container } from './middleware/container'
 import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
 import { authRoutes, meRoutes } from './modules/auth/auth.routes'
+import { productRoutes } from './modules/catalog/catalog.routes'
 import { healthRoutes } from './modules/health/health.routes'
 import { PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
 import { scanRoutes } from './modules/scans/scans.routes'
@@ -28,7 +29,7 @@ app.use(requestId(), logger(), cors, secureHeaders(), container, auth, requestCo
 // Keep this a single chain: AppType is inferred from it, and the frontend's
 // typed client (hc<AppType>) only sees routes mounted inside the chain.
 // Everything but /health lives under API_V1_PREFIX: one sub-app carries the versioned routes so a future v2 sits beside it.
-const v1 = openapiApp().route('/auth', authRoutes).route('/me', meRoutes).route(PRODUCT_SCANS_PATH, scanRoutes)
+const v1 = openapiApp().route('/auth', authRoutes).route('/me', meRoutes).route('/products', productRoutes).route(PRODUCT_SCANS_PATH, scanRoutes)
 const routes = app.route('/health', healthRoutes).route(API_V1_PREFIX, v1)
 
 mountDocs(app)

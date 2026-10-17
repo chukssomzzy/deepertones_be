@@ -14,6 +14,8 @@ export const products = sqliteTable(
     name: text('name').notNull(),
     variant: text('variant'),
     category: text('category', { enum: CATEGORIES }).notNull(),
+    // brand, name and variant, normalised (catalog.identity normaliseText), for search; '' for an unnamed product, which search never returns.
+    searchText: text('search_text').notNull().default(''),
     imageKey: text('image_key'),
     imageSourceUrl: text('image_source_url'),
     // Set whether or not an image was found, so a product with none is not searched again on every scan.

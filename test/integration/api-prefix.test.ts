@@ -54,6 +54,7 @@ describe('the old unversioned API paths', () => {
     ['POST', `/scans/${SCAN_ID}/items/${ITEM_ID}/confirmation`],
     ['POST', `/scans/${SCAN_ID}/items/${ITEM_ID}/back-photo`],
     ['GET', '/scans/photos/x'],
+    ['GET', '/products/search?q=serum'],
     ['POST', '/scans/products'],
     ['GET', `/scans/products/${SCAN_ID}`],
   ]
@@ -75,6 +76,13 @@ describe('the old unversioned API paths', () => {
 describe('the versioned API', () => {
   it('answers GET /api/v1/me without a token with 401 AUTH_REQUIRED', async () => {
     const res = await fetchWorker('/api/v1/me')
+
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
+  })
+
+  it('answers GET /api/v1/products/search without a token with 401 AUTH_REQUIRED', async () => {
+    const res = await fetchWorker('/api/v1/products/search?q=serum')
 
     expect(res.status).toBe(401)
     expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
@@ -116,7 +124,9 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/retake',
+        'POST /api/v1/scans/products/{scanId}/items/{itemId}/identification',
         'GET /api/v1/scans/products/photos/{token}',
+        'GET /api/v1/products/search',
       ].sort(),
     )
   })
@@ -131,6 +141,7 @@ describe('the OpenAPI document', () => {
       confirmProductScanItem: paths[`${base}/{scanId}/items/{itemId}/confirmation`]?.post,
       addProductScanItemBackPhoto: paths[`${base}/{scanId}/items/{itemId}/back-photo`]?.post,
       retakeProductScanItem: paths[`${base}/{scanId}/items/{itemId}/retake`]?.post,
+      identifyProductScanItem: paths[`${base}/{scanId}/items/{itemId}/identification`]?.post,
       getProductScanPhoto: paths[`${base}/photos/{token}`]?.get,
     }
 
@@ -138,6 +149,16 @@ describe('the OpenAPI document', () => {
       expect(operation?.operationId, operationId).toBe(operationId)
       expect(operation?.tags, operationId).toEqual(['Product scans'])
     }
+  })
+
+  it('names the product search operation searchProducts, under the "Products" tag, with a summary', async () => {
+    const { paths } = await documentOf()
+
+    const search = paths['/api/v1/products/search']?.get
+
+    expect(search?.operationId).toBe('searchProducts')
+    expect(search?.tags).toEqual(['Products'])
+    expect(search?.summary).toEqual(expect.any(String))
   })
 
   it('says "product scan" in the summaries that name a scan', async () => {

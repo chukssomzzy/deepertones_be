@@ -47,6 +47,15 @@ export const ConfirmProductBody = z
   })
   .openapi('ConfirmProductBody')
 
+// Exactly one of the two: a strict object each, so neither `{}` nor both fields at once validates. The text's length and content are the
+// service's to judge (INVALID_PRODUCT_TEXT), as for a confirmation.
+export const IdentifyProductBody = z
+  .union([
+    z.strictObject({ productId: z.string().min(1).openapi({ description: 'A product id from `GET /api/v1/products/search`.' }) }),
+    z.strictObject({ text: z.string().openapi({ description: 'A product name the user typed, 2 to 120 characters once trimmed, with no link, markup or hidden character.' }) }),
+  ])
+  .openapi('IdentifyProductBody')
+
 const ProductResult = z
   .object({
     product: z.object({

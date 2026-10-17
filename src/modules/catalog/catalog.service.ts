@@ -95,6 +95,16 @@ export type ResearchResult =
 /** The product and formulation a label's list belongs to; `analysed` says whether that formulation is already analysed by the current versions. */
 export type LabelResult = { productId: string; formulationId: string; analysed: boolean }
 
+/** A named product as a search shows it, and as an identification reads it back. */
+export type ProductSummary = {
+  id: string
+  brand: string
+  name: string
+  variant: string | null
+  category: Product['category']
+  imageUrl: string | null
+}
+
 export type ProductView = {
   product: {
     id: string
@@ -129,6 +139,12 @@ export class ProductCatalogService {
   private static readonly DAY = 24 * 60 * 60 * 1000
   /** What the identity key of a product no label named starts with; the rest is the list's ingredients key. */
   private static readonly UNNAMED_PREFIX = 'unnamed:'
+  /** The most products a search returns: a list to pick from, not to page through. */
+  private static readonly MAX_SEARCH_RESULTS = 10
+  /** A query shorter than this, once normalised, would match most of the catalog; the route already refuses it, so it is the service's rule too. */
+  private static readonly MIN_SEARCH_LENGTH = 2
+  /** How many products without search text one `fillSearchText` call fills. */
+  private static readonly FILL_BATCH = 500
   private static readonly MAX_LABEL_INGREDIENTS = 150
   private static readonly MAX_LABEL_INGREDIENT_LENGTH = 120
   private static readonly CONTROL_CHARACTER = /\p{Cc}/u
@@ -150,6 +166,10 @@ export class ProductCatalogService {
     category: product.category,
     ...(product.variant === null ? {} : { variant: product.variant }),
   })
+
+  /** Normalised like a user's query (accents folded), but with pack sizes kept: "50 ml" is a thing a person may type. */
+  private static searchTextOf = (product: { brand: string; name: string; variant?: string | null }): string =>
+    normaliseText(`${product.brand} ${product.name} ${product.variant ?? ''}`)
 
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
     const [x, y] = [normaliseText(a ?? ''), normaliseText(b ?? '')]
@@ -174,6 +194,46 @@ export class ProductCatalogService {
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
     this.policy = deps.policy ?? CATALOG_POLICY
+  }
+
+  /**
+   * The named products whose brand, name and variant, or any alias, contain what was typed (the query is normalised like the product's
+   * search text, so case, accents and punctuation do not matter), best first, at most 10. Makes no model or web call. A query under
+   * 2 characters once normalised ("a!") finds nothing and is not run, never every product.
+   */
+  async search(q: string): Promise<ProductSummary[]> {
+    const query = normaliseText(q)
+    if (query.length < ProductCatalogService.MIN_SEARCH_LENGTH) return []
+    const found = await this.repository.search(query, ProductCatalogService.MAX_SEARCH_RESULTS)
+    return found.map((product) => this.summaryOf(product))
+  }
+
+  /**
+   * A named product by id, for a caller that was offered it by `search`. An id the catalog does not hold, and an unnamed product (which
+   * search never offers), are both PRODUCT_NOT_FOUND.
+   */
+  async namedProduct(productId: string): Promise<ProductSummary> {
+    return this.summaryOf(await this.requireNamedProduct(productId))
+  }
+
+  /**
+   * What a scan of a product the user picked from search needs next: the answer `resolve` gives for the same product, with no lookup
+   * by name, no model call and nothing written. PRODUCT_NOT_FOUND for an id the catalog does not hold or an unnamed product.
+   */
+  async choose(productId: string): Promise<ResolveResult> {
+    return this.nextStep(await this.requireNamedProduct(productId))
+  }
+
+  /**
+   * Gives the named products that have no search text (made before the column existed, or by a Worker that did not know it) the
+   * text a new product gets, at most 500 a call. Never touches a product that has text, and makes no model or web call. Returns
+   * how many it filled; the scheduled reaper calls it until none are left.
+   */
+  async fillSearchText(): Promise<number> {
+    const missing = await this.repository.namedWithoutSearchText(ProductCatalogService.FILL_BATCH)
+    // One write for all of them: a Worker invocation may make only so many subrequests, and one per product would spend them.
+    if (missing.length > 0) await this.repository.setSearchTexts(missing.map((product) => ({ id: product.id, searchText: ProductCatalogService.searchTextOf(product) })))
+    return missing.length
   }
 
   /**
@@ -220,6 +280,7 @@ export class ProductCatalogService {
       name: identity.name,
       variant: identity.variant ?? null,
       category: identity.category ?? 'other',
+      searchText: ProductCatalogService.searchTextOf(identity),
       createdAt: this.now(),
     })
   }
@@ -329,6 +390,7 @@ export class ProductCatalogService {
         name: '',
         variant: null,
         category: label.category ?? 'other',
+        searchText: '',
         createdAt: this.now(),
       })
       return this.labelResult(product.id, await this.formulationFor(product.id, ingredients, listKey))
@@ -505,6 +567,23 @@ export class ProductCatalogService {
       if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
       throw error
     }
+  }
+
+  private summaryOf(product: Product): ProductSummary {
+    return {
+      id: product.id,
+      brand: product.brand,
+      name: product.name,
+      variant: product.variant,
+      category: product.category,
+      imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
+    }
+  }
+
+  private async requireNamedProduct(productId: string): Promise<Product> {
+    const product = await this.requireProduct(productId)
+    if (product.kind !== 'named') throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    return product
   }
 
   private async requireProduct(productId: string): Promise<Product> {

@@ -51,6 +51,8 @@ src/
     (anthropic/ is the shared Claude Messages API client, its errors, reply helpers, price table and the AiSpendLedger
      port; product-research/ finds a product's ingredients with web search; product-analysis/ writes concerns and
      answers same-product and image-matches-product questions. See "Claude (Anthropic) providers" and "AI cost tracking".)
+    (name-splitting/ splits a name a user typed into brand, name, variant and category: the NameSplitter port, the Claude adapter, a memory fake.
+     See "Claude (Anthropic) providers".)
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
@@ -262,8 +264,8 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
-`client.api.v1.auth`, `client.api.v1.me` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
+(`/auth`, `/me`, `/products`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+`client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
 Anything that builds a link to an API route starts from `API_V1_PREFIX` (the service's photo link does, via `productPhotoUrl`
@@ -608,6 +610,19 @@ prompts and the answer shapes.
   such as a right-to-left override or a zero-width space, `\p{Cf}`), or a list of more than 150 entries, becomes
   `unreadable` / `{ readable: false }`, never an error. The link and markup check lives in `lib/text-safety.ts`, shared with
   the catalog, because a provider may not import from a module.
+- **`AnthropicNameSplitter`** (`split-name`, port `NameSplitter`, in `providers/name-splitting/`; `MemoryNameSplitter` is the fake)
+  splits a name a user typed into a product: `split(text)` answers `{ kind: 'product', brand, name, variant?, category }` or
+  `{ kind: 'not-a-product' }`. The typed text is the only thing in the user message (the system prompt never carries it), the prompt
+  tells the model it is user-supplied data whose instructions are ignored, and never to guess or invent a brand, name or variant, and to copy the user's words as typed. The
+  schema is one closed object with required `kind`, `brand`, `name`, `variant` and `category` (not a union, which the API does not
+  take); a missing text field is read as empty and a category outside the five parses as absent, so a slip is a result and not a
+  failed call. Same bounds as the recognizer (each of brand, name and variant at most 120 characters after trimming, no hidden
+  character, no link or markup), and a product with an empty brand or name, or no valid category, is `not-a-product`: **a brand-less
+  typed name is not a product.** **Provenance:** each of the brand, name and variant must be a stretch of the typed text, compared after `normaliseText` (`lib/normalise-text.ts`, shared with the
+  catalog: case, accents and punctuation ignored, `&` is "and", `+` is "plus") **and with the spaces removed**, so "SheaMoisture" matches a typed "shea moisture" and "50 ml"
+  matches "50ml"; the user may have typed more. A part the model made up, or a typo it corrected, is `not-a-product`, so it cannot put into the shared catalog a name nobody typed. The category is exempt. The brand and name
+  must each keep at least one character after normalising. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable
+  model and an unusable answer are thrown as the client's errors; `ScanService.identifyByName` decides what each means.
 
 ### AI cost tracking
 Every Claude request is counted against a daily dollar cap. This is the app's only spend cap: by the owner's decision
@@ -655,9 +670,9 @@ there is no Console spend limit behind it, so the code is the backstop.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `read-label`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product) and `_VISION`
+  `recognize`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name) and `_VISION`
   (image-check, recognize and read-label). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
-  (Sonnet) for the text users read. Each adapter says which job it is. `recognize` and `read-label` are reserved for the
+  (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
@@ -751,7 +766,7 @@ there is no Console spend limit behind it, so the code is the backstop.
 ### Product catalog data
 `modules/catalog` holds the shared, per-product data behind the product scan (#20): products, aliases, formulations,
 concerns and traits, research attempts, and the pure rules that feed them. The service on top of it is
-described in "Product catalog service"; routes come later.
+described in "Product catalog service"; its one route, `GET /api/v1/products/search`, is under "Product search".
 
 - **Identity keys** (`catalog.identity.ts`) are `brand|name|variant`, each part normalised: lower case, accents and
   apostrophes dropped, `&` read as "and", other marks turned into spaces. Pack sizes are removed (`ml`, `mg`, `kg`,
@@ -773,6 +788,17 @@ described in "Product catalog service"; routes come later.
   for an unknown formulation or product, a formulation of a named product, a product that already has the list, or a move another call
   made first (the UPDATE changed no row). **Invariant:** `scan_items.product_id` may name an unnamed product that adoption has deleted; read
   the product through `formulation_id`. **Known limit:** a bare-list scan after the adoption makes a new unnamed product and analyses the list again (once).
+- **Search text.** `products.search_text` (migration 0015, `NOT NULL DEFAULT ''`) is what search looks in: the service writes
+  `normaliseText(brand name variant)` when it creates a named product (accents folded, `&` as "and", `+` as "plus", marks as spaces,
+  single spaces) and `''` for an unnamed one. **Pack sizes are kept** (`stripSizes` is not applied), because a person may type "50 ml".
+  The repository stores what it is given and never derives it (`NewProduct.searchText` is optional, default `''`). The migration only adds
+  the column; **no SQL backfills it**, because SQL cannot fold accents. Products that exist without search text (made before the column,
+  or by an old Worker that kept running during a deploy) are filled **by the scheduled reaper, in code**: every run of the scan-reaper
+  cron (`jobs/scheduled.ts`, every 10 minutes), after `scans.reap` (the job's purpose, which uses the Worker's subrequests first), then calls `ProductCatalogService.fillSearchText()`, which takes up to 500 named products
+  whose `search_text` is `''` (`namedWithoutSearchText`, by id), sets each to the text `resolve` would store (one private helper builds both) with
+  `setSearchTexts`, and returns how many it filled. The writes are ONE `db.batch` (one D1 subrequest for up to 500 rows; a Worker invocation may make only 50 on the free plan and 1000 on paid), skipped when there is nothing to fill; an unknown id is ignored. It never overwrites existing text, never touches an unnamed product and makes no model or web
+  call. It is its own call beside `scans.reap`, in its own `try`: a failure is logged `{ outcome: 'search-text-fill-failed', error }` and
+  does not fail the sweep, and a failing sweep is caught, the fill still runs, and the sweep's error is then rethrown so the run is recorded as failed. More than 500 take more runs.
 - **Aliases** map another key to a product. An alias never shadows an identity key, and the first product to take
   one keeps it (`addAlias` is one `insert or ignore` statement; an unknown product throws). `createProduct` is an
   insert-or-ignore on the identity key that returns the stored row, so two scans of one new product both carry on
@@ -816,6 +842,11 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   formulation is stored; if the adoption loses to another call, the product's own formulation is used or stored, never the other's. Without
   both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and `REFERENCE_VERSION`) so the scan can
   skip the analyse step. Callers (the scan jobs) run one of these per step.
+- **search, namedProduct and choose** serve a user who names a product by hand (see "Product search" and `identifyByName`).
+  `search(q)` normalises the query with `normaliseText` and returns at most 10 `{ id, brand, name, variant, category, imageUrl }`, or `[]` for a
+  query with nothing left once normalised (never every product); no model or web call. `namedProduct(id)` is that summary for one id.
+  `choose(id)` is `nextStep` for a product the user picked, the same `ResolveResult` `resolve` gives for it: no lookup by name, no model, nothing
+  written. An id the catalog does not hold, and an unnamed product, are `NotFoundError('PRODUCT_NOT_FOUND')` for both.
 - **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest
   formulation as `found` when it is fresh, without calling the researcher or recording an attempt. `analyse` returns at
   once when the formulation is already analysed by the current `ANALYSIS_VERSION` and `REFERENCE_VERSION`.
@@ -950,6 +981,9 @@ comes in a later PR.
   recognising → rejected                          (face-or-person, not-a-beauty-product)
   recognising → needs-retake → recognising        (unreadable or label-not-visible, fewer than 3 front photos so far; the user retakes)
   recognising → needs-identification              (unreadable or label-not-visible on the 3rd front photo)
+  needs-retake | needs-identification → matching  (a typed name, split by a model: `identifyByName`, queues `match`)
+  needs-retake | needs-identification → ready | analysing | researching | failed (analysis-failed)
+                                                  (a product picked from search: `identifyByName`, the same moves as `match`)
   needs-identification → reading-label                       (a back photo is uploaded for an item with no product)
   reading-label (no product) → ready                         (`catalog.fromLabel` found its list already analysed)
   reading-label (no product) → analysing → ready             (otherwise)
@@ -1066,6 +1100,26 @@ comes in a later PR.
   `scan_retakes` row and queues `recognise` with `at` = the time of the move. If the queueing fails the move is undone to `needs-retake` with the old reason and a null
   `photo_key`, the new photo is deleted and the error rethrown (the retake row stays: the photo was sent). Of two retakes at once one wins and the other is 409;
   a loser deletes only its own key, and only when it differs from the winner's. The route answers 202 with the item.
+- **identifyByName.** `ScanService.identifyByName(scanId, itemId, { productId } | { text })` names the product of an item whose front photo could
+  not be read, from `needs-retake` or `needs-identification` (anything else is 409 `ITEM_NOT_AWAITING_IDENTIFICATION`). It sends no photo, so no
+  quota or retake row is written. The checks run in this order, and nothing is paid for until all have passed: the scan is the caller's
+  (404 `SCAN_NOT_FOUND`), the state, then the text (400 `INVALID_PRODUCT_TEXT`: trimmed, 2 to 120 characters, no link, markup or hidden character,
+  because the split becomes a product in the shared catalog), then the work. No AI call is made on any 4xx.
+  - **`{ productId }`** (a result of search, no model call): `catalog.choose` says what the product needs, and the item moves through the same
+    handling as the `match` step (`moveOn`): `ready`, `analysing` (queues `analyse`), `researching` (queues `research`), or `failed` /
+    `analysis-failed` for a product whose analysis was rejected the maximum number of times. `recognised` is set from the chosen product
+    (`catalog.namedProduct`). An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`, the item unchanged.
+  - **`{ text }`**: one `NameSplitter.split` call, which has its own `AnthropicClient` with a 15 s timeout (the shared one waits 60 s; the split runs in the request), then the item goes to `matching` with the split's brand, name, variant and category as
+    `recognised` and `match` is queued, exactly as a confirmation does; the catalog lookup and any research happen in the queue, not in the request.
+    `not-a-product`, or a refusal, is 400 `NOT_A_PRODUCT_NAME`; `AiBudgetExceededError` is `CatalogBusyError` (503 `CATALOG_BUSY`);
+    `AnthropicUnavailableError` (down, overloaded or timed out) and `AnthropicRequestError` (an unusable answer) are `UnavailableError` (503 `AI_UNAVAILABLE`,
+    "Couldn't read that name right now. Try again in a moment.": it blames no limit) and are logged `{ outcome: 'split-name-failed', error }` with the error name only. In each the item stays where it was, nothing is queued and the user may try again (the one
+    split is paid for, which the rate limits bound).
+  - The move is a guarded `transition` from the state read, so of two simultaneous calls one wins and the other is 409; if the next step cannot be
+    queued, the move is undone and the fields it set (`recognised*`, `productId`, `formulationId`) are cleared again.
+  - **Known limits.** `stripSizes` is not applied to a typed name or to search (a pack size in a name is matched as typed). A typed name with
+    no brand is not a product: the splitter answers `not-a-product`, and so does an empty name. Products made before search text existed are searchable only once the reaper
+    has filled them (see "Product catalog data"), within a few runs.
 - **The user's steps.** `confirm` takes the corrected brand, name, variant and category of an item in `needs-confirmation`
   and queues `match`; its text is trimmed and refused (`INVALID_PRODUCT_TEXT`) when empty, over 120 characters, or carrying
   a link, markup or a hidden character, because it becomes a product in the shared catalog. `addBackPhoto` takes the photo
@@ -1140,6 +1194,7 @@ comes in a later PR.
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/retake` | bearer; multipart, one `photo` part | 202 the item, now `recognising`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_RETAKE`, 413, 415, 429 | 20 per IP, 10 per user |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/identification` | bearer; JSON, exactly one of `{ productId }` or `{ text }` | 202 the item (`matching`, `ready`, `analysing`, `researching` or `failed`); 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`, `NOT_A_PRODUCT_NAME`), 401, 404 `SCAN_NOT_FOUND` or `PRODUCT_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_IDENTIFICATION`, 415, 429, 503 `CATALOG_BUSY` or `AI_UNAVAILABLE` | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
   | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
 
@@ -1150,6 +1205,9 @@ comes in a later PR.
     the bytes, so the service sniffs them and answers `UNSUPPORTED_IMAGE` (a PNG that says it is a JPEG included) or
     `IMAGE_TOO_LARGE` (over 2,000,000 bytes or 1600 px) with a code the app can act on. The route turns each `File` into the
     service's `ProductImage` (bytes plus the declared type, which the service never trusts).
+  - **Identification body and order.** The body is a union of two closed objects, so `{}`, both fields, an extra field or a non-string is
+    `VALIDATION_FAILED`; the text's length and content are the service's (`INVALID_PRODUCT_TEXT`). The route runs the IP limiter,
+    `signedIn()`, then the user limiter, then validates the body, so an unsigned caller with a bad or non-JSON body is 401 and a model is never called past the limits.
   - **Order and size.** All three upload routes run, in this order: the IP limiter, `signedIn()`, the user limiter, `bodyLimit`.
     The IP limiter counts every caller, signed in or not. `signedIn()` (`middleware/signed-in.ts`) answers 401 `AUTH_REQUIRED`,
     `TOKEN_EXPIRED` or `TOKEN_INVALID` from `c.var.auth` (the same codes as `requireUser`, through `notSignedIn` in
@@ -1160,10 +1218,10 @@ comes in a later PR.
     framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
-    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake; 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
+    `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake, `SCAN_IDENTIFY_IP_LIMITER` (20) and `SCAN_IDENTIFY_USER_LIMITER` (10) on the identification (each may cost a model call); 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
     read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
     do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
-    underneath. Namespace ids are 1006 to 1011 at the top level, 2006 to 2011 in staging and 3006 to 3011 in production (the retake limiters are 1010/1011, 2010/2011, 3010/3011).
+    underneath. Namespace ids are 1006 to 1015 at the top level, 2006 to 2015 in staging and 3006 to 3015 in production (the retake limiters are 1010/1011, 2010/2011, 3010/3011; the identification limiters 1012/1013, 2012/2013, 3012/3013; the product search limiters 1014/1015, 2014/2015, 3014/3015).
   - **Client address.** The service is handed `cf-connecting-ip` as the address for the per-address daily quota (`unknown` where the
     header is absent, as for the rate limiter).
   - **The public photo route** ignores the Authorization header altogether (a broken or expired one changes nothing), answers 200
@@ -1172,11 +1230,32 @@ comes in a later PR.
     `PHOTO_NOT_FOUND` in the JSON error envelope. Its token parameter has no length limit of its own for that reason.
     It is declared with `imageResponse`, so the compiler cannot check that handler's return: the integration tests do.
 - **Wiring.** The container builds the service with `D1ScansRepository`, the catalog, `AnthropicProductRecognizer`,
-  `AnthropicLabelReader` (both over the shared client), `R2PhotoStore` for `PRIVATE_PHOTOS` locked to `ENVIRONMENT`
+  `AnthropicLabelReader` and `AnthropicNameSplitter` (all over the shared client), `R2PhotoStore` for `PRIVATE_PHOTOS` locked to `ENVIRONMENT`
   (anything but development, staging, production or test stops the build), the job queue with the `scan-items` binding,
   `DurableObjectScanEvents` over the `SCAN_STREAM` binding, `JWT_SECRET` for the photo links and `DEVICE_ID_KEY` for the IP hash.
 - **Logs** carry ids and outcomes only, never a photo, an IP, or what the model said.
 - **Back-photo reads are keyed per upload.** The `read-label` message's `at` is the upload's move into `reading-label`, so a fresh photo after an unreadable one is read again rather than dropped as a duplicate (every step is keyed this way now, see Steps).
+
+### Product search
+`GET /api/v1/products/search?q=` (`modules/catalog/catalog.routes.ts`, operation `searchProducts`, tag "Products", mounted at `/api/v1/products`) finds
+named products as the user types, so an item that could not be photographed can be identified by picking one
+(`POST .../items/{itemId}/identification` with its `productId`; see "Scan module"). It calls `ProductCatalogService.search`; the response is
+`data: { products: [{ id, brand, name, variant, category, imageUrl }] }`, at most 10, shaped by `catalog.presenter.ts`. It makes no model or web call.
+
+- **Query.** `q` is trimmed, then 2 to 80 characters (`VALIDATION_FAILED` otherwise). The service normalises it with `normaliseText`, so case, accents
+  and punctuation do not matter; a query under 2 characters once normalised (`!!`, `a!`) finds nothing, never everything, and the service does not query for it (the route's bound
+  is on the trimmed text, so `a!` passes validation and answers `[]`).
+- **Match.** Word-wise. The normalised query is split on spaces (empty parts ignored, at most the first 8 words; none left finds nothing). A product
+  matches when its `products.search_text` (see "Product catalog data") contains EVERY word, OR when ONE of its alias keys in `product_aliases`
+  contains every word (the AND is inside the per-alias subquery, so words spread over two aliases do not match). Each product appears once, and only
+  named products are searched (an unnamed product's `search_text` is `''`, and `kind = 'named'` is checked too). The words need not be adjacent or in
+  order: "loreal revitalift" finds "loreal paris revitalift creme". Order: those whose `search_text` starts with the whole query first, then
+  `search_text` ascending, then `id`, so the order is the same every time. The repository uses SQLite `instr` per word, not `LIKE`: D1 refuses a
+  LIKE pattern over 50 bytes ("pattern too complex") and a query may be 80 characters, and `instr` has no wildcard characters to escape (a user typing
+  `50%` means those characters). Every word is a bound parameter. `instr` is case-sensitive, like the fake's `includes`; both sides are normalised.
+- **Auth and limits.** Bearer token (a guest is fine). Middleware in order: `PRODUCT_SEARCH_IP_LIMITER` (120 per 60 s), `signedIn()`, `PRODUCT_SEARCH_USER_LIMITER` (60 per 60 s),
+  then the query is validated, so an unsigned caller is 401 whatever the query. Far looser than the routes that cost something, because
+  search runs every keystroke or two and calls no model.
 
 ### Live updates
 

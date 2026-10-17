@@ -153,7 +153,7 @@ describe('wrangler.jsonc rate limits', () => {
 type SimpleLimit = { name: string; namespace_id: string; simple?: { limit: number; period: number } }
 const scanLimitBlocks = scanBlocks as unknown as [string, { ratelimits?: SimpleLimit[] } | undefined, string][]
 
-describe('wrangler.jsonc scan route rate limits', () => {
+describe('wrangler.jsonc scan and product search route rate limits', () => {
   const limiters: [string, number][] = [
     ['SCAN_CREATE_IP_LIMITER', 20],
     ['SCAN_CREATE_USER_LIMITER', 10],
@@ -161,6 +161,12 @@ describe('wrangler.jsonc scan route rate limits', () => {
     ['SCAN_BACK_PHOTO_IP_LIMITER', 20],
     ['SCAN_RETAKE_IP_LIMITER', 20],
     ['SCAN_RETAKE_USER_LIMITER', 10],
+    // Typing a name: each identification may cost a model call, so these are as tight as the retake's.
+    ['SCAN_IDENTIFY_IP_LIMITER', 20],
+    ['SCAN_IDENTIFY_USER_LIMITER', 10],
+    // Search runs as the user types (a request every keystroke or two, and no AI), so it is far looser than the routes that cost something.
+    ['PRODUCT_SEARCH_IP_LIMITER', 120],
+    ['PRODUCT_SEARCH_USER_LIMITER', 60],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 

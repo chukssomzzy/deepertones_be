@@ -310,6 +310,7 @@ const jobOf = (call: { body: any }) => {
   if ((call.body.tools ?? []).some((tool: { name: string }) => tool.name === 'web_search')) return 'research'
   const properties = Object.keys(call.body.output_config?.format?.schema?.properties ?? {})
   if (properties.includes('classification')) return 'recognize'
+  if (properties.includes('kind')) return 'split-name'
   if (properties.includes('readable')) return 'read-label'
   if (properties.includes('concerns')) return 'analysis'
   if (properties.includes('same')) return 'same-product'
@@ -460,5 +461,74 @@ describe('scan items identified by their back photo, through the Worker queue ha
 
     expect(again.explicitAcks).toEqual(['m'])
     expect(calls.map(jobOf)).toEqual(['read-label'])
+  })
+})
+
+// --- an item identified by a typed name ---
+
+/** What the name splitter answers: the typed text read as a product. */
+const splitAs = (brand: string, name: string) => readLabel({ kind: 'product', brand, name, variant: '', category: 'skin' })
+/** A container of its own: the Anthropic client takes the global fetch when it is built, so one built before a test's stub would keep an earlier test's. */
+const identifyByName = (taken: Identifying, input: { productId: string } | { text: string }) =>
+  asUser(taken.userId, () => buildContainer(testEnv).scans.identifyByName(taken.scanId, taken.itemId, input))
+
+describe('scan items identified by a typed name, through the Worker queue handler', () => {
+  it('pays for one split-name call, then takes a product the catalog already holds to ready with no call at all: the match step is free', async () => {
+    const brand = freshBrand()
+    const formulationId = await catalogued(brand, 'Hydrating Cleanser')
+    const taken = await identifying()
+    const calls = stubAnthropic(splitAs(brand, 'Hydrating Cleanser'))
+
+    const moved = await identifyByName(taken, { text: `${brand} Hydrating Cleanser` })
+
+    expect(moved).toMatchObject({ state: 'matching', recognised: { brand, name: 'Hydrating Cleanser', category: 'skin' } })
+    expect(calls.map(jobOf)).toEqual(['split-name'])
+    const match = await runQueue(MAIN, { itemId: taken.itemId, step: 'match', at: AT + 20 })
+
+    expect(match.explicitAcks).toEqual(['m'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'ready', product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(calls.map(jobOf)).toEqual(['split-name'])
+  })
+
+  it('takes a product the catalog does not hold to researching, as a confirmation does, after the one split-name call', async () => {
+    const brand = freshBrand()
+    const taken = await identifying()
+    const calls = stubAnthropic(splitAs(brand, 'Bright Tone Serum'))
+    await identifyByName(taken, { text: `${brand} Bright Tone Serum` })
+
+    const match = await runQueue(MAIN, { itemId: taken.itemId, step: 'match', at: AT + 20 })
+
+    expect(match.explicitAcks).toEqual(['m'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'researching' })
+    expect(calls.map(jobOf)).toEqual(['split-name'])
+  })
+
+  it('makes no AI call at all for a product picked from the catalog: ready at once for an analysed product', async () => {
+    const brand = freshBrand()
+    const formulationId = await catalogued(brand, 'Hydrating Cleanser')
+    const resolved = await new ProductCatalogService({
+      repository: new D1CatalogRepository(createDb(env.DB)),
+      researcher: new MemoryProductResearcher(),
+      analyst: new MemoryProductAnalyst(),
+      images: new MemoryCatalogImageStore(),
+      imageKeyPrefix: 'catalog/test',
+    }).resolve({ brand, name: 'Hydrating Cleanser', category: 'skin' })
+    const taken = await identifying()
+    const calls = stubAnthropic(face)
+
+    const moved = await identifyByName(taken, { productId: resolved.productId })
+
+    expect(moved).toMatchObject({ state: 'ready', product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(calls).toHaveLength(0)
+  })
+
+  it('leaves the item waiting for identification, with the one split paid for and nothing queued, when the text is not a product name', async () => {
+    const taken = await identifying()
+    const calls = stubAnthropic(readLabel({ kind: 'not-a-product', brand: '', name: '', variant: '', category: 'other' }))
+
+    await expect(identifyByName(taken, { text: 'my cat is called Biscuit' })).rejects.toMatchObject({ code: 'NOT_A_PRODUCT_NAME' })
+
+    expect(calls.map(jobOf)).toEqual(['split-name'])
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'needs-identification' })
   })
 })

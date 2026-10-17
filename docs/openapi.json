@@ -328,6 +328,63 @@
         ],
         "description": "The profile this session is on."
       },
+      "ProductSearch": {
+        "type": "object",
+        "properties": {
+          "products": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "brand": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "variant": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "category": {
+                  "type": "string",
+                  "enum": [
+                    "skin",
+                    "hair",
+                    "body",
+                    "makeup",
+                    "other"
+                  ]
+                },
+                "imageUrl": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "description": "The product's stock image, an absolute URL, if it has one."
+                }
+              },
+              "required": [
+                "id",
+                "brand",
+                "name",
+                "variant",
+                "category",
+                "imageUrl"
+              ]
+            },
+            "description": "At most 10, best first: those whose search text (brand, name and variant, normalised) starts with the query, then the others, each group by that text."
+          }
+        },
+        "required": [
+          "products"
+        ]
+      },
       "Scan": {
         "type": "object",
         "properties": {
@@ -729,6 +786,37 @@
         },
         "required": [
           "photo"
+        ]
+      },
+      "IdentifyProductBody": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "productId": {
+                "type": "string",
+                "minLength": 1,
+                "description": "A product id from `GET /api/v1/products/search`."
+              }
+            },
+            "required": [
+              "productId"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "A product name the user typed, 2 to 120 characters once trimmed, with no link, markup or hidden character."
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
         ]
       }
     },
@@ -1462,6 +1550,113 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/products/search": {
+      "get": {
+        "operationId": "searchProducts",
+        "tags": [
+          "Products"
+        ],
+        "summary": "Search the catalog by what the user types",
+        "description": "Finds named products whose brand, name or variant contain the query (or one of their other spellings), as the user types. No model is called. Pick a result with `POST /api/v1/scans/products/{scanId}/items/{itemId}/identification`. Unnamed products are never returned.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 80,
+              "description": "What the user typed: a fragment of the brand, name or variant. Case, accents and punctuation do not matter."
+            },
+            "required": true,
+            "description": "What the user typed: a fragment of the brand, name or variant. Case, accents and punctuation do not matter.",
+            "name": "q",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The matching products",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ProductSearch"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
             "content": {
               "application/json": {
                 "schema": {
@@ -2239,6 +2434,167 @@
           },
           "500": {
             "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/scans/products/{scanId}/items/{itemId}/identification": {
+      "post": {
+        "operationId": "identifyProductScanItem",
+        "tags": [
+          "Product scans"
+        ],
+        "summary": "Name the product of an item whose photo could not be read",
+        "description": "For an item in `needs-retake` or `needs-identification`. Send exactly one of `productId` (picked from `GET /api/v1/products/search`; no model is called) or `text` (a name the user typed, which is split into brand, name and variant by a model: 400 `NOT_A_PRODUCT_NAME` when it is not a product's name, 503 `AI_UNAVAILABLE` when the model is unavailable, 503 `CATALOG_BUSY` when the daily AI budget is spent). The item goes on to matching, researching, analysing or ready. It sends no photo, so no photo quota or retake is used.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "scanId",
+            "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "itemId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IdentifyProductBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The item, now on its way",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ScanItem"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
             "content": {
               "application/json": {
                 "schema": {
