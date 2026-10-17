@@ -101,9 +101,16 @@ export class NotificationsService {
    * A guest signed in to an existing account and is left behind. Its push token rows go, so that phone stops receiving the
    * guest's notifications; it registers again under the account it signed in to. (Verify carries no device id, so the guest's
    * rows are the only way to name this phone.) Not called when the guest is promoted in place: that account keeps its rows.
+   * Answers with the platform of the phone it deleted, for the sign-in alert's text; the most recently updated row's if the guest
+   * had several, null if it had none.
    */
-  async guestSignedIn(userId: string): Promise<void> {
+  async guestSignedIn(userId: string): Promise<PushToken['platform'] | null> {
+    // Read before the delete on purpose: the rows are gone afterwards, and the alert wants the platform of the phone that signed in.
+    const rows = await this.pushTokens.forUser(userId)
     await this.pushTokens.deleteForUser(userId)
+    let latest: PushToken | undefined
+    for (const row of rows) if (!latest || row.updatedAt.getTime() > latest.updatedAt.getTime()) latest = row
+    return latest?.platform ?? null
   }
 
   /** Queues "your scan is ready" for the scan's profile. A failed enqueue is logged and swallowed: it must never fail the scan step. */

@@ -301,3 +301,25 @@ describe('NotificationsService token drops on sign-out and sign-in', () => {
     expect(await pushTokens.forUser('user-bob')).toHaveLength(1)
   })
 })
+
+describe('NotificationsService.guestSignedIn: the platform it answers with', () => {
+  it.each(['ios', 'android'] as const)('answers %s, the platform of the guest\'s phone row it deleted', async (platform) => {
+    await register(ADA, 'device-install-0001', TOKEN_A, platform)
+    await register(BOB, 'device-install-0003', TOKEN_C, platform === 'ios' ? 'android' : 'ios')
+
+    const answered = await runAs(ADA, () => service.guestSignedIn('user-ada'))
+
+    expect(answered).toBe(platform)
+    expect(await pushTokens.forUser('user-ada')).toEqual([])
+    expect((await pushTokens.forUser('user-bob')).map((row) => row.token)).toEqual([TOKEN_C])
+  })
+
+  it('answers null when the guest had no phone row, and deletes nothing', async () => {
+    await register(BOB, 'device-install-0003', TOKEN_C)
+
+    const answered = await runAs(ADA, () => service.guestSignedIn('user-ada'))
+
+    expect(answered).toBeNull()
+    expect(await pushTokens.forUser('user-bob')).toHaveLength(1)
+  })
+})

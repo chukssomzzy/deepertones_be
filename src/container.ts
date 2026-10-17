@@ -155,6 +155,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         photos: privatePhotos(),
         jobs: jobQueue(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        notifications: notifications(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         // A separate HKDF info (see ScanService) keeps the IP hash key unrelated to how device ids are hashed with the same secret.

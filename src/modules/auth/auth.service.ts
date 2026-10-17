@@ -42,6 +42,7 @@ export class AuthService {
   private readonly otp: OtpService
   private readonly tokens: TokenService
   private readonly notifications: NotificationsService
+  private readonly now: () => Date
   // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
   readonly #deviceIdKey: string
 
@@ -52,6 +53,7 @@ export class AuthService {
     this.tokens = deps.tokens
     this.notifications = deps.notifications
     this.#deviceIdKey = deps.deviceIdKey
+    this.now = deps.now ?? (() => new Date())
   }
 
   /**
@@ -94,7 +96,11 @@ export class AuthService {
     if (guestLeftBehind) await this.users.bumpTokenVersion(actor.userId)
     await this.users.unlinkDevices(actor.userId)
     // After the unlink, so a failure here cannot skip it once the code is consumed.
-    if (guestLeftBehind) await this.notifications.guestSignedIn(actor.userId)
+    if (guestLeftBehind) {
+      const platform = await this.notifications.guestSignedIn(actor.userId)
+      // The account's other phones are told; the phone that signed in is not among them (its guest row is gone, and the row it registers next is newer than `at`).
+      await this.notifications.newSignIn({ userId: user.id, platform, at: this.now().getTime() })
+    }
     return this.session(user, outcome === 'promoted' ? actor.profileId : (await this.profiles.defaultFor(user.id)).id)
   }
 

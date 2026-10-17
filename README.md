@@ -116,7 +116,10 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    `DELETE /api/v1/me/push-token` with `{ deviceId }` stops them for this phone (204 even if nothing was registered). Logout and
    signing a guest in to an existing account delete the tokens they leave behind, so register again after them.
    `GET`/`PATCH /api/v1/me/notification-settings` read and change `{ scanFinished, scanNeedsYou }` (both on by default; PATCH names at
-   least one).
+   least one). The pushes sent are "your scan is ready" (to the phones on the profile that made the scan), "your scan needs you" (an item
+   needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
+   a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
+   the ids to route the tap.
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
@@ -232,7 +235,8 @@ live (it invalidates outstanding codes; harmless once 10 minutes have passed).
 
 Push notifications go out through the Expo Push Service. The provider is in `src/providers/push`, the send and receipt
 jobs in `src/modules/notifications` (see "Push notifications (Expo)" and "Sending push notifications" in
-`docs/architecture.md`); the triggers that queue them come in the last PR of issue #54. Tests never call Expo and need no
+`docs/architecture.md`). The backend sends three pushes: "scan ready", "scan needs you" (a confirmation or a back photo) and a
+security alert when a guest signs in to an existing account; "What triggers a push" there says when. Tests never call Expo and need no
 secrets. What is left for the account owner, once per environment (a separate access token per environment is fine but not
 required):
 

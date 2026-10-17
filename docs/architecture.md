@@ -463,6 +463,9 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 - **Device ids are HMAC'd** with `DEVICE_ID_KEY` before they reach the database; the raw id is never stored.
 - **Logout and a guest's sign-in drop push tokens** (see "Push tokens and notification settings"): logout deletes every push token of
   the account, and signing in as an existing owner deletes the leaving guest's.
+- **A guest's sign-in alerts the account.** After the guest's rows are deleted, `verifyOtp` queues the `new-sign-in` push for the account that was
+  signed in to, with the platform of the deleted phone and the time of the sign-in (see "Sending push notifications" → "What triggers a push").
+  It is always sent (no setting) and never fails the sign-in. The alert is not sent for promotion in place or for a verified user re-verifying their own address.
 - **Verify and logout unlink the user's devices**, so the device's next bootstrap creates a new guest rather than
   returning data that belonged to the pre-login (or just logged-out) identity.
 - **Linking is refused up front.** A verified caller using an address nobody owns gets 409 `ACCOUNT_LINKING_UNAVAILABLE` from send and verify, before a code is sent or consumed (checked against the user's row, not the token's status). A guest that signs in as an existing owner has its token version bumped, retiring its refresh token.
@@ -558,7 +561,7 @@ Push notifications go through the Expo Push Service, behind a `PushSender` port 
 adapter, `ExpoPushSender` (`expo.push.ts`), and a memory fake, `MemoryPushSender`. The port file also exports
 `isExpoPushToken`, a pure token-shape check, because services may not import an adapter. The tokens and settings
 (see "Push tokens and notification settings") are stored and routed, and the container builds the `ExpoPushSender` with `EXPO_ACCESS_TOKEN`.
-The send and receipt jobs are in "Sending push notifications"; the triggers that queue them come in the last PR of #54.
+The send and receipt jobs are in "Sending push notifications"; the scan and sign-in flows that queue them are listed there under "What triggers a push".
 
 - **Why Expo.** The app is an Expo (React Native) app and registers an Expo push token; Expo's service then reaches Apple
   and Google with the credentials uploaded to Expo/EAS. The backend never talks to APNs or FCM.
@@ -643,7 +646,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 
 - **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou` and `newSignIn` queue a `send-push` job
   and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId? }` and return: a scan step or a sign-in must not fail
-  because a push could not be queued. (The triggers are wired into the scan and sign-in flows in the last PR of #54.)
+  because a push could not be queued. (Who calls them, and when, is in "What triggers a push".)
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
@@ -654,6 +657,34 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
   deduplicated by the key. The receipt job's key is its ticket ids.
+- **What triggers a push.** Only a guarded update that APPLIED notifies, and the call comes after the update (never inside it), so a repeated or
+  late step, or a step that lost a race, says nothing. `ScanService` takes `NotificationsService` (a type-only import; the dependency runs one way) and calls:
+
+  | Where | When | Call | Key |
+  | --- | --- | --- | --- |
+  | `recognise` | the item moved to `needs-confirmation` | `scanNeedsYou({ need: 'confirm' })` | `scan-needs-you:<scanId>:confirm` |
+  | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
+  | `labelUnreadable` | the item moved back to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo', ask: n })`, `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
+  | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
+  | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
+
+  An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
+  rest), linking to the first item that asked.
+  - **Keys.** `userId` and `profileId` are the scan row's (a step runs as a system actor, so there is no session to take them from).
+    `notifyNeedsYou` reads the scan for them after the update; that read is guarded (a failure is logged as
+    `{ outcome: 'push-failed', scanId, itemId }`), because the item has already moved and a throw would be retried into a no-op.
+  - **Finished goes before the live `done`.** `sendDone` queues the push, then publishes `done`. The person may have closed the app, so the push must
+    not depend on the live stream being up or the publish succeeding; if the order were the other way a failing publish would skip it. The
+    call that SET the done time is the only one that pushes: `watch` re-sending `done` to a late client (time already set) does not, but
+    `watch` and the reaper, when they are the call that sets it, do. The push's reads (the scan, and the items when the caller has none in hand: the reaper) are guarded on their own:
+    if they throw, `push-failed` is logged, `done` is still published, and the done time is cleared again so the reaper re-claims it and queues the push again; the step does not fail. The done time can be cleared
+    and set again (a failed publish, a reaper re-claim), which queues `scan-finished:<scanId>` again; the key makes the repeat free.
+  - **Orphans are skipped.** A scan with no profile (written by the old Worker, before `adoptOrphanScans` gave it one) has no phones to tell:
+    nothing is queued and `{ outcome: 'push-skipped-no-profile', scanId }` is logged (a needs-you push for such a scan is skipped the same way). The
+    done time is still set, so the scan is not told later either.
+  - **Sign-in.** `AuthService.verifyOtp` calls `guestSignedIn` (deletes the guest's rows and answers the platform of the phone it deleted: the
+    most recently updated row's, null if none), then `newSignIn` with that platform and `at` = the injected clock's now. The alert fires only when the caller was a
+    guest and the outcome is `existing`; promotion in place and a verified user signing in again do not.
 - **Targeting is decided at send time.** Scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
   account the message names); the sign-in alert goes to the account's phones (`forUser`), on any profile, EXCEPT the phone that signed
   in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on); the sign-in alert has no switch.
@@ -688,9 +719,10 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   the device's row still holds that token. A phone that registered a new token since the send keeps it. The receipt job has only the
   hash, so it reads the row, compares `sha256Hex(row.token)` with the message's `tokenHash`, and only then deletes with the row's token.
 - **Dead letters.** `onDeadLetter` logs `{ job, outcome: 'dead-lettered' }` and nothing else; a lost notification needs no repair.
-- **Logs** are `{ job, kind?, outcome, count }` (`push-enqueue-failed` aside): no token, text, link or account, profile, scan or item id,
-  and no error text. The outcomes are `sent`, `not-sent`, `misconfigured`, `dead-token-deleted`, `dead-token-delete-failed` and
-  `receipt-enqueue-failed`.
+- **Logs.** The notifications module logs `{ job, kind?, outcome, count }`: no token, text, link or account, profile, scan or item id, and no error
+  text. The outcomes are `sent`, `not-sent`, `misconfigured`, `dead-token-deleted`, `dead-token-delete-failed` and `receipt-enqueue-failed`.
+  The lines that name ids are the exceptions, and log nothing but ids: `push-enqueue-failed` (`kind`, `scanId` if any), and from `ScanService`
+  `push-skipped-no-profile` (`scanId`) and `push-failed` (`scanId`, plus `itemId` for a needs-you push).
 - **Queue settings.** `push-delivery` is modelled on `otp-delivery` (batch 10, a 1 second batch timeout since a person waits, 5 attempts,
   backoff 5 s x3 up to 135 s). `push-receipts` is not urgent, so it lets a batch fill (25, up to 30 seconds), 5 attempts, backoff 30 s x3
   up to 600 s.
@@ -1100,8 +1132,9 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
 ### Scan module
 `modules/scans` owns the product scan (#20): the photos a user takes and how each one gets to a result. `ScanService`
 reaches the catalog only through `ProductCatalogService`, and never depends on `UsersService` (the users service calls
-it, through a guest cleaner, so a dependency the other way would be a cycle). The routes are below; the live stream
-comes in a later PR.
+it, through a guest cleaner, so a dependency the other way would be a cycle). It also takes `NotificationsService` (type-only, one way:
+notifications never imports scans) to tell the person when a scan needs them or is done; which transitions notify is in
+"Sending push notifications" → "What triggers a push". The routes are below.
 
 - **Tables** (migrations 0009 and 0010). `scans`: id, `user_id` (references users, cascade), `profile_id` (migration 0012; see "Profiles"), `ip_hash`, `created_at`, `done_at`
   (null until the scan's `done` event is claimed, see Events); indexed by `user_id`, `(profile_id, created_at)`, `(ip_hash, created_at)` and, for the
@@ -1254,7 +1287,7 @@ comes in a later PR.
 - **Events.** After every change the service publishes `{ type: 'item', item }` (the item exactly as `ScanItemView`), and
   `{ type: 'done' }` once when the item that just finished was the last non-final one. `done` is sent only by the call
   whose guarded `UPDATE scans SET done_at = ? WHERE id = ? AND done_at IS NULL` applies (`markScanDone`), so two items
-  finishing together send it once. Only after the change is stored;
+  finishing together send it once, and the same call queues the finished push first (see "Sending push notifications"). Only after the change is stored;
   a publish that throws is logged as `{ outcome: 'publish-failed', scanId, itemId }` and never fails the step. If it was the
   `done` publish that threw, the done time `markScanDone` set is cleared again (`clearScanDone`, guarded on that very time), so
   `done` is still owed and the reaper finds the scan; without that the scan would look finished and no one would ever send it. The port
@@ -1350,7 +1383,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   does this, not the object, which never reads the snapshot. A publish that fails here is logged with ids only
   (`{ outcome: 'publish-failed', scanId, itemId? }`) and never fails the stream.
 - **Already finished.** The same step covers a scan that is final when a client connects: nothing differs, every item is final,
-  so `watch` marks the scan done if it was not (`markScanDone`, result ignored) and publishes `done` right after subscribing:
+  so `watch` marks the scan done if it was not (`markScanDone`; if this call set the time it also queues the finished push, see "Sending push notifications") and publishes `done` right after subscribing:
   the client gets `snapshot`, `done`, and the stream ends. It publishes `done` even if `done_at` was already set, because this
   client has not had it; that also covers a `done` that was lost while nobody was connected. If that `done` fails after
   `watch` itself set the time, the time is cleared again, as for the steps and the reaper.
