@@ -59,4 +59,7 @@ jobs:
         with:
           name: catalog-eval
           path: .eval/
-          if-no-files-found: ignore
+          # `.eval/` is a dot-folder, which upload-artifact v4 skips unless told otherwise.
+          include-hidden-files: true
+          # The step only runs when the eval did, so a missing report is worth a warning.
+          if-no-files-found: warn

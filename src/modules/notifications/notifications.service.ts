@@ -1,0 +1,292 @@
+import { PermanentJobError } from '../../jobs/job'
+import { hmacSha256Hex, sha256Hex } from '../../lib/crypto'
+import { requireUser } from '../../lib/context'
+import { ValidationError } from '../../lib/errors'
+import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
+import { type PushMessage, type PushSender, PushUnavailableError, isExpoPushToken } from '../../providers/push/push.provider'
+import { deepLinkFor } from './deep-links'
+import { type CheckPushReceiptsMessage, type SendPushMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
+import type { NotificationSettingsRepository, PushTokensRepository } from './notifications.repository'
+import type { NotificationSettings, NotificationSettingsPatch, PushToken } from './notifications.types'
+
+export type NotificationsServiceDeps = {
+  pushTokens: PushTokensRepository
+  settings: NotificationSettingsRepository
+  push: PushSender
+  jobs: JobQueue
+  /** Keys the HMAC of device ids. It must be the key AuthService uses, so a push token row joins to the `devices` row of the same phone. */
+  deviceIdKey: string
+  now?: () => Date
+  /** Makes the id of a sign-in event; a test injects a counter. */
+  newId?: () => string
+}
+
+/** The switches as the app sees them. */
+export type ScanNotificationSettings = Pick<NotificationSettings, 'scanFinished' | 'scanNeedsYou'>
+
+/**
+ * Which phones may be notified, and which notifications an account wants. A phone is a row keyed by the keyed hash of its device
+ * id; the account and profile come from the session, so the app never says whose phone it is.
+ */
+export class NotificationsService {
+  // Expo needs a while to hand a message to Apple or Google before it has a receipt to give.
+  private static readonly RECEIPT_DELAY_SECONDS = 15 * 60
+
+  private readonly pushTokens: PushTokensRepository
+  private readonly settingsRepository: NotificationSettingsRepository
+  private readonly push: PushSender
+  private readonly jobs: JobQueue
+  private readonly now: () => Date
+  private readonly newId: () => string
+  // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
+  readonly #deviceIdKey: string
+
+  constructor(deps: NotificationsServiceDeps) {
+    this.pushTokens = deps.pushTokens
+    this.settingsRepository = deps.settings
+    this.push = deps.push
+    this.jobs = deps.jobs
+    this.#deviceIdKey = deps.deviceIdKey
+    this.now = deps.now ?? (() => new Date())
+    this.newId = deps.newId ?? (() => crypto.randomUUID())
+  }
+
+  /**
+   * Stores the phone's push token for the session's account and profile. A phone that registers again is moved: to the new
+   * token, or to another account or profile, and a token another phone held now belongs to this one. Call it after every sign-in,
+   * logout, profile switch and token refresh.
+   */
+  async register(input: { deviceId: string; platform: PushToken['platform']; token: string }): Promise<void> {
+    const { userId, profileId } = requireUser()
+    if (!isExpoPushToken(input.token)) throw new ValidationError('PUSH_TOKEN_INVALID', 'That is not an Expo push token')
+    const now = this.now()
+    await this.pushTokens.upsert({
+      deviceHash: await hmacSha256Hex(this.#deviceIdKey, input.deviceId),
+      token: input.token,
+      platform: input.platform,
+      userId,
+      profileId,
+      createdAt: now,
+      updatedAt: now,
+    })
+  }
+
+  /** Removes the caller's own phone. A phone with no row, or one that belongs to another account, is not an error: it is left as it is. */
+  async unregister(input: { deviceId: string }): Promise<void> {
+    const { userId } = requireUser()
+    await this.pushTokens.deleteForDevice(await hmacSha256Hex(this.#deviceIdKey, input.deviceId), userId)
+  }
+
+  /** The account's switches; both are on until one is changed, and reading writes nothing. */
+  async settings(): Promise<ScanNotificationSettings> {
+    const { userId } = requireUser()
+    return NotificationsService.switchesOf(await this.settingsRepository.get(userId))
+  }
+
+  /** Changes only the switches named and answers with all of them. Settings belong to the account, so every profile shares them. */
+  async updateSettings(patch: NotificationSettingsPatch): Promise<ScanNotificationSettings> {
+    const { userId } = requireUser()
+    return NotificationsService.switchesOf(await this.settingsRepository.upsert(userId, patch, this.now()))
+  }
+
+  /**
+   * Logout signs the whole account out, on every phone, so every one of its push tokens goes. Each phone registers again under
+   * the guest it is handed next. Takes the id so AuthService, which already read the actor, does not make this read it twice.
+   */
+  async accountSignedOut(userId: string): Promise<void> {
+    await this.pushTokens.deleteForUser(userId)
+  }
+
+  /**
+   * A guest signed in to an existing account and is left behind. Its push token rows go, so that phone stops receiving the
+   * guest's notifications; it registers again under the account it signed in to. (Verify carries no device id, so the guest's
+   * rows are the only way to name this phone.) Not called when the guest is promoted in place: that account keeps its rows.
+   * Answers with the platform of the phone it deleted, for the sign-in alert's text; the most recently updated row's if the guest
+   * had several, null if it had none.
+   */
+  async guestSignedIn(userId: string): Promise<PushToken['platform'] | null> {
+    // Read before the delete on purpose: the rows are gone afterwards, and the alert wants the platform of the phone that signed in.
+    const rows = await this.pushTokens.forUser(userId)
+    await this.pushTokens.deleteForUser(userId)
+    let latest: PushToken | undefined
+    for (const row of rows) if (!latest || row.updatedAt.getTime() > latest.updatedAt.getTime()) latest = row
+    return latest?.platform ?? null
+  }
+
+  /** Queues "your scan is ready" for the scan's profile. A failed enqueue is logged and swallowed: it must never fail the scan step. */
+  async scanFinished(input: { userId: string; profileId: string; scanId: string; readyCount: number }): Promise<void> {
+    await this.enqueue({ kind: 'scan-finished', ...input })
+  }
+
+  /**
+   * Queues "your scan needs you" for the scan's profile, linking to `itemId`. `ask` counts the times this item asks again after
+   * an unreadable back photo. A failed enqueue is logged and swallowed.
+   */
+  async scanNeedsYou(input: { userId: string; profileId: string; scanId: string; itemId: string; need: 'back-photo' | 'confirm'; ask?: number }): Promise<void> {
+    await this.enqueue({ kind: 'scan-needs-you', ...input })
+  }
+
+  /**
+   * Queues the security alert for the account's phones. Without an `eventId` each call is its own event and is sent; a caller
+   * that passes one (the sign-in's own id) makes a repeated call for the same sign-in the same notification. `at` (default now)
+   * is when the sign-in happened: a phone whose row was created at or after it is the phone that signed in, and is not alerted.
+   * A failed enqueue is logged and swallowed.
+   */
+  async newSignIn(input: { userId: string; platform: PushToken['platform'] | null; eventId?: string; at?: number }): Promise<void> {
+    await this.enqueue({
+      kind: 'new-sign-in',
+      userId: input.userId,
+      platform: input.platform,
+      eventId: input.eventId ?? this.newId(),
+      at: input.at ?? this.now().getTime(),
+    })
+  }
+
+  /**
+   * The send job's body. Reads the account's switch and the phones now, so a change since the event is respected, then sends one
+   * message per phone. At most once: a rate-limited or failed message is not tried again, since a retry would resend the others.
+   * Only a failure of the whole call is retried (PushUnavailableError, rethrown); one that cannot pass fails the job for good.
+   */
+  async deliver(body: SendPushMessage): Promise<void> {
+    if (!(await this.wanted(body))) return
+    const phones = await this.phonesFor(body)
+    if (phones.length === 0) return
+    const content = NotificationsService.contentOf(body)
+
+    // Hashed before the send, so nothing after it can throw outside the guards below.
+    const tokenHashes = await Promise.all(phones.map((phone) => sha256Hex(phone.token)))
+
+    let tickets
+    try {
+      tickets = await this.push.send(phones.map((phone) => ({ to: phone.token, ...content })))
+    } catch (error) {
+      throw NotificationsService.refusal('The push could not be sent', error)
+    }
+
+    const accepted: CheckPushReceiptsMessage['receipts'] = []
+    const dead: PushToken[] = []
+    let misconfigured = 0
+    let notSent = 0
+    for (const [index, ticket] of tickets.entries()) {
+      const phone = phones[index]!
+      if (ticket.status === 'ok') accepted.push({ ticketId: ticket.id, deviceHash: phone.deviceHash, tokenHash: tokenHashes[index]! })
+      else if (ticket.reason === 'device-not-registered') dead.push(phone)
+      else if (ticket.reason === 'misconfigured') misconfigured++
+      else notSent++
+    }
+
+    // The messages have gone out, so nothing below may throw: the job's retry would send them again.
+    const logPush = (outcome: string, count: number) => NotificationsService.log({ job: sendPushSpec.name, kind: body.kind, outcome, count })
+    if (accepted.length > 0) logPush('sent', accepted.length)
+    if (notSent > 0) logPush('not-sent', notSent)
+    if (misconfigured > 0) logPush('misconfigured', misconfigured)
+    try {
+      for (const phone of dead) await this.pushTokens.deleteIfToken(phone.deviceHash, phone.token)
+      if (dead.length > 0) logPush('dead-token-deleted', dead.length)
+    } catch {
+      logPush('dead-token-delete-failed', dead.length)
+    }
+    if (accepted.length > 0) {
+      try {
+        await this.jobs.enqueue(checkPushReceiptsSpec, { receipts: accepted }, { delaySeconds: NotificationsService.RECEIPT_DELAY_SECONDS })
+      } catch {
+        logPush('receipt-enqueue-failed', accepted.length)
+      }
+    }
+    // Every message refused for our own setup: retrying cannot help, so the job fails for good (and is logged by the dispatcher).
+    if (misconfigured === tickets.length) throw new PermanentJobError('Expo refused every push: check the push credentials')
+  }
+
+  /**
+   * The receipt job's body. Deletes each phone whose receipt says its token is dead, but only while the device still holds the
+   * token the push went to (its hash is in the message): a phone that registered again since is left alone. A receipt Expo
+   * does not have yet is skipped; repeating the check is safe.
+   */
+  async checkReceipts(body: CheckPushReceiptsMessage): Promise<void> {
+    let receipts
+    try {
+      receipts = await this.push.receipts(body.receipts.map((receipt) => receipt.ticketId))
+    } catch (error) {
+      throw NotificationsService.refusal('The push receipts could not be read', error)
+    }
+
+    let deleted = 0
+    let misconfigured = 0
+    for (const { ticketId, deviceHash, tokenHash } of body.receipts) {
+      const receipt = receipts[ticketId]
+      if (receipt?.status !== 'error') continue
+      if (receipt.reason === 'misconfigured') misconfigured++
+      if (receipt.reason !== 'device-not-registered') continue
+      const row = await this.pushTokens.find(deviceHash)
+      if (row && (await sha256Hex(row.token)) === tokenHash && (await this.pushTokens.deleteIfToken(deviceHash, row.token))) deleted++
+    }
+    if (deleted > 0) NotificationsService.log({ job: checkPushReceiptsSpec.name, outcome: 'dead-token-deleted', count: deleted })
+    if (misconfigured > 0) NotificationsService.log({ job: checkPushReceiptsSpec.name, outcome: 'misconfigured', count: misconfigured })
+  }
+
+  /** Never throws: the scan step or the sign-in that triggered this must not fail because a push could not be queued. */
+  private async enqueue(body: SendPushMessage): Promise<void> {
+    try {
+      await this.jobs.enqueue(sendPushSpec, body)
+    } catch {
+      // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}) })
+    }
+  }
+
+  /** Whether the account wants this notification. The sign-in alert has no switch. Read at send time. */
+  private async wanted(body: SendPushMessage): Promise<boolean> {
+    if (body.kind === 'new-sign-in') return true
+    const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
+    return body.kind === 'scan-finished' ? switches.scanFinished : switches.scanNeedsYou
+  }
+
+  /** Scan notifications go to the phones on the scan's profile; the sign-in alert goes to every phone of the account. */
+  private async phonesFor(body: SendPushMessage): Promise<PushToken[]> {
+    // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
+    if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
+    // The profile's phones, narrowed to the account the message names.
+    return (await this.pushTokens.forProfile(body.profileId)).filter((phone) => phone.userId === body.userId)
+  }
+
+  /** What the phone shows. Generic by decision: it appears on a lock screen, so no product names. */
+  private static contentOf(body: SendPushMessage): Pick<PushMessage, 'title' | 'body' | 'data'> {
+    switch (body.kind) {
+      case 'scan-finished':
+        return {
+          title: 'Your scan is ready',
+          body: body.readyCount === 0 ? 'Open the app to see what we found' : `${body.readyCount} ${body.readyCount === 1 ? 'product' : 'products'} analysed`,
+          data: { url: deepLinkFor(body.kind, { scanId: body.scanId }), kind: body.kind, scanId: body.scanId, profileId: body.profileId },
+        }
+      case 'scan-needs-you':
+        return {
+          title: 'Your scan needs you',
+          body: body.need === 'back-photo' ? 'We need a photo of the back of a product' : 'Please confirm a product we were not sure about',
+          data: { url: deepLinkFor(body.kind, { scanId: body.scanId, itemId: body.itemId }), kind: body.kind, scanId: body.scanId, itemId: body.itemId, profileId: body.profileId },
+        }
+      case 'new-sign-in': {
+        const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''
+        return {
+          title: 'New sign-in to your Deeper Tones account',
+          body: `${where}just now`,
+          data: { url: deepLinkFor(body.kind, {}), kind: body.kind },
+        }
+      }
+    }
+  }
+
+  /** A temporary outage passes through as it is, so the job retries; anything else is our own setup and fails the job for good. */
+  private static refusal(what: string, error: unknown): Error {
+    // The message is ours and static (the dispatcher logs a PermanentJobError's text); the cause is only ever logged by name.
+    return error instanceof PushUnavailableError ? error : new PermanentJobError(what, { cause: error })
+  }
+
+  /** Every push log line: the job, the kind when there is one, an outcome and a count. Never a token, text, link or id. */
+  private static log(entry: { job: string; kind?: string; outcome: string; count: number }): void {
+    console.log(entry)
+  }
+
+  private static switchesOf(row: ScanNotificationSettings | null): ScanNotificationSettings {
+    return { scanFinished: row?.scanFinished ?? true, scanNeedsYou: row?.scanNeedsYou ?? true }
+  }
+}

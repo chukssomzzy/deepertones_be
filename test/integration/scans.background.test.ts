@@ -33,12 +33,13 @@ const AT = 1_900_000_000_000
 afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
+  pushQueued.length = 0
 })
 
 // The database is shared by the whole file, so every product and user gets a name no other test has.
 const runSalt = String(Math.floor(Math.random() * 1e5)).padStart(5, '0')
 let counter = 0
-const freshBrand = () => `Brand${runSalt}x${counter++}`
+const freshBrand = () => `${runSalt}${counter++}x Brand`
 
 const users = new D1UsersRepository(createDb(env.DB))
 const guest = async () => {
@@ -50,7 +51,10 @@ const guest = async () => {
 // Steps are driven by hand below. The real local queue would deliver the service's own follow-on messages a moment
 // later, into whichever test is running then (with its fetch stub), so this file's Worker queues into nothing.
 const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue
-const testEnv = { ...env, SCAN_ITEMS_QUEUE: quietQueue }
+// The push jobs the steps queue are recorded for the tests that read them (processing one is push.background.test.ts's concern).
+const pushQueued: unknown[] = []
+const pushQueue = { send: async (body: unknown) => void pushQueued.push(body), sendBatch: async () => {} } as unknown as Queue
+const testEnv = { ...env, SCAN_ITEMS_QUEUE: quietQueue, PUSH_DELIVERY_QUEUE: pushQueue }
 const container = buildContainer(testEnv)
 const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous', profileId: `profile-${userId}` }, fn)
 
@@ -95,10 +99,10 @@ const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
 
 const recognised = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))] })
 const beautyProduct = (brand: string, name: string) =>
-  recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
-const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
-const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
-const labelNotVisible = recognised({ classification: 'label-not-visible', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+  recognised({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence: 0.92 })
+const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
+const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
+const labelNotVisible = recognised({ classification: 'label-not-visible', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
 
 const runQueue = async (queue: string, body: unknown, attempts = 1) => {
   const batch = createMessageBatch(queue, [{ id: 'm', timestamp: new Date(), attempts, body }])
@@ -292,3 +296,36 @@ describe('scan items advanced through the Worker queue handler', () => {
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'rejected' })
   })
 })
+
+describe('push notifications queued by the steps, through the Worker queue handler', () => {
+  it('queues a scan-finished push for the scan\'s profile when the last item finishes, and not before', async () => {
+    const { userId, scanId, itemId } = await startScan()
+    stubAnthropic(face)
+    expect(pushQueued).toEqual([])
+
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(pushQueued).toEqual([{ kind: 'scan-finished', userId, profileId: `profile-${userId}`, scanId, readyCount: 0 }])
+  })
+
+  it('queues a scan-needs-you confirm push for the scan\'s profile when a read is too doubtful to use', async () => {
+    const { userId, scanId, itemId } = await startScan()
+    stubAnthropic(recognised({ classification: 'beauty-product', brand: freshBrand(), name: 'Cleanser', variant: '', form: 'unknown', category: 'skin', confidence: 0.3 }))
+
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-confirmation' })
+    expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId, need: 'confirm' }])
+  })
+
+  it('queues one push when the same finishing step is delivered twice', async () => {
+    const { itemId } = await startScan()
+    stubAnthropic(face)
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT }, 2)
+
+    expect(pushQueued).toHaveLength(1)
+  })
+})
+

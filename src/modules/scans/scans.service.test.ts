@@ -14,12 +14,17 @@ import type { ProductImage } from '../../providers/product-analysis/product-anal
 import { MemoryProductRecognizer } from '../../providers/product-recognition/memory.product-recognizer'
 import type { Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
+import { MemoryPushSender } from '../../providers/push/memory.push'
 import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
 import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
 import { FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
+import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
+import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
+import { NotificationsService } from '../notifications/notifications.service'
+import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-specs'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
@@ -94,6 +99,16 @@ const setup = (options: SetupOptions = {}) => {
   const labelReader = new MemoryLabelReader()
   const photos = options.photos ?? new MemoryPhotoStore({ environment: 'test' })
   const jobs = new MemoryJobQueue()
+  // The push jobs go to a queue of their own: `queued`, `queuedWithTime` and `drain` read every message on `jobs` as a scan step.
+  const pushJobs = new MemoryJobQueue()
+  const notifications = new NotificationsService({
+    pushTokens: new FakePushTokensRepository(),
+    settings: new FakeNotificationSettingsRepository(),
+    push: new MemoryPushSender(),
+    jobs: pushJobs,
+    deviceIdKey: 'device-key-for-tests',
+    now: () => clock,
+  })
   const events = options.events?.(repository) ?? new MemoryScanEvents()
   const service = new ScanService({
     repository,
@@ -103,6 +118,7 @@ const setup = (options: SetupOptions = {}) => {
     photos,
     jobs,
     events,
+    notifications,
     photoLinkSecret: PHOTO_SECRET,
     ipHashSecret: options.ipHashSecret ?? IP_SECRET,
     environment: 'test',
@@ -122,6 +138,7 @@ const setup = (options: SetupOptions = {}) => {
     labelReader,
     photos,
     jobs,
+    pushJobs,
     events,
     advance: (ms: number) => (clock = new Date(clock.getTime() + ms)),
     now: () => clock,
@@ -187,7 +204,8 @@ const scanOne = async (ctx: Ctx, photo: ProductImage = markedJpeg(1)) => {
 /** Puts a catalog product into the state a scan of it will find: researched and analysed (ready), or only researched (needs-analysis). */
 const catalogued = async (ctx: Ctx, who: ProductIdentity = CERAVE, over: { ingredients?: string[]; analysed?: boolean; imageUrl?: string } = {}) => {
   const { ingredients = CLEAN, analysed = true, imageUrl } = over
-  ctx.researcher.respondWith(() => ({ found: true, ingredients, sourceUrl: SOURCE_URL, ...(imageUrl ? { imageUrl } : {}) }))
+  ctx.researcher.respondWith(() => ({ found: true, ingredients, sourceUrl: SOURCE_URL }))
+  if (imageUrl) ctx.images.respondToPage(SOURCE_URL, imageUrl)
   const resolved = await ctx.catalog.resolve(who)
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
   const found = await ctx.catalog.research(resolved.productId)
@@ -851,6 +869,93 @@ describe('ScanService.advance: recognise, a front photo that cannot be read', ()
     const matching = await reach(ctx, 'matching')
 
     for (const { scanId, itemId } of [recognising, confirming, matching]) expect(await states(ctx, scanId, itemId)).not.toHaveProperty('retakesLeft')
+  })
+})
+
+describe('ScanService product form', () => {
+  const sprayKey = identityKey({ ...CERAVE, form: 'spray' })
+
+  it('stores the recognised form on the item and shows it, and shows null when the photo gave none', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? seen({ form: 'spray' }) : seen()))
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    const [a, b] = scan.items
+
+    await run(ctx, a.id, 'recognise')
+    await run(ctx, b.id, 'recognise')
+
+    expect((await itemOf(ctx, scan.id, a.id)).recognised).toMatchObject({ form: 'spray' })
+    expect((await itemOf(ctx, scan.id, b.id)).recognised).toMatchObject({ form: null })
+  })
+
+  it('hands the recognised form to the catalog when it matches the item', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => seen({ form: 'spray' }))
+    const { itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+    await run(ctx, itemId, 'match')
+
+    expect(resolve).toHaveBeenCalledWith(expect.objectContaining({ brand: CERAVE.brand, name: CERAVE.name, form: 'spray' }))
+    expect(await ctx.catalogRepository.findProductByKey(sprayKey)).not.toBeNull()
+    expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).toBeNull()
+  })
+
+  it('hands the catalog no form when none was recognised', async () => {
+    const ctx = setup()
+    const { itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+    await run(ctx, itemId, 'match')
+
+    expect(resolve.mock.calls[0]![0]).not.toHaveProperty('form')
+  })
+
+  it('keeps the form of an earlier read when the recognise step runs again, without asking the recogniser', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await scanOne(ctx)
+    await ctx.repository.updateItem(itemId, 'recognising', {
+      recognisedBrand: CERAVE.brand,
+      recognisedName: CERAVE.name,
+      recognisedVariant: null,
+      recognisedForm: 'spray',
+      recognisedCategory: 'skin',
+      recognisedConfidence: 0.9,
+      updatedAt: ctx.now(),
+    })
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.calls).toEqual([])
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'matching', recognised: { form: 'spray' } })
+  })
+
+  it('confirm stores the form the user gave, and the corrected product is looked up with it', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+    await asUser(() => ctx.service.confirm(scanId, itemId, { ...CERAVE, form: 'roll-on' }))
+    await drain(ctx)
+
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'roll-on' })
+    expect(await ctx.catalogRepository.findProductByKey(identityKey({ ...CERAVE, form: 'roll-on' }))).not.toBeNull()
+  })
+
+  it('confirm without a form clears the form that was read to null', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => seen({ confidence: 0.3, form: 'spray' }))
+    const { scanId, itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'spray' })
+
+    await asUser(() => ctx.service.confirm(scanId, itemId, { ...CERAVE }))
+    await drain(ctx)
+
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: null })
+    expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).not.toBeNull()
+    expect(await ctx.catalogRepository.findProductByKey(sprayKey)).toBeNull()
   })
 })
 
@@ -3692,5 +3797,456 @@ describe('ScanService: a scan belongs to the profile that made it', () => {
 
     await expect(create(ctx, photosOf(1), { profileId: OTHER_PROFILE })).resolves.toMatchObject({ items: expect.any(Array) })
     expect((await errorOf(create(ctx, photosOf(1), { profileId: PROFILE }))).code).toBe('SCAN_DAILY_LIMIT')
+  })
+})
+
+// What the person is told about a scan, through the push jobs the service queues: the bodies, and the keys that decide how many are sent.
+describe('ScanService: push notifications', () => {
+  const SETTLED = 5 * MINUTE
+  const pushes = (ctx: Ctx) => ctx.pushJobs.enqueued.map((e) => e.body as SendPushMessage)
+  const keys = (ctx: Ctx) => pushes(ctx).map((body) => sendPushSpec.key(body))
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+  const watch = (ctx: Ctx, scanId: string) => asUser(() => ctx.service.watch(scanId))
+  const quiet = () => vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+  /** Fails to publish a `done` while `failing`; items go through. */
+  class DoneFlaky extends MemoryScanEvents {
+    failing = false
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (this.failing && event.type === 'done') throw new Error('stream is down')
+      return super.publish(scanId, event)
+    }
+  }
+  /** Fails to publish anything while `failing`, as a stream that is down does. */
+  class AllFlaky extends MemoryScanEvents {
+    failing = false
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (this.failing) throw new Error('stream is down')
+      return super.publish(scanId, event)
+    }
+  }
+  /** Says what had been queued for push at the moment the live `done` went out. */
+  class ProbeEvents extends MemoryScanEvents {
+    onDone: (() => void) | undefined
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (event.type === 'done') this.onDone?.()
+      return super.publish(scanId, event)
+    }
+  }
+
+  describe('when an item needs a confirmation', () => {
+    it('tells the profile that made the scan, once, with a key that is the scan and the need', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+      const scan = await create(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+      const itemId = scan.items[0].id as string
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-needs-you', userId: OTHER_USER, profileId: OTHER_PROFILE, scanId: scan.id, itemId, need: 'confirm' }])
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scan.id}:confirm`])
+      expect(ctx.pushJobs.enqueued[0]!.job).toBe('send-push')
+    })
+
+    it('says nothing when the read is sure enough (exactly the confirmation threshold, 0.6)', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => seen({ confidence: SCAN_POLICY.confirmBelowConfidence }))
+      const { itemId } = await scanOne(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('says it once when the same step is delivered twice', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+      const { itemId } = await scanOne(ctx)
+
+      await run(ctx, itemId, 'recognise')
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('says nothing when another call moved the item first, so the guarded update did not apply', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+      const { itemId } = await scanOne(ctx)
+      const read = ctx.recognizer.recognize.bind(ctx.recognizer)
+      vi.spyOn(ctx.recognizer, 'recognize').mockImplementationOnce(async (image) => {
+        const answer = await read(image)
+        await ctx.repository.updateItem(itemId, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+        return answer
+      })
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toEqual([])
+    })
+  })
+
+  describe('when an item needs the back of the pack', () => {
+    const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
+    const addBack = (ctx: Ctx, scanId: string, itemId: string, marker: number) => asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(marker), IP))
+    /** Reads the back photo the item holds as unreadable, then uploads the next one. */
+    const failOneRead = async (ctx: Ctx, scanId: string, itemId: string, marker: number) => {
+      unreadable(ctx)
+      await run(ctx, itemId, 'read-label')
+      await addBack(ctx, scanId, itemId, marker)
+    }
+    /** An item whose `n`th back photo (1-based) has just been uploaded, the first `n - 1` having been read as unreadable. */
+    const readingBackPhoto = async (ctx: Ctx, n: number) => {
+      const { scanId, itemId } = await reach(ctx, 'reading-label')
+      for (let i = 1; i < n; i++) await failOneRead(ctx, scanId, itemId, 10 + i)
+      return { scanId, itemId }
+    }
+
+    it('asks for it when the research finds no ingredients, with no ask number, keyed by the scan and the need', async () => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await reach(ctx, 'needs-back-photo')
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-needs-you', userId: USER, profileId: PROFILE, scanId, itemId, need: 'back-photo' }])
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scanId}:back-photo`])
+    })
+
+    it('asks nothing of the person when the research found the ingredients', async () => {
+      const ctx = setup()
+
+      await analysingItem(ctx)
+
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('asks once when the same research step is delivered twice', async () => {
+      const ctx = setup()
+      const { itemId } = await reach(ctx, 'needs-back-photo')
+
+      await run(ctx, itemId, 'research')
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('asks nothing when another call moved the item first, so the guarded update did not apply', async () => {
+      const ctx = setup()
+      const { itemId } = await reach(ctx, 'researching')
+      const research = ctx.catalog.research.bind(ctx.catalog)
+      vi.spyOn(ctx.catalog, 'research').mockImplementationOnce(async (productId) => {
+        const result = await research(productId)
+        await ctx.repository.updateItem(itemId, 'researching', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+        return result
+      })
+
+      await run(ctx, itemId, 'research')
+
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it.each([1, 2])('asks again as ask number %i when that many back photos have been unreadable, under a key of its own', async (n) => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, n)
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(pushes(ctx).at(-1)).toEqual({ kind: 'scan-needs-you', userId: USER, profileId: PROFILE, scanId, itemId, need: 'back-photo', ask: n })
+      // The first ask keeps its key; each re-ask is one more push.
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scanId}:back-photo`, ...Array.from({ length: n }, (_, i) => `scan-needs-you:${scanId}:${itemId}:ask-${i + 1}`)])
+    })
+
+    it('does not ask a third time: the 3rd unreadable back photo ends the item as failed with no push', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+      const before = keys(ctx)
+      expect(before).toEqual([`scan-needs-you:${scanId}:back-photo`, `scan-needs-you:${scanId}:${itemId}:ask-1`, `scan-needs-you:${scanId}:${itemId}:ask-2`])
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+      expect(keys(ctx).filter((key) => key.includes('needs-you'))).toEqual(before)
+    })
+
+    it('does not ask again when another call moved the item first, so the guarded update did not apply', async () => {
+      const ctx = setup()
+      const { itemId } = await readingBackPhoto(ctx, 1)
+      const before = pushes(ctx).length
+      vi.spyOn(ctx.labelReader, 'read').mockImplementationOnce(async () => {
+        await ctx.repository.updateItem(itemId, 'reading-label', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+        return { readable: false }
+      })
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(pushes(ctx)).toHaveLength(before)
+    })
+
+    it('still moves the item on when the push cannot be queued', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      const { scanId, itemId } = await reach(ctx, 'researching')
+      ctx.pushJobs.failNextWith(new Error('queue is down'))
+
+      await expect(run(ctx, itemId, 'research')).resolves.toBeUndefined()
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: null })
+      logged.mockRestore()
+    })
+  })
+
+  describe('when a scan is finished', () => {
+    const recogniseAs = (ctx: Ctx, answer: (marker: number) => Recognition) => ctx.recognizer.respondWith((image) => answer(image.bytes.at(-1)!))
+
+    it('tells the profile that made the scan, once, with readyCount 0 when nothing came out ready', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+
+      await run(ctx, scan.items[0].id, 'recognise')
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId: scan.id, readyCount: 0 }])
+      expect(keys(ctx)).toEqual([`scan-finished:${scan.id}`])
+    })
+
+    it('counts only the items that are ready: 2 ready, 1 rejected and 1 failed make readyCount 2, sent by the last item to finish and no earlier', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      recogniseAs(ctx, (marker) => {
+        if (marker === 3) return { classification: 'unreadable' }
+        if (marker === 4) throw new AiBudgetExceededError('cap')
+        return seen()
+      })
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3), markedJpeg(4)])
+      const [a, b, c, d] = scan.items.map((i: { id: string }) => i.id) as [string, string, string, string]
+      for (const id of [a, b, c, d]) await run(ctx, id, 'recognise')
+      expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'unreadable' })
+      expect(await stateOf(ctx, scan.id, d)).toEqual({ state: 'failed', reason: 'research-busy' })
+      await run(ctx, a, 'match')
+      expect(pushes(ctx)).toEqual([])
+
+      await run(ctx, b, 'match')
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId: scan.id, readyCount: 2 }])
+    })
+
+    it('queues the push before the live done goes out', async () => {
+      let events!: ProbeEvents
+      const ctx = setup({ events: () => (events = new ProbeEvents()) })
+      let queuedWhenDoneWent = -1
+      events.onDone = () => void (queuedWhenDoneWent = ctx.pushJobs.enqueued.length)
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+
+      await run(ctx, scan.items[0].id, 'recognise')
+
+      expect(queuedWhenDoneWent).toBe(1)
+      expect(events.eventsFor(scan.id).map((e) => e.type)).toEqual(['item', 'done'])
+    })
+
+    it('queues the push though the live done cannot be published, and the step still succeeds', async () => {
+      let events!: DoneFlaky
+      const ctx = setup({ events: () => (events = new DoneFlaky()) })
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      events.failing = true
+
+      await expect(run(ctx, scan.items[0].id, 'recognise')).resolves.toBeUndefined()
+
+      expect(keys(ctx)).toEqual([`scan-finished:${scan.id}`])
+      logged.mockRestore()
+    })
+
+    it('queues the same key again when the reaper re-claims a done whose live publish failed, so the job system sends it once', async () => {
+      let events!: DoneFlaky
+      const ctx = setup({ events: () => (events = new DoneFlaky()) })
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      events.failing = true
+      await run(ctx, scan.items[0].id, 'recognise')
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+      expect(pushes(ctx)).toHaveLength(1)
+      events.failing = false
+      ctx.advance(SETTLED + 1)
+
+      await reap(ctx)
+
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+      expect(pushes(ctx)).toHaveLength(2)
+      expect(pushes(ctx)[1]).toEqual(pushes(ctx)[0])
+      expect(keys(ctx)).toEqual([`scan-finished:${scan.id}`, `scan-finished:${scan.id}`])
+      logged.mockRestore()
+    })
+
+    it('queues the push when the reaper sends a done that was lost with the item\'s own publish', async () => {
+      let events!: AllFlaky
+      const ctx = setup({ events: () => (events = new AllFlaky()) })
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      events.failing = true
+      await run(ctx, scan.items[0].id, 'recognise')
+      events.failing = false
+      expect(pushes(ctx)).toEqual([])
+      ctx.advance(SETTLED + 1)
+
+      await reap(ctx)
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId: scan.id, readyCount: 0 }])
+      logged.mockRestore()
+    })
+
+    it('queues the push when watch itself sets the done time of a scan whose last change went unpublished', async () => {
+      let events!: AllFlaky
+      const ctx = setup({ events: () => (events = new AllFlaky()) })
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      events.failing = true
+      await run(ctx, scan.items[0].id, 'recognise')
+      events.failing = false
+      expect(pushes(ctx)).toEqual([])
+
+      await watch(ctx, scan.id)
+
+      expect(keys(ctx)).toEqual([`scan-finished:${scan.id}`])
+      logged.mockRestore()
+    })
+
+    it('does not push again when watch re-sends done to a client of a scan that was already marked done', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      await run(ctx, scan.items[0].id, 'recognise')
+      expect(pushes(ctx)).toHaveLength(1)
+
+      await watch(ctx, scan.id)
+
+      expect(ctx.events.eventsFor(scan.id).filter((e) => e.type === 'done')).toHaveLength(2)
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('sends the needs-you push but no finished one while an item still waits for the person', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+
+      await run(ctx, scan.items[0].id, 'recognise')
+      await run(ctx, scan.items[1].id, 'recognise')
+
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scan.id}:confirm`])
+    })
+
+    it('finishes the scan, publishing done, though the push cannot be queued', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      ctx.pushJobs.failNextWith(new Error('queue is down'))
+
+      await expect(run(ctx, scan.items[0].id, 'recognise')).resolves.toBeUndefined()
+
+      expect(ctx.events.eventsFor(scan.id).map((e) => e.type)).toEqual(['item', 'done'])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+      logged.mockRestore()
+    })
+  })
+
+  // A problem with the push must never get in the way of the scan: the item stays moved, the live done goes out, and what is
+  // owed is logged by id and left for the reaper.
+  describe('when the push cannot be prepared', () => {
+    const readFails = (ctx: Ctx) => vi.spyOn(ctx.repository, 'findScan').mockRejectedValueOnce(new Error('D1 is down'))
+
+    it('still publishes done and resolves when the finished push\'s scan read throws, logging push-failed and clearing the done time', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      readFails(ctx)
+
+      await expect(run(ctx, scan.items[0].id, 'recognise')).resolves.toBeUndefined()
+
+      expect(ctx.events.eventsFor(scan.id).map((e) => e.type)).toEqual(['item', 'done'])
+      expect(logged).toHaveBeenCalledWith({ outcome: 'push-failed', scanId: scan.id })
+      expect(logged).not.toHaveBeenCalledWith(expect.objectContaining({ outcome: 'publish-failed' }))
+      expect(pushes(ctx)).toEqual([])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+      logged.mockRestore()
+    })
+
+    it('has the reaper re-claim that done and queue the finished push under the same key', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      const scan = await create(ctx)
+      readFails(ctx)
+      await run(ctx, scan.items[0].id, 'recognise')
+      ctx.advance(SETTLED + 1)
+
+      await reap(ctx)
+
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId: scan.id, readyCount: 0 }])
+      expect(keys(ctx)).toEqual([`scan-finished:${scan.id}`])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+      logged.mockRestore()
+    })
+
+    it('keeps the item moved, resolves and logs push-failed with the item when the needs-you push\'s scan read throws', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+      const { scanId, itemId } = await scanOne(ctx)
+      readFails(ctx)
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-confirmation', reason: null })
+      expect(logged).toHaveBeenCalledWith({ outcome: 'push-failed', scanId, itemId })
+      expect(pushes(ctx)).toEqual([])
+      logged.mockRestore()
+    })
+  })
+
+  // Scans the old Worker wrote without a profile have no phones to tell until the reaper adopts them.
+  describe('for a scan with no profile (written before profiles)', () => {
+    const withOrphan = async () => {
+      const ctx = setup()
+      const scanId = 'orphan-scan'
+      const itemId = 'orphan-item'
+      const photoKey = 'photos/test/user-1/orphan-scan/orphan-item.jpg'
+      await ctx.photos.put(photoKey, markedJpeg(1))
+      await ctx.repository.createScan({ id: scanId, userId: USER, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
+        { id: itemId, scanId, userId: USER, position: 0, photoKey, createdAt: ctx.now() },
+      ])
+      return { ctx, scanId, itemId }
+    }
+
+    it('skips the finished push, logging push-skipped-no-profile, and still publishes done', async () => {
+      const { ctx, scanId, itemId } = await withOrphan()
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect(pushes(ctx)).toEqual([])
+      expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
+      expect(ctx.events.eventsFor(scanId).map((e) => e.type)).toEqual(['item', 'done'])
+      log.mockRestore()
+    })
+
+    it('skips the needs-you push, logging push-skipped-no-profile, and still moves the item', async () => {
+      const { ctx, scanId, itemId } = await withOrphan()
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect(pushes(ctx)).toEqual([])
+      expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
+      expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-confirmation')
+      log.mockRestore()
+    })
   })
 })

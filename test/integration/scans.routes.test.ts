@@ -10,6 +10,7 @@ import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.reposi
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
 import { messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
+import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 
 // The scan HTTP routes through the Worker's real entrypoint, with the frontend's typed client, real local D1 and R2.
 // The scan queue's producer is replaced by a recorder and the steps are driven by hand through the Worker's queue
@@ -52,7 +53,7 @@ const freshIp = () => {
   const n = next()
   return `10.${Number(runSalt) % 250}.${Math.floor(n / 250) % 250}.${(n % 250) + 1}`
 }
-const freshBrand = () => `RoutesBrand${runSalt}x${next()}`
+const freshBrand = () => `${runSalt}${next()}x RoutesBrand`
 
 type Envelope<T> = { success: true; status: number; message: string; data: T } | { success: false; status: number; error: { code: string } }
 type Reply = { json(): Promise<unknown>; status: number; headers: Headers }
@@ -63,7 +64,7 @@ type ItemView = {
   reason: string | null
   retakesLeft?: number
   image: { kind: string; url: string } | null
-  recognised?: { brand: string; name: string; variant?: string | null; category: string }
+  recognised?: { brand: string; name: string; variant?: string | null; form?: string | null; category: string }
 }
 type ScanView = { id: string; createdAt: string; items: ItemView[] }
 
@@ -140,7 +141,7 @@ const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
 }
 const recognisedAs = (brand: string, name: string, confidence: number) => () =>
   messageResponse({
-    content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence }))],
+    content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence }))],
   })
 // What the recognizer answers for a photo it cannot use: nothing to read, or a product whose label is turned away.
 const classifiedAs = (classification: string) => () =>
@@ -363,36 +364,42 @@ describe('POST /api/v1/scans/products', () => {
 
   describe('rate limits', () => {
     it('answers 429 RATE_LIMITED with Retry-After to the 21st scan from one address in a minute, whoever sends it', async () => {
-      const shared = freshIp()
-      const statuses: number[] = []
-      let limited: Awaited<ReturnType<typeof createScan>> | undefined
-      for (let i = 0; i < 21; i++) {
-        const res = await createScan(await newGuest(), [fileOf(markedJpeg(i))], shared)
-        statuses.push(res.status)
-        if (res.status === 429) limited = res
-      }
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const shared = freshIp()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof createScan>> | undefined
+        for (let i = 0; i < 21; i++) {
+          const res = await createScan(await newGuest(), [fileOf(markedJpeg(i))], shared)
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
 
       expect(statuses.slice(0, 20)).toEqual(Array(20).fill(202))
       expect(statuses[20]).toBe(429)
       expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
       expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-    })
+    }, RATE_TEST_TIMEOUT_MS)
 
     it('answers 429 RATE_LIMITED to the 11th scan of one user in a minute, from any address', async () => {
-      const guest = await newGuest()
-      const statuses: number[] = []
-      let limited: Awaited<ReturnType<typeof createScan>> | undefined
-      for (let i = 0; i < 11; i++) {
-        const res = await createScan(guest, [fileOf(markedJpeg(i))], freshIp())
-        statuses.push(res.status)
-        if (res.status === 429) limited = res
-      }
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const guest = await newGuest()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof createScan>> | undefined
+        for (let i = 0; i < 11; i++) {
+          const res = await createScan(guest, [fileOf(markedJpeg(i))], freshIp())
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
 
       expect(statuses.slice(0, 10)).toEqual(Array(10).fill(202))
       expect(statuses[10]).toBe(429)
       expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
       expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-    })
+    }, RATE_TEST_TIMEOUT_MS)
   })
 })
 
@@ -431,6 +438,43 @@ describe('GET /api/v1/scans/products/{scanId}', () => {
 
     expect(res.status).toBe(404)
     expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+  })
+})
+
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation product form', () => {
+  it('accepts a form, with 202, and shows it on the item', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId, { brand: 'Glow Co', name: 'Bright Tone Serum', form: 'spray', category: 'skin' })
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, data: { id: itemId, state: 'matching', recognised: { form: 'spray' } } })
+  })
+
+  it('shows a null form on the item when the confirmation has none', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId)
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, data: { recognised: { form: null } } })
+  })
+
+  it.each([
+    ['a form that is not one of the twelve', 'perfume'],
+    ['an empty form', ''],
+    ['unknown, which only the recognizer may say', 'unknown'],
+  ])('refuses %s with 400 VALIDATION_FAILED, leaving the item waiting', async (_label, form) => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingConfirmation(guest)
+
+    const res = await confirm(guest, scanId, itemId, { brand: 'Glow Co', name: 'Bright Tone Serum', form, category: 'skin' })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    expect(await stateOf(guest, scanId, itemId)).toBe('needs-confirmation')
   })
 })
 
@@ -616,44 +660,50 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () =>
   })
 
   it('answers 429 RATE_LIMITED to the 11th back photo of one user in a minute, from any address', async () => {
-    const guest = await newGuest()
-    const statuses: number[] = []
-    let limited: Awaited<ReturnType<typeof addBackPhoto>> | undefined
-    for (let i = 0; i < 11; i++) {
-      // Not the user's scan: the limit is counted before the route looks at which scan it is.
-      const res = await scansApi[':scanId'].items[':itemId']['back-photo'].$post(
-        { param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() }, form: { photo: fileOf(markedJpeg(i)) } },
-        { headers: guest.headers(freshIp()) },
-      )
-      statuses.push(res.status)
-      if (res.status === 429) limited = res
-    }
+    const { statuses, limited } = await inOneRateWindow(async () => {
+      const guest = await newGuest()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof addBackPhoto>> | undefined
+      for (let i = 0; i < 11; i++) {
+        // Not the user's scan: the limit is counted before the route looks at which scan it is.
+        const res = await scansApi[':scanId'].items[':itemId']['back-photo'].$post(
+          { param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() }, form: { photo: fileOf(markedJpeg(i)) } },
+          { headers: guest.headers(freshIp()) },
+        )
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+      return { statuses, limited }
+    }, { needMs: BURST_NEEDS_MS })
 
     expect(statuses.slice(0, 10)).not.toContain(429)
     expect(statuses[10]).toBe(429)
     expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
     expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-  })
+  }, RATE_TEST_TIMEOUT_MS)
 
   it('answers 429 RATE_LIMITED to the 21st back photo from one address in a minute, whoever sends it', async () => {
-    const shared = freshIp()
-    const statuses: number[] = []
-    let limited: Awaited<ReturnType<typeof addBackPhoto>> | undefined
-    for (let i = 0; i < 21; i++) {
-      // Another user each time, so only the address is shared; the scan is not theirs, as the limit is counted before it is looked up.
-      const res = await scansApi[':scanId'].items[':itemId']['back-photo'].$post(
-        { param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() }, form: { photo: fileOf(markedJpeg(i)) } },
-        { headers: (await newGuest()).headers(shared) },
-      )
-      statuses.push(res.status)
-      if (res.status === 429) limited = res
-    }
+    const { statuses, limited } = await inOneRateWindow(async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof addBackPhoto>> | undefined
+      for (let i = 0; i < 21; i++) {
+        // Another user each time, so only the address is shared; the scan is not theirs, as the limit is counted before it is looked up.
+        const res = await scansApi[':scanId'].items[':itemId']['back-photo'].$post(
+          { param: { scanId: crypto.randomUUID(), itemId: crypto.randomUUID() }, form: { photo: fileOf(markedJpeg(i)) } },
+          { headers: (await newGuest()).headers(shared) },
+        )
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+      return { statuses, limited }
+    }, { needMs: BURST_NEEDS_MS })
 
     expect(statuses.slice(0, 20)).not.toContain(429)
     expect(statuses[20]).toBe(429)
     expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
     expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-  })
+  }, RATE_TEST_TIMEOUT_MS)
 })
 
 describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', () => {
@@ -1003,13 +1053,16 @@ describe('signing in', () => {
 
     // The address limit comes first, so a flood of unsigned requests from one address is still 429, not 401 for ever.
     it.each(uploads)('%s counts unsigned requests against the address limit before it answers 401', async (_route, path) => {
-      const shared = freshIp()
-      const statuses: number[] = []
-      for (let i = 0; i < 21; i++) statuses.push((await plainPost(path(), new FormData(), { 'cf-connecting-ip': shared })).status)
+      const statuses = await inOneRateWindow(async () => {
+        const shared = freshIp()
+        const seen: number[] = []
+        for (let i = 0; i < 21; i++) seen.push((await plainPost(path(), new FormData(), { 'cf-connecting-ip': shared })).status)
+        return seen
+      }, { needMs: BURST_NEEDS_MS })
 
       expect(statuses.slice(0, 20)).toEqual(Array(20).fill(401))
       expect(statuses[20]).toBe(429)
-    })
+    }, RATE_TEST_TIMEOUT_MS)
   })
 
   it('needs no verification: a guest can use every route', async () => {

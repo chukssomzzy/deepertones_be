@@ -4,6 +4,7 @@ import { MemoryCatalogImageStore } from './memory.catalog-image-store'
 
 const PHOTO: ProductImage = { bytes: new Uint8Array([1, 2, 3]), mediaType: 'image/webp' }
 const URL_ = 'https://brand.example/serum.webp'
+const PAGE = 'https://brand.example/serum'
 
 describe('MemoryCatalogImageStore', () => {
   it('fetchImage answers null for a url nobody responded to, and records the attempt', async () => {
@@ -55,5 +56,28 @@ describe('MemoryCatalogImageStore', () => {
 
   it('publicUrl is https://images.test/<key>', () => {
     expect(new MemoryCatalogImageStore().publicUrl('products/p1.webp')).toBe('https://images.test/products/p1.webp')
+  })
+
+  it('pageImageUrl answers null for a page nobody responded to, and records the lookup', async () => {
+    const store = new MemoryCatalogImageStore()
+
+    await expect(store.pageImageUrl(PAGE)).resolves.toBeNull()
+    expect(store.pageLookups).toEqual([PAGE])
+  })
+
+  it('pageImageUrl answers what respondToPage set for that page only', async () => {
+    const store = new MemoryCatalogImageStore()
+    store.respondToPage(PAGE, URL_)
+
+    await expect(store.pageImageUrl(PAGE)).resolves.toBe(URL_)
+    await expect(store.pageImageUrl('https://brand.example/other')).resolves.toBeNull()
+  })
+
+  it('respondToPage with null makes a page answer null again', async () => {
+    const store = new MemoryCatalogImageStore()
+    store.respondToPage(PAGE, URL_)
+    store.respondToPage(PAGE, null)
+
+    await expect(store.pageImageUrl(PAGE)).resolves.toBeNull()
   })
 })

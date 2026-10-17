@@ -29,17 +29,28 @@ export const stripSizes = (text: string): string =>
 
 const comparable = (raw: string | null | undefined): string => stripSizes(normaliseText(raw ?? '')).replace(/\s+/g, ' ').trim()
 
-type Named = { name: string; variant?: string | null }
-type Branded = Named & { brand: string }
+type Named = { name: string; variant?: string | null; brand?: string }
+type Branded = Named & { brand: string; form?: string | null }
 
 export const brandKey = (brand: string): string => normaliseText(brand)
 
-/** One product, one key: brand, name and variant normalised, with pack sizes ignored. */
-export const identityKey = (product: Branded): string => `${brandKey(product.brand)}|${comparable(product.name)}|${comparable(product.variant)}`
+/** The first word of the normalised brand: "NIVEA MEN" and "NIVEA" both give "nivea". */
+export const brandFirstWord = (brand: string): string => brandKey(brand).split(' ')[0] ?? ''
 
-const words = (product: Named): Set<string> => new Set(comparable(`${product.name} ${product.variant ?? ''}`).split(' ').filter(Boolean))
+/** Whether two brands share a first word, so a brand/name split ("NIVEA MEN" + "DRY IMPACT" or "NIVEA" + "MEN DRY IMPACT") still meets. */
+export const sameBrandFamily = (brandA: string, brandB: string): boolean => brandFirstWord(brandA) === brandFirstWord(brandB)
 
-/** Jaccard ratio of the words in the name and variant: 1 for the same words, 0 for none shared. */
+/** Whether two products have the same form; none counts as a value, as it does in the key. */
+export const sameForm = (a: { form?: string | null }, b: { form?: string | null }): boolean => (a.form ?? '') === (b.form ?? '')
+
+/** One product, one key: brand, name and variant normalised, with pack sizes ignored, then the form (empty for none). */
+export const identityKey = (product: Branded): string =>
+  `${brandKey(product.brand)}|${comparable(product.name)}|${comparable(product.variant)}|${product.form ?? ''}`
+
+const words = (product: Named): Set<string> =>
+  new Set(comparable(`${product.brand ?? ''} ${product.name} ${product.variant ?? ''}`).split(' ').filter(Boolean))
+
+/** Jaccard ratio of the words in the brand, name and variant, pooled so a word may sit in any of them: 1 for the same words, 0 for none shared. */
 export const nameSimilarity = (a: Named, b: Named): number => {
   const wa = words(a)
   const wb = words(b)
@@ -50,7 +61,7 @@ export const nameSimilarity = (a: Named, b: Named): number => {
 }
 
 /**
- * Products of the same brand whose name nearly matches but whose identity key differs: the cases for the model
+ * Products of the same brand family (first word) whose words nearly match but whose identity key differs: the cases for the model
  * to decide (same product or not). Best first, equal similarity by id.
  */
 export const nearMissCandidates = <P extends Branded & { id: string }>(
@@ -59,10 +70,9 @@ export const nearMissCandidates = <P extends Branded & { id: string }>(
   options: { threshold?: number; limit?: number } = {},
 ): P[] => {
   const { threshold = 0.6, limit = 3 } = options
-  const targetBrand = brandKey(target.brand)
   const targetKey = identityKey(target)
   return products
-    .filter((p) => brandKey(p.brand) === targetBrand && identityKey(p) !== targetKey)
+    .filter((p) => sameBrandFamily(p.brand, target.brand) && identityKey(p) !== targetKey)
     .map((p) => ({ product: p, similarity: nameSimilarity(target, p) }))
     .filter((c) => c.similarity >= threshold)
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))

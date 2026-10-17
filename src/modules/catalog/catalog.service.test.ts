@@ -6,7 +6,7 @@ import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.c
 import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.product-analyst'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
-import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
+import type { ProductForm, ProductIdentity } from '../../providers/product-research/product-researcher.provider'
 import { identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
@@ -148,12 +148,13 @@ describe('ProductCatalogService.resolve', () => {
     const result = await service.resolve(identity())
 
     expect(result).toEqual({ kind: 'needs-research', productId: expect.any(String) })
-    expect(await repository.findProductByKey('cerave|hydrating facial cleanser|')).toMatchObject({
+    expect(await repository.findProductByKey('cerave|hydrating facial cleanser||')).toMatchObject({
       id: (result as { productId: string }).productId,
       brandKey: 'cerave',
       brand: 'CeraVe',
       name: 'Hydrating Facial Cleanser',
       variant: null,
+      form: null,
       category: 'skin',
       createdAt: T0,
     })
@@ -164,7 +165,15 @@ describe('ProductCatalogService.resolve', () => {
 
     await service.resolve(identity({ variant: 'Night' }))
 
-    expect(await repository.findProductByKey('cerave|hydrating facial cleanser|night')).toMatchObject({ variant: 'Night' })
+    expect(await repository.findProductByKey('cerave|hydrating facial cleanser|night|')).toMatchObject({ variant: 'Night' })
+  })
+
+  it('keeps the form when the label has one', async () => {
+    const { service, repository } = setup()
+
+    await service.resolve(identity({ form: 'spray' }))
+
+    expect(await repository.findProductByKey('cerave|hydrating facial cleanser||spray')).toMatchObject({ form: 'spray' })
   })
 
   it('finds the same product again, however the label spells it, instead of creating another', async () => {
@@ -540,8 +549,11 @@ describe('ProductCatalogService.research', () => {
   })
 
   describe('stock image', () => {
-    const withImage = (ctx: Ctx, imageUrl: string | undefined = IMAGE_URL) =>
-      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL, ...(imageUrl ? { imageUrl } : {}) }))
+    // The researcher cannot see image urls; the image comes from the og:image of the page it cited.
+    const withImage = (ctx: Ctx, pageImage: string | null = IMAGE_URL) => {
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      ctx.images.respondToPage(SOURCE_URL, pageImage)
+    }
 
     it.each([
       ['image/jpeg', 'jpg'],
@@ -607,14 +619,54 @@ describe('ProductCatalogService.research', () => {
       expect(ctx.images.stored.size).toBe(0)
     })
 
-    it('does not look for an image when the result has no image URL', async () => {
+    it('marks the image as checked without fetching or judging anything when the source page has no image', async () => {
       const ctx = setup()
       const productId = await productFor(ctx)
-      withImage(ctx, '')
+      withImage(ctx, null)
 
       await ctx.service.research(productId)
 
+      expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
       expect(ctx.images.fetched).toHaveLength(0)
+      expect(ctx.analyst.calls.imageShowsProduct).toHaveLength(0)
+      expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageSourceUrl: null, imageCheckedAt: T0 })
+    })
+
+    it('does not look at the source page again for a product that already has an image', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      ctx.images.respondTo(IMAGE_URL, JPEG)
+      ctx.analyst.imageShowsProductWith(() => true)
+      withImage(ctx)
+      await ctx.service.research(productId)
+      ctx.advance(FRESH_FOR_DAYS * DAY + 1)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toHaveLength(1)
+    })
+
+    it('does not look at the source page while the image check is still fresh', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY))
+      withImage(ctx)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toHaveLength(0)
+      expect(ctx.images.fetched).toHaveLength(0)
+    })
+
+    it('looks at the source page again once the image check is older than FRESH_FOR_DAYS', async () => {
+      const ctx = setup()
+      const productId = await productFor(ctx)
+      await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY - 1))
+      withImage(ctx)
+
+      await ctx.service.research(productId)
+
+      expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
     })
 
     it('does not fetch another image for a product that already has one', async () => {
@@ -969,7 +1021,8 @@ describe('ProductCatalogService.productView', () => {
     ctx.analyst.imageShowsProductWith(() => true)
     const resolved = await ctx.service.resolve(who)
     const productId = resolved.productId
-    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL, imageUrl: IMAGE_URL }))
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
+    ctx.images.respondToPage(SOURCE_URL, IMAGE_URL)
     const found = await ctx.service.research(productId)
     const formulationId = (found as { formulationId: string }).formulationId
     ctx.analyst.analyseWith(() => [draft()])
@@ -983,6 +1036,7 @@ describe('ProductCatalogService.productView', () => {
         brand: 'CeraVe',
         name: 'Hydrating Facial Cleanser',
         variant: 'Night',
+        form: null,
         category: 'skin',
         imageUrl: ctx.images.publicUrl(`${IMAGE_KEY_PREFIX}/products/${productId}.jpg`),
       },
@@ -1366,6 +1420,282 @@ describe('ProductCatalogService.resolve alias guard', () => {
       expect(result.kind).toBe('needs-research')
       expect(result.productId).not.toBe(existing.productId)
     }
+  })
+})
+
+describe('ProductCatalogService.resolve product form', () => {
+  const NIVEA = { brand: 'NIVEA MEN', name: 'Dry Impact' } as const
+  const nivea = (form?: ProductForm): ProductIdentity => identity({ ...NIVEA, ...(form ? { form } : {}) })
+
+  it('makes a new product, without asking the same-product judge, when a spray is scanned and only a formless product exists', async () => {
+    const ctx = setup()
+    const formless = await ctx.service.resolve(nivea())
+
+    const result = await ctx.service.resolve(nivea('spray'))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.kind).toBe('needs-research')
+    expect(result.productId).not.toBe(formless.productId)
+  })
+
+  it('makes a new formless product, without asking the judge, when a formless label is scanned and only a spray exists', async () => {
+    const ctx = setup()
+    const spray = await ctx.service.resolve(nivea('spray'))
+
+    const result = await ctx.service.resolve(nivea())
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.productId).not.toBe(spray.productId)
+  })
+
+  it('never asks the judge about a roll-on when a spray is scanned, and makes a separate product', async () => {
+    const ctx = setup()
+    const rollOn = await ctx.service.resolve(nivea('roll-on'))
+
+    const result = await ctx.service.resolve(nivea('spray'))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.productId).not.toBe(rollOn.productId)
+  })
+
+  it('still asks the judge about a near miss of the same form, and remembers a "same product" answer', async () => {
+    const ctx = setup()
+    const existing = await ctx.service.resolve(identity({ brand: 'NIVEA MEN', name: 'Dry Impact Plus', form: 'spray' }))
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(identity({ brand: 'NIVEA MEN', name: 'Dry Impact', form: 'spray' }))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).toBe(existing.productId)
+  })
+
+  it('tells the researcher the form the product was created with', async () => {
+    const ctx = setup()
+    ctx.researcher.respondWith(() => ({ found: false }))
+    const { productId } = await ctx.service.resolve(nivea('spray'))
+
+    await ctx.service.research(productId)
+
+    expect(ctx.researcher.calls[0]).toMatchObject({ brand: 'NIVEA MEN', name: 'Dry Impact', form: 'spray' })
+  })
+
+  it('does not put a form on the identity it gives the researcher for a formless product', async () => {
+    const ctx = setup()
+    ctx.researcher.respondWith(() => ({ found: false }))
+    const { productId } = await ctx.service.resolve(nivea())
+
+    await ctx.service.research(productId)
+
+    expect(ctx.researcher.calls[0]).not.toHaveProperty('form')
+  })
+
+  it('shows the form in the product view, and null when there is none', async () => {
+    const ctx = setup()
+    const spray = await researched(ctx, { who: nivea('spray') })
+    const formless = await researched(ctx, { who: identity({ brand: 'Other', name: 'Plain' }) })
+
+    expect((await ctx.service.productView(spray.formulationId)).product.form).toBe('spray')
+    expect((await ctx.service.productView(formless.formulationId)).product.form).toBeNull()
+  })
+})
+
+describe('ProductCatalogService.resolve brand families', () => {
+  // The three splits the recognizer really returned for one NIVEA MEN Dry Impact aerosol.
+  const SPLITS = {
+    'NIVEA MEN | DRY IMPACT': identity({ brand: 'NIVEA MEN', name: 'DRY IMPACT', category: 'body', form: 'spray' }),
+    'NIVEA | MEN DRY IMPACT': identity({ brand: 'NIVEA', name: 'MEN DRY IMPACT', category: 'body', form: 'spray' }),
+    'NIVEA | MEN (variant Dry Impact)': identity({ brand: 'NIVEA', name: 'MEN', variant: 'Dry Impact', category: 'body', form: 'spray' }),
+  }
+  type Split = keyof typeof SPLITS
+  const pairs = (Object.keys(SPLITS) as Split[]).flatMap((existing) =>
+    (Object.keys(SPLITS) as Split[]).filter((incoming) => incoming !== existing).map((incoming) => [existing, incoming] as const),
+  )
+  const NIVEA_MEN = SPLITS['NIVEA MEN | DRY IMPACT']
+  const NIVEA_NAME = SPLITS['NIVEA | MEN DRY IMPACT']
+
+  it.each(pairs)('lands on the existing product when %s exists and %s is scanned, after the judge says they are the same', async (existingSplit, incomingSplit) => {
+    const ctx = setup()
+    const existing = await ctx.service.resolve(SPLITS[existingSplit])
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(SPLITS[incomingSplit])
+
+    expect(result).toEqual({ kind: 'needs-research', productId: existing.productId })
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    const [asked, candidate] = ctx.analyst.calls.sameProduct[0]!
+    expect(asked).toMatchObject({ brand: SPLITS[incomingSplit].brand, name: SPLITS[incomingSplit].name })
+    expect(candidate).toMatchObject({ brand: SPLITS[existingSplit].brand, name: SPLITS[existingSplit].name })
+    // The new spelling is remembered: the key of the incoming split now finds the existing product.
+    expect(await ctx.repository.findProductByKey(identityKey(SPLITS[incomingSplit]))).toMatchObject({ id: existing.productId })
+  })
+
+  it.each(pairs)('answers a repeat scan of %s then %s from the alias, without asking the judge again', async (existingSplit, incomingSplit) => {
+    const ctx = setup()
+    await ctx.service.resolve(SPLITS[existingSplit])
+    ctx.analyst.sameProductWith(() => true)
+    const first = await ctx.service.resolve(SPLITS[incomingSplit])
+    const asked = ctx.analyst.calls.sameProduct.length
+
+    const second = await ctx.service.resolve(SPLITS[incomingSplit])
+
+    expect(second).toEqual(first)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(asked)
+  })
+
+  it('converges all three splits on one product', async () => {
+    const ctx = setup()
+    ctx.analyst.sameProductWith(() => true)
+    const results = []
+    for (const split of Object.values(SPLITS)) results.push(await ctx.service.resolve(split))
+
+    expect(new Set(results.map((r) => r.productId)).size).toBe(1)
+  })
+
+  it('still returns an exact repeat of the same split at once, without asking the judge', async () => {
+    const ctx = setup()
+    const first = await ctx.service.resolve(NIVEA_MEN)
+    await ctx.service.resolve(identity({ brand: 'NIVEA', name: 'Soft', category: 'body', form: 'spray' }))
+
+    expect(await ctx.service.resolve(NIVEA_MEN)).toEqual(first)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+  })
+
+  it('makes a new product, without asking the judge, for a different product of the family with little word overlap', async () => {
+    const ctx = setup()
+    const men = await ctx.service.resolve(NIVEA_MEN)
+    ctx.analyst.sameProductWith(() => true)
+
+    const sun = await ctx.service.resolve(identity({ brand: 'NIVEA SUN', name: 'Protect & Moisture', category: 'body', form: 'spray' }))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(sun.kind).toBe('needs-research')
+    expect(sun.productId).not.toBe(men.productId)
+  })
+
+  it('makes a new product, without asking the judge, for a family member the other way round too', async () => {
+    const ctx = setup()
+    const sun = await ctx.service.resolve(identity({ brand: 'NIVEA', name: 'SUN', variant: 'Protect & Moisture', category: 'body', form: 'spray' }))
+    ctx.analyst.sameProductWith(() => true)
+
+    const men = await ctx.service.resolve(NIVEA_NAME)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(men.productId).not.toBe(sun.productId)
+  })
+
+  it.each<[string, ProductIdentity, ProductIdentity]>([
+    [
+      'The Ordinary and The Body Shop, with different products',
+      identity({ brand: 'The Ordinary', name: 'Niacinamide 10% + Zinc 1%' }),
+      identity({ brand: 'The Body Shop', name: 'Tea Tree Oil' }),
+    ],
+    [
+      'The Ordinary and The Body Shop, with the same product name',
+      identity({ brand: 'The Ordinary', name: 'Tea Tree Oil' }),
+      identity({ brand: 'The Body Shop', name: 'Tea Tree Oil' }),
+    ],
+  ])('does not merge brands that share only a first word: %s', async (_label, existingIdentity, scanned) => {
+    const ctx = setup()
+    const existing = await ctx.service.resolve(existingIdentity)
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.kind).toBe('needs-research')
+    expect(result.productId).not.toBe(existing.productId)
+  })
+
+  it('does not look at a brand that merely starts with the same letters', async () => {
+    const ctx = setup()
+    const other = await ctx.service.resolve(identity({ brand: 'NIVEAUX', name: 'MEN DRY IMPACT', category: 'body', form: 'spray' }))
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(NIVEA_NAME)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.productId).not.toBe(other.productId)
+  })
+
+  // Each pair has the same combined words, so only the category, form or variant rule keeps the judge out.
+  it.each<[string, ProductIdentity, ProductIdentity]>([
+    ['a different category', NIVEA_MEN, { ...NIVEA_NAME, category: 'hair' }],
+    ['a different form', NIVEA_MEN, { ...NIVEA_NAME, form: 'roll-on' }],
+    ['no form against a form', NIVEA_MEN, { ...NIVEA_NAME, form: undefined }],
+    ['a conflicting variant', { ...NIVEA_MEN, variant: 'Fresh' }, { ...NIVEA_NAME, variant: 'Original' }],
+  ])('never asks the judge about a family member with %s, and makes a new product', async (_label, existingIdentity, scanned) => {
+    const ctx = setup()
+    const existing = await ctx.service.resolve(existingIdentity)
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+    expect(result.kind).toBe('needs-research')
+    expect(result.productId).not.toBe(existing.productId)
+  })
+
+  it('makes a new product and saves no alias when the judge says the family member is a different product', async () => {
+    const ctx = setup()
+    const existing = await ctx.service.resolve(NIVEA_MEN)
+    ctx.analyst.sameProductWith(() => false)
+
+    const result = await ctx.service.resolve(NIVEA_NAME)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).not.toBe(existing.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(NIVEA_NAME))).toMatchObject({ id: result.productId })
+    expect(await ctx.repository.findProductByKey(identityKey(NIVEA_MEN))).toMatchObject({ id: existing.productId })
+    // A second scan is an exact hit on the product made for it, so the judge is not asked again either.
+    expect(await ctx.service.resolve(NIVEA_NAME)).toEqual(result)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+  })
+
+  it('leaves the call to the judge for two different same-brand products at exactly 0.6, and makes a new product with no alias', async () => {
+    const ctx = setup()
+    const sun = identity({ brand: 'NIVEA', name: 'Sun Protect Moisture', category: 'body', form: 'spray' })
+    const men = identity({ brand: 'NIVEA', name: 'Men Protect Moisture', category: 'body', form: 'spray' })
+    const existing = await ctx.service.resolve(sun)
+    ctx.analyst.sameProductWith(() => false)
+
+    const result = await ctx.service.resolve(men)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).not.toBe(existing.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(men))).toMatchObject({ id: result.productId })
+    expect(await ctx.repository.findProductByKey(identityKey(sun))).toMatchObject({ id: existing.productId })
+  })
+
+  it('asks the judge about at most nearMissLimit candidates when the family is large, and then makes a new product', async () => {
+    const ctx = setup()
+    const flavours = ['Fresh', 'Cool', 'Sport', 'Active', 'Black', 'White', 'Silver', 'Protect', 'Sensitive', 'Original']
+    const ids: string[] = []
+    for (const [i, flavour] of flavours.entries()) {
+      const brand = i % 2 === 0 ? 'NIVEA' : 'NIVEA MEN'
+      const name = i % 2 === 0 ? `MEN DRY IMPACT ${flavour}` : `DRY IMPACT ${flavour}`
+      ids.push((await ctx.service.resolve(identity({ brand, name, category: 'body', form: 'spray' }))).productId)
+      ctx.advance(MINUTE)
+    }
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(NIVEA_NAME)
+
+    expect(ctx.analyst.calls.sameProduct.length - before).toBe(CATALOG_POLICY.nearMissLimit)
+    expect(ids).not.toContain(result.productId)
+  })
+
+  it('compares with only the newest brandScanLimit products of the whole family', async () => {
+    const ctx = setup({ policy: { brandScanLimit: 2 } })
+    await ctx.service.resolve(NIVEA_MEN)
+    ctx.advance(MINUTE)
+    await ctx.service.resolve(identity({ brand: 'NIVEA SUN', name: 'Protect & Moisture', category: 'body', form: 'spray' }))
+    ctx.advance(MINUTE)
+    await ctx.service.resolve(identity({ brand: 'NIVEA', name: 'Soft Cream', category: 'body', form: 'spray' }))
+    const before = ctx.analyst.calls.sameProduct.length
+
+    await ctx.service.resolve(NIVEA_NAME)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(before)
   })
 })
 

@@ -51,3 +51,8 @@ DEVICE_ID_KEY=
 # Anthropic API key for product research and analysis (Claude Console → API keys). Required.
 # Use a separate key or workspace per environment, so spend limits and revocation are per environment.
 ANTHROPIC_API_KEY=
+
+# Expo robot-user access token for push notifications (Expo → account → Access tokens → a robot user's token). Required.
+# Also turn on "Enhanced security for push notifications" in the Expo project settings.
+# A different token per environment is fine but not required.
+EXPO_ACCESS_TOKEN=

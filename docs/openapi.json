@@ -328,6 +328,78 @@
         ],
         "description": "The profile this session is on."
       },
+      "RegisterPushTokenBody": {
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 200,
+            "description": "The same stable install id the app sends to `/api/v1/auth/anonymous`."
+          },
+          "platform": {
+            "type": "string",
+            "enum": [
+              "ios",
+              "android"
+            ]
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256,
+            "description": "The Expo push token, `ExponentPushToken[...]`. Anything else is 400 `PUSH_TOKEN_INVALID`.",
+            "example": "ExponentPushToken[xxxxxxxxxxxxxxxxxxxxxx]"
+          }
+        },
+        "required": [
+          "deviceId",
+          "platform",
+          "token"
+        ]
+      },
+      "UnregisterPushTokenBody": {
+        "type": "object",
+        "properties": {
+          "deviceId": {
+            "type": "string",
+            "minLength": 16,
+            "maxLength": 200,
+            "description": "The same stable install id the app sends to `/api/v1/auth/anonymous`."
+          }
+        },
+        "required": [
+          "deviceId"
+        ]
+      },
+      "NotificationSettings": {
+        "type": "object",
+        "properties": {
+          "scanFinished": {
+            "type": "boolean"
+          },
+          "scanNeedsYou": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "scanFinished",
+          "scanNeedsYou"
+        ]
+      },
+      "UpdateNotificationSettingsBody": {
+        "type": "object",
+        "properties": {
+          "scanFinished": {
+            "type": "boolean",
+            "description": "Tell me when a scan is ready."
+          },
+          "scanNeedsYou": {
+            "type": "boolean",
+            "description": "Tell me when a scan needs a photo or a confirmation from me."
+          }
+        }
+      },
       "Scan": {
         "type": "object",
         "properties": {
@@ -419,6 +491,27 @@
                   "null"
                 ]
               },
+              "form": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "spray",
+                  "roll-on",
+                  "stick",
+                  "cream",
+                  "lotion",
+                  "gel",
+                  "oil",
+                  "serum",
+                  "liquid",
+                  "bar",
+                  "powder",
+                  "balm",
+                  null
+                ]
+              },
               "category": {
                 "type": "string",
                 "enum": [
@@ -434,6 +527,7 @@
               "brand",
               "name",
               "variant",
+              "form",
               "category"
             ],
             "description": "What the photo was read as, or what the user corrected it to. Absent until it has been read."
@@ -494,6 +588,27 @@
                   "null"
                 ]
               },
+              "form": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "spray",
+                  "roll-on",
+                  "stick",
+                  "cream",
+                  "lotion",
+                  "gel",
+                  "oil",
+                  "serum",
+                  "liquid",
+                  "bar",
+                  "powder",
+                  "balm",
+                  null
+                ]
+              },
               "category": {
                 "type": "string",
                 "enum": [
@@ -516,6 +631,7 @@
               "brand",
               "name",
               "variant",
+              "form",
               "category",
               "imageUrl"
             ]
@@ -678,6 +794,23 @@
           },
           "variant": {
             "type": "string"
+          },
+          "form": {
+            "type": "string",
+            "enum": [
+              "spray",
+              "roll-on",
+              "stick",
+              "cream",
+              "lotion",
+              "gel",
+              "oil",
+              "serum",
+              "liquid",
+              "bar",
+              "powder",
+              "balm"
+            ]
           },
           "category": {
             "type": "string",
@@ -1453,6 +1586,318 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/push-token": {
+      "put": {
+        "operationId": "registerPushToken",
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Register this phone to receive push notifications",
+        "description": "Guests included. The phone is stored for the session's account and profile, so call it after every sign-in, logout, profile switch and token refresh. Registering a device again moves it to the new token, account or profile; a token another device held moves to this one.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterPushTokenBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "The phone is registered"
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "operationId": "unregisterPushToken",
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Stop push notifications to this phone",
+        "description": "Idempotent: a phone with no registration, or one registered to another account, is left alone and still answers 204.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UnregisterPushTokenBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "The phone is no longer registered to this account"
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/notification-settings": {
+      "get": {
+        "operationId": "getNotificationSettings",
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Which notifications the account wants",
+        "description": "Both are on until changed. The phone's own permission is the master switch.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The account's settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/NotificationSettings"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateNotificationSettings",
+        "tags": [
+          "Notifications"
+        ],
+        "summary": "Turn scan notifications on or off",
+        "description": "Name the settings to change; the rest keep their value. The account's profiles share one set.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateNotificationSettingsBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "All of the account's settings, after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/NotificationSettings"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {
