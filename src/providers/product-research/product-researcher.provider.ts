@@ -1,3 +1,6 @@
+import { PRODUCT_FORMS, type ProductForm } from '../../modules/catalog/catalog.vocabulary'
+
+export { PRODUCT_FORMS, type ProductForm }
 export type ProductCategory = 'skin' | 'hair' | 'body' | 'makeup' | 'other'
 
 /** Who a product is, as read from its label. */
@@ -5,6 +8,7 @@ export type ProductIdentity = {
   brand: string
   name: string
   variant?: string
+  form?: ProductForm
   category: ProductCategory
 }
 

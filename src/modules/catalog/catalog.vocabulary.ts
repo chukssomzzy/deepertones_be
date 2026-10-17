@@ -1,6 +1,9 @@
 export const CATEGORIES = ['skin', 'hair', 'body', 'makeup', 'other'] as const
 export type Category = (typeof CATEGORIES)[number]
 
+export const PRODUCT_FORMS = ['spray', 'roll-on', 'stick', 'cream', 'lotion', 'gel', 'oil', 'serum', 'liquid', 'bar', 'powder', 'balm'] as const
+export type ProductForm = (typeof PRODUCT_FORMS)[number]
+
 export const CONCERN_KINDS = [
   'irritation',
   'allergen',

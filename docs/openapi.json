@@ -483,6 +483,27 @@
                   "null"
                 ]
               },
+              "form": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "spray",
+                  "roll-on",
+                  "stick",
+                  "cream",
+                  "lotion",
+                  "gel",
+                  "oil",
+                  "serum",
+                  "liquid",
+                  "bar",
+                  "powder",
+                  "balm",
+                  null
+                ]
+              },
               "category": {
                 "type": "string",
                 "enum": [
@@ -498,6 +519,7 @@
               "brand",
               "name",
               "variant",
+              "form",
               "category"
             ],
             "description": "What the photo was read as, or what the user corrected it to. Absent until it has been read."
@@ -558,6 +580,27 @@
                   "null"
                 ]
               },
+              "form": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "spray",
+                  "roll-on",
+                  "stick",
+                  "cream",
+                  "lotion",
+                  "gel",
+                  "oil",
+                  "serum",
+                  "liquid",
+                  "bar",
+                  "powder",
+                  "balm",
+                  null
+                ]
+              },
               "category": {
                 "type": "string",
                 "enum": [
@@ -580,6 +623,7 @@
               "brand",
               "name",
               "variant",
+              "form",
               "category",
               "imageUrl"
             ]
@@ -742,6 +786,23 @@
           },
           "variant": {
             "type": "string"
+          },
+          "form": {
+            "type": "string",
+            "enum": [
+              "spray",
+              "roll-on",
+              "stick",
+              "cream",
+              "lotion",
+              "gel",
+              "oil",
+              "serum",
+              "liquid",
+              "bar",
+              "powder",
+              "balm"
+            ]
           },
           "category": {
             "type": "string",

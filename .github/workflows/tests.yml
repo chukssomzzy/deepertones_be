@@ -2,7 +2,7 @@
 # build check, as separate jobs so a red check names what broke without anyone opening
 # the log, and a slow tier never holds up the result of a fast one. They share no state.
 #
-# The scripts tier is CI tooling under scripts/ (asset sync) and runs in plain Node.
+# The scripts tier is CI tooling under scripts/ (asset sync, the prompts generator) and runs in plain Node.
 #
 # No job here takes a secret, and none must ever need one. Both test tiers run
 # inside workerd through @cloudflare/vitest-plugin against the top level of
@@ -149,6 +149,30 @@ jobs:
       # Valid OpenAPI 3.1, plus Redocly's recommended rules (exceptions in redocly.yaml).
       - name: Lint the spec
         run: npm run openapi:lint
+
+  prompts:
+    name: Prompts
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      # src/prompts/prompts.generated.ts is generated from the Markdown prompt files and committed, so a
+      # prompt edit shows as a diff of both. Regenerating it here catches a PR that edited a prompt but
+      # forgot to run `npm run prompts` (or deleted the file).
+      - name: Regenerate src/prompts/prompts.generated.ts
+        run: npm run prompts
+      - name: Fail if the committed prompts module is stale
+        run: |
+          if [ -n "$(git status --porcelain -- src/prompts/prompts.generated.ts)" ]; then
+            git diff -- src/prompts/prompts.generated.ts
+            echo "::error file=src/prompts/prompts.generated.ts::src/prompts/prompts.generated.ts is out of date. Run \`npm run prompts\` and commit the result."
+            exit 1
+          fi
 
   build:
     name: Build
