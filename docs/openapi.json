@@ -525,7 +525,7 @@
             "description": "What the photo was read as, or what the user corrected it to. Absent until it has been read."
           },
           "product": {
-            "$ref": "#/components/schemas/ProductResult"
+            "$ref": "#/components/schemas/ProductSummary"
           },
           "image": {
             "type": [
@@ -559,201 +559,72 @@
           "image"
         ]
       },
-      "ProductResult": {
+      "ProductSummary": {
         "type": "object",
         "properties": {
-          "product": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "brand": {
-                "type": "string"
-              },
-              "name": {
-                "type": "string"
-              },
-              "variant": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              },
-              "form": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "enum": [
-                  "spray",
-                  "roll-on",
-                  "stick",
-                  "cream",
-                  "lotion",
-                  "gel",
-                  "oil",
-                  "serum",
-                  "liquid",
-                  "bar",
-                  "powder",
-                  "balm",
-                  null
-                ]
-              },
-              "category": {
-                "type": "string",
-                "enum": [
-                  "skin",
-                  "hair",
-                  "body",
-                  "makeup",
-                  "other"
-                ]
-              },
-              "imageUrl": {
-                "type": [
-                  "string",
-                  "null"
-                ]
-              }
-            },
-            "required": [
-              "id",
-              "brand",
-              "name",
-              "variant",
-              "form",
-              "category",
-              "imageUrl"
+          "id": {
+            "type": "string"
+          },
+          "brand": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
             ]
           },
-          "formulation": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "ingredients": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "In label (INCI) order."
-              },
-              "source": {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "enum": [
-                      "web",
-                      "label"
-                    ]
-                  },
-                  "url": {
-                    "type": [
-                      "string",
-                      "null"
-                    ]
-                  }
-                },
-                "required": [
-                  "kind",
-                  "url"
-                ]
-              },
-              "foundAt": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "analysedAt": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "format": "date-time"
-              }
-            },
-            "required": [
-              "id",
-              "ingredients",
-              "source",
-              "foundAt",
-              "analysedAt"
+          "form": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "spray",
+              "roll-on",
+              "stick",
+              "cream",
+              "lotion",
+              "gel",
+              "oil",
+              "serum",
+              "liquid",
+              "bar",
+              "powder",
+              "balm",
+              null
             ]
           },
-          "concerns": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "kind": {
-                  "type": "string"
-                },
-                "severity": {
-                  "type": "string"
-                },
-                "ingredients": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "why": {
-                  "type": "string"
-                },
-                "whoShouldTakeCare": {
-                  "type": "string"
-                },
-                "traits": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "sources": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                }
-              },
-              "required": [
-                "kind",
-                "severity",
-                "ingredients",
-                "why",
-                "whoShouldTakeCare",
-                "traits",
-                "sources"
-              ]
-            }
+          "category": {
+            "type": "string",
+            "enum": [
+              "skin",
+              "hair",
+              "body",
+              "makeup",
+              "other"
+            ]
           },
-          "reference": {
-            "type": "object",
-            "properties": {
-              "version": {
-                "type": "string"
-              },
-              "coverage": {
-                "type": "string",
-                "description": "How much of the regulatory lists the checks cover. A result with no concerns is not an all-clear unless this says so."
-              }
-            },
-            "required": [
-              "version",
-              "coverage"
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
             ]
           }
         },
         "required": [
-          "product",
-          "formulation",
-          "concerns",
-          "reference"
+          "id",
+          "brand",
+          "name",
+          "variant",
+          "form",
+          "category",
+          "imageUrl"
         ],
-        "description": "Only on a `ready` item."
+        "description": "The product's identity, only on a `ready` item. Its ingredients and concerns are not part of a scan."
       },
       "CreateScanBody": {
         "type": "object",

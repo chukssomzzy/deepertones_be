@@ -15,7 +15,7 @@ import type { ProductImage } from '../../providers/product-analysis/product-anal
 import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
-import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
+import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductSummary, ResearchInProgressError } from '../catalog/catalog.service'
 import type { NotificationsService } from '../notifications/notifications.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
@@ -60,8 +60,8 @@ export type ScanItemView = {
   reason: ItemReason | null
   /** What the photo was read as (or what the user corrected it to); absent until it has been read. */
   recognised?: { brand: string; name: string; variant: string | null; form: ProductForm | null; category: ProductCategory }
-  /** Only on a ready item. */
-  product?: ProductView
+  /** Only on a ready item: who the product is, not its ingredients or concerns. */
+  product?: ProductSummary
   /** The product's stock image if it has one, else the user's own photo through a signed link, else none. */
   image: { kind: 'stock' | 'user'; url: string } | null
 }
@@ -850,8 +850,8 @@ export class ScanService {
   }
 
   private async itemView(item: ScanItem, now: Date): Promise<ScanItemView> {
-    const product = item.state === 'ready' && item.formulationId !== null ? await this.catalog.productView(item.formulationId) : undefined
-    const stock = product?.product.imageUrl ?? null
+    const product = item.state === 'ready' && item.productId !== null ? await this.catalog.productSummary(item.productId) : undefined
+    const stock = product?.imageUrl ?? null
     let image: ScanItemView['image'] = null
     if (stock !== null) {
       image = { kind: 'stock', url: stock }

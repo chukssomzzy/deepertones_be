@@ -822,7 +822,7 @@ describe('ScanService.advance: match', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'ready', reason: null })
-    expect(item.product).toEqual(await ctx.catalog.productView(formulationId))
+    expect(item.product).toEqual(await ctx.catalog.productSummary(productId))
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
     expect(ctx.researcher.calls).toHaveLength(1)
     expect(ctx.analyst.calls.analyse).toHaveLength(1)
@@ -947,7 +947,7 @@ describe('ScanService.advance: research', () => {
 
     await run(ctx, itemId, 'research')
 
-    expect((await itemOf(ctx, scanId, itemId))).toMatchObject({ state: 'ready', product: { formulation: { id: old.formulationId } } })
+    expect((await itemOf(ctx, scanId, itemId))).toMatchObject({ state: 'ready', product: { id: old.productId } })
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: old.productId, formulationId: old.formulationId })
   })
 
@@ -1275,6 +1275,25 @@ describe('ScanService.advance: the cap on back photos per item', () => {
   })
 })
 
+describe('ScanService: what a ready item shows of its product', () => {
+  it('shows only the product\'s identity, with no formulation, concerns or reference, in the scan and in the published item event', async () => {
+    const ctx = setup()
+    const { productId } = await catalogued(ctx)
+    const { scanId, itemId } = await reach(ctx, 'matching')
+
+    await run(ctx, itemId, 'match')
+
+    const item = await itemOf(ctx, scanId, itemId)
+    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(item.product).toMatchObject({ id: productId, brand: CERAVE.brand, name: CERAVE.name })
+    expect(item.product).not.toHaveProperty('product')
+    const published = ctx.events.published.map((p) => p.event).filter((event) => event.type === 'item' && event.item.id === itemId && event.item.state === 'ready')
+    expect(published).toHaveLength(1)
+    const sent = (published[0] as { item: typeof item }).item
+    expect(Object.keys(sent.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+  })
+})
+
 describe('ScanService.advance: analyse', () => {
   it('makes the item ready with the analysed product', async () => {
     const ctx = setup()
@@ -1284,8 +1303,7 @@ describe('ScanService.advance: analyse', () => {
     const item = await itemOf(ctx, scanId, itemId)
     expect(item.state).toBe('ready')
     const stored = await ctx.repository.findItem(itemId)
-    expect(item.product).toEqual(await ctx.catalog.productView(stored!.formulationId!))
-    expect(item.product.formulation.analysedAt).toEqual(T0)
+    expect(item.product).toEqual(await ctx.catalog.productSummary(stored!.productId!))
   })
 
   it('fails the item as research-busy, without throwing, when the catalog cannot analyse today', async () => {
@@ -1479,7 +1497,7 @@ describe('ScanService.advance: whole scans through the queue', () => {
     await drain(ctx)
 
     const item = await itemOf(ctx, scanId, itemId)
-    expect(item.image).toEqual({ kind: 'stock', url: item.product.product.imageUrl })
+    expect(item.image).toEqual({ kind: 'stock', url: item.product.imageUrl })
     expect(item.image.url).toMatch(/^https:\/\/images\.test\/catalog\/test\/products\//)
   })
 
@@ -1930,7 +1948,7 @@ describe('ScanService.getScan', () => {
     expect(matching).not.toHaveProperty('product')
 
     await run(ctx, itemId, 'match')
-    expect(await itemOf(ctx, scanId, itemId)).toHaveProperty('product.formulation.ingredients', CLEAN)
+    expect(await itemOf(ctx, scanId, itemId)).toHaveProperty('product.brand', CERAVE.brand)
   })
 
   it('links the user\'s own photo for 5 minutes at a time, signed for that user and that photo', async () => {

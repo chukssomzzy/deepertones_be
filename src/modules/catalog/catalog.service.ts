@@ -92,16 +92,19 @@ export type ResearchResult =
   | { kind: 'not-found'; fallbackFormulationId?: string }
   | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
+/** A product's identity and stock image, nothing about its formulation. */
+export type ProductSummary = {
+  id: string
+  brand: string
+  name: string
+  variant: string | null
+  form: ProductForm | null
+  category: Product['category']
+  imageUrl: string | null
+}
+
 export type ProductView = {
-  product: {
-    id: string
-    brand: string
-    name: string
-    variant: string | null
-    form: ProductForm | null
-    category: Product['category']
-    imageUrl: string | null
-  }
+  product: ProductSummary
   formulation: {
     id: string
     ingredients: string[]
@@ -384,15 +387,7 @@ export class ProductCatalogService {
     const concerns = await this.repository.concernsFor(formulationId)
 
     return {
-      product: {
-        id: product.id,
-        brand: product.brand,
-        name: product.name,
-        variant: product.variant,
-        form: product.form,
-        category: product.category,
-        imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
-      },
+      product: this.summaryOf(product),
       formulation: {
         id: formulation.id,
         ingredients: formulation.ingredients,
@@ -413,6 +408,11 @@ export class ProductCatalogService {
     }
   }
 
+  /** Who a product is, for a screen that must not carry its ingredients or concerns (a scan item). Reads only the product row. */
+  async productSummary(productId: string): Promise<ProductSummary> {
+    return this.summaryOf(await this.requireProduct(productId))
+  }
+
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
   private async isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
     try {
@@ -420,6 +420,18 @@ export class ProductCatalogService {
     } catch (error) {
       if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
       throw error
+    }
+  }
+
+  private summaryOf(product: Product): ProductSummary {
+    return {
+      id: product.id,
+      brand: product.brand,
+      name: product.name,
+      variant: product.variant,
+      form: product.form,
+      category: product.category,
+      imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
     }
   }
 

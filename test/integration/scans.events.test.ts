@@ -221,6 +221,10 @@ describe('GET /api/v1/scans/products/{scanId}/events: live updates from the back
       { id: productItem, state: 'ready' },
     ])
     expect(await stream.read(1)).toEqual({ frames: [], ended: true })
+    // A scan carries who the product is and nothing of its ingredients, concerns or reference data.
+    const ready = parsed[2]!.data as { product: Record<string, unknown> }
+    expect(Object.keys(ready.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(ready.product).toMatchObject({ brand })
   })
 
   it('sends an item exactly as GET /api/v1/scans/products/{scanId} shows it', async () => {
@@ -259,6 +263,24 @@ describe('GET /api/v1/scans/products/{scanId}/events: live updates from the back
     const { frames } = await second.stream.read(2)
     expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['item', 'done'])
     expect(parseFrame(frames[0]!).data).toMatchObject({ id: itemId, state: 'ready' })
+  })
+
+  it('shows a ready item\'s product in the snapshot as the product\'s identity only', async () => {
+    const brand = freshBrand()
+    await catalogued(brand, 'Hydrating Cleanser')
+    const guest = await newGuest()
+    const { scanId, itemIds } = await startScan(guest)
+    const itemId = itemIds[0]!
+    stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
+    await step(itemId, 'recognise')
+    await step(itemId, 'match')
+
+    const { stream } = await watch(scanId, guest.token)
+    const snapshot = parseFrame((await stream.read(1)).frames[0]!)
+
+    const item = (snapshot.data as { items: { product: Record<string, unknown> }[] }).items[0]!
+    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(item.product).toMatchObject({ brand })
   })
 
   it('sends the same events to every client watching the scan', async () => {

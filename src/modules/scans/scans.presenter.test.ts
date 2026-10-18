@@ -9,31 +9,32 @@ const readyItem = (): ScanItemView => ({
   state: 'ready',
   reason: null,
   recognised: { brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin' },
-  product: {
-    product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
-    formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: new Date('2030-01-01T00:00:00Z'), analysedAt: null },
-    concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
-    reference: { version: 'v1', coverage: 'partial' },
-  },
+  product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
   image: { kind: 'stock', url: 'https://example.test/serum.jpg' },
 })
 
 describe('toScanItemResponse', () => {
-  it('publishes the catalog view field by field, with its dates as ISO strings', () => {
+  it('publishes the product summary field by field, and nothing else about the product', () => {
     expect(toScanItemResponse(readyItem())).toEqual({
       id: 'item-1',
       position: 0,
       state: 'ready',
       reason: null,
       recognised: { brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin' },
-      product: {
-        product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
-        formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: '2030-01-01T00:00:00.000Z', analysedAt: null },
-        concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
-        reference: { version: 'v1', coverage: 'partial' },
-      },
+      product: { id: 'p1', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
       image: { kind: 'stock', url: 'https://example.test/serum.jpg' },
     })
+  })
+
+  it('publishes exactly the summary keys for a ready item\'s product, even when the view carries formulation, concerns and reference', () => {
+    const carrying = {
+      ...readyItem(),
+      product: { ...readyItem().product!, formulation: { id: 'f1' }, concerns: [], reference: { version: 'v1' }, product: { id: 'nested' } },
+    } as unknown as ScanItemView
+
+    const response = toScanItemResponse(carrying)
+
+    expect(Object.keys(response.product!).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
   })
 
   it('publishes the form of what was read and of the product, when they have one', () => {
@@ -41,27 +42,21 @@ describe('toScanItemResponse', () => {
     const sprayed: ScanItemView = {
       ...item,
       recognised: { ...item.recognised!, form: 'spray' },
-      product: { ...item.product!, product: { ...item.product!.product, form: 'spray' } },
+      product: { ...item.product!, form: 'spray' },
     }
 
     const response = toScanItemResponse(sprayed)
 
     expect(response.recognised).toEqual({ brand: 'Glow Co', name: 'Serum', variant: null, form: 'spray', category: 'skin' })
-    expect(response.product!.product.form).toBe('spray')
+    expect(response.product!.form).toBe('spray')
   })
 
-  it('leaves out a field the catalog view gains that the response schema does not name', () => {
+  it('leaves out a field the product summary gains that the response schema does not name', () => {
     const item = readyItem()
     const grown = {
       ...item,
       recognised: { ...item.recognised!, confidence: 0.9 },
-      product: {
-        ...item.product!,
-        product: { ...item.product!.product, imageKey: 'secret/key' },
-        formulation: { ...item.product!.formulation, ingredientsKey: 'k' },
-        concerns: [{ ...item.product!.concerns[0]!, internalNote: 'n' }],
-        reference: { ...item.product!.reference, listHash: 'h' },
-      },
+      product: { ...item.product!, imageKey: 'secret/key' },
       image: { ...item.image!, key: 'photos/x' },
     } as unknown as ScanItemView
 

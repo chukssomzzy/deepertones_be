@@ -47,41 +47,17 @@ export const ConfirmProductBody = z
   })
   .openapi('ConfirmProductBody')
 
-const ProductResult = z
+const ProductSummary = z
   .object({
-    product: z.object({
-      id: z.string(),
-      brand: z.string(),
-      name: z.string(),
-      variant: z.string().nullable(),
-      form: z.enum(PRODUCT_FORMS).nullable(),
-      category: Category,
-      imageUrl: z.string().nullable(),
-    }),
-    formulation: z.object({
-      id: z.string(),
-      ingredients: z.array(z.string()).openapi({ description: 'In label (INCI) order.' }),
-      source: z.object({ kind: z.enum(['web', 'label']), url: z.string().nullable() }),
-      foundAt: z.iso.datetime(),
-      analysedAt: z.iso.datetime().nullable(),
-    }),
-    concerns: z.array(
-      z.object({
-        kind: z.string(),
-        severity: z.string(),
-        ingredients: z.array(z.string()),
-        why: z.string(),
-        whoShouldTakeCare: z.string(),
-        traits: z.array(z.string()),
-        sources: z.array(z.string()),
-      }),
-    ),
-    reference: z.object({
-      version: z.string(),
-      coverage: z.string().openapi({ description: 'How much of the regulatory lists the checks cover. A result with no concerns is not an all-clear unless this says so.' }),
-    }),
+    id: z.string(),
+    brand: z.string(),
+    name: z.string(),
+    variant: z.string().nullable(),
+    form: z.enum(PRODUCT_FORMS).nullable(),
+    category: Category,
+    imageUrl: z.string().nullable(),
   })
-  .openapi('ProductResult')
+  .openapi('ProductSummary')
 
 export const ScanItemResponse = z
   .object({
@@ -101,7 +77,9 @@ export const ScanItemResponse = z
       .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), form: z.enum(PRODUCT_FORMS).nullable(), category: Category })
       .optional()
       .openapi({ description: 'What the photo was read as, or what the user corrected it to. Absent until it has been read.' }),
-    product: ProductResult.optional().openapi({ description: 'Only on a `ready` item.' }),
+    product: ProductSummary.optional().openapi({
+      description: 'The product\'s identity, only on a `ready` item. Its ingredients and concerns are not part of a scan.',
+    }),
     image: z
       .object({
         kind: z.enum(['stock', 'user']),

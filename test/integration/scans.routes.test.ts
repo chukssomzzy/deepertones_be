@@ -852,7 +852,7 @@ describe('OpenAPI', () => {
   const documentOf = async () => {
     const res = await fetchWorker('http://deepertones.test/openapi.json')
     expect(res.status).toBe(200)
-    return (await res.json()) as { paths: Record<string, Record<string, Operation>> }
+    return (await res.json()) as { paths: Record<string, Record<string, Operation>>; components?: { schemas?: Record<string, { properties?: Record<string, unknown> }> } }
   }
   const usesBearer = (operation?: Operation) => (operation?.security ?? []).some((requirement) => 'bearerAuth' in requirement)
 
@@ -874,6 +874,13 @@ describe('OpenAPI', () => {
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
     expect(Object.keys(paths['/api/v1/scans/products/photos/{token}']!.get!.responses['200']!.content!).sort()).toEqual(['image/jpeg', 'image/webp'])
+  })
+
+  it('documents a ready item\'s product as a flat ProductSummary of the product\'s identity, with no ProductResult', async () => {
+    const { components } = await documentOf()
+
+    expect(components?.schemas?.ProductResult).toBeUndefined()
+    expect(Object.keys(components!.schemas!.ProductSummary!.properties!).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
   })
 
   it('lists the statuses the scan routes can answer with', async () => {

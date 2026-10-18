@@ -1147,7 +1147,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   the seed list is `'partial'`, a result with no concerns is "nothing in the checks we run", never an all-clear, and
   clients must say so. An unknown formulation is `NotFoundError('PRODUCT_NOT_FOUND')`; `research` and
   `addLabelIngredients` on an unknown product are the same, `analyse` on an unknown formulation is
-  `FORMULATION_NOT_FOUND`.
+  `FORMULATION_NOT_FOUND`. Scans do not use the view: a scan item carries `productSummary(productId)`, the same `product` part
+  read from the product row alone.
 
 ### Scan module
 `modules/scans` owns the product scan (#20): the photos a user takes and how each one gets to a result. `ScanService`
@@ -1186,8 +1187,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
   when the last back photo could not be read, was refused by the model, or is gone.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `recognised` (once read), `product` (a
-  `ProductView`, only when ready) and `image`: the product's stock image, else the user's own photo through a signed link
-  (`/api/v1/scans/products/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events carry the same item.
+  `ProductSummary`: id, brand, name, variant, form, category and `imageUrl`, only when ready; never the ingredients, the
+  concerns or the reference coverage) and `image`: the product's stock image, else the user's own photo through a signed
+  link (`/api/v1/scans/products/photos/<token>`), else `null` (a rejected item's photo is deleted). The stream's events
+  carry the same item.
 - **create.** Every photo is checked before any is stored, and one bad photo refuses the whole scan: 1 to 10 photos
   (`NO_IMAGES`, `TOO_MANY_IMAGES`), at most 2,000,000 bytes and 1600 pixels on the longest side (`IMAGE_TOO_LARGE`), JPEG
   or WebP (`UNSUPPORTED_IMAGE`). The type is read from the bytes with `readImageHeader`, never from what the caller

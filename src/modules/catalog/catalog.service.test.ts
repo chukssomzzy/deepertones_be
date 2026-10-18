@@ -1092,6 +1092,46 @@ describe('ProductCatalogService.productView', () => {
   })
 })
 
+describe('ProductCatalogService.productSummary', () => {
+  it('gives the product\'s identity and its public image URL, and nothing of its formulation or concerns', async () => {
+    const ctx = setup()
+    ctx.images.respondTo(IMAGE_URL, JPEG)
+    ctx.analyst.imageShowsProductWith(() => true)
+    const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
+    ctx.images.respondToPage(SOURCE_URL, IMAGE_URL)
+    await ctx.service.research(productId)
+
+    const summary = await ctx.service.productSummary(productId)
+
+    expect(summary).toEqual({
+      id: productId,
+      brand: 'CeraVe',
+      name: 'Hydrating Facial Cleanser',
+      variant: 'Night',
+      form: null,
+      category: 'skin',
+      imageUrl: ctx.images.publicUrl(`${IMAGE_KEY_PREFIX}/products/${productId}.jpg`),
+    })
+  })
+
+  it('has no image URL for a product with no image', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx)
+
+    expect(await ctx.service.productSummary(productId)).toMatchObject({ id: productId, variant: null, imageUrl: null })
+  })
+
+  it('says the product was not found for an unknown product id', async () => {
+    const { service } = setup()
+
+    const error = await errorOf(service.productSummary('no-such-product'))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+})
+
 describe('ProductCatalogService.research without asking the researcher', () => {
   const productFor = async (ctx: Ctx, who = identity()) => (await ctx.service.resolve(who)).productId
 

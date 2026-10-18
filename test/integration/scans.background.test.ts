@@ -118,7 +118,7 @@ describe('the job registry the Worker runs', () => {
 describe('scan items advanced through the Worker queue handler', () => {
   it('takes a photo of a product the catalog already holds to ready, with one vision call on the stored photo and nothing else', async () => {
     const brand = freshBrand()
-    const formulationId = await catalogued(brand, 'Hydrating Cleanser')
+    await catalogued(brand, 'Hydrating Cleanser')
     const { userId, photo, scanId, itemId } = await startScan()
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'recognising' })
     const calls = stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
@@ -131,7 +131,11 @@ describe('scan items advanced through the Worker queue handler', () => {
 
     expect(match.explicitAcks).toEqual(['m'])
     const item = await itemOf(userId, scanId, itemId)
-    expect(item).toMatchObject({ state: 'ready', reason: null, image: { kind: 'user' }, product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(item).toMatchObject({ state: 'ready', reason: null, image: { kind: 'user' }, product: { brand } })
+    expect(item.product).not.toHaveProperty('formulation')
+    expect(item.product).not.toHaveProperty('concerns')
+    expect(item.product).not.toHaveProperty('reference')
+    expect(item.product).not.toHaveProperty('product')
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe(ANTHROPIC_URL)
     expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(photo.bytes))
