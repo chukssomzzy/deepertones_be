@@ -1360,7 +1360,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   - **`{ productId }`** (a result of search, no model call): `catalog.choose` says what the product needs, and the item moves through the same
     handling as the `match` step (`moveOn`): `ready`, `analysing` (queues `analyse`), `researching` (queues `research`), or `failed` /
     `analysis-failed` for a product whose analysis was rejected the maximum number of times. `recognised` is set from the chosen product
-    (`catalog.namedProduct`). An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`, the item unchanged.
+    (`catalog.namedProduct`), `recognised.form` included (the product's own form, or `null`). An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`, the item unchanged.
   - **`{ text }`**: one `NameSplitter.split` call, which has its own `AnthropicClient` with a 15 s timeout (the shared one waits 60 s; the split runs in the request), then the item goes to `matching` with the split's brand, name, variant and category as
     `recognised` and `match` is queued, exactly as a confirmation does; the catalog lookup and any research happen in the queue, not in the request.
     `not-a-product`, or a refusal, is 400 `NOT_A_PRODUCT_NAME`; `AiBudgetExceededError` is `CatalogBusyError` (503 `CATALOG_BUSY`);
@@ -1492,7 +1492,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
 `GET /api/v1/products/search?q=` (`modules/catalog/catalog.routes.ts`, operation `searchProducts`, tag "Products", mounted at `/api/v1/products`) finds
 named products as the user types, so an item that could not be photographed can be identified by picking one
 (`POST .../items/{itemId}/identification` with its `productId`; see "Scan module"). It calls `ProductCatalogService.search`; the response is
-`data: { products: [{ id, brand, name, variant, category, imageUrl }] }`, at most 10, shaped by `catalog.presenter.ts`. It makes no model or web call.
+`data: { products: [{ id, brand, name, variant, form, category, imageUrl }] }` (`form` is one of `PRODUCT_FORMS` or `null`, always present, so a spray and a roll-on of one line are told apart), at most 10, shaped by `catalog.presenter.ts`. It makes no model or web call.
 
 - **Query.** `q` is trimmed, then 2 to 80 characters (`VALIDATION_FAILED` otherwise). The service normalises it with `normaliseText`, so case, accents
   and punctuation do not matter; a query under 2 characters once normalised (`!!`, `a!`) finds nothing, never everything, and the service does not query for it (the route's bound

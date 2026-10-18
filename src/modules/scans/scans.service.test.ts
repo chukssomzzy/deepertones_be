@@ -4392,6 +4392,56 @@ describe('ScanService.identifyByName', () => {
       expect(queued(ctx)).toEqual(queuedBefore)
     })
 
+    it('shows the chosen product\'s form as what the item was recognised as, and keeps it on the item', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, { ...CERAVE, form: 'spray' })
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: 'spray', category: 'skin' })
+      expect(view.product.product).toMatchObject({ id: productId, form: 'spray' })
+      expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'spray' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ recognisedForm: 'spray' })
+    })
+
+    it('shows a null form for a chosen product that has none', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ recognisedForm: null })
+    })
+
+    it('takes the form of the product picked, not of a sibling that differs only by form', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      await catalogued(ctx, { ...CERAVE, form: 'spray' })
+      const rollOn = await catalogued(ctx, { ...CERAVE, form: 'roll-on' })
+
+      const view = await identify(ctx, scanId, itemId, { productId: rollOn.productId })
+
+      expect(view.recognised).toMatchObject({ form: 'roll-on' })
+      expect(view.product.product).toMatchObject({ id: rollOn.productId, form: 'roll-on' })
+    })
+
+    it('shows the chosen product\'s form for a product that still has to be researched or analysed, too', async () => {
+      const ctx = setup()
+      const first = await arrange(ctx)
+      const second = await arrange(ctx)
+      const unresearched = await ctx.catalog.resolve({ ...CERAVE, form: 'spray' })
+      const unanalysed = await catalogued(ctx, { ...CERAVE, form: 'roll-on' }, { analysed: false })
+
+      const researching = await identify(ctx, first.scanId, first.itemId, { productId: unresearched.productId })
+      const analysing = await identify(ctx, second.scanId, second.itemId, { productId: unanalysed.productId })
+
+      expect(researching).toMatchObject({ state: 'researching', recognised: { form: 'spray' } })
+      expect(analysing).toMatchObject({ state: 'analysing', recognised: { form: 'roll-on' } })
+    })
+
     it('makes no AI call of any kind for an analysed product: no recognizer, splitter, researcher or analyst', async () => {
       const ctx = setup()
       const { scanId, itemId } = await arrange(ctx)
@@ -4567,6 +4617,23 @@ describe('ScanService.identifyByName', () => {
       expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', product: { product: { id: productId }, formulation: { id: formulationId } } })
       expect(aiCalls(ctx)).toBe(before + 1)
       expect(ctx.nameSplitter.calls).toHaveLength(1)
+    })
+
+    it('leaves the form null, as the split gives none, and matches the form-less product though a sibling of another form is in the catalog', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const spray = await catalogued(ctx, { ...CERAVE, form: 'spray' })
+      const formless = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const view = await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin' })
+      const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+      await drain(ctx)
+
+      expect(resolve.mock.calls[0]![0]).not.toHaveProperty('form')
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { form: null }, product: { product: { id: formless.productId, form: null } } })
+      expect(formless.productId).not.toBe(spray.productId)
     })
 
     it('researches a product the catalog does not hold, as a confirmation does, and creates it under the split\'s brand, name and variant', async () => {

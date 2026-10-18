@@ -101,6 +101,7 @@ export type ProductSummary = {
   brand: string
   name: string
   variant: string | null
+  form: ProductForm | null
   category: Product['category']
   imageUrl: string | null
 }
@@ -583,6 +584,7 @@ export class ProductCatalogService {
       brand: product.brand,
       name: product.name,
       variant: product.variant,
+      form: product.form,
       category: product.category,
       imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
     }

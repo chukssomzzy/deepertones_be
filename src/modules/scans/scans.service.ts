@@ -145,6 +145,7 @@ export class ScanService {
     recognisedBrand: null,
     recognisedName: null,
     recognisedVariant: null,
+    recognisedForm: null,
     recognisedCategory: null,
   }
 
@@ -432,7 +433,7 @@ export class ScanService {
       item,
       from,
       resolved,
-      { reason: null, recognisedBrand: product.brand, recognisedName: product.name, recognisedVariant: product.variant, recognisedCategory: product.category },
+      { reason: null, recognisedBrand: product.brand, recognisedName: product.name, recognisedVariant: product.variant, recognisedForm: product.form, recognisedCategory: product.category },
       ScanService.NOT_NAMED,
     )
   }

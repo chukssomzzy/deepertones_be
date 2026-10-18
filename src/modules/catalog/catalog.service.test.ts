@@ -3006,13 +3006,13 @@ describe('ProductCatalogService.search', () => {
   const callsToAi = (ctx: Ctx) => ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length
   const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
 
-  it('finds a named product by a fragment of its brand, name and variant, as { id, brand, name, variant, category, imageUrl } and nothing more', async () => {
+  it('finds a named product by a fragment of its brand, name and variant, as { id, brand, name, variant, form, category, imageUrl } and nothing more', async () => {
     const ctx = setup()
     const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
 
     const found = await ctx.service.search('facial cleanser')
 
-    expect(found).toEqual([{ id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin', imageUrl: null }])
+    expect(found).toEqual([{ id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', form: null, category: 'skin', imageUrl: null }])
   })
 
   it('gives a null variant for a product with none, and the stock image\'s public URL for one that has an image', async () => {
@@ -3021,8 +3021,36 @@ describe('ProductCatalogService.search', () => {
     await ctx.repository.setProductImage(productId, { key: 'catalog/test/products/cerave.jpg', sourceUrl: IMAGE_URL, checkedAt: T0 })
 
     expect(await ctx.service.search('cerave')).toEqual([
-      { id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
+      { id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
     ])
+  })
+
+  it('shows the form of a product, so a spray and a roll-on of the same line are told apart in the list', async () => {
+    const ctx = setup()
+    const nivea = { brand: 'NIVEA MEN', name: 'Dry Impact', category: 'body' } as const
+    const spray = await ctx.service.resolve(identity({ ...nivea, form: 'spray' }))
+    const rollOn = await ctx.service.resolve(identity({ ...nivea, form: 'roll-on' }))
+
+    const found = await ctx.service.search('nivea men dry impact')
+
+    expect(spray.productId).not.toBe(rollOn.productId)
+    expect(found).toHaveLength(2)
+    expect(found).toEqual(
+      expect.arrayContaining([
+        { id: spray.productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'spray', category: 'body', imageUrl: null },
+        { id: rollOn.productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'roll-on', category: 'body', imageUrl: null },
+      ]),
+    )
+  })
+
+  it('gives a null form for a product that has none, next to one that has', async () => {
+    const ctx = setup()
+    const plain = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Glow Serum' }))
+    const spray = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Glow Serum', form: 'spray' }))
+
+    const found = await ctx.service.search('acme glow serum')
+
+    expect(Object.fromEntries(found.map((p) => [p.id, p.form]))).toEqual({ [plain.productId]: null, [spray.productId]: 'spray' })
   })
 
   it.each([
@@ -3142,6 +3170,31 @@ describe('ProductCatalogService.search', () => {
     await ctx.service.search('zzz')
 
     expect(callsToAi(ctx)).toBe(before)
+  })
+})
+
+describe('ProductCatalogService.namedProduct', () => {
+  it('reads a named product back as { id, brand, name, variant, form, category, imageUrl }, with the form it was made with', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', category: 'body', form: 'spray' }))
+
+    expect(await ctx.service.namedProduct(productId)).toEqual({ id: productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', form: 'spray', category: 'body', imageUrl: null })
+  })
+
+  it('gives a null form for a product made without one', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.namedProduct(productId)).toMatchObject({ id: productId, form: null })
+  })
+
+  it('reads each product of one line by its own form, not the form of its sibling', async () => {
+    const ctx = setup()
+    const spray = await ctx.service.resolve(identity({ form: 'spray' }))
+    const rollOn = await ctx.service.resolve(identity({ form: 'roll-on' }))
+
+    expect((await ctx.service.namedProduct(spray.productId)).form).toBe('spray')
+    expect((await ctx.service.namedProduct(rollOn.productId)).form).toBe('roll-on')
   })
 })
 
