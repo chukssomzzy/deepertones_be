@@ -5846,6 +5846,54 @@ describe('ScanService: push notifications', () => {
     })
   })
 
+  describe('when an item with no product has an unreadable back photo', () => {
+    const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
+    /** An item with no product that has had `n` back photos uploaded, the first `n - 1` read as unreadable, the last waiting to be read. */
+    const readingBackPhoto = async (ctx: Ctx, n: number) => {
+      const taken = await readingUnidentified(ctx)
+      for (let i = 1; i < n; i++) {
+        unreadable(ctx)
+        await run(ctx, taken.itemId, 'read-label')
+        ctx.advance(SECOND)
+        await sendBack(ctx, taken.scanId, taken.itemId, 10 + i)
+      }
+      return taken
+    }
+    const needsYouKeys = (ctx: Ctx) => keys(ctx).filter((key) => key.startsWith('scan-needs-you'))
+
+    it.each([1, 2])('asks it to be identified again, as ask number %i, not for another photo of the back, under an item-scoped key', async (n) => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, n)
+      const before = pushes(ctx).length
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-identification', reason: 'label-unreadable' })
+      // Exactly one push is added by this read, and it is the identify need.
+      expect(pushes(ctx).slice(before)).toEqual([{ kind: 'scan-needs-you', userId: USER, profileId: PROFILE, scanId, itemId, need: 'identify', ask: n }])
+      expect(keys(ctx).at(-1)).toBe(`scan-needs-you:${scanId}:${itemId}:ask-${n}`)
+    })
+
+    it('does not ask a third time: the 3rd unreadable back photo ends the item as failed with no needs-you push', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+      const before = needsYouKeys(ctx)
+      expect(before.slice(-2)).toEqual([`scan-needs-you:${scanId}:${itemId}:ask-1`, `scan-needs-you:${scanId}:${itemId}:ask-2`])
+      // The two asks so far were to identify the item, not for a photo of the back.
+      expect(pushes(ctx).slice(-2).map((body) => body.kind === 'scan-needs-you' && body.need)).toEqual(['identify', 'identify'])
+      const sent = pushes(ctx).length
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+      expect(needsYouKeys(ctx)).toEqual(before)
+      // The only push this read adds is the scan's own finish: its single item is now final.
+      expect(pushes(ctx).slice(sent)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId, readyCount: 0 }])
+    })
+  })
+
   describe('when a scan is finished', () => {
     const recogniseAs = (ctx: Ctx, answer: (marker: number) => Recognition) => ctx.recognizer.respondWith((image) => answer(image.bytes.at(-1)!))
 

@@ -396,7 +396,7 @@
           },
           "scanNeedsYou": {
             "type": "boolean",
-            "description": "Tell me when a scan needs a photo or a confirmation from me."
+            "description": "Tell me when a scan needs something from me: a photo, a confirmation, or the name of a product it could not read."
           }
         }
       },
