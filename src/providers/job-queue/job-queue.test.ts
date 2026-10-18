@@ -12,6 +12,15 @@ const job = jobSpec({
   retry: { baseSeconds: 5, factor: 3, capSeconds: 135 },
 })
 
+const sharedJob = jobSpec({
+  name: 'shared-job',
+  queue: 'shared',
+  shared: true,
+  schema: z.object({ id: z.string() }),
+  key: (body) => body.id,
+  retry: { baseSeconds: 5, factor: 3, capSeconds: 135 },
+})
+
 const fakeQueue = () => {
   const sent: unknown[] = []
   const options: unknown[] = []
@@ -95,5 +104,29 @@ describe('CloudflareQueuesJobQueue', () => {
     const adapter = new CloudflareQueuesJobQueue({})
 
     await expect(adapter.enqueue(job, { id: 'a' })).rejects.toThrow(/test-job/)
+  })
+
+  // A shared queue carries several jobs, so the message names its own: { job, body }. A queue of one job keeps the bare body.
+  it('wraps the validated body with the job name when the job\'s queue is shared', async () => {
+    const { queue, sent } = fakeQueue()
+
+    await new CloudflareQueuesJobQueue({ shared: queue }).enqueue(sharedJob, { id: 'a', extra: 1 } as never)
+
+    expect(sent).toEqual([{ job: 'shared-job', body: { id: 'a' } }])
+  })
+
+  it('sends the delay beside the wrapped body on a shared queue', async () => {
+    const { queue, options } = fakeQueue()
+
+    await new CloudflareQueuesJobQueue({ shared: queue }).enqueue(sharedJob, { id: 'a' }, { delaySeconds: 30 })
+
+    expect(options).toEqual([{ delaySeconds: 30 }])
+  })
+
+  it('rejects a body that fails the schema on a shared queue and sends nothing', async () => {
+    const { queue, sent } = fakeQueue()
+
+    await expect(new CloudflareQueuesJobQueue({ shared: queue }).enqueue(sharedJob, { id: 5 } as never)).rejects.toThrow()
+    expect(sent).toEqual([])
   })
 })

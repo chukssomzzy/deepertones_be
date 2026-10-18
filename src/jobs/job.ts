@@ -21,6 +21,11 @@ export type JobSpec<S extends z.ZodType = z.ZodType> = {
   name: string
   /** The queue's base name; see queueNames for the per-environment names. */
   queue: string
+  /**
+   * Set on every job whose queue is meant to carry more than this one (the `email` queue). Its messages are `{ job, body }`, so the
+   * dispatcher knows which job a message is for; a job alone on its queue sends the bare body. Producers wrap through JobQueue, never by hand.
+   */
+  shared?: true
   schema: S
   /** Idempotency key derived from the message's own data, not the queue's message id. */
   key(body: z.infer<S>): string
@@ -51,7 +56,7 @@ export const defineJob = <S extends z.ZodType, Services = unknown>(
   },
 ): JobDefinition<S, Services> => ({ ...spec, ...handlers })
 
-/** One queue and one dead-letter queue per job per environment. */
+/** One queue and one dead-letter queue per queue per environment. A queue carries one job, or several when its jobs are `shared`. */
 export const queueNames = (queue: string, environment: string) => ({
   main: `deepertones-${queue}-${environment}`,
   deadLetter: `deepertones-${queue}-dlq-${environment}`,
