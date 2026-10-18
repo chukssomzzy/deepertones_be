@@ -66,6 +66,8 @@ export const SCAN_POLICY: ScanPolicy = {
 }
 
 /** What the app shows for one item. Built by the service so a presenter, the stream and the events all say the same thing. */
+export type NoLabelView = { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string; concerns: DraftConcern[]; rulesVersion: number }
+
 export type ScanItemView = {
   id: string
   /** The scan photo the item was read from; null only for an item from before the column. */
@@ -80,7 +82,7 @@ export type ScanItemView = {
   /** Only on a ready item: who the product is, not its ingredients or concerns. */
   product?: ProductSummary
   /** Only on an unidentified item: what the user said about a product with no label, and the cautions those answers earn (worked out now, not stored). */
-  noLabel?: { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string; concerns: DraftConcern[]; rulesVersion: number }
+  noLabel?: NoLabelView
   /** The product's stock image if it has one, else the user's own photo (the item's, or its shelf photo's) through a signed link while it is still stored, else none. */
   image: { kind: 'stock' | 'user'; url: string } | null
 }
@@ -1390,6 +1392,21 @@ export class ScanService {
     const item = items.find((candidate) => candidate.id === itemId)
     if (!item) throw ScanService.scanNotFound()
     return item
+  }
+
+  /**
+   * The noLabel view of each given item that has one, in one read, keyed by item id. Checks no ownership: the shelf asks only for
+   * the items its own profile's rows point at, so the caller has already been decided. An item that is gone, or is not an unidentified
+   * one with answers, is absent from the map.
+   */
+  async noLabelViews(itemIds: string[]): Promise<Map<string, NoLabelView>> {
+    const views = new Map<string, NoLabelView>()
+    if (itemIds.length === 0) return views
+    for (const item of await this.repository.findItems([...new Set(itemIds)])) {
+      const { noLabel } = this.noLabelView(item)
+      if (noLabel) views.set(item.id, noLabel)
+    }
+    return views
   }
 
   private async itemViewOf(itemId: string): Promise<ScanItemView> {

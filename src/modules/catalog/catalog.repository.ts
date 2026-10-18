@@ -1,6 +1,6 @@
 import { type SQL, and, asc, count, desc, eq, exists, gte, inArray, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
-import type { Db } from '../../lib/db'
+import { queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { analysisAttempts, concernTraits, formulationConcerns, formulations, productAliases, products, researchAttempts } from './catalog.table'
 import type { AnalysisAttempt, DraftConcernRow, Formulation, NewFormulation, NewProduct, Product, ResearchAttempt, StoredConcern } from './catalog.types'
@@ -36,6 +36,11 @@ export class D1CatalogRepository {
   async findProductById(id: string): Promise<Product | null> {
     const [row] = await this.db.select().from(products).where(eq(products.id, id))
     return row ?? null
+  }
+
+  /** The products with these ids; an id nobody has is simply absent. */
+  async findProductsByIds(ids: string[]): Promise<Product[]> {
+    return queryByIds(ids, (chunk) => this.db.select().from(products).where(inArray(products.id, chunk)))
   }
 
   /** The product whose identity key is `key`, else the one an alias maps `key` to; null if neither. */
@@ -193,6 +198,11 @@ export class D1CatalogRepository {
   async findFormulation(id: string): Promise<Formulation | null> {
     const [row] = await this.db.select().from(formulations).where(eq(formulations.id, id))
     return row ?? null
+  }
+
+  /** The formulations with these ids; an id nobody has is simply absent. */
+  async findFormulationsByIds(ids: string[]): Promise<Formulation[]> {
+    return queryByIds(ids, (chunk) => this.db.select().from(formulations).where(inArray(formulations.id, chunk)))
   }
 
   /** The product's formulation found most recently; the later insert wins a tie. */

@@ -24,6 +24,8 @@ import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
 import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
+import { D1ShelfRepository } from './modules/shelf/shelf.repository'
+import { ShelfService } from './modules/shelf/shelf.service'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
@@ -258,6 +260,10 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const shelf = once(
+    () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -303,6 +309,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get scans() {
       return scans()
+    },
+    get shelf() {
+      return shelf()
     },
     get tokens() {
       return tokens()

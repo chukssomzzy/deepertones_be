@@ -17,7 +17,7 @@ const toConcernResponse = (concern: ConcernResponse): ConcernResponse => ({
 })
 
 // Every field is named, so a field added to the catalog's summary is not published by accident.
-const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
+export const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
   id: product.id,
   kind: product.kind,
   brand: product.brand,
@@ -28,7 +28,7 @@ const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof 
   imageUrl: product.imageUrl,
 })
 
-const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, rulesVersion }: NonNullable<ScanItemView['noLabel']>): NonNullable<z.infer<typeof ScanItemResponse>['noLabel']> => ({
+export const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, rulesVersion }: NonNullable<ScanItemView['noLabel']>): NonNullable<z.infer<typeof ScanItemResponse>['noLabel']> => ({
   source,
   purpose,
   usedFor,

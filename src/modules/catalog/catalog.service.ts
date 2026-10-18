@@ -575,6 +575,22 @@ export class ProductCatalogService {
     return this.summaryOf(await this.requireProduct(formulation.productId))
   }
 
+  /**
+   * productSummary for many formulations in two reads, for a list (a shelf). A formulation that does not resolve, or whose product is
+   * gone, is left out of the map rather than failing the rest. Reads no concerns.
+   */
+  async productSummaries(formulationIds: string[]): Promise<Map<string, ProductSummary>> {
+    const summaries = new Map<string, ProductSummary>()
+    if (formulationIds.length === 0) return summaries
+    const formulations = await this.repository.findFormulationsByIds([...new Set(formulationIds)])
+    const products = new Map((await this.repository.findProductsByIds([...new Set(formulations.map((f) => f.productId))])).map((p) => [p.id, p]))
+    for (const formulation of formulations) {
+      const product = products.get(formulation.productId)
+      if (product) summaries.set(formulation.id, this.summaryOf(product))
+    }
+    return summaries
+  }
+
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
   private async isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
     try {

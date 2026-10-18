@@ -119,6 +119,13 @@ export class FakeScansRepository implements ScansRepository {
     return item ? copyItem(item) : null
   }
 
+  async findItems(itemIds: string[]): Promise<ScanItem[]> {
+    return itemIds.flatMap((id) => {
+      const item = this.items.get(id)
+      return item ? [copyItem(item)] : []
+    })
+  }
+
   /**
    * Applies the patch only while the item is still in the `expected` state, and says whether it did. A field the patch
    * leaves out is unchanged; one it sets to null is cleared. Nothing changes when the state differs or the item is unknown.
