@@ -5,9 +5,9 @@ import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
 import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
-export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto }
+export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto }
 
 // D1 allows 100 bound parameters per statement; this many ids leave headroom.
 const ID_CHUNK = 90
@@ -90,6 +90,36 @@ export class D1ScansRepository {
     statements.push(update)
     const results = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
     return (results[results.length - 1] as { id: string }[]).length === 1
+  }
+
+  /**
+   * Files what reading a shelf photo found, in one batch (all or nothing): the photo's patch, the new items, and the placeholder's move.
+   * Safe to repeat, so a retried read cannot duplicate or lose a product.
+   *
+   * - The photo's patch applies only while the photo is `recognising`; a photo already read keeps its first answer.
+   * - Each sibling is stored only while the scan holds fewer than `maxItems` items (counted as the statement runs, so the first in the
+   *   list wins) and only if no item holds its position, which is no error: a repeat adds nothing. An id that is taken fails the whole batch.
+   *   One statement per sibling keeps each under D1's bound-parameter limit.
+   * - The placeholder moves out of `from` as `updateItem` does, whatever became of the siblings; the result says whether it did.
+   */
+  async fanOut(input: {
+    photo: { id: string; patch: PhotoPatch }
+    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    siblings: NewSibling[]
+    maxItems: number
+  }): Promise<{ placeholderMoved: boolean }> {
+    const { photo, placeholder, siblings, maxItems } = input
+    const statements: BatchItem<'sqlite'>[] = [
+      this.db.update(scanPhotos).set(photo.patch).where(and(eq(scanPhotos.id, photo.id), eq(scanPhotos.state, 'recognising'))),
+      ...siblings.map((sibling) => this.db.insert(scanItems).select(this.siblingIfRoom(sibling, maxItems)).onConflictDoNothing({ target: [scanItems.scanId, scanItems.position] })),
+      this.db
+        .update(scanItems)
+        .set(placeholder.patch)
+        .where(and(eq(scanItems.id, placeholder.id), eq(scanItems.state, placeholder.from)))
+        .returning({ id: scanItems.id }),
+    ]
+    const results = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+    return { placeholderMoved: (results[results.length - 1] as { id: string }[]).length === 1 }
   }
 
   /** Sets the scan's done time unless it has one (one conditional UPDATE), and says whether it did: of any number of callers exactly one gets true. */
@@ -244,6 +274,14 @@ export class D1ScansRepository {
   private uploadIfStill(upload: NewBackPhoto | NewRetake, expected: ItemState) {
     return sql`select ${upload.id}, ${upload.itemId}, ${upload.userId}, ${upload.ipHash}, ${upload.uploadedAt.getTime()}
         where exists (select 1 from ${scanItems} where ${scanItems.id} = ${upload.itemId} and ${scanItems.state} = ${expected})`
+  }
+
+  /** The sibling as a SELECT that yields it only while its scan holds fewer than `maxItems` items, for an INSERT ... SELECT (one value per column, in the table's order). */
+  private siblingIfRoom(s: NewSibling, maxItems: number) {
+    return sql`select ${s.id}, ${s.scanId}, ${s.userId}, ${s.position}, ${s.photoId}, ${s.state}, null, ${s.photoKey}, null,
+        ${s.recognisedBrand}, ${s.recognisedName}, ${s.recognisedVariant}, ${s.recognisedForm}, ${s.recognisedCategory}, ${s.recognisedConfidence},
+        null, null, null, null, null, null, ${s.createdAt.getTime()}, ${s.createdAt.getTime()}
+        where (select count(*) from ${scanItems} where ${scanItems.scanId} = ${s.scanId}) < ${maxItems}`
   }
 
   private async photoCounts(

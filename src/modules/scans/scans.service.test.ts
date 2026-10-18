@@ -14,7 +14,7 @@ import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.pr
 import type { LabelReading } from '../../providers/label-reading/label-reader.provider'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductRecognizer } from '../../providers/product-recognition/memory.product-recognizer'
-import type { Recognition } from '../../providers/product-recognition/product-recognizer.provider'
+import type { Recognition, ShelfProduct, ShelfRecognition } from '../../providers/product-recognition/product-recognizer.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import { MemoryPushSender } from '../../providers/push/memory.push'
 import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
@@ -277,7 +277,7 @@ const failedFront = async (ctx: Ctx, reads: Recognition[]) => {
 }
 
 describe('SCAN_POLICY', () => {
-  it('sets the photo, size, dimension, front photo, back photo, daily quota and confirmation limits', () => {
+  it('sets the photo, size, dimension, front photo, back photo, daily quota, confirmation, shelf photo and items-per-scan limits', () => {
     expect(SCAN_POLICY).toEqual({
       maxPhotosPerScan: 10,
       maxPhotoBytes: 2_000_000,
@@ -288,6 +288,8 @@ describe('SCAN_POLICY', () => {
       dailyPhotosPerIp: 100,
       confirmBelowConfidence: 0.6,
       doneRepairWindowMs: 3 * HOUR,
+      maxShelfPhotos: 3,
+      maxItemsPerScan: 20,
     })
   })
 })
@@ -649,7 +651,7 @@ describe('ScanService.create', () => {
         super()
       }
       override async createScan(...[scan, photos, items]: Parameters<FakeScansRepository['createScan']>): Promise<void> {
-        for (const item of items) present.push((await this.store.get(item.photoKey)) !== null)
+        for (const item of items) present.push(item.photoKey !== null && (await this.store.get(item.photoKey)) !== null)
         return super.createScan(scan, photos, items)
       }
     }
@@ -5993,5 +5995,816 @@ describe('ScanService: push notifications', () => {
       expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-confirmation')
       log.mockRestore()
     })
+  })
+})
+
+// ---- shelf scans: one photo of several products (#74, part 3) ----
+
+const createShelf = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}): Promise<any> =>
+  asUser(() => ctx.service.createShelf({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
+
+const shelfProduct = (name: string, confidence = 0.9, over: Partial<ShelfProduct> = {}): ShelfProduct => ({ brand: 'Glow Co', name, category: 'skin', confidence, ...over })
+const shelfRead = (products: ShelfProduct[], over: Partial<ShelfRecognition> = {}): ShelfRecognition => ({
+  classification: 'beauty-product',
+  products,
+  excluded: { otherProducts: 0, unreadable: 0 },
+  ...over,
+})
+/** `count` distinct products, most confident first, as the recognizer lists them: Product 0 at 0.95, then 0.05 less each. */
+const shelfList = (count: number): ShelfProduct[] => Array.from({ length: count }, (_, i) => shelfProduct(`Product ${i}`, Math.round((0.95 - i * 0.05) * 100) / 100))
+const NOTHING_READ = (classification: 'other-product' | 'face-or-person' | 'unreadable', excluded = { otherProducts: 0, unreadable: 0 }): ShelfRecognition => ({ classification, products: [], excluded })
+
+/** A shelf scan of the given photos, created. `itemIds` are the placeholders, one per photo. */
+const shelfScan = async (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}) => {
+  const scan = await createShelf(ctx, photos, over)
+  const itemIds = scan.items.map((i: { id: string }) => i.id) as string[]
+  return { scanId: scan.id as string, itemIds, itemId: itemIds[0]! }
+}
+const answerShelf = (ctx: Ctx, read: ShelfRecognition) => ctx.recognizer.respondToShelfWith(() => read)
+/** position, recognised name and state of each item the scan holds, in position order. */
+const shape = async (ctx: Ctx, scanId: string) => (await ctx.repository.itemsOf(scanId)).map((i) => [i.position, i.recognisedName, i.state])
+const photoRow = async (ctx: Ctx, scanId: string, position = 0) => (await ctx.repository.photosOf(scanId))[position]!
+const shelfKey = (scanId: string, photoId: string, extension = 'jpg', userId = USER) => `photos/test/${userId}/${scanId}/${photoId}.${extension}`
+const matchesQueued = (ctx: Ctx) => queued(ctx).filter((m) => m.step === 'match').map((m) => m.itemId)
+
+describe('SCAN_POLICY: shelf scans', () => {
+  it('allows 3 shelf photos and 20 items in a scan', () => {
+    expect(SCAN_POLICY.maxShelfPhotos).toBe(3)
+    expect(SCAN_POLICY.maxItemsPerScan).toBe(20)
+  })
+})
+
+describe('ScanService.createShelf', () => {
+  it('makes a scan of kind shelf, with one recognising placeholder item per photo, in photo order, at slot positions 0, 5 and 10', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), webpPhoto(), markedJpeg(3)])
+
+    expect(scan).toMatchObject({ id: expect.any(String), createdAt: T0 })
+    expect(scan.items.map((i: { position: number; state: string; reason: unknown }) => [i.position, i.state, i.reason])).toEqual([
+      [0, 'recognising', null],
+      [5, 'recognising', null],
+      [10, 'recognising', null],
+    ])
+    expect((await ctx.repository.findScan(scan.id))!.kind).toBe('shelf')
+  })
+
+  it('records one photo per uploaded photo at positions 0, 1, 2, each holding its own image under photos/<environment>/<user>/<scan>/<photoId>.<jpg|webp>', async () => {
+    const ctx = setup()
+    const [first, second] = [markedJpeg(1), webpPhoto()]
+
+    const scan = await createShelf(ctx, [first, second])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    expect(photos.map((p) => [p.position, p.state, p.userId, p.scanId])).toEqual([
+      [0, 'recognising', USER, scan.id],
+      [1, 'recognising', USER, scan.id],
+    ])
+    expect(photos.map((p) => p.photoKey)).toEqual([shelfKey(scan.id, photos[0]!.id, 'jpg'), shelfKey(scan.id, photos[1]!.id, 'webp')])
+    expect(ctx.photos.stored.get(photos[0]!.photoKey!)).toEqual(first)
+    expect(ctx.photos.stored.get(photos[1]!.photoKey!)).toEqual(second)
+    expect(ctx.photos.stored.size).toBe(2)
+  })
+
+  it('points each placeholder at its photo and gives it no image of its own', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    const items = await ctx.repository.itemsOf(scan.id)
+    expect(items.map((i) => i.photoId)).toEqual(photos.map((p) => p.id))
+    expect(items.map((i) => i.photoKey)).toEqual([null, null])
+  })
+
+  it('enqueues one recognise job per placeholder and nothing else', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(queued(ctx)).toEqual(scan.items.map((i: { id: string }) => advanceMessage(i.id, 'recognise')))
+  })
+
+  it('accepts 3 photos and refuses 4 as TOO_MANY_IMAGES, naming 3, keeping nothing', async () => {
+    const three = Array.from({ length: 3 }, (_, i) => markedJpeg(i))
+    expect((await createShelf(setup(), three)).items).toHaveLength(3)
+
+    const ctx = setup()
+    const error = await errorOf(createShelf(ctx, [...three, markedJpeg(4)]))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('TOO_MANY_IMAGES')
+    expect(error.message).toContain('3')
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('refuses a scan with no photo as NO_IMAGES', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(createShelf(ctx, []))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('NO_IMAGES')
+  })
+
+  it.each([
+    ['a PNG', () => pngPhoto(), 'UNSUPPORTED_IMAGE'],
+    ['a photo 1601 pixels wide', () => jpegPhoto({ width: 1601, height: 600 }), 'IMAGE_TOO_LARGE'],
+    ['a photo one byte over 2,000,000', () => jpegPhoto({ size: 2_000_001 }), 'IMAGE_TOO_LARGE'],
+  ])('refuses the whole scan, storing none of its photos, when one photo is %s', async (_label, make, code) => {
+    const ctx = setup()
+
+    const error = await errorOf(createShelf(ctx, [markedJpeg(1), make()]))
+
+    expect(error.code).toBe(code)
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('refuses a public caller with AUTH_REQUIRED and keeps nothing', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.createShelf({ photos: [markedJpeg(1)], clientIp: IP })))
+
+    expect(error).toBeInstanceOf(UnauthorizedError)
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  describe('daily quotas, one per photo', () => {
+    it('lets a user reach the daily limit with shelf photos and refuses the photo past it, keeping nothing of the refused scan', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 4 } })
+      await createShelf(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+      const stored = ctx.photos.stored.size
+      const enqueued = ctx.jobs.enqueued.length
+
+      const error = await errorOf(createShelf(ctx, [markedJpeg(4), markedJpeg(5)]))
+
+      expect(error).toBeInstanceOf(RateLimitedError)
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+      expect(ctx.photos.stored.size).toBe(stored)
+      expect(ctx.jobs.enqueued).toHaveLength(enqueued)
+      // One photo takes the user to exactly 4: allowed.
+      await expect(createShelf(ctx, [markedJpeg(6)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+
+    it('counts a photo for the address too: the daily limit per IP is reached by one photo per placeholder, whoever made the scans', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+
+      const error = await errorOf(createShelf(ctx, [markedJpeg(2), markedJpeg(3), markedJpeg(4)]))
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+
+      await expect(createShelf(ctx, [markedJpeg(2), markedJpeg(3)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+  })
+
+  it('deletes the photos it already put when the scan cannot be saved, rethrows, and enqueues nothing', async () => {
+    class SaveFails extends FakeScansRepository {
+      override async createScan(): Promise<void> {
+        throw new Error('database is down')
+      }
+    }
+    const ctx = setup({ repository: new SaveFails() })
+
+    await expect(createShelf(ctx, [markedJpeg(1), webpPhoto()])).rejects.toThrow('database is down')
+
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('puts the photos before it saves the scan, so a saved photo never points at a missing image', async () => {
+    const present: boolean[] = []
+    class Probe extends FakeScansRepository {
+      constructor(private readonly store: MemoryPhotoStore) {
+        super()
+      }
+      override async createScan(...[scan, photos, items]: Parameters<FakeScansRepository['createScan']>): Promise<void> {
+        for (const photo of photos) present.push(photo.photoKey !== null && (await this.store.get(photo.photoKey)) !== null)
+        return super.createScan(scan, photos, items)
+      }
+    }
+    const photos = new MemoryPhotoStore({ environment: 'test' })
+    const ctx = setup({ photos, repository: new Probe(photos) })
+
+    await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(present).toEqual([true, true])
+  })
+
+  it('fails a placeholder as unavailable when its recognise job cannot be queued, and queues the others', async () => {
+    const ctx = setup()
+    ctx.jobs.failNextWith(new Error('queue is down'))
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(scan.items.map((i: { state: string; reason: unknown }) => [i.state, i.reason])).toEqual([
+      ['failed', 'unavailable'],
+      ['recognising', null],
+    ])
+    expect(queued(ctx)).toEqual([advanceMessage(scan.items[1].id, 'recognise')])
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo with products', () => {
+  it('turns a photo of 3 products into 3 items at slots 0, 1, 2, the placeholder taking the first, every one pointing at the photo', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await shape(ctx, scanId)).toEqual([
+      [0, 'Product 0', 'matching'],
+      [1, 'Product 1', 'matching'],
+      [2, 'Product 2', 'matching'],
+    ])
+    const items = await ctx.repository.itemsOf(scanId)
+    expect(items[0]!.id).toBe(itemId)
+    expect(new Set(items.map((i) => i.id)).size).toBe(3)
+    const photo = await photoRow(ctx, scanId)
+    expect(items.map((i) => i.photoId)).toEqual([photo.id, photo.id, photo.id])
+    expect(items.map((i) => i.photoKey)).toEqual([null, null, null])
+    expect(items.map((i) => i.recognisedBrand)).toEqual(['Glow Co', 'Glow Co', 'Glow Co'])
+    expect(items.map((i) => i.recognisedConfidence)).toEqual([0.95, 0.9, 0.85])
+    // A new item is made when it is read.
+    expect(items.slice(1).map((i) => i.createdAt)).toEqual([new Date(T0.getTime() + SECOND), new Date(T0.getTime() + SECOND)])
+  })
+
+  it('reads the photo\'s own image once, and no product scan\'s recognizer', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(2)))
+    const shelfPhoto = markedJpeg(7)
+    const { itemId } = await shelfScan(ctx, [shelfPhoto])
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.shelfCalls).toEqual([shelfPhoto])
+    expect(ctx.recognizer.calls).toEqual([])
+  })
+
+  it('files each product\'s variant and form, and leaves them null when the product has none', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead([shelfProduct('Serum', 0.9, { variant: 'Night', form: 'serum' }), shelfProduct('Plain Soap', 0.8)]))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const items = await ctx.repository.itemsOf(scanId)
+    expect(items.map((i) => [i.recognisedVariant, i.recognisedForm, i.recognisedCategory])).toEqual([
+      ['Night', 'serum', 'skin'],
+      [null, null, 'skin'],
+    ])
+  })
+
+  it('numbers the items of each photo from its own slot: photo 1\'s products are 5, 6, 7 and the other photos are left as they were', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    await run(ctx, itemIds[1]!, 'recognise')
+
+    expect(await shape(ctx, scanId)).toEqual([
+      [0, null, 'recognising'],
+      [5, 'Product 0', 'matching'],
+      [6, 'Product 1', 'matching'],
+      [7, 'Product 2', 'matching'],
+      [10, null, 'recognising'],
+    ])
+    const photos = await ctx.repository.photosOf(scanId)
+    expect(photos.map((p) => p.state)).toEqual(['recognising', 'recognised', 'recognising'])
+    expect((await ctx.repository.itemsOf(scanId)).filter((i) => i.position >= 5 && i.position <= 7).every((i) => i.photoId === photos[1]!.id)).toBe(true)
+  })
+
+  it('takes 3 photos of 5 products each to 15 items at positions 0-4, 5-9 and 10-14, none colliding, in any order of reading', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(5)))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    for (const id of [itemIds[2]!, itemIds[0]!, itemIds[1]!]) await run(ctx, id, 'recognise')
+
+    expect((await ctx.repository.itemsOf(scanId)).map((i) => i.position)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+  })
+
+  it('marks the photo recognised, storing the recognizer\'s whole answer and the counts of what was left out', async () => {
+    const ctx = setup()
+    const read = shelfRead(shelfList(2), { excluded: { otherProducts: 2, unreadable: 3 } })
+    answerShelf(ctx, read)
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    const photo = await photoRow(ctx, scanId)
+    expect(photo).toMatchObject({ state: 'recognised', skippedNotBeauty: 2, skippedUnreadable: 3, skippedOverLimit: 0, skippedDailyLimit: 0, updatedAt: new Date(T0.getTime() + SECOND) })
+    expect(JSON.parse(photo.recognition!)).toEqual(read)
+  })
+
+  it('announces every item of the photo (the placeholder and each new one) after all of them are stored, and no done', async () => {
+    class Probe extends MemoryScanEvents {
+      readonly storedAtEachEvent: number[] = []
+      constructor(private readonly repo: FakeScansRepository) {
+        super()
+      }
+      override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+        this.storedAtEachEvent.push((await this.repo.itemsOf(scanId)).length)
+        return super.publish(scanId, event)
+      }
+    }
+    const ctx = setup({ events: (repository) => new Probe(repository) })
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const events = ctx.events.eventsFor(scanId)
+    const announced = events.flatMap((e) => (e.type === 'item' ? [e.item.id] : []))
+    expect(new Set(announced)).toEqual(new Set((await ctx.repository.itemsOf(scanId)).map((i) => i.id)))
+    expect(announced).toHaveLength(3)
+    expect(events.some((e) => e.type === 'done')).toBe(false)
+    expect((ctx.events as Probe).storedAtEachEvent.every((n) => n === 3)).toBe(true)
+  })
+
+  describe('identical products', () => {
+    it('counts one product once however it is cased or spaced, keeping the first, and counts the repeat nowhere', async () => {
+      const ctx = setup()
+      answerShelf(
+        ctx,
+        shelfRead([
+          shelfProduct('Bright Serum', 0.95, { brand: 'Glow Co', variant: 'Night' }),
+          shelfProduct('Other Soap', 0.9),
+          shelfProduct('  bright   SERUM ', 0.85, { brand: 'GLOW   co', variant: ' night' }),
+        ]),
+      )
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Bright Serum', 'matching'],
+        [1, 'Other Soap', 'matching'],
+      ])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedNotBeauty: 0, skippedUnreadable: 0, skippedOverLimit: 0, skippedDailyLimit: 0 })
+    })
+
+    it.each([
+      ['brand', { brand: 'Other Co' }],
+      ['name', { name: 'Bright Serum 2' }],
+      ['variant', { variant: 'Day' }],
+      ['form', { form: 'cream' as const }],
+    ])('keeps two products that differ in %s', async (_field, change) => {
+      const ctx = setup()
+      const base = shelfProduct('Bright Serum', 0.95, { variant: 'Night', form: 'serum' })
+      answerShelf(ctx, shelfRead([base, { ...base, ...change, confidence: 0.9 }]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(2)
+    })
+
+    it('collapses before anything is counted against a limit: 5 products with 2 repeats are 3 items and use no allowance', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 3 } })
+      const [a, b, c] = shelfList(3)
+      answerShelf(ctx, shelfRead([a!, { ...a!, confidence: 0.9 }, b!, { ...b!, confidence: 0.8 }, c!]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(3)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 0, skippedOverLimit: 0 })
+    })
+  })
+
+  describe('the cap on items in a scan', () => {
+    it('skips the least confident products that would take the scan past its cap, and counts them as over the limit', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 6 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      // 3 placeholders already; 4 more products would make 7.
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1', 'Product 2', 'Product 3', null, null])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 1 })
+    })
+
+    it('skips nothing when the items come to exactly the cap', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 7 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(7)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 0 })
+    })
+
+    it('counts the items the scan already has, whichever photo they came from', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 6 } })
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      await run(ctx, itemIds[1]!, 'recognise')
+
+      // photo 0: 2 placeholders + 2 more = 4 items; photo 1: its 2 more would make 6, which is the cap.
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(6)
+      expect((await ctx.repository.photosOf(scanId)).map((p) => p.skippedOverLimit)).toEqual([0, 0])
+    })
+  })
+
+  describe('the daily allowance', () => {
+    it('counts the placeholder, then keeps as many of the most confident extra products as the user has allowance left for, skipping the rest as over the daily limit', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 3 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1', 'Product 2'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2, skippedOverLimit: 0 })
+    })
+
+    it('skips nothing when the extra products come to exactly the allowance left', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 5 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(5)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 0 })
+    })
+
+    it('adds no item when the placeholder used the last of the allowance, and still reads the first product', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 1 } })
+      answerShelf(ctx, shelfRead(shelfList(4)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([[0, 'Product 0', 'matching']])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 3 })
+    })
+
+    it('stops at the address\'s allowance too, counting what other accounts took from the same address', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(9)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      // 2 photos from this address (the other account's and this placeholder): 1 left.
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 3 })
+    })
+
+    it('does not count what another address took', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(9)], { userId: OTHER_USER, profileId: OTHER_PROFILE, ip: OTHER_IP })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(3)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2 })
+    })
+
+    it('uses the scan\'s own address, not the one of whoever runs the job', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 2 } })
+      const { scanId, itemId } = await shelfScan(ctx, [markedJpeg(1)], { ip: OTHER_IP })
+      answerShelf(ctx, shelfRead(shelfList(4)))
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(2)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2 })
+    })
+
+    it('applies the cap first, then the allowance to what the cap left', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 3, dailyPhotosPerUser: 2 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 2, skippedDailyLimit: 1 })
+    })
+
+    it('counts the new items against the allowance of the next scan', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 4 } })
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { itemId } = await shelfScan(ctx)
+      await run(ctx, itemId, 'recognise')
+
+      // 3 items so far: one more photo is the 4th, a second is the 5th.
+      await expect(createShelf(ctx, [markedJpeg(2), markedJpeg(3)])).rejects.toBeInstanceOf(RateLimitedError)
+      await expect(createShelf(ctx, [markedJpeg(2)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+  })
+
+  describe('the next step of each new item', () => {
+    it('queues a match for the placeholder and for each new item that is sure enough', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      const ids = (await ctx.repository.itemsOf(scanId)).map((i) => i.id)
+      expect(matchesQueued(ctx)).toEqual(ids)
+      expect(queuedWithTime(ctx).filter((m) => m.step === 'match').map((m) => m.at)).toEqual([T0.getTime(), T0.getTime(), T0.getTime()])
+    })
+
+    it('asks the user to confirm products read below 0.6, with a match only for those at 0.6 or more', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.6), shelfProduct('C', 0.59), shelfProduct('D', 0.3)]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'A', 'matching'],
+        [1, 'B', 'matching'],
+        [2, 'C', 'needs-confirmation'],
+        [3, 'D', 'needs-confirmation'],
+      ])
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(matchesQueued(ctx)).toEqual([items[0]!.id, items[1]!.id])
+    })
+
+    it('sends one "needs you" push for the photo, whoever of its products needs confirming and however many', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.5), shelfProduct('C', 0.4)]))
+      const { scanId, itemId } = await shelfScan(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+
+      await run(ctx, itemId, 'recognise')
+
+      const pushes = ctx.pushJobs.enqueued.map((e) => e.body as SendPushMessage)
+      expect(pushes).toEqual([{ kind: 'scan-needs-you', userId: OTHER_USER, profileId: OTHER_PROFILE, scanId, itemId: expect.any(String), need: 'confirm' }])
+      const waiting = (await ctx.repository.itemsOf(scanId)).filter((i) => i.state === 'needs-confirmation').map((i) => i.id)
+      expect(waiting).toContain((pushes[0] as { itemId: string }).itemId)
+    })
+
+    it('sends the push when only the placeholder\'s product needs confirming', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.5)]))
+      const { itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.pushJobs.enqueued).toHaveLength(1)
+      expect(matchesQueued(ctx)).toEqual([])
+    })
+
+    it('sends no push when every product is sure enough', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.pushJobs.enqueued).toEqual([])
+    })
+
+    it('carries on, leaving the item matching for the reaper, when a new item\'s match cannot be queued', async () => {
+      const ctx = setup()
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const real = ctx.jobs.enqueue.bind(ctx.jobs)
+      let calls = 0
+      vi.spyOn(ctx.jobs, 'enqueue').mockImplementation((async (job: never, body: never, options: never) => {
+        // 1st is the placeholder's match, 2nd the first new item's.
+        if (++calls === 2) throw new Error('queue is down')
+        return real(job, body, options)
+      }) as never)
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(items.map((i) => i.state)).toEqual(['matching', 'matching', 'matching'])
+      expect(matchesQueued(ctx)).toEqual([items[0]!.id, items[2]!.id])
+      expect(error).toHaveBeenCalledWith(expect.objectContaining({ itemId: items[1]!.id }))
+    })
+  })
+
+  describe('a match that cannot be queued for the placeholder', () => {
+    const queueFails = async () => {
+      const ctx = setup()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3), { excluded: { otherProducts: 1, unreadable: 2 } }))
+      const scan = await shelfScan(ctx)
+      ctx.jobs.failNextWith(new Error('queue is down'))
+      const error = await errorOf(run(ctx, scan.itemId, 'recognise'))
+      return { ctx, error, ...scan }
+    }
+
+    it('puts the placeholder back to recognising and rethrows, with the other items and the photo\'s answer kept', async () => {
+      const { ctx, error, scanId, itemId } = await queueFails()
+
+      expect(error.message).toBe('queue is down')
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'recognising', reason: null })
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(items.map((i) => [i.position, i.state])).toEqual([
+        [0, 'recognising'],
+        [1, 'matching'],
+        [2, 'matching'],
+      ])
+      expect(items.slice(1).map((i) => i.recognisedName)).toEqual(['Product 1', 'Product 2'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognised', skippedNotBeauty: 1, skippedUnreadable: 2 })
+    })
+
+    it('is retried for free: no second call to the model, no duplicate items, the same counts, and the placeholder moves on', async () => {
+      const { ctx, scanId, itemId } = await queueFails()
+      const before = await photoRow(ctx, scanId)
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Product 0', 'matching'],
+        [1, 'Product 1', 'matching'],
+        [2, 'Product 2', 'matching'],
+      ])
+      expect(await photoRow(ctx, scanId)).toEqual(before)
+      expect(matchesQueued(ctx)).toContain(itemId)
+    })
+  })
+
+  describe('a repeated delivery after the photo was read', () => {
+    it('adds nothing and calls nothing: no model call, no duplicate items, the same counts', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3), { excluded: { otherProducts: 1, unreadable: 0 } }))
+      const { scanId, itemId } = await shelfScan(ctx)
+      await run(ctx, itemId, 'recognise')
+      const items = await ctx.repository.itemsOf(scanId)
+      const photo = await photoRow(ctx, scanId)
+      const pushes = ctx.pushJobs.enqueued.length
+      const matches = matchesQueued(ctx).length
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+      expect(await ctx.repository.itemsOf(scanId)).toEqual(items)
+      expect(await photoRow(ctx, scanId)).toEqual(photo)
+      expect(ctx.pushJobs.enqueued).toHaveLength(pushes)
+      expect(matchesQueued(ctx)).toHaveLength(matches)
+    })
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo with no product', () => {
+  it.each([
+    ['other-product', 'not-a-beauty-product'],
+    ['face-or-person', 'face-or-person'],
+    ['unreadable', 'unreadable'],
+  ] as const)('rejects the placeholder as %s -> %s, rejects the photo, and deletes the image, never asking for a retake', async (classification, reason) => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ(classification, { otherProducts: 2, unreadable: 1 }))
+    const { scanId, itemId } = await shelfScan(ctx)
+    const key = (await photoRow(ctx, scanId)).photoKey!
+    expect(ctx.photos.stored.has(key)).toBe(true)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason })
+    expect(await photoRow(ctx, scanId)).toMatchObject({
+      state: 'rejected',
+      photoKey: null,
+      skippedNotBeauty: 2,
+      skippedUnreadable: 1,
+      updatedAt: new Date(T0.getTime() + SECOND),
+    })
+    expect(JSON.parse((await photoRow(ctx, scanId)).recognition!)).toEqual(NOTHING_READ(classification, { otherProducts: 2, unreadable: 1 }))
+    expect(ctx.photos.stored.has(key)).toBe(false)
+    expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+    expect(matchesQueued(ctx)).toEqual([])
+    expect(await ctx.repository.countRetakes(itemId)).toBe(0)
+  })
+
+  it('treats a refusal to look at the photo as unreadable: rejected, not a retake, the image deleted', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AnthropicRefusalError('Claude refused to answer'))
+
+    await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason: 'unreadable' })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 0, skippedUnreadable: 0 })
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('finishes the scan: the rejected placeholder was its only item', async () => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ('face-or-person'))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.events.eventsFor(scanId).map((e) => e.type)).toEqual(['item', 'done'])
+  })
+
+  it('deletes the image before it says anything is rejected: a failed delete leaves the photo and the placeholder as they were', async () => {
+    class DeleteFails extends MemoryPhotoStore {
+      failing = false
+      override async delete(key: string): Promise<void> {
+        if (this.failing) throw new Error('bucket is down')
+        return super.delete(key)
+      }
+      override async deleteMany(keys: string[]): Promise<void> {
+        if (this.failing) throw new Error('bucket is down')
+        return super.deleteMany(keys)
+      }
+    }
+    const photos = new DeleteFails({ environment: 'test' })
+    const ctx = setup({ photos })
+    answerShelf(ctx, NOTHING_READ('other-product'))
+    const { scanId, itemId } = await shelfScan(ctx)
+    photos.failing = true
+
+    await expect(run(ctx, itemId, 'recognise')).rejects.toThrow('bucket is down')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'recognising', reason: null })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising' })
+    expect(photos.stored.size).toBe(1)
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo the model cannot or will not read', () => {
+  const noSiblings = async (ctx: Ctx, scanId: string) => expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+
+  it('fails the placeholder as research-busy, keeping the image, with no other item, when the AI spend cap is spent', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AiBudgetExceededError('cap'))
+
+    await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
+    expect(ctx.photos.stored.size).toBe(1)
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising' })
+    await noSiblings(ctx, scanId)
+  })
+
+  it('fails the placeholder as unavailable and throws a PermanentJobError when the answer was unusable', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AnthropicRequestError('Claude returned text that is not valid JSON'))
+
+    const error = await errorOf(run(ctx, itemId, 'recognise'))
+
+    expect(error).toBeInstanceOf(PermanentJobError)
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
+    await noSiblings(ctx, scanId)
+  })
+
+  it('throws, leaving the placeholder recognising for the queue to retry, when the model is merely unavailable', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    const outage = new AnthropicUnavailableError('overloaded')
+    ctx.recognizer.failNextWith(outage)
+
+    await expect(run(ctx, itemId, 'recognise')).rejects.toBe(outage)
+
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('recognising')
+    await noSiblings(ctx, scanId)
+  })
+
+  it('fails the placeholder as photo-missing, without calling the model, when the photo\'s image is gone', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.photos.stored.clear()
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+    expect(ctx.recognizer.shelfCalls).toEqual([])
+    await noSiblings(ctx, scanId)
+  })
+})
+
+describe('ScanService.advance: recognise, a product scan is not a shelf scan', () => {
+  it('gives a product photo ONE item through the single-product recognizer, even if the shelf recognizer would have listed several', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await scanOne(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.calls).toHaveLength(1)
+    expect(ctx.recognizer.shelfCalls).toEqual([])
+    expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'matching', recognised: { brand: 'CeraVe' } })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising', photoKey: null })
   })
 })

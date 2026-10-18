@@ -1267,6 +1267,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
   (one `db.batch`: the scan and one INSERT per item, under D1's bound-parameter limit), so a saved item never points at a
   missing photo; if saving fails they are deleted again. One `recognise` job is queued per item; an item whose job cannot
   be queued is marked `failed` / `unavailable` rather than left recognising for ever.
+- **createShelf** (#74, no route yet). A shelf scan is `scans.kind = 'shelf'`: 1 to `SCAN_POLICY.maxShelfPhotos` (3) photos, checked, quota-ed and stored by the same private
+  helper as `create`. Each photo gets a `scan_photos` row that holds its image, under `photos/<env>/<user>/<scan>/<photo id>.<jpg|webp>`, and ONE placeholder item
+  (`recognising`, `photo_key` null) at position `photo position * 5`: a photo owns the slots `p * 5` to `p * 5 + 4` (decision D), so the position of an item is the same on every
+  retry and two photos read at once cannot collide. The quota counts one per photo here; the products found are counted as items when they are made. One `recognise` job per placeholder.
 - **Photo keys.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, and for the back of the pack
   `<item id>-back.<jpg|webp>` (see "Private photos"). A retaken front photo uses the front photo's own key: the photo it replaces was deleted when it
   failed, and a concurrent loser never removes a key the winner wrote.
@@ -1285,6 +1289,12 @@ notifications never imports scans) to tell the person when a scan needs them or 
   `ip_hash` to the back-photo and retake rows with that `ip_hash`, so a back photo or retake is counted against the address that uploaded it,
   which may not be the scan's. The per-IP query reads only scans made in the window, through `(ip_hash, created_at)`, however long the
   address's history.
+- **fanOut.** `ScansRepository.fanOut({ photo: { id, patch }, placeholder: { id, from, patch }, siblings, maxItems })` files a shelf photo's read in ONE `db.batch`, all or nothing
+  (a taken item id fails the whole batch), and returns `{ placeholderMoved }`. The photo's patch applies only while the photo is `recognising`, so a repeat leaves the first answer.
+  Each sibling is its own `INSERT ... SELECT ... WHERE (SELECT count(*) FROM scan_items WHERE scan_id = ?) < maxItems ON CONFLICT (scan_id, position) DO NOTHING` (the cap guard
+  counts as the batch runs, so the first in the list wins; a position already held is skipped, which is what makes a retry idempotent; one statement each keeps D1's bound-parameter
+  limit). A scan already at the cap stores none, yet the photo and placeholder still move. The placeholder's move is a guarded UPDATE ... RETURNING, whose applied-ness is the result.
+  The fake mirrors it, checking the whole call before changing anything.
 - **IP hashing.** `ip_hash` is HMAC-SHA-256 of the address under a key derived from `DEVICE_ID_KEY`
   (`HMAC(DEVICE_ID_KEY, "deepertones/ip-hash/v1")`), so it is unrelated to how device ids are hashed with the same secret and
   a leaked table cannot be reversed by hashing every address. The raw IP is never stored or logged; the route hands it to
@@ -1307,6 +1317,19 @@ notifications never imports scans) to tell the person when a scan needs them or 
     item. **An earlier answer is reused:** if the item already holds recognised fields and a confidence (a previous attempt's
     answer survived a failed enqueue, which the undo does not clear), the recognizer is not called again, and the stored
     confidence decides `matching` or `needs-confirmation`.
+  - `recognise` on a **shelf placeholder** (the item has no `photo_key` and its photo holds one): the shelf path, `ScanService.recogniseShelf`. The photo's answer is
+    `scan_photos.recognition` if an earlier attempt stored it (no second model call), else `recognizer.recognizeShelf` on the photo's image; errors are today's, on the
+    placeholder only (spend cap `research-busy`, unusable answer `unavailable` + `PermanentJobError`, a refusal is an `unreadable` answer, a missing image `photo-missing`).
+    - **Faces are never counted** (decision E): `skipped_*` never includes a person or a face.
+    - **No product** (decision A): the image is deleted first, then `fanOut` with no siblings rejects the photo (counts and answer recorded, `photo_key` null) and the placeholder
+      (`not-a-beauty-product`, `face-or-person` or `unreadable`). Never `needs-retake` or `needs-identification`.
+    - **Products:** identical ones (brand, name, variant, form, ignoring case and spacing) collapse, keeping the first. The placeholder becomes product #1 and the rest become
+      items at `photo position * 5 + rank`, each `matching` or, below `confirmBelowConfidence`, `needs-confirmation`. Then the limits cut from the tail (the recognizer lists the most
+      confident first): 5 per photo and `maxItemsPerScan` (20, counting the items the scan already holds) are `skipped_over_limit`; the day's allowance, the smaller of the user's
+      and the scan's `ip_hash` remaining with the placeholder already counted, is `skipped_daily_limit`. The recognizer's own counts are `skipped_not_beauty` / `skipped_unreadable`.
+    - **After `fanOut`**, only if the placeholder moved (a repeat does nothing): its `match` is queued first (if that fails the placeholder goes back to `recognising` and the error is
+      rethrown, as `transition` does; the retry reuses the stored answer), then each `matching` item's in rank order (a failure logs ids only and leaves it to the reaper), one
+      `scanNeedsYou('confirm')` for the photo, then the item events. Every enqueue is stamped with the batch's time (the key the reaper reuses). Model text is never logged.
   - `match` (`matching`): `catalog.resolve`. `ready` makes the item ready; `needs-analysis` goes to `analysing`;
     `needs-research` to `researching`; `analysis-failed` fails the item; a busy catalog (`CatalogBusyError`) fails it as
     `research-busy` without throwing. Missing recognised fields fail the item as `unavailable`.

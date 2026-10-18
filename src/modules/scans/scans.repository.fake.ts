@@ -1,6 +1,6 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 const copyItem = (item: ScanItem): ScanItem => ({ ...item })
 
@@ -117,12 +117,56 @@ export class FakeScansRepository implements ScansRepository {
   async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
     const item = this.items.get(itemId)
     if (!item || item.state !== expected) return false
-    for (const [field, value] of Object.entries(patch)) {
-      if (value !== undefined) (item as Record<string, unknown>)[field] = value
-    }
+    this.apply(item, patch)
     if (backPhoto) this.backPhotos.set(backPhoto.id, { ...backPhoto })
     if (retake) this.retakes.set(retake.id, { ...retake })
     return true
+  }
+
+  /**
+   * Files what reading a shelf photo found, all or nothing (the whole call is checked before anything is changed). The photo's patch applies
+   * only while the photo is `recognising`. Each sibling is stored, in list order, only while the scan holds fewer than `maxItems` items and
+   * no item holds its position (no error otherwise); a stored sibling whose id is taken rejects the whole call, as D1's primary key does.
+   * The placeholder moves out of `from` as `updateItem` does, whatever became of the siblings, and the result says whether it did.
+   */
+  async fanOut(input: {
+    photo: { id: string; patch: PhotoPatch }
+    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    siblings: NewSibling[]
+    maxItems: number
+  }): Promise<{ placeholderMoved: boolean }> {
+    const { photo, placeholder, siblings, maxItems } = input
+    const added = new Map<string, ScanItem>()
+    const held = new Map([...this.items.values()].map((i) => [`${i.scanId}:${i.position}`, i]))
+    const counts = new Map<string, number>()
+    for (const item of this.items.values()) counts.set(item.scanId, (counts.get(item.scanId) ?? 0) + 1)
+    for (const sibling of siblings) {
+      const slot = `${sibling.scanId}:${sibling.position}`
+      const count = counts.get(sibling.scanId) ?? 0
+      if (count >= maxItems) continue
+      if (this.items.has(sibling.id) || added.has(sibling.id)) throw new Error('duplicate id')
+      if (held.has(slot)) continue
+      const stored: ScanItem = {
+        ...sibling,
+        reason: null,
+        backPhotoKey: null,
+        productId: null,
+        formulationId: null,
+        noLabelSource: null,
+        noLabelPurpose: null,
+        noLabelUsedFor: null,
+        noLabelDescription: null,
+        updatedAt: sibling.createdAt,
+      }
+      added.set(sibling.id, stored)
+      held.set(slot, stored)
+      counts.set(sibling.scanId, count + 1)
+    }
+
+    const storedPhoto = this.photos.get(photo.id)
+    if (storedPhoto?.state === 'recognising') this.apply(storedPhoto, photo.patch)
+    for (const [id, item] of added) this.items.set(id, item)
+    return { placeholderMoved: await this.updateItem(placeholder.id, placeholder.from, placeholder.patch) }
   }
 
   /**
@@ -249,6 +293,13 @@ export class FakeScansRepository implements ScansRepository {
   /** How many retakes have been uploaded for the item, whatever became of their photos. */
   async countRetakes(itemId: string): Promise<number> {
     return [...this.retakes.values()].filter((upload) => upload.itemId === itemId).length
+  }
+
+  /** Sets each field the patch names; a field left out (undefined) is unchanged, and null clears. */
+  private apply(row: ScanItem | ScanPhoto, patch: ItemPatch | PhotoPatch): void {
+    for (const [field, value] of Object.entries(patch)) {
+      if (value !== undefined) (row as Record<string, unknown>)[field] = value
+    }
   }
 
   private photoTimes(ownsItem: (item: ScanItem) => boolean, ownsUpload: (upload: NewBackPhoto) => boolean, since: Date) {

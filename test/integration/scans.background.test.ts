@@ -590,3 +590,80 @@ describe('push notifications queued by the steps, through the Worker queue handl
   })
 })
 
+
+// A shelf photo is read once for up to 5 products; the fan-out writes the photo, its new items and the placeholder's move in one D1 batch.
+const shelfProduct = (brand: string, name: string, confidence: number) => ({ brand, name, variant: '', form: 'unknown', category: 'skin', confidence })
+const shelfRead = (products: ReturnType<typeof shelfProduct>[], excluded = { otherProducts: 0, unreadable: 0 }) =>
+  recognised({ classification: 'beauty-product', products, excluded })
+
+/** A one-photo shelf scan, made through the real service (the photo is in the real bucket, the photo row and its placeholder in D1). */
+const startShelfScan = async () => {
+  const userId = await guest()
+  const photo = jpegPhoto()
+  const scan = await asUser(userId, () => container.scans.createShelf({ photos: [photo], clientIp: SCAN_IP }))
+  return { userId, photo, scanId: scan.id, itemId: scan.items[0]!.id }
+}
+const shelfPhotosOf = (scanId: string) => new D1ScansRepository(createDb(env.DB)).photosOf(scanId)
+const shelfItemsOf = (scanId: string) => new D1ScansRepository(createDb(env.DB)).itemsOf(scanId)
+
+describe('a shelf scan advanced through the Worker queue handler', () => {
+  it('turns one photo into one item per product, at slots 0, 1, 2, reading the stored photo once, and records what was left out on the photo', async () => {
+    const brand = freshBrand()
+    const { userId, photo, scanId, itemId } = await startShelfScan()
+    expect((await shelfPhotosOf(scanId)).map((p) => [p.position, p.state])).toEqual([[0, 'recognising']])
+    expect((await shelfItemsOf(scanId)).map((i) => [i.position, i.photoKey])).toEqual([[0, null]])
+    const calls = stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Toner', 0.85), shelfProduct(brand, 'Serum', 0.4)], { otherProducts: 2, unreadable: 1 }))
+
+    const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(photo.bytes))
+    const items = await shelfItemsOf(scanId)
+    expect(items.map((i) => [i.position, i.recognisedName, i.state])).toEqual([
+      [0, 'Cleanser', 'matching'],
+      [1, 'Toner', 'matching'],
+      [2, 'Serum', 'needs-confirmation'],
+    ])
+    expect(items[0]!.id).toBe(itemId)
+    const [stored] = await shelfPhotosOf(scanId)
+    expect(items.map((i) => i.photoId)).toEqual([stored!.id, stored!.id, stored!.id])
+    expect(stored).toMatchObject({ state: 'recognised', skippedNotBeauty: 2, skippedUnreadable: 1, skippedOverLimit: 0, skippedDailyLimit: 0 })
+    expect(JSON.parse(stored!.recognition!).products).toHaveLength(3)
+    const view = await asUser(userId, () => container.scans.getScan(scanId))
+    expect(view.items.map((i) => [i.position, i.state])).toEqual([
+      [0, 'matching'],
+      [1, 'matching'],
+      [2, 'needs-confirmation'],
+    ])
+    expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId: items[2]!.id, need: 'confirm' }])
+  })
+
+  it('adds nothing and calls Anthropic no more when the same delivery comes again', async () => {
+    const brand = freshBrand()
+    const { scanId, itemId } = await startShelfScan()
+    const calls = stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Toner', 0.85)]))
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    const before = await shelfItemsOf(scanId)
+
+    const again = await runQueue(MAIN, { itemId, step: 'recognise', at: AT }, 2)
+
+    expect(again.explicitAcks).toEqual(['m'])
+    expect(calls).toHaveLength(1)
+    expect(await shelfItemsOf(scanId)).toEqual(before)
+  })
+
+  it('rejects the photo and its placeholder, and deletes the image from the private bucket, when the shelf holds no readable product', async () => {
+    const { userId, scanId, itemId } = await startShelfScan()
+    const [photo] = await shelfPhotosOf(scanId)
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).not.toBeNull()
+    stubAnthropic(recognised({ classification: 'other-product', products: [], excluded: { otherProducts: 3, unreadable: 0 } }))
+
+    const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'rejected', reason: 'not-a-beauty-product' })
+    expect((await shelfPhotosOf(scanId))[0]).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 3 })
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).toBeNull()
+  })
+})

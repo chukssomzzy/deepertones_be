@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ScansRepository } from './scans.repository'
-import type { ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto } from './scans.types'
+import type { ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch } from './scans.types'
 
 const BASE = new Date('2030-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -55,6 +55,31 @@ const newItem = (scan: NewScan, position: number, over: Partial<NewScanItem> = {
   photoId: freshId(),
   photoKey: `photos/test/${scan.userId}/${scan.id}/${position}.jpg`,
   createdAt: scan.createdAt,
+  ...over,
+})
+
+/** A product read on a shelf photo, as a new item: it has no image of its own, and it starts where the read puts it. */
+const newSibling = (scan: NewScan, photo: NewScanPhoto, position: number, over: Partial<NewSibling> = {}): NewSibling => ({
+  ...newItem(scan, position, { photoId: photo.id, photoKey: null, createdAt: at(MINUTE) }),
+  state: 'matching',
+  recognisedBrand: 'Glow Co',
+  recognisedName: `Serum ${position}`,
+  recognisedVariant: null,
+  recognisedForm: null,
+  recognisedCategory: 'skin',
+  recognisedConfidence: 0.9,
+  ...over,
+})
+
+/** What reading a shelf photo writes on the photo: its state, the whole answer, and the counts of what was left out. */
+const readPhoto = (over: Partial<PhotoPatch> = {}): PhotoPatch => ({
+  state: 'recognised',
+  recognition: JSON.stringify({ classification: 'beauty-product', products: [], excluded: { otherProducts: 1, unreadable: 2 } }),
+  skippedNotBeauty: 1,
+  skippedUnreadable: 2,
+  skippedOverLimit: 3,
+  skippedDailyLimit: 4,
+  updatedAt: at(MINUTE),
   ...over,
 })
 
@@ -334,6 +359,226 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         expect(await repository.findPhoto(aPhoto.id)).toBeNull()
         expect(await repository.photosOf(a.id)).toEqual([])
         expect(await repository.findPhoto(bPhoto.id)).not.toBeNull()
+      })
+    })
+
+    describe('fanOut', () => {
+      /** A shelf scan with one photo that holds its image, and one placeholder item at slot 0 still recognising. */
+      const shelfSeeded = async (otherPositions: number[] = []) => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const scan = newScan(userId, { kind: 'shelf' })
+        const photo = newPhoto(scan, 0, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` })
+        const placeholder = newItem(scan, 0, { photoId: photo.id, photoKey: null })
+        const others = otherPositions.map((position) => newItem(scan, position, { photoId: freshId(), photoKey: null }))
+        await repository.createScan(scan, [photo], [placeholder, ...others])
+        const move = (patch: Partial<Parameters<ScansRepository['fanOut']>[0]['placeholder']['patch']> = {}) => ({
+          id: placeholder.id,
+          from: 'recognising' as ItemState,
+          patch: { state: 'matching' as const, recognisedBrand: 'Glow Co', recognisedName: 'Serum 0', recognisedCategory: 'skin' as const, recognisedConfidence: 0.95, updatedAt: at(MINUTE), ...patch },
+        })
+        return { repository, scan, photo, placeholder, move, newUser }
+      }
+
+      it('stores the new items where the read puts them, moves the placeholder and the photo, and says the placeholder moved', async () => {
+        const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+        const [a, b] = [newSibling(scan, photo, 1), newSibling(scan, photo, 2, { state: 'needs-confirmation', recognisedConfidence: 0.4, recognisedVariant: 'Night', recognisedForm: 'serum' })]
+
+        const result = await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [a, b], maxItems: 20 })
+
+        expect(result).toEqual({ placeholderMoved: true })
+        expect((await repository.itemsOf(scan.id)).map((i) => [i.position, i.state])).toEqual([
+          [0, 'matching'],
+          [1, 'matching'],
+          [2, 'needs-confirmation'],
+        ])
+        expect(await repository.findItem(placeholder.id)).toMatchObject({ recognisedName: 'Serum 0', recognisedConfidence: 0.95 })
+        expect(await repository.findItem(b.id)).toMatchObject({
+          id: b.id,
+          scanId: scan.id,
+          userId: scan.userId,
+          position: 2,
+          photoId: photo.id,
+          photoKey: null,
+          state: 'needs-confirmation',
+          reason: null,
+          backPhotoKey: null,
+          recognisedBrand: 'Glow Co',
+          recognisedName: 'Serum 2',
+          recognisedVariant: 'Night',
+          recognisedForm: 'serum',
+          recognisedCategory: 'skin',
+          recognisedConfidence: 0.4,
+          productId: null,
+          formulationId: null,
+          noLabelSource: null,
+          createdAt: at(MINUTE),
+          updatedAt: at(MINUTE),
+        })
+        expect(await repository.findPhoto(photo.id)).toMatchObject({
+          state: 'recognised',
+          recognition: readPhoto().recognition,
+          skippedNotBeauty: 1,
+          skippedUnreadable: 2,
+          skippedOverLimit: 3,
+          skippedDailyLimit: 4,
+          updatedAt: at(MINUTE),
+        })
+      })
+
+      it('can reject the photo and its placeholder with no new items, clearing the photo\'s key', async () => {
+        const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+
+        const result = await repository.fanOut({
+          photo: { id: photo.id, patch: readPhoto({ state: 'rejected', photoKey: null }) },
+          placeholder: move({ state: 'rejected', reason: 'not-a-beauty-product' }),
+          siblings: [],
+          maxItems: 20,
+        })
+
+        expect(result).toEqual({ placeholderMoved: true })
+        expect(await repository.findPhoto(photo.id)).toMatchObject({ state: 'rejected', photoKey: null })
+        expect(await repository.findItem(placeholder.id)).toMatchObject({ state: 'rejected', reason: 'not-a-beauty-product' })
+        expect(await repository.itemsOf(scan.id)).toHaveLength(1)
+      })
+
+      it('counts the new items among the user\'s photos for the daily quota', async () => {
+        const { repository, scan, photo, move } = await shelfSeeded()
+        await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1), newSibling(scan, photo, 2)], maxItems: 20 })
+
+        expect((await repository.photosSince(scan.userId, at(0))).count).toBe(3)
+      })
+
+      it('stores nothing at all when one new item cannot be stored (its id is taken)', async () => {
+        const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+        const clash = newSibling(scan, photo, 2, { id: placeholder.id })
+
+        await expect(repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1), clash], maxItems: 20 })).rejects.toThrow()
+
+        expect(await repository.itemsOf(scan.id)).toHaveLength(1)
+        expect(await repository.findItem(placeholder.id)).toMatchObject({ state: 'recognising', recognisedName: null })
+        expect(await repository.findPhoto(photo.id)).toMatchObject({ state: 'recognising', recognition: null, skippedNotBeauty: 0 })
+      })
+
+      it('does nothing new when repeated: the placeholder does not move again, no item is added or changed, the photo keeps its first answer', async () => {
+        const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+        const siblings = [newSibling(scan, photo, 1), newSibling(scan, photo, 2)]
+        await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings, maxItems: 20 })
+        const items = await repository.itemsOf(scan.id)
+        const stored = await repository.findPhoto(photo.id)
+
+        const again = await repository.fanOut({
+          photo: { id: photo.id, patch: readPhoto({ skippedOverLimit: 9, updatedAt: at(2 * MINUTE) }) },
+          placeholder: move({ updatedAt: at(2 * MINUTE) }),
+          siblings: siblings.map((s) => ({ ...s, id: freshId(), recognisedName: 'Changed' })),
+          maxItems: 20,
+        })
+
+        expect(again).toEqual({ placeholderMoved: false })
+        expect(await repository.itemsOf(scan.id)).toEqual(items)
+        expect(await repository.findItem(placeholder.id)).toMatchObject({ updatedAt: at(MINUTE) })
+        expect(await repository.findPhoto(photo.id)).toEqual(stored)
+      })
+
+      it('skips a new item whose position is already taken, with no error, leaves the item that holds it, and stores the others', async () => {
+        const { repository, scan, photo, move } = await shelfSeeded([2])
+
+        const result = await repository.fanOut({
+          photo: { id: photo.id, patch: readPhoto() },
+          placeholder: move(),
+          siblings: [newSibling(scan, photo, 1, { recognisedName: 'First' }), newSibling(scan, photo, 2, { recognisedName: 'Clash' }), newSibling(scan, photo, 3, { recognisedName: 'Third' })],
+          maxItems: 20,
+        })
+
+        expect(result).toEqual({ placeholderMoved: true })
+        expect((await repository.itemsOf(scan.id)).map((i) => [i.position, i.recognisedName])).toEqual([
+          [0, 'Serum 0'],
+          [1, 'First'],
+          [2, null],
+          [3, 'Third'],
+        ])
+      })
+
+      describe('the cap on items in a scan', () => {
+        it('stores new items only while the scan holds fewer than maxItems, the first in the list winning', async () => {
+          const { repository, scan, photo, move } = await shelfSeeded([100])
+          const siblings = [1, 2, 3, 4].map((position) => newSibling(scan, photo, position))
+
+          await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings, maxItems: 4 })
+
+          // The scan held 2 items (the placeholder and one other): room for 2 more.
+          expect((await repository.itemsOf(scan.id)).map((i) => i.position)).toEqual([0, 1, 2, 100])
+        })
+
+        it('stores them all when they bring the scan to exactly maxItems', async () => {
+          const { repository, scan, photo, move } = await shelfSeeded([100])
+
+          await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1), newSibling(scan, photo, 2)], maxItems: 4 })
+
+          expect(await repository.itemsOf(scan.id)).toHaveLength(4)
+        })
+
+        it('stores none when the scan is already at maxItems, and still moves the placeholder and the photo', async () => {
+          const { repository, scan, photo, placeholder, move } = await shelfSeeded([100])
+
+          const result = await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1)], maxItems: 2 })
+
+          expect(result).toEqual({ placeholderMoved: true })
+          expect(await repository.itemsOf(scan.id)).toHaveLength(2)
+          expect((await repository.findItem(placeholder.id))!.state).toBe('matching')
+          expect((await repository.findPhoto(photo.id))!.state).toBe('recognised')
+        })
+
+        it('counts only the items of its own scan', async () => {
+          const { repository, scan, photo, move, newUser } = await shelfSeeded()
+          const other = newScan(await newUser())
+          await createWithPhotos(repository, other, [newItem(other, 0), newItem(other, 1), newItem(other, 2)])
+
+          await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1)], maxItems: 2 })
+
+          expect(await repository.itemsOf(scan.id)).toHaveLength(2)
+        })
+      })
+
+      describe('the guards', () => {
+        it('applies the photo\'s patch only while the photo is recognising: a photo already read keeps its answer, yet the placeholder still moves (the undo case)', async () => {
+          const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+          await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1)], maxItems: 20 })
+          const stored = await repository.findPhoto(photo.id)
+          // The next step could not be queued: the placeholder is put back.
+          expect(await repository.updateItem(placeholder.id, 'matching', { state: 'recognising', updatedAt: at(2 * MINUTE) })).toBe(true)
+
+          const result = await repository.fanOut({
+            photo: { id: photo.id, patch: readPhoto({ skippedOverLimit: 9, updatedAt: at(3 * MINUTE) }) },
+            placeholder: move({ updatedAt: at(3 * MINUTE) }),
+            siblings: [newSibling(scan, photo, 1)],
+            maxItems: 20,
+          })
+
+          expect(result).toEqual({ placeholderMoved: true })
+          expect(await repository.findPhoto(photo.id)).toEqual(stored)
+          expect(await repository.findItem(placeholder.id)).toMatchObject({ state: 'matching', updatedAt: at(3 * MINUTE) })
+          expect(await repository.itemsOf(scan.id)).toHaveLength(2)
+        })
+
+        it('says false and leaves the placeholder as it was when it is not in the state it was expected in', async () => {
+          const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+          await repository.updateItem(placeholder.id, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: at(30 * SECOND) })
+
+          const result = await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1)], maxItems: 20 })
+
+          expect(result).toEqual({ placeholderMoved: false })
+          expect(await repository.findItem(placeholder.id)).toMatchObject({ state: 'failed', reason: 'unavailable', recognisedName: null, updatedAt: at(30 * SECOND) })
+        })
+
+        it('says false for an unknown placeholder', async () => {
+          const { repository, scan, photo, move } = await shelfSeeded()
+
+          const result = await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: { ...move(), id: freshId() }, siblings: [], maxItems: 20 })
+
+          expect(result).toEqual({ placeholderMoved: false })
+          expect(await repository.itemsOf(scan.id)).toHaveLength(1)
+        })
       })
     })
 
