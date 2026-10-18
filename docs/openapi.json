@@ -423,6 +423,27 @@
                     "null"
                   ]
                 },
+                "form": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "spray",
+                    "roll-on",
+                    "stick",
+                    "cream",
+                    "lotion",
+                    "gel",
+                    "oil",
+                    "serum",
+                    "liquid",
+                    "bar",
+                    "powder",
+                    "balm",
+                    null
+                  ]
+                },
                 "category": {
                   "type": "string",
                   "enum": [
@@ -446,6 +467,7 @@
                 "brand",
                 "name",
                 "variant",
+                "form",
                 "category",
                 "imageUrl"
               ]

@@ -1,5 +1,5 @@
 import { z } from '@hono/zod-openapi'
-import { CATEGORIES } from './catalog.vocabulary'
+import { CATEGORIES, PRODUCT_FORMS } from './catalog.vocabulary'
 
 // Trimmed first, then measured: what a person types around the words does not count. 2 to 80 characters: one letter would match most of the catalog.
 export const SearchProductsQuery = z.object({
@@ -15,6 +15,7 @@ export const ProductSearchResponse = z
           brand: z.string(),
           name: z.string(),
           variant: z.string().nullable(),
+          form: z.enum(PRODUCT_FORMS).nullable(),
           category: z.enum(CATEGORIES),
           imageUrl: z.string().nullable().openapi({ description: 'The product\'s stock image, an absolute URL, if it has one.' }),
         }),
