@@ -20,9 +20,9 @@ export const scans = sqliteTable(
     // NOT NULL or REFERENCES column to a parent table takes a table rebuild, which could cascade-delete scan_items. A profile
     // dies only with its user, and the user's scans go with the user, so nothing is left dangling. Code always sets it.
     profileId: text('profile_id'),
-    // What the scan is of: one product per photo, or a shelf per photo. Nullable with no SQL default for the same rebuild reason as
+    // What the scan is of: one product per photo, a shelf per photo, or one product the user typed (picked from search) with no photo. Nullable with no SQL default for the same rebuild reason as
     // profile_id; rows written before the column existed read NULL and are product scans (the repository reads NULL as 'product').
-    kind: text('kind', { enum: ['product', 'shelf'] }),
+    kind: text('kind', { enum: ['product', 'shelf', 'typed'] }),
     ipHash: text('ip_hash').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     doneAt: integer('done_at', { mode: 'timestamp_ms' }),
@@ -116,6 +116,8 @@ export const scanItems = sqliteTable(
     noLabelDescription: text('no_label_description'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+    // Whether the item counts toward the daily photo quotas. Every item does, except a typed one whose product needed no model.
+    counted: integer('counted', { mode: 'boolean' }).notNull().default(true),
   },
   (t) => [
     uniqueIndex('scan_items_scan_id_position_idx').on(t.scanId, t.position),

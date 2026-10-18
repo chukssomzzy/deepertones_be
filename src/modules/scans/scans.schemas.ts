@@ -168,7 +168,9 @@ export const ScanResponse = z
   .object({
     id: z.string(),
     createdAt: z.iso.datetime(),
-    kind: z.enum(['product', 'shelf']).openapi({ description: '`product` when each photo is one product; `shelf` when each photo is read for up to 5.' }),
+    kind: z.enum(['product', 'shelf', 'typed']).openapi({
+      description: '`product` when each photo is one product; `shelf` when each photo is read for up to 5; `typed` when a named product was added to the shelf from search, with no photo and one item.',
+    }),
     photos: z.array(ScanPhotoResponse).openapi({ description: 'The uploaded photos, in upload order.' }),
     items: z.array(ScanItemResponse).openapi({ description: 'One per product, in position order. A product scan has one per photo; a shelf scan starts with one per photo and gains the others as each photo is read.' }),
   })

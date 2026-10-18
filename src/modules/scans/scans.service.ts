@@ -247,6 +247,41 @@ export class ScanService {
     return this.startScan('shelf', this.policy.maxShelfPhotos, input)
   }
 
+  /**
+   * Starts a typed scan: the user added a named product they found by search, with no photo. Run as the session's user and profile.
+   *
+   * Nothing is written until the checks pass, in this order: the product (PRODUCT_NOT_FOUND for an unknown or unnamed one), then, only
+   * if the catalog says it still needs a model (`needs-research` or `needs-analysis`), the daily allowance for the user and the address
+   * with one added (SCAN_DAILY_LIMIT, as a photo scan's). A `ready` or `analysis-failed` product costs no model, so it is neither checked
+   * nor counted (see `NewScanItem.counted`).
+   *
+   * The scan has no photo and one item at position 0. It is created in `needs-identification`, not `recognising`: with no photo the
+   * reaper would requeue a recognise that can only fail as photo-missing, whereas this state is one it leaves alone and the app can still
+   * identify by hand. The item is then moved on exactly as picking the product for an item is (`identifyByChoice`), so a failure there
+   * (the next step cannot be queued) leaves it waiting in `needs-identification` and propagates.
+   */
+  async createTyped(input: { productId: string; clientIp: string }): Promise<{ scanId: string; itemId: string }> {
+    const { userId, profileId } = requireUser()
+    const resolved = await this.catalog.choose(input.productId)
+    await this.catalog.namedProduct(input.productId)
+    const needsModel = resolved.kind === 'needs-research' || resolved.kind === 'needs-analysis'
+    const now = this.now()
+    const ipHash = await this.hashIp(input.clientIp)
+    if (needsModel) await this.assertWithinQuota(userId, ipHash, 1, now)
+
+    const scanId = this.newId()
+    const itemId = this.newId()
+    await this.repository.createScan(
+      { id: scanId, userId, profileId, kind: 'typed', ipHash, createdAt: now },
+      [],
+      [{ id: itemId, scanId, userId, position: 0, photoId: null, photoKey: null, state: 'needs-identification', counted: needsModel, createdAt: now }],
+    )
+    const item = await this.repository.findItem(itemId)
+    if (!item) throw new Error('typed scan item vanished')
+    await this.identifyByChoice(item, 'needs-identification', input.productId)
+    return { scanId, itemId }
+  }
+
   /** What `create` and `createShelf` share: check every photo, take the quota, put the photos then save the scan, and queue a recognise job per item. */
   private async startScan(kind: ScanKind, maxPhotos: number, input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
     const { userId, profileId } = requireUser()
@@ -776,6 +811,9 @@ export class ScanService {
     if (!scan) return
     // An orphan, written by the old Worker, has no profile whose phones could be told.
     if (scan.profileId === null) return void console.log({ outcome: 'push-skipped-no-profile', scanId })
+    // A typed scan whose item was not counted finished inside the request that made it (the product needed no model), so the person is
+    // still looking at the answer: a push would only tell them what they have just seen. A counted one waited for a model, possibly after they left.
+    if (scan.kind === 'typed' && items.every((item) => !item.counted)) return
     await this.notifications.scanFinished({
       userId: scan.userId,
       profileId: scan.profileId,

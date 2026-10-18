@@ -22,7 +22,8 @@ export class D1ScansRepository {
 
   /**
    * Stores the scan, its photos and all its items, or nothing (one batch). Every photo starts `recognising` with no recognition
-   * and nothing skipped; every item starts `recognising` with no reason, recognised fields, product or back photo; both have
+   * and nothing skipped; every item starts `recognising` (or `needs-identification` when it says so) and counted (unless it says not), with no reason,
+   * recognised fields, product or back photo; both have
    * `updatedAt` equal to `createdAt`, and the scan starts with no done time. Rejects if any id is taken or two photos share a
    * position. One INSERT per row keeps each statement under D1's bound-parameter limit.
    */
@@ -386,7 +387,7 @@ export class D1ScansRepository {
   private siblingIfRoom(s: NewSibling, maxItems: number) {
     return sql`select ${s.id}, ${s.scanId}, ${s.userId}, ${s.position}, ${s.photoId}, ${s.state}, null, ${s.photoKey}, null,
         ${s.recognisedBrand}, ${s.recognisedName}, ${s.recognisedVariant}, ${s.recognisedForm}, ${s.recognisedCategory}, ${s.recognisedConfidence},
-        null, null, null, null, null, null, ${s.createdAt.getTime()}, ${s.createdAt.getTime()}
+        null, null, null, null, null, null, ${s.createdAt.getTime()}, ${s.createdAt.getTime()}, 1
         where (select count(*) from ${scanItems} where ${scanItems.scanId} = ${s.scanId}) < ${maxItems}`
   }
 
@@ -400,7 +401,7 @@ export class D1ScansRepository {
       this.db
         .select({ count: count(), oldest: min(scanItems.createdAt) })
         .from(scanItems)
-        .where(and(ownedItems, gte(scanItems.createdAt, since))),
+        .where(and(ownedItems, eq(scanItems.counted, true), gte(scanItems.createdAt, since))),
       this.db
         .select({ count: count(), oldest: min(scanBackPhotos.uploadedAt) })
         .from(scanBackPhotos)

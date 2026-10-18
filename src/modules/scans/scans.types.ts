@@ -23,8 +23,16 @@ export type NewBackPhoto = typeof scanBackPhotos.$inferInsert
 /** A retaken front photo, to be counted against the daily quotas. */
 export type NewRetake = typeof scanRetakes.$inferInsert
 
-/** What a new item needs: it always starts `recognising`, with no reason, no recognised fields, no product and no back photo. */
-export type NewScanItem = Pick<ScanItem, 'id' | 'scanId' | 'userId' | 'position' | 'createdAt'> & { photoId: string; photoKey: string | null }
+/**
+ * What a new item needs: it starts `recognising` unless it says it waits for a name (a typed scan's item, which has no photo to
+ * recognise), with no reason, no recognised fields, no product and no back photo. It counts toward the daily quotas unless it says not.
+ */
+export type NewScanItem = Pick<ScanItem, 'id' | 'scanId' | 'userId' | 'position' | 'createdAt'> & {
+  photoId: string | null
+  photoKey: string | null
+  state?: 'needs-identification'
+  counted?: boolean
+}
 
 /** A change to an item: any column but its identity, and when it was made. A field left out is unchanged; null clears it. */
 export type ItemPatch = Partial<Omit<ScanItem, 'id' | 'scanId' | 'userId' | 'position' | 'createdAt' | 'updatedAt'>> & { updatedAt: Date }
@@ -33,7 +41,7 @@ export type ItemPatch = Partial<Omit<ScanItem, 'id' | 'scanId' | 'userId' | 'pos
 export type PhotoPatch = Partial<Pick<ScanPhoto, 'state' | 'photoKey' | 'recognition' | 'skippedNotBeauty' | 'skippedUnreadable' | 'skippedOverLimit' | 'skippedDailyLimit'>> & { updatedAt: Date }
 
 /** A further product read on a shelf photo, stored as a new item where the read leaves it: it has no image of its own, and no product yet. */
-export type NewSibling = NewScanItem & {
+export type NewSibling = Omit<NewScanItem, 'state' | 'counted'> & {
   state: 'matching' | 'needs-confirmation'
   recognisedBrand: string
   recognisedName: string

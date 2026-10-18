@@ -2355,11 +2355,11 @@ describe('OpenAPI', () => {
       expect(photos).toMatchObject({ type: 'array', minItems: 1, maxItems: 3 })
     })
 
-    it('documents the scan\'s kind as product or shelf, required', async () => {
+    it('documents the scan\'s kind as product, shelf or typed, required', async () => {
       const doc = await fullDocument()
 
       const scan = doc.components.schemas.Scan
-      expect([...deref(doc, scan.properties.kind).enum].sort()).toEqual(['product', 'shelf'])
+      expect([...deref(doc, scan.properties.kind).enum].sort()).toEqual(['product', 'shelf', 'typed'])
       expect(scan.required).toContain('kind')
     })
 

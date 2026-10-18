@@ -910,6 +910,37 @@
           "kind"
         ]
       },
+      "AddShelfProductResult": {
+        "type": "object",
+        "properties": {
+          "scanId": {
+            "type": "string",
+            "description": "The typed scan made for the add. Follow it with `GET /api/v1/scans/products/{scanId}` or its `/events`."
+          },
+          "itemId": {
+            "type": "string",
+            "description": "Its one item. When the item is `ready` the product is on the shelf."
+          }
+        },
+        "required": [
+          "scanId",
+          "itemId"
+        ]
+      },
+      "AddShelfProductBody": {
+        "type": "object",
+        "properties": {
+          "productId": {
+            "type": "string",
+            "minLength": 1,
+            "description": "A product id from `GET /api/v1/products/search`."
+          }
+        },
+        "required": [
+          "productId"
+        ],
+        "additionalProperties": false
+      },
       "RemoveShelfEntryBody": {
         "type": "object",
         "properties": {
@@ -1018,9 +1049,10 @@
             "type": "string",
             "enum": [
               "product",
-              "shelf"
+              "shelf",
+              "typed"
             ],
-            "description": "`product` when each photo is one product; `shelf` when each photo is read for up to 5."
+            "description": "`product` when each photo is one product; `shelf` when each photo is read for up to 5; `typed` when a named product was added to the shelf from search, with no photo and one item."
           },
           "photos": {
             "type": "array",
@@ -3122,6 +3154,168 @@
           },
           "401": {
             "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "addShelfProduct",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "Add a product found by search to the shelf",
+        "description": "Body `{ productId }`, a named product from `GET /api/v1/products/search`. A product already on the shelf is 200 with its entry, as `GET /api/v1/me/shelf` shows it, and nothing else happens. Otherwise 202 with `{ scanId, itemId }` of a `typed` scan (no photo, one item): a product already analysed is `ready`, and on the shelf, by the time this answers; one that still needs research or analysis is `researching` or `analysing` until a background job finishes it, so follow `GET /api/v1/scans/products/{scanId}` or its `/events`, then read the shelf. A product that needs research or analysis counts as one photo toward the daily limit (30 per user and 100 per address, 429 `SCAN_DAILY_LIMIT`); an analysed one counts for nothing and is never refused for it. The finished push is sent only for a scan that waited for a model. An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`. Adding a product taken off the shelf puts it back as the same entry.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "middleware": [
+          null,
+          null,
+          null
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddShelfProductBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The product was already on the shelf: its entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ShelfEntry"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "A typed scan was started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/AddShelfProductResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
             "content": {
               "application/json": {
                 "schema": {

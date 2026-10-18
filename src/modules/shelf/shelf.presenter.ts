@@ -3,7 +3,7 @@ import { toNoLabelResponse, toProductResponse } from '../scans/scans.presenter'
 import type { ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
 import type { ShelfEntryView, ShelfView } from './shelf.service'
 
-const toEntryResponse = (entry: ShelfEntryView): z.infer<typeof ShelfEntryResponse> => ({
+export const toEntryResponse = (entry: ShelfEntryView): z.infer<typeof ShelfEntryResponse> => ({
   id: entry.id,
   addedAt: entry.addedAt.toISOString(),
   lastScannedAt: entry.lastScannedAt.toISOString(),

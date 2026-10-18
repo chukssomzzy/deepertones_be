@@ -35,6 +35,7 @@ import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-sp
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
 import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import { toScanResponse } from './scans.presenter'
+import { FakeShelfRepository } from '../shelf/shelf.repository.fake'
 import { FakeShelfStore } from '../shelf/shelf.store.fake'
 import { FakeScansRepository } from './scans.repository.fake'
 import { SCAN_POLICY, ScanService } from './scans.service'
@@ -8015,5 +8016,365 @@ describe('ScanService.watch: a shelf scan', () => {
     await watch(ctx, scanId)
 
     expect(ctx.events.eventsFor(scanId)).toEqual([])
+  })
+})
+
+// A typed scan is made when the user adds a named product from search to the shelf: no photo, one item, picked straight from the catalog.
+// `createTyped` answers { scanId, itemId }; it resolves the product (an unknown or unnamed one is PRODUCT_NOT_FOUND, before any write),
+// checks the daily allowance only when the product still needs a model, and moves the item on as picking a product for an item does.
+describe('ScanService.createTyped', () => {
+  const addTyped = (ctx: Ctx, productId: string, over: { ip?: string; userId?: string; profileId?: string } = {}): Promise<{ scanId: string; itemId: string }> =>
+    asUser(() => ctx.service.createTyped({ productId, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
+  const pushes = (ctx: Ctx) => ctx.pushJobs.enqueued.map((e) => e.body as SendPushMessage)
+  const rowsOf = (ctx: Ctx, profileId = PROFILE) => ctx.shelf.rows.filter((row) => row.profileId === profileId)
+  const doneEvents = (ctx: Ctx, scanId: string) => ctx.events.eventsFor(scanId).filter((e) => e.type === 'done')
+  /** Scans still waiting for a name anywhere in the store: a typed scan that was written and then left behind would be one. */
+  const waitingItems = (ctx: Ctx) => ctx.repository.staleItems(['needs-identification'], new Date(ctx.now().getTime() + DAY), 100)
+  /** A named product the catalog knows but has no ingredients for. */
+  const unresearched = async (ctx: Ctx) => {
+    const resolved = await ctx.catalog.resolve(CERAVE)
+    if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
+    return resolved.productId
+  }
+  /** A product whose analysis the catalog has given up on. */
+  const unanalysable = async (ctx: Ctx) => {
+    const made = await catalogued(ctx, CERAVE, { ingredients: WITH_MERCURY, analysed: false })
+    for (let i = 0; i < 3; i++) await ctx.catalog.analyse(made.formulationId).catch(() => undefined)
+    return made
+  }
+  const photosOf = (count: number) => Array.from({ length: count }, (_, i) => markedJpeg(i))
+  /** `count` photos taken today by the user, from addresses of their own so no address is over its allowance. */
+  const takePhotos = async (ctx: Ctx, count: number, userId = USER) => {
+    for (let taken = 0, n = 1; taken < count; n++) {
+      const batch = Math.min(10, count - taken)
+      await create(ctx, photosOf(batch), { ip: `192.0.2.${n}`, userId })
+      taken += batch
+    }
+  }
+
+  describe('a product the catalog has analysed', () => {
+    it('makes a typed scan of the caller\'s profile with no photo and one item, ready with the product, and not counted', async () => {
+      const ctx = setup()
+      const { productId, formulationId } = await catalogued(ctx)
+
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      expect(await ctx.repository.findScan(scanId)).toMatchObject({ kind: 'typed', userId: USER, profileId: PROFILE })
+      expect(await ctx.repository.photosOf(scanId)).toEqual([])
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(items).toHaveLength(1)
+      expect(items[0]).toMatchObject({ id: itemId, position: 0, state: 'ready', reason: null, productId, formulationId, photoId: null, photoKey: null, counted: false })
+    })
+
+    it('shows the scan to its owner as kind typed with no photos and the one item ready with its product', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      const scan = await getScan(ctx, scanId)
+      expect(scan.kind).toBe('typed')
+      expect(scan.photos).toEqual([])
+      expect(scan.items).toHaveLength(1)
+      expect(scan.items[0]).toMatchObject({ id: itemId, state: 'ready', photoId: null, product: { id: productId, kind: 'named' } })
+    })
+
+    it('puts the product on the profile\'s shelf at once, pointing at the typed scan and its item', async () => {
+      const ctx = setup()
+      const { productId, formulationId } = await catalogued(ctx)
+
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      expect(rowsOf(ctx)).toHaveLength(1)
+      expect(rowsOf(ctx)[0]).toMatchObject({ kind: 'product', productId, formulationId, scanId, itemId, removedAt: null })
+    })
+
+    it('queues no job, sends no push, and still publishes the done event', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+
+      const { scanId } = await addTyped(ctx, productId)
+
+      expect(ctx.jobs.enqueued).toEqual([])
+      expect(pushes(ctx)).toEqual([])
+      expect(doneEvents(ctx, scanId)).toHaveLength(1)
+    })
+
+    it('makes no model, web or recognition call', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+      const calls = () => ctx.recognizer.calls.length + ctx.labelReader.calls.length + ctx.nameSplitter.calls.length + ctx.researcher.calls.length + ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length
+      const before = calls()
+
+      await addTyped(ctx, productId)
+
+      expect(calls()).toBe(before)
+    })
+
+    it('puts a product that was removed from the shelf back on it as the same entry', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+      await addTyped(ctx, productId)
+      const entry = rowsOf(ctx)[0]!
+      await new FakeShelfRepository(ctx.shelf).remove(PROFILE, entry.id, 'finished', ctx.now())
+      ctx.advance(MINUTE)
+
+      const again = await addTyped(ctx, productId)
+
+      expect(rowsOf(ctx)).toHaveLength(1)
+      expect(rowsOf(ctx)[0]).toMatchObject({ id: entry.id, scanId: again.scanId, itemId: again.itemId, removedAt: null, removedReason: null, lastScannedAt: ctx.now() })
+    })
+  })
+
+  describe('a product the catalog gave up analysing', () => {
+    it('fails the item as analysis-failed, not counted, with nothing on the shelf, no job and no push', async () => {
+      const ctx = setup()
+      const { productId, formulationId } = await unanalysable(ctx)
+
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'failed', reason: 'analysis-failed', productId, formulationId, counted: false })
+      expect(rowsOf(ctx)).toEqual([])
+      expect(ctx.jobs.enqueued).toEqual([])
+      expect(pushes(ctx)).toEqual([])
+      expect(doneEvents(ctx, scanId)).toHaveLength(1)
+    })
+  })
+
+  describe('a product with ingredients that are not analysed yet', () => {
+    it('moves the item to analysing, counted, and queues its analysis, with nothing on the shelf and no push yet', async () => {
+      const ctx = setup()
+      const { productId, formulationId } = await catalogued(ctx, CERAVE, { analysed: false })
+
+      const { itemId } = await addTyped(ctx, productId)
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'analysing', productId, formulationId, photoId: null, photoKey: null, counted: true })
+      expect(queued(ctx)).toEqual([advanceMessage(itemId, 'analyse')])
+      expect(rowsOf(ctx)).toEqual([])
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('puts the product on the shelf and sends the finished push once the analysis has run', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      expect(await drain(ctx)).toEqual(['analyse'])
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'ready', counted: true })
+      expect(rowsOf(ctx)).toHaveLength(1)
+      expect(rowsOf(ctx)[0]).toMatchObject({ kind: 'product', productId, scanId, itemId })
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId, readyCount: 1 }])
+      expect(doneEvents(ctx, scanId)).toHaveLength(1)
+    })
+  })
+
+  describe('a product the catalog has no ingredients for', () => {
+    it('moves the item to researching, counted, and queues its research, with nothing on the shelf and no push yet', async () => {
+      const ctx = setup()
+      const productId = await unresearched(ctx)
+
+      const { itemId } = await addTyped(ctx, productId)
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'researching', productId, photoId: null, photoKey: null, counted: true })
+      expect(queued(ctx)).toEqual([advanceMessage(itemId, 'research')])
+      expect(rowsOf(ctx)).toEqual([])
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('puts the product on the shelf and sends the finished push once the research and analysis have run', async () => {
+      const ctx = setup()
+      const productId = await unresearched(ctx)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      const { scanId, itemId } = await addTyped(ctx, productId)
+
+      expect(await drain(ctx)).toEqual(['research', 'analyse'])
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'ready', counted: true })
+      expect(rowsOf(ctx)[0]).toMatchObject({ kind: 'product', productId, scanId, itemId })
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId, readyCount: 1 }])
+    })
+  })
+
+  describe('a product the catalog does not offer', () => {
+    it('throws PRODUCT_NOT_FOUND for an id the catalog does not hold, and writes nothing', async () => {
+      const ctx = setup()
+
+      const error = await errorOf(addTyped(ctx, 'no-such-product'))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect(await waitingItems(ctx)).toEqual([])
+      expect(rowsOf(ctx)).toEqual([])
+      expect(ctx.jobs.enqueued).toEqual([])
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('throws PRODUCT_NOT_FOUND for an unnamed product, and writes nothing', async () => {
+      const ctx = setup()
+      const unnamed = await ctx.catalog.fromLabel({ ingredients: CLEAN })
+
+      const error = await errorOf(addTyped(ctx, unnamed.productId))
+
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect(await waitingItems(ctx)).toEqual([])
+      expect(rowsOf(ctx)).toEqual([])
+    })
+
+    it('throws PRODUCT_NOT_FOUND even when the daily allowance is used up: the product is looked at first', async () => {
+      const ctx = setup()
+      await takePhotos(ctx, 30)
+
+      const error = await errorOf(addTyped(ctx, 'no-such-product'))
+
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+    })
+  })
+
+  describe('the daily allowance', () => {
+    it.each([
+      ['has ingredients not yet analysed', (ctx: Ctx) => catalogued(ctx, CERAVE, { analysed: false }).then((p) => p.productId)],
+      ['has no ingredients yet', (ctx: Ctx) => unresearched(ctx)],
+    ])('refuses a product that %s once the user has taken 30 photos in a day, with SCAN_DAILY_LIMIT and a wait, and writes nothing', async (_label, arrange) => {
+      const ctx = setup()
+      const productId = await arrange(ctx)
+      await takePhotos(ctx, 30)
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(addTyped(ctx, productId))
+
+      expect(error).toBeInstanceOf(RateLimitedError)
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+      expect(error.details!.retryAfterSeconds).toBeGreaterThan(0)
+      expect(await waitingItems(ctx)).toEqual([])
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(rowsOf(ctx)).toEqual([])
+    })
+
+    it('accepts a product that needs a model as the 30th of the day and refuses the next one: it counts as one photo', async () => {
+      const ctx = setup()
+      const first = await catalogued(ctx, CERAVE, { analysed: false })
+      const second = await catalogued(ctx, { brand: 'Aveeno', name: 'Daily Moisturizer', category: 'skin' }, { analysed: false })
+      await takePhotos(ctx, 29)
+
+      await expect(addTyped(ctx, first.productId)).resolves.toMatchObject({ itemId: expect.any(String) })
+
+      expect((await errorOf(addTyped(ctx, second.productId))).code).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('counts a product that needs a model against the photo allowance: 29 photos and one added product leave room for one photo, not two', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      await takePhotos(ctx, 28)
+      await addTyped(ctx, productId)
+
+      expect((await errorOf(create(ctx, photosOf(2), { ip: '192.0.2.99' }))).code).toBe('SCAN_DAILY_LIMIT')
+      await expect(create(ctx, photosOf(1), { ip: '192.0.2.99' })).resolves.toMatchObject({ items: expect.any(Array) })
+    })
+
+    it('does not count an analysed product: the user can still take all 30 photos after adding it', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+      await addTyped(ctx, productId)
+
+      await expect(takePhotos(ctx, 30)).resolves.toBeUndefined()
+
+      expect((await errorOf(create(ctx, photosOf(1), { ip: '192.0.2.99' }))).code).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('does not count a product the catalog gave up on: the user can still take all 30 photos after adding it', async () => {
+      const ctx = setup()
+      const { productId } = await unanalysable(ctx)
+      await addTyped(ctx, productId)
+
+      await expect(takePhotos(ctx, 30)).resolves.toBeUndefined()
+    })
+
+    it('still adds an analysed product after 30 photos', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+      await takePhotos(ctx, 30)
+
+      await expect(addTyped(ctx, productId)).resolves.toMatchObject({ itemId: expect.any(String) })
+
+      expect(rowsOf(ctx)).toHaveLength(1)
+    })
+
+    it('still adds a product the catalog gave up on after 30 photos, as a failed item', async () => {
+      const ctx = setup()
+      const { productId } = await unanalysable(ctx)
+      await takePhotos(ctx, 30)
+
+      const { itemId } = await addTyped(ctx, productId)
+
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'failed', reason: 'analysis-failed' })
+    })
+
+    it('refuses a product that needs a model when the address has used its 100 photos, though this user has taken none', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      for (let n = 0; n < 10; n++) await create(ctx, photosOf(10), { ip: IP, userId: `shared-address-${n}`, profileId: `profile-shared-${n}` })
+
+      const error = await errorOf(addTyped(ctx, productId, { ip: IP }))
+
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+      await expect(addTyped(ctx, productId, { ip: OTHER_IP })).resolves.toMatchObject({ itemId: expect.any(String) })
+    })
+
+    it('forgets a counted item after 24 hours and a millisecond, and not before', async () => {
+      const ctx = setup()
+      const first = await catalogued(ctx, CERAVE, { analysed: false })
+      const second = await catalogued(ctx, { brand: 'Aveeno', name: 'Daily Moisturizer', category: 'skin' }, { analysed: false })
+      await takePhotos(ctx, 29)
+      await addTyped(ctx, first.productId)
+
+      ctx.advance(DAY)
+      expect((await errorOf(addTyped(ctx, second.productId))).code).toBe('SCAN_DAILY_LIMIT')
+
+      ctx.advance(1)
+      await expect(addTyped(ctx, second.productId)).resolves.toMatchObject({ itemId: expect.any(String) })
+    })
+  })
+
+  describe('the address', () => {
+    it('is stored hashed the way a photo scan stores it: the same address gives the same hash, another address another', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+      const photoScan = await create(ctx, [markedJpeg(1)], { ip: IP })
+      const sameAddress = await addTyped(ctx, productId, { ip: IP })
+      const otherAddress = await addTyped(ctx, productId, { ip: OTHER_IP })
+
+      const hash = (await ctx.repository.findScan(photoScan.id))!.ipHash
+      expect((await ctx.repository.findScan(sameAddress.scanId))!.ipHash).toBe(hash)
+      expect((await ctx.repository.findScan(otherAddress.scanId))!.ipHash).not.toBe(hash)
+      expect(hash).not.toContain(IP)
+    })
+  })
+
+  describe('which profile it is made for', () => {
+    it('puts the product on the shelf of the profile of the session, not another profile of the same account', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx)
+
+      await addTyped(ctx, productId, { profileId: OTHER_PROFILE })
+
+      expect(rowsOf(ctx, OTHER_PROFILE)).toHaveLength(1)
+      expect(rowsOf(ctx, PROFILE)).toEqual([])
+    })
+  })
+
+  describe('an item that waits for a name', () => {
+    it('is left in needs-identification, to be identified by hand, when the next step cannot be queued', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      ctx.jobs.failNextWith(new Error('queue down'))
+
+      await expect(addTyped(ctx, productId)).rejects.toThrow('queue down')
+
+      const waiting = await waitingItems(ctx)
+      expect(waiting).toHaveLength(1)
+      expect(waiting[0]).toMatchObject({ state: 'needs-identification', photoId: null, photoKey: null, counted: true })
+      expect(rowsOf(ctx)).toEqual([])
+    })
   })
 })

@@ -11,13 +11,15 @@ import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts
 import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { markedJpeg } from '../../src/modules/scans/scans.photos.fake'
+import { scans } from '../../src/modules/scans/scans.table'
 import { profileProducts } from '../../src/modules/shelf/shelf.table'
-import { messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
+import { messageResponse, searchCall, searchResults, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
 import { MemoryEmailSender } from '../../src/providers/email/memory.email'
 import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 
 // The shelf routes through the Worker's public surface: the typed client against the real entrypoint and real local D1. Products reach
 // the shelf the way they do in life, by a scan item moving to ready (a catalogued product picked for an item) or to unidentified (the
@@ -29,9 +31,12 @@ const MINUTE = 60 * 1000
 const NOW = Date.now()
 
 const queued: unknown[] = []
+// The push jobs the Worker queues are recorded, not delivered (delivering one is push.background.test.ts's concern).
+const pushQueued: unknown[] = []
 const WORKER_ENV = {
   ...env,
   SCAN_ITEMS_QUEUE: { send: async (body: unknown) => void queued.push(body) } as unknown as Queue,
+  PUSH_DELIVERY_QUEUE: { send: async (body: unknown) => void pushQueued.push(body), sendBatch: async () => {} } as unknown as Queue,
 }
 const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) =>
   worker.fetch!(new Request(input, init) as never, WORKER_ENV, createExecutionContext())
@@ -43,6 +48,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   queued.length = 0
+  pushQueued.length = 0
 })
 
 const runSalt = String(Math.floor(Math.random() * 1e6))
@@ -55,11 +61,11 @@ const freshIp = () => {
 const freshBrand = () => `${runSalt}${next()}x ShelfBrand`
 
 type Envelope<T> = { success: true; status: number; data: T } | { success: false; status: number; error: { code: string } }
-type Reply = { json(): Promise<unknown>; status: number }
+type Reply = { json(): Promise<unknown>; status: number; headers: Headers }
 type NoLabelBody = { source: string; purpose: string; usedFor: string; description?: string; concerns: unknown[]; rulesVersion: number }
 type ProductBody = { id: string; kind: string; brand: string; name: string; variant: string | null; form?: string | null; category: string; imageUrl: string | null }
 type ItemView = { id: string; state: string; product?: ProductBody; noLabel?: NoLabelBody }
-type ScanView = { id: string; items: ItemView[] }
+type ScanView = { id: string; kind: string; photos: unknown[]; items: (ItemView & { photoId: string | null; image: unknown })[] }
 type EntryBody = {
   id: string
   addedAt: string
@@ -466,5 +472,446 @@ describe('DELETE /api/v1/me/shelf/{entryId}', () => {
 
     expect(res.status).toBe(401)
     expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+})
+
+// --- adding a named product from search ---
+
+const DAY_SECONDS = 24 * 60 * 60
+const retryAfterOf = (res: Reply) => Number(res.headers.get('Retry-After'))
+const CLEAN_LIST = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
+const CHEAP = { input_tokens: 100, output_tokens: 50 }
+// What Claude answers in the background steps: the research searches and finds a list (the researcher only believes a source the search
+// returned); the analysis finds nothing to warn about.
+const SOURCE_URL = 'https://shop.example/product'
+const researchFinds = () =>
+  messageResponse({
+    content: [searchCall('srvtoolu_01', 'ingredients'), searchResults('srvtoolu_01', [SOURCE_URL]), textBlock(JSON.stringify({ found: true, ingredients: CLEAN_LIST, sourceUrl: SOURCE_URL, imageUrl: null }))],
+    usage: CHEAP,
+  })
+const analysedWithNoConcerns = () => messageResponse({ content: [textBlock(JSON.stringify({ concerns: [] }))], usage: CHEAP })
+
+/** The catalog as the Worker's background steps use it, for arranging products in the states a scan finds them in. */
+const catalogFor = (researcher = new MemoryProductResearcher()) =>
+  new ProductCatalogService({
+    repository: new D1CatalogRepository(db),
+    researcher,
+    analyst: new MemoryProductAnalyst(),
+    images: new MemoryCatalogImageStore(),
+    imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
+  })
+/** A named product with a list that is not analysed yet: adding it needs the analysis. */
+const productNeedingAnalysis = async () => {
+  const researcher = new MemoryProductResearcher()
+  researcher.respondWith(() => ({ found: true, ingredients: CLEAN_LIST, sourceUrl: 'https://shop.example/product' }))
+  const catalog = catalogFor(researcher)
+  const resolved = await catalog.resolve({ brand: freshBrand(), name: 'Hydrating Cleanser', category: 'skin' })
+  if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
+  const found = await catalog.research(resolved.productId)
+  if (found.kind !== 'found') throw new Error('expected found')
+  return resolved.productId
+}
+/** A named product nobody has the ingredients for: adding it needs the research, then the analysis. */
+const productNeedingResearch = async () => {
+  const resolved = await catalogFor().resolve({ brand: freshBrand(), name: 'Hydrating Cleanser', category: 'skin' })
+  if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
+  return resolved.productId
+}
+/** A product made from a list nobody named: the catalog never offers it from search. */
+const unnamedProduct = async () => (await catalogFor().fromLabel({ ingredients: [...CLEAN_LIST, `Parfum ${runSalt}x${next()}`] })).productId
+
+const addProduct = (guest: Guest | undefined, body: unknown, ip?: string) =>
+  (v1.me.shelf.$post as (args: unknown, init: unknown) => Promise<Reply>)(
+    { json: body },
+    { headers: guest ? { ...guest.headers(), ...(ip ? { 'cf-connecting-ip': ip } : {}) } : { 'cf-connecting-ip': freshIp() } },
+  )
+const started = async (res: Reply) => {
+  expect(res.status).toBe(202)
+  return dataOf<{ scanId: string; itemId: string }>(res)
+}
+/** Scans the user has made, read from the table: no route lists them, and "no scan was made" is a thing only the table can show. */
+const scanCountOf = async (guest: Guest) => (await db.select({ id: scans.id }).from(scans).where(eq(scans.userId, guest.userId))).length
+const scanOf = async (guest: Guest, scanId: string) => dataOf<ScanView>(await scansApi[':scanId'].$get({ param: { scanId } }, scanPath(guest)))
+/** `count` photos taken as product scans of up to 10, each from an address of its own so only the user's allowance is tested. */
+const takePhotos = async (guest: Guest, count: number) => {
+  for (let taken = 0; taken < count; ) {
+    const batch = Math.min(10, count - taken)
+    const photos = Array.from({ length: batch }, (_, i) => new File([markedJpeg(taken + i).bytes], `p${taken + i}.jpg`, { type: 'image/jpeg' }))
+    const res = await scansApi.$post({ form: { photos } }, { headers: { ...guest.headers(), 'cf-connecting-ip': freshIp() } })
+    expect(res.status).toBe(202)
+    taken += batch
+  }
+}
+const photoResponse = (guest: Guest) =>
+  scansApi.$post({ form: { photos: [new File([markedJpeg(250).bytes], 'one-more.jpg', { type: 'image/jpeg' })] } }, { headers: { ...guest.headers(), 'cf-connecting-ip': freshIp() } })
+
+describe('POST /api/v1/me/shelf', () => {
+  describe('a product the catalog has analysed', () => {
+    it('answers 202 with the scan and item, and the item is ready at once in a typed scan with no photo', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      const scan = await scanOf(guest, scanId)
+      expect(scan).toMatchObject({ id: scanId, kind: 'typed', photos: [] })
+      expect(scan.items).toHaveLength(1)
+      expect(scan.items[0]).toMatchObject({ id: itemId, state: 'ready', photoId: null, image: null, product: { id: productId, kind: 'named' } })
+    })
+
+    it('puts the product on the shelf at once, pointing at the typed scan, in the view the scan item shows', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      const entries = await entriesOf(guest)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ kind: 'product', source: { scanId, itemId } })
+      expect(entries[0]!.product).toEqual((await scanOf(guest, scanId)).items[0]!.product)
+      expect(Math.abs(new Date(entries[0]!.lastScannedAt).getTime() - NOW)).toBeLessThan(5 * MINUTE)
+    })
+
+    it('queues no background step and no push', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      queued.length = 0
+      pushQueued.length = 0
+
+      await started(await addProduct(guest, { productId }))
+
+      expect(queued).toEqual([])
+      expect(pushQueued).toEqual([])
+    })
+
+    it('does not use up any of the day\'s photos: the user can still take 30', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await started(await addProduct(guest, { productId }))
+
+      await takePhotos(guest, 30)
+
+      expect((await photoResponse(guest)).status).toBe(429)
+    })
+
+    it('still adds it past the daily allowance, when the user has taken 30 photos', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await takePhotos(guest, 30)
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      expect((await entriesOf(guest)).map((e) => e.source)).toEqual([{ scanId, itemId }])
+    })
+
+    it('puts a product that was removed back on the shelf as the same entry, from the new typed scan', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await scanProduct(guest, productId)
+      const [entry] = await entriesOf(guest)
+      expect((await deleteEntry(guest, entry!.id, { reason: 'finished' })).status).toBe(204)
+      expect(await entriesOf(guest)).toEqual([])
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      const entries = await entriesOf(guest)
+      expect(entries).toHaveLength(1)
+      expect(entries[0]).toMatchObject({ id: entry!.id, addedAt: entry!.addedAt, source: { scanId, itemId } })
+      const [row] = await db.select().from(profileProducts).where(eq(profileProducts.id, entry!.id))
+      expect(row).toMatchObject({ removedAt: null, removedReason: null })
+    })
+
+    it('puts the product on the shelf of the caller\'s profile only', async () => {
+      const amara = await newGuest()
+      const tolu = await newGuest()
+      const { productId } = await cataloguedProduct()
+
+      await started(await addProduct(amara, { productId }))
+
+      expect(await entriesOf(amara)).toHaveLength(1)
+      expect(await entriesOf(tolu)).toEqual([])
+    })
+  })
+
+  describe('a product already on the profile\'s shelf', () => {
+    it('answers 200 with that entry, as the shelf shows it, and makes no scan, queues nothing and sends no push', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await scanProduct(guest, productId)
+      const [entry] = await entriesOf(guest)
+      const scansBefore = await scanCountOf(guest)
+      queued.length = 0
+      pushQueued.length = 0
+
+      const res = await addProduct(guest, { productId })
+
+      expect(res.status).toBe(200)
+      expect(await dataOf<EntryBody>(res)).toEqual(entry)
+      expect(await scanCountOf(guest)).toBe(scansBefore)
+      expect(await entriesOf(guest)).toEqual([entry])
+      expect(queued).toEqual([])
+      expect(pushQueued).toEqual([])
+    })
+
+    it('answers 200 even when the daily allowance is used up', async () => {
+      const guest = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await scanProduct(guest, productId)
+      // The scan above took 3 photos (the first and two retakes): 27 more is the day's 30.
+      await takePhotos(guest, 27)
+      expect((await photoResponse(guest)).status).toBe(429)
+
+      expect((await addProduct(guest, { productId })).status).toBe(200)
+    })
+
+    it('does not take another profile\'s entry for it: the product is added', async () => {
+      const amara = await newGuest()
+      const tolu = await newGuest()
+      const { productId } = await cataloguedProduct()
+      await scanProduct(amara, productId)
+
+      const res = await addProduct(tolu, { productId })
+
+      expect(res.status).toBe(202)
+      expect(await entriesOf(tolu)).toHaveLength(1)
+    })
+  })
+
+  describe('a product whose ingredients are not analysed yet', () => {
+    it('answers 202 and the item is analysing, with the analysis queued, nothing on the shelf and no push yet', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingAnalysis()
+      queued.length = 0
+      pushQueued.length = 0
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      expect((await scanOf(guest, scanId)).items[0]).toMatchObject({ id: itemId, state: 'analysing' })
+      expect(queued).toEqual([{ itemId, step: 'analyse', at: expect.any(Number) }])
+      expect(await entriesOf(guest)).toEqual([])
+      expect(pushQueued).toEqual([])
+    })
+
+    it('puts the product on the shelf and queues the finished push for the profile once the analysis has run', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingAnalysis()
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+      pushQueued.length = 0
+
+      stubAnthropic(analysedWithNoConcerns)
+      await runStep(itemId, 'analyse')
+      vi.unstubAllGlobals()
+
+      expect((await scanOf(guest, scanId)).items[0]).toMatchObject({ state: 'ready', product: { id: productId } })
+      expect((await entriesOf(guest)).map((e) => e.source)).toEqual([{ scanId, itemId }])
+      expect(pushQueued).toEqual([{ kind: 'scan-finished', userId: guest.userId, profileId: await profileIdOf(guest), scanId, readyCount: 1 }])
+    })
+
+    it('counts as one of the day\'s photos: after 29 photos it is accepted, and the next photo is refused', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingAnalysis()
+      await takePhotos(guest, 29)
+
+      await started(await addProduct(guest, { productId }))
+
+      const refused = await photoResponse(guest)
+      expect(refused.status).toBe(429)
+      expect(await errorCodeOf(refused)).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('answers 429 SCAN_DAILY_LIMIT with Retry-After after 30 photos, and makes no scan, queues nothing and puts nothing on the shelf', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingAnalysis()
+      await takePhotos(guest, 30)
+      const scansBefore = await scanCountOf(guest)
+      queued.length = 0
+
+      const res = await addProduct(guest, { productId })
+
+      expect(res.status).toBe(429)
+      expect(await errorCodeOf(res)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(res)).toBeGreaterThan(0)
+      expect(retryAfterOf(res)).toBeLessThanOrEqual(DAY_SECONDS + 1)
+      expect(await scanCountOf(guest)).toBe(scansBefore)
+      expect(queued).toEqual([])
+      expect(await entriesOf(guest)).toEqual([])
+    })
+  })
+
+  describe('a product nobody has the ingredients for', () => {
+    it('answers 202 and the item is researching, with the research queued, nothing on the shelf and no push yet', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingResearch()
+      queued.length = 0
+      pushQueued.length = 0
+
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+
+      expect((await scanOf(guest, scanId)).items[0]).toMatchObject({ id: itemId, state: 'researching' })
+      expect(queued).toEqual([{ itemId, step: 'research', at: expect.any(Number) }])
+      expect(await entriesOf(guest)).toEqual([])
+      expect(pushQueued).toEqual([])
+    })
+
+    it('puts the product on the shelf and queues the finished push once the research and analysis have run', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingResearch()
+      const { scanId, itemId } = await started(await addProduct(guest, { productId }))
+      pushQueued.length = 0
+
+      stubAnthropic(researchFinds)
+      await runStep(itemId, 'research')
+      vi.unstubAllGlobals()
+      expect((await scanOf(guest, scanId)).items[0]).toMatchObject({ state: 'analysing' })
+      stubAnthropic(analysedWithNoConcerns)
+      await runStep(itemId, 'analyse')
+      vi.unstubAllGlobals()
+
+      expect((await entriesOf(guest)).map((e) => e.source)).toEqual([{ scanId, itemId }])
+      expect(pushQueued).toEqual([{ kind: 'scan-finished', userId: guest.userId, profileId: await profileIdOf(guest), scanId, readyCount: 1 }])
+    })
+
+    it('counts as one of the day\'s photos, and is refused with SCAN_DAILY_LIMIT after 30', async () => {
+      const guest = await newGuest()
+      const productId = await productNeedingResearch()
+      await takePhotos(guest, 30)
+
+      const res = await addProduct(guest, { productId })
+
+      expect(res.status).toBe(429)
+      expect(await errorCodeOf(res)).toBe('SCAN_DAILY_LIMIT')
+    })
+  })
+
+  describe('the address', () => {
+    it('counts the day\'s photos per address from cf-connecting-ip: refused at an address that has taken 100, accepted from another', async () => {
+      const shared = freshIp()
+      for (let i = 0; i < 10; i++) {
+        const other = await newGuest()
+        const photos = Array.from({ length: 10 }, (_, p) => new File([markedJpeg(i * 10 + p).bytes], `p${p}.jpg`, { type: 'image/jpeg' }))
+        const res = await scansApi.$post({ form: { photos } }, { headers: { ...other.headers(), 'cf-connecting-ip': shared } })
+        expect(res.status).toBe(202)
+      }
+      const guest = await newGuest()
+      const productId = await productNeedingAnalysis()
+
+      const refused = await addProduct(guest, { productId }, shared)
+      const elsewhere = await addProduct(guest, { productId }, freshIp())
+
+      expect(refused.status).toBe(429)
+      expect(await errorCodeOf(refused)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(refused)).toBeGreaterThan(0)
+      expect(elsewhere.status).toBe(202)
+    })
+  })
+
+  describe('a product the catalog does not offer', () => {
+    it('answers 404 PRODUCT_NOT_FOUND for an id the catalog does not hold, and makes no scan', async () => {
+      const guest = await newGuest()
+
+      const res = await addProduct(guest, { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+      expect(await scanCountOf(guest)).toBe(0)
+      expect(queued).toEqual([])
+    })
+
+    it('answers 404 PRODUCT_NOT_FOUND for an unnamed product, and makes no scan', async () => {
+      const guest = await newGuest()
+
+      const res = await addProduct(guest, { productId: await unnamedProduct() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+      expect(await scanCountOf(guest)).toBe(0)
+    })
+
+    it('answers 404 rather than 429 when the allowance is used up: the product is looked at first', async () => {
+      const guest = await newGuest()
+      await takePhotos(guest, 30)
+
+      const res = await addProduct(guest, { productId: crypto.randomUUID() })
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+    })
+  })
+
+  describe('the body', () => {
+    it.each([['no productId', {}], ['an empty productId', { productId: '' }], ['a productId that is not text', { productId: 5 }], ['a null body', null]])(
+      'answers 400 VALIDATION_FAILED for %s, and makes no scan',
+      async (_label, body) => {
+        const guest = await newGuest()
+
+        const res = await addProduct(guest, body)
+
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+        expect(await scanCountOf(guest)).toBe(0)
+      },
+    )
+
+    it('answers 400 VALIDATION_FAILED for a body that is not JSON', async () => {
+      const guest = await newGuest()
+
+      const res = await fetchWorker('http://deepertones.test/api/v1/me/shelf', {
+        method: 'POST',
+        headers: { ...guest.headers(), 'content-type': 'application/json' },
+        body: '{not json',
+      })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    })
+  })
+
+  it('answers 401 AUTH_REQUIRED without a token', async () => {
+    const res = await addProduct(undefined, { productId: crypto.randomUUID() })
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+
+  describe('rate limits', () => {
+    it('answers 429 RATE_LIMITED with Retry-After to the 11th add of one user in a minute, from any address', async () => {
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const guest = await newGuest()
+        const statuses: number[] = []
+        let limited: Reply | undefined
+        for (let i = 0; i < 11; i++) {
+          // A product nobody holds: the limit is counted before the route looks at it.
+          const res = await addProduct(guest, { productId: crypto.randomUUID() }, freshIp())
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
+
+      expect(statuses.slice(0, 10)).toEqual(Array(10).fill(404))
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    }, RATE_TEST_TIMEOUT_MS)
+
+    it('answers 429 RATE_LIMITED with Retry-After to the 21st add from one address in a minute, whoever sends it', async () => {
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const shared = freshIp()
+        const statuses: number[] = []
+        let limited: Reply | undefined
+        for (let i = 0; i < 21; i++) {
+          const res = await addProduct(await newGuest(), { productId: crypto.randomUUID() }, shared)
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
+
+      expect(statuses.slice(0, 20)).toEqual(Array(20).fill(404))
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    }, RATE_TEST_TIMEOUT_MS)
   })
 })
