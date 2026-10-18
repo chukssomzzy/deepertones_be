@@ -12,6 +12,7 @@ The brand is the maker's name only, as printed, such as NIVEA, Garnier or CeraVe
 The variant is only a shade, scent or skin type that is printed, and a product line name is not a variant. Use an empty string when none is printed.
 Read the form from the printed words or from the shape of the container. For the texture forms (cream, lotion, gel, balm, serum, oil, liquid, powder) use the word printed on the pack, and if none is printed use unknown. The shape of the container alone may decide only spray (an aerosol can), roll-on (a roll-on ball), stick and bar (a bar of soap). Use unknown when you are not sure. Never guess a form from the brand alone.
 Never guess a brand or name you cannot read.
+List each product once, even when several of the same product stand together.
 
 Do not list the other products. Count them in excluded instead:
 - otherProducts: products that are not beauty or personal care.

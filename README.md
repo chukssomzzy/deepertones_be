@@ -193,7 +193,7 @@ npm run ai:spend -- --env staging          # also --env production; local by def
 ```
 
 It prints today, the last 7 days and the last N days in dollars, then each job and model. The models per job are
-`ANTHROPIC_MODEL_RESEARCH`, `_VISION`, `_JUDGE` (Haiku) and `_ANALYSIS` (Sonnet) in the same file. Design in "AI cost
+`ANTHROPIC_MODEL_RESEARCH`, `_VISION`, `_RECOGNIZE_SHELF`, `_JUDGE` (Haiku) and `_ANALYSIS` (Sonnet) in the same file. Design in "AI cost
 tracking" in `docs/architecture.md`.
 
 To measure the research and analysis steps against fixed cases, run `npm run eval:catalog` (it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.

@@ -837,8 +837,8 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   and category (one of the five) when the label prints them, never guessed; it reads no form. Only the ingredient list decides whether the reading is
   readable: a bad entry (over 120 characters, a hidden character, a link or markup), an empty list or more than 150 entries is
   `{ readable: false }`, while each of brand, name and variant that is empty or fails the same checks, and a category outside the five
-  (the request advertises the five, but the parse is lenient so it cannot fail the list), is dropped on its own and the rest is kept. Both run on the vision
-  model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
+  (the request advertises the five, but the parse is lenient so it cannot fail the list), is dropped on its own and the rest is kept. `recognize` and `read-label` both run on the vision
+  model (`ANTHROPIC_MODEL_VISION`; `recognizeShelf` has its own, `ANTHROPIC_MODEL_RECOGNIZE_SHELF`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
   as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
   trimming), with a link, markup or a hidden character (a control character, `\p{Cc}`, or an invisible format character
   such as a right-to-left override or a zero-width space, `\p{Cf}`), or a list of more than 150 entries, becomes
