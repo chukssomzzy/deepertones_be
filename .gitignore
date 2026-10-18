@@ -50,5 +50,8 @@ Session.vim
 # catalog eval reports
 .eval/
 
+# the owner's real shelf photos and their expected answers for `npm run eval:shelf`: never committed
+eval-photos/
+
 # human layer
 .humanlayer/

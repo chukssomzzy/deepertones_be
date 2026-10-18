@@ -101,9 +101,13 @@ export type ResearchResult =
 /** The product and formulation a label's list belongs to; `analysed` says whether that formulation is already analysed by the current versions. */
 export type LabelResult = { productId: string; formulationId: string; analysed: boolean }
 
-/** A named product as a search shows it, and as an identification reads it back. */
+/**
+ * A product's identity and stock image, nothing about its formulation: what a search shows, what an identification reads back,
+ * and all a scan item carries. Each presenter names the fields it publishes.
+ */
 export type ProductSummary = {
   id: string
+  kind: Product['kind']
   brand: string
   name: string
   variant: string | null
@@ -113,16 +117,7 @@ export type ProductSummary = {
 }
 
 export type ProductView = {
-  product: {
-    id: string
-    kind: Product['kind']
-    brand: string
-    name: string
-    variant: string | null
-    form: ProductForm | null
-    category: Product['category']
-    imageUrl: string | null
-  }
+  product: ProductSummary
   formulation: {
     id: string
     ingredients: string[]
@@ -548,16 +543,7 @@ export class ProductCatalogService {
     const concerns = await this.repository.concernsFor(formulationId)
 
     return {
-      product: {
-        id: product.id,
-        kind: product.kind,
-        brand: product.brand,
-        name: product.name,
-        variant: product.variant,
-        form: product.form,
-        category: product.category,
-        imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
-      },
+      product: this.summaryOf(product),
       formulation: {
         id: formulation.id,
         ingredients: formulation.ingredients,
@@ -578,6 +564,17 @@ export class ProductCatalogService {
     }
   }
 
+  /**
+   * Who the product behind a formulation is, for a screen that must not carry its ingredients or concerns (a scan item). Read
+   * through the formulation, not a product id the caller kept: a named label that adopts an unnamed product's list moves the
+   * formulation and deletes the unnamed product, and an item already showing it must follow. Reads no concerns.
+   */
+  async productSummary(formulationId: string): Promise<ProductSummary> {
+    const formulation = await this.repository.findFormulation(formulationId)
+    if (!formulation) throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    return this.summaryOf(await this.requireProduct(formulation.productId))
+  }
+
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
   private async isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
     try {
@@ -591,6 +588,7 @@ export class ProductCatalogService {
   private summaryOf(product: Product): ProductSummary {
     return {
       id: product.id,
+      kind: product.kind,
       brand: product.brand,
       name: product.name,
       variant: product.variant,

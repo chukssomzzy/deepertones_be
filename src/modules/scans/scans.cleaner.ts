@@ -15,7 +15,8 @@ export class ScanDataCleaner {
   }
 
   /**
-   * Deletes these users' photos and back photos, then their scans, items and back-photo records. The photos go first, so
+   * Deletes these users' photos, back photos and shelf photos, then their scans, scan photos, items and back-photo and retake
+   * records. The images go first, so
    * if the bucket fails the rows stay and the next run finds the same keys; both halves are safe to repeat.
    */
   async deleteForUsers(userIds: string[]): Promise<void> {

@@ -1,0 +1,2 @@
+CREATE INDEX `scan_items_held_updated_at_idx` ON `scan_items` (`updated_at`) WHERE "scan_items"."photo_key" IS NOT NULL;--> statement-breakpoint
+CREATE INDEX `scan_photos_held_updated_at_idx` ON `scan_photos` (`updated_at`) WHERE "scan_photos"."photo_key" IS NOT NULL;

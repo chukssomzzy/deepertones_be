@@ -22,6 +22,7 @@ const SECOND = 1000
 
 const SNAPSHOT = { id: 'scan-snapshot', createdAt: '2030-06-15T12:00:00.000Z', items: [{ id: 'item-1', position: 0, state: 'recognising', reason: null }] }
 const itemEvent = (item: Record<string, unknown>) => ({ type: 'item', item }) as unknown as ScanEvent
+const photoEvent = (photo: Record<string, unknown>) => ({ type: 'photo', photo }) as unknown as ScanEvent
 const DONE = { type: 'done' } as ScanEvent
 
 const stubFor = (scanId: string) => env.SCAN_STREAM.get(env.SCAN_STREAM.idFromName(scanId))
@@ -174,6 +175,51 @@ describe('ScanStream publish', () => {
     await arriving
 
     expect(await clientCount(scanId)).toBe(2)
+  })
+})
+
+describe('ScanStream photo events', () => {
+  const PHOTO = { id: 'photo-1', position: 0, state: 'recognised', skipped: { notBeauty: 2, unreadable: 0, overLimit: 1, dailyLimit: 0 } }
+
+  it('writes a photo event as an event named photo whose data is the photo, not as an item', async () => {
+    const scanId = freshScanId()
+    const { stream } = await subscribe(scanId)
+    await stream.read(1)
+
+    await stubFor(scanId).publish(photoEvent(PHOTO))
+
+    expect((await stream.read(1)).frames).toEqual([`event: photo\ndata: ${JSON.stringify(PHOTO)}`])
+  })
+
+  it('keeps photo and item frames in the order published, each under its own event name', async () => {
+    const scanId = freshScanId()
+    const { stream } = await subscribe(scanId)
+    await stream.read(1)
+    const item = { id: 'item-1', photoId: 'photo-1', state: 'matching' }
+
+    await stubFor(scanId).publish(photoEvent(PHOTO))
+    await stubFor(scanId).publish(itemEvent(item))
+    await stubFor(scanId).publish(DONE)
+
+    const { frames, ended } = await stream.read(4)
+    const parsed = frames.map(parseFrame)
+    expect(parsed.map((frame) => frame.event)).toEqual(['photo', 'item', 'done'])
+    expect(parsed[0]!.data).toEqual(PHOTO)
+    expect(parsed[1]!.data).toEqual(item)
+    expect(ended).toBe(true)
+  })
+
+  it('writes a photo event to every client of the scan', async () => {
+    const scanId = freshScanId()
+    const first = await subscribe(scanId)
+    const second = await subscribe(scanId)
+
+    await stubFor(scanId).publish(photoEvent(PHOTO))
+
+    for (const { stream } of [first, second]) {
+      const { frames } = await stream.read(2)
+      expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['snapshot', 'photo'])
+    }
   })
 })
 
