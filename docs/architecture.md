@@ -1914,6 +1914,16 @@ brand and name both agree, ignoring case and runs of spaces; each expected produ
 - **Run.** Needs `ANTHROPIC_API_KEY` (environment, else `.dev.vars`) and makes real, billed calls, capped by `--max-usd` (default 2). `--model recognize-shelf=MODEL`
   tries another model, `--limit N` runs the first N photos. Report-only: never part of `npm test` or CI, and it prints no model text beyond the brand and name of found products.
 
+### Shelf
+
+`src/modules/shelf` owns `profile_products`: the products a profile uses, one row per entry (spec #100). Part 1 has the table only; the routes and service come later.
+
+- **Invariant.** An item is on its profile's shelf if and only if it reached `ready` (a `product` row) or `unidentified` (a `no-label` row). `D1ScansRepository.updateItem` writes the row in the same `db.batch` as the guarded move, as an INSERT ... SELECT that selects nothing unless the item holds the patched state and `updated_at`, so a lost race or a repeated move writes nothing. `updatedAt` is therefore required on those moves (it throws without). A `ready` item with no product is not shelved.
+- **Latest wins.** A product is one row per (profile, product) (a partial unique index). A later `ready` of the same product points the row at the new formulation, scan and item, moves `last_scanned_at` on, and clears any removal; `added_at` keeps the first time. A no-label row is one per item.
+- **Soft removal.** Removed rows keep `removed_at` and an optional reason; they are not deleted.
+- **Profile.** It comes from the scan row, joined to `profiles` (queue steps run as a system actor, with no session). A scan with no profile, or one naming no profile row, is not shelved and its move still applies. So the invariant holds from the moment a scan has a profile: an item of a pre-rollout scan that was already `ready` or `unidentified` when `adoptOrphanScans` gave the scan a profile is not shelved (there is no backfill, by decision; a rescan shelves the product).
+- **Catalog caveats.** A named label that adopts an unnamed product's list deletes the unnamed product, so a row's `product_id` can dangle (read the product through `formulation_id`), and a rescan after the adoption arrives under a different product id and can leave a second row for one physical product. Accepted for now.
+
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
 through ZeptoMail (see above); WhatsApp, through the Meta WhatsApp Cloud API with an approved

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import type { ShelfEntryRow } from '../shelf/shelf.types'
 import type { ScansRepository } from './scans.repository'
-import type { ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch } from './scans.types'
 
 const BASE = new Date('2030-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -18,12 +19,16 @@ const freshId = () => crypto.randomUUID()
  * What a contract run needs: the repository, and a way to get a user id that exists (D1 enforces scans.user_id -> users.id).
  * For adoptOrphanScans, which reads the owner's default profile: a user the way the old Worker left one, with no profile,
  * and a way to give any user a default profile afterwards.
+ * For the shelf: a way to read every shelf row of a profile (removed ones too), and an arrange-only stand-in for removing one
+ * (the shelf module's own remove comes later), so the tests can prove a later move restores it.
  */
 export type ScansContractSetup = {
   repository: ScansRepository
   newUser: () => Promise<string>
   newUserWithoutProfile: () => Promise<string>
   giveDefaultProfile: (userId: string) => Promise<string>
+  shelfOf: (profileId: string) => Promise<ShelfEntryRow[]>
+  removeFromShelf: (entryId: string, reason: NonNullable<ShelfEntryRow['removedReason']>, at: Date) => Promise<void>
 }
 
 // scans.profile_id has no foreign key (profiles die with their user, and the user's scans with it), so any id will do.
@@ -737,6 +742,264 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
 
         expect((await repository.findItem(items[1]!.id))!.state).toBe('recognising')
+      })
+    })
+
+    describe('the shelf', () => {
+      const MOVE_AT = at(5 * MINUTE)
+
+      /** A user with a real default profile (the shelf row's foreign key is real on D1), and a way to scan as that profile. */
+      const shelving = async () => {
+        const setup = await make()
+        const userId = await setup.newUserWithoutProfile()
+        const profileId = await setup.giveDefaultProfile(userId)
+        const scanItems = async (count = 1, over: Partial<NewScan> = {}) => {
+          const scan = newScan(userId, { profileId, ...over })
+          const items = Array.from({ length: count }, (_, i) => newItem(scan, i))
+          await createWithPhotos(setup.repository, scan, items)
+          return { scan, items }
+        }
+        return { ...setup, userId, profileId, scanItems }
+      }
+      const ready = (productId: string, formulationId: string, updatedAt: Date): ItemPatch => ({ state: 'ready', productId, formulationId, updatedAt })
+
+      it('puts an item that moves into ready on its profile\'s shelf: one product row with the item\'s product and formulation, its scan and item as the source, and the move time as added and last scanned', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { scan, items } = await scanItems()
+        const [productId, formulationId] = [fresh('product'), fresh('formulation')]
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', ready(productId, formulationId, MOVE_AT))
+
+        expect(applied).toBe(true)
+        const rows = await shelfOf(profileId)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({
+          profileId,
+          kind: 'product',
+          productId,
+          formulationId,
+          scanId: scan.id,
+          itemId: items[0]!.id,
+          addedAt: MOVE_AT,
+          lastScannedAt: MOVE_AT,
+          removedAt: null,
+          removedReason: null,
+        })
+      })
+
+      it('records an upload and shelves the item when one move into ready carries both, and says the move applied', async () => {
+        const { repository, userId, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems()
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', ready(fresh('product'), fresh('formulation'), MOVE_AT), newUpload(items[0]!.id, userId, MOVE_AT))
+
+        expect(applied).toBe(true)
+        expect(await repository.countBackPhotos(items[0]!.id)).toBe(1)
+        expect(await shelfOf(profileId)).toHaveLength(1)
+      })
+
+      it('keeps one row when a second item of the same product reaches ready for the profile: formulation, source and last scanned follow the newer item, added stays the first time', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const productId = fresh('product')
+        const first = await scanItems()
+        const second = await scanItems()
+        const newerFormulation = fresh('formulation')
+        await repository.updateItem(first.items[0]!.id, 'recognising', ready(productId, fresh('formulation'), at(5 * MINUTE)))
+        const entryId = (await shelfOf(profileId))[0]!.id
+
+        await repository.updateItem(second.items[0]!.id, 'recognising', ready(productId, newerFormulation, at(9 * MINUTE)))
+
+        const rows = await shelfOf(profileId)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({
+          id: entryId,
+          productId,
+          formulationId: newerFormulation,
+          scanId: second.scan.id,
+          itemId: second.items[0]!.id,
+          addedAt: at(5 * MINUTE),
+          lastScannedAt: at(9 * MINUTE),
+        })
+      })
+
+      it('restores a removed product when an item of it reaches ready again: removed time and reason are cleared, added stays the first time', async () => {
+        const { repository, profileId, scanItems, shelfOf, removeFromShelf } = await shelving()
+        const productId = fresh('product')
+        const first = await scanItems()
+        const second = await scanItems()
+        await repository.updateItem(first.items[0]!.id, 'recognising', ready(productId, fresh('formulation'), at(5 * MINUTE)))
+        const entryId = (await shelfOf(profileId))[0]!.id
+        await removeFromShelf(entryId, 'finished', at(6 * MINUTE))
+        expect((await shelfOf(profileId))[0]).toMatchObject({ removedAt: at(6 * MINUTE), removedReason: 'finished' })
+
+        await repository.updateItem(second.items[0]!.id, 'recognising', ready(productId, fresh('formulation'), at(9 * MINUTE)))
+
+        const rows = await shelfOf(profileId)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({ id: entryId, removedAt: null, removedReason: null, addedAt: at(5 * MINUTE), lastScannedAt: at(9 * MINUTE), itemId: second.items[0]!.id })
+      })
+
+      it('gives each profile its own row for the same product', async () => {
+        const { repository, shelfOf, profileId, scanItems, newUserWithoutProfile, giveDefaultProfile } = await shelving()
+        const productId = fresh('product')
+        const mine = await scanItems()
+        const otherUser = await newUserWithoutProfile()
+        const otherProfile = await giveDefaultProfile(otherUser)
+        const theirScan = newScan(otherUser, { profileId: otherProfile })
+        const theirItem = newItem(theirScan, 0)
+        await createWithPhotos(repository, theirScan, [theirItem])
+
+        await repository.updateItem(mine.items[0]!.id, 'recognising', ready(productId, fresh('formulation'), at(5 * MINUTE)))
+        await repository.updateItem(theirItem.id, 'recognising', ready(productId, fresh('formulation'), at(6 * MINUTE)))
+
+        const [theirs, ours] = [await shelfOf(otherProfile), await shelfOf(profileId)]
+        expect(ours.map((r) => r.itemId)).toEqual([mine.items[0]!.id])
+        expect(theirs.map((r) => r.itemId)).toEqual([theirItem.id])
+      })
+
+      it('puts an item that moves into unidentified on the shelf as a no-label row with no product or formulation, its scan and item as the source', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { scan, items } = await scanItems()
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', { state: 'unidentified', updatedAt: MOVE_AT })
+
+        expect(applied).toBe(true)
+        const rows = await shelfOf(profileId)
+        expect(rows).toHaveLength(1)
+        expect(rows[0]).toMatchObject({
+          profileId,
+          kind: 'no-label',
+          productId: null,
+          formulationId: null,
+          scanId: scan.id,
+          itemId: items[0]!.id,
+          addedAt: MOVE_AT,
+          lastScannedAt: MOVE_AT,
+          removedAt: null,
+          removedReason: null,
+        })
+      })
+
+      it('gives every unidentified item its own row, whatever its answers', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems(2)
+
+        await repository.updateItem(items[0]!.id, 'recognising', { state: 'unidentified', updatedAt: at(5 * MINUTE) })
+        await repository.updateItem(items[1]!.id, 'recognising', { state: 'unidentified', updatedAt: at(6 * MINUTE) })
+
+        const rows = await shelfOf(profileId)
+        expect(rows.map((r) => r.itemId).sort()).toEqual(items.map((i) => i.id).sort())
+        expect(rows.every((r) => r.kind === 'no-label')).toBe(true)
+      })
+
+      it('shelves nothing, and says false, when the guarded move does not apply because the item is in another state', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems(2)
+
+        const ready_ = await repository.updateItem(items[0]!.id, 'matching', ready(fresh('product'), fresh('formulation'), MOVE_AT))
+        const unidentified = await repository.updateItem(items[1]!.id, 'matching', { state: 'unidentified', updatedAt: MOVE_AT })
+
+        expect([ready_, unidentified]).toEqual([false, false])
+        expect(await shelfOf(profileId)).toEqual([])
+      })
+
+      it('shelves nothing for an unknown item', async () => {
+        const { repository, profileId, shelfOf } = await shelving()
+
+        expect(await repository.updateItem(freshId(), 'recognising', ready(fresh('product'), fresh('formulation'), MOVE_AT))).toBe(false)
+        expect(await shelfOf(profileId)).toEqual([])
+      })
+
+      it('applies a move into ready for a scan with no profile, and shelves nothing', async () => {
+        const { repository, newUserWithoutProfile } = await make()
+        // An owner with no profile, so the reaper's adoption (another case) never picks this scan up.
+        const scan = orphan(await newUserWithoutProfile())
+        const item = newItem(scan, 0)
+        await createWithPhotos(repository, scan, [item])
+
+        const applied = await repository.updateItem(item.id, 'recognising', ready(fresh('product'), fresh('formulation'), MOVE_AT))
+
+        expect(applied).toBe(true)
+        expect((await repository.findItem(item.id))!.state).toBe('ready')
+      })
+
+      it('applies a move into unidentified for a scan with no profile, and shelves nothing', async () => {
+        const { repository, newUserWithoutProfile } = await make()
+        // An owner with no profile, so the reaper's adoption (another case) never picks this scan up.
+        const scan = orphan(await newUserWithoutProfile())
+        const item = newItem(scan, 0)
+        await createWithPhotos(repository, scan, [item])
+
+        expect(await repository.updateItem(item.id, 'recognising', { state: 'unidentified', updatedAt: MOVE_AT })).toBe(true)
+        expect((await repository.findItem(item.id))!.state).toBe('unidentified')
+      })
+
+      it('applies the move, and shelves nothing, when the scan\'s profile is not a profile that exists', async () => {
+        const { repository, newUser, shelfOf } = await make()
+        const scan = newScan(await newUser())
+        const items = [newItem(scan, 0), newItem(scan, 1)]
+        await createWithPhotos(repository, scan, items)
+
+        const applied = [
+          await repository.updateItem(items[0]!.id, 'recognising', ready(fresh('product'), fresh('formulation'), MOVE_AT)),
+          await repository.updateItem(items[1]!.id, 'recognising', { state: 'unidentified', updatedAt: MOVE_AT }),
+        ]
+
+        expect(applied).toEqual([true, true])
+        expect((await repository.findItem(items[0]!.id))!.state).toBe('ready')
+        expect((await repository.findItem(items[1]!.id))!.state).toBe('unidentified')
+        expect(await shelfOf(scan.profileId)).toEqual([])
+      })
+
+      it.each(['matching', 'analysing', 'researching', 'reading-label', 'needs-back-photo', 'needs-confirmation', 'rejected', 'failed'] as const)('shelves nothing for a move into %s', async (state) => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems()
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', { state, productId: fresh('product'), formulationId: fresh('formulation'), updatedAt: MOVE_AT })
+
+        expect(applied).toBe(true)
+        expect(await shelfOf(profileId)).toEqual([])
+      })
+
+      it('shelves nothing when a ready item has no product, and the move still applies', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems()
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', { state: 'ready', updatedAt: MOVE_AT })
+
+        expect(applied).toBe(true)
+        expect((await repository.findItem(items[0]!.id))!.state).toBe('ready')
+        expect(await shelfOf(profileId)).toEqual([])
+      })
+
+      it.each(['ready', 'unidentified'] as const)('throws, and leaves the item as it was, when a move into %s carries no time', async (state) => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems()
+        const before = await repository.findItem(items[0]!.id)
+
+        await expect(repository.updateItem(items[0]!.id, 'recognising', { state, productId: fresh('product') } as unknown as ItemPatch)).rejects.toThrow()
+
+        expect(await repository.findItem(items[0]!.id)).toEqual(before)
+        expect(await shelfOf(profileId)).toEqual([])
+      })
+
+      it('neither duplicates nor bumps a row when a move is repeated and its guard no longer matches', async () => {
+        const { repository, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems(2)
+        const productId = fresh('product')
+        const formulationId = fresh('formulation')
+        await repository.updateItem(items[0]!.id, 'recognising', ready(productId, formulationId, at(5 * MINUTE)))
+        await repository.updateItem(items[1]!.id, 'recognising', { state: 'unidentified', updatedAt: at(5 * MINUTE) })
+        const before = await shelfOf(profileId)
+
+        const again = [
+          await repository.updateItem(items[0]!.id, 'recognising', ready(productId, fresh('formulation'), at(9 * MINUTE))),
+          await repository.updateItem(items[1]!.id, 'recognising', { state: 'unidentified', updatedAt: at(9 * MINUTE) }),
+        ]
+
+        expect(again).toEqual([false, false])
+        expect(before).toHaveLength(2)
+        expect(await shelfOf(profileId)).toEqual(before)
       })
     })
 

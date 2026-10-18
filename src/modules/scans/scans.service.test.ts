@@ -35,6 +35,7 @@ import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-sp
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
 import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import { toScanResponse } from './scans.presenter'
+import { FakeShelfStore } from '../shelf/shelf.store.fake'
 import { FakeScansRepository } from './scans.repository.fake'
 import { SCAN_POLICY, ScanService } from './scans.service'
 
@@ -86,7 +87,9 @@ const setup = (options: SetupOptions = {}) => {
   let clock = T0
   let n = 0
   let c = 0
-  const repository = options.repository ?? new FakeScansRepository()
+  // The shelf rows the scans repository writes, for the tests to read (a repository passed in brings its own store).
+  const shelf = new FakeShelfStore()
+  const repository = options.repository ?? new FakeScansRepository({ shelf })
   const catalogRepository = new FakeCatalogRepository()
   const researcher = new MemoryProductResearcher()
   const analyst = new MemoryProductAnalyst()
@@ -149,6 +152,7 @@ const setup = (options: SetupOptions = {}) => {
   return {
     service,
     repository,
+    shelf,
     catalog,
     catalogRepository,
     researcher,
@@ -5713,6 +5717,172 @@ describe('ScanService: an unidentified item and the background jobs', () => {
 
     expect(ctx.events.eventsFor(scanId).slice(published).map((e) => e.type)).toEqual(['done'])
     expect((await ctx.repository.findScan(scanId))!.doneAt).toEqual(ctx.now())
+  })
+})
+
+// Whatever the way into ready or unidentified, the item is on its profile's shelf; no other state is. The rows are read from the shelf store the fake repository writes.
+describe('ScanService: the shelf an item reaches', () => {
+  const rowsOf = (ctx: Ctx, profileId = PROFILE) => ctx.shelf.rows.filter((row) => row.profileId === profileId)
+
+  it('puts an item on the shelf when the catalog already holds its analysed product: the match step', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await catalogued(ctx)
+    const { scanId, itemId } = await reach(ctx, 'matching')
+    expect(rowsOf(ctx)).toEqual([])
+
+    await run(ctx, itemId, 'match')
+
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'product', productId, formulationId, scanId, itemId, addedAt: ctx.now(), lastScannedAt: ctx.now(), removedAt: null, removedReason: null })
+  })
+
+  it('puts an item on the shelf when its name is picked from search and the catalog sends it straight to ready', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+    const { productId, formulationId } = await catalogued(ctx)
+    expect(rowsOf(ctx)).toEqual([])
+
+    await asUser(() => ctx.service.identifyByName(scanId, itemId, { productId }))
+
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'product', productId, formulationId, scanId, itemId, lastScannedAt: ctx.now() })
+  })
+
+  it('puts an item on the shelf when research finds nothing new and the earlier analysed formulation is shown', async () => {
+    const ctx = setup()
+    const old = await catalogued(ctx)
+    ctx.advance(FRESH_FOR_DAYS * DAY + 1)
+    const { scanId, itemId } = await reach(ctx, 'matching')
+    await run(ctx, itemId, 'match')
+    ctx.researcher.respondWith(() => ({ found: false }))
+    expect(rowsOf(ctx)).toEqual([])
+
+    await run(ctx, itemId, 'research')
+
+    expect(rowsOf(ctx)).toHaveLength(1)
+    expect(rowsOf(ctx)[0]).toMatchObject({ kind: 'product', productId: old.productId, formulationId: old.formulationId, scanId, itemId })
+  })
+
+  it('puts an item on the shelf when the list on its back photo is one the catalog has already analysed: the read-label step', async () => {
+    const ctx = setup()
+    const first = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList())
+    await run(ctx, first.itemId, 'read-label')
+    await run(ctx, first.itemId, 'analyse')
+    const second = await readingUnidentified(ctx, 10)
+    expect(rowsOf(ctx).map((r) => r.itemId)).toEqual([first.itemId])
+
+    await run(ctx, second.itemId, 'read-label')
+
+    expect(await stateOf(ctx, second.scanId, second.itemId)).toEqual({ state: 'ready', reason: null })
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'product', scanId: second.scanId, itemId: second.itemId, formulationId: await formulationIdOf(ctx, second.itemId) })
+  })
+
+  it('puts an item on the shelf when its analysis is done: the analyse step', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await analysingItem(ctx)
+    expect(rowsOf(ctx)).toEqual([])
+
+    await run(ctx, itemId, 'analyse')
+
+    const stored = (await ctx.repository.findItem(itemId))!
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'product', productId: stored.productId, formulationId: stored.formulationId, scanId, itemId })
+  })
+
+  it('puts an item the user says has no label on the shelf as a no-label entry, without a product', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+    expect(rowsOf(ctx)).toEqual([])
+
+    await asUser(() => ctx.service.noLabel(scanId, itemId, { source: 'market-vendor', purpose: 'lighten', usedFor: '6-months-2-years' } as never))
+
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ kind: 'no-label', productId: null, formulationId: null, scanId, itemId, addedAt: ctx.now(), lastScannedAt: ctx.now() })
+  })
+
+  it('keeps an item off the shelf while it is still being worked on', async () => {
+    const ctx = setup()
+    await catalogued(ctx, CERAVE, { analysed: false })
+    const matching = await reach(ctx, 'matching')
+    await reach(ctx, 'needs-confirmation')
+    await reach(ctx, 'researching')
+    await reach(ctx, 'needs-back-photo')
+    await run(ctx, matching.itemId, 'match')
+
+    expect(await stateOf(ctx, matching.scanId, matching.itemId)).toMatchObject({ state: 'analysing' })
+    expect(rowsOf(ctx)).toEqual([])
+  })
+
+  it('keeps a rejected item off the shelf', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+    const { scanId, itemId } = await scanOne(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('rejected')
+    expect(rowsOf(ctx)).toEqual([])
+  })
+
+  it('keeps a failed item off the shelf', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await scanOne(ctx)
+    ctx.photos.stored.delete(photoKey(scanId, itemId))
+
+    await run(ctx, itemId, 'recognise')
+
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('failed')
+    expect(rowsOf(ctx)).toEqual([])
+  })
+
+  it('keeps an item whose analysis the catalog gave up on off the shelf', async () => {
+    const ctx = setup()
+    const { formulationId } = await catalogued(ctx, CERAVE, { ingredients: WITH_MERCURY, analysed: false })
+    for (let i = 0; i < 3; i++) await ctx.catalog.analyse(formulationId).catch(() => undefined)
+    const { scanId, itemId } = await reach(ctx, 'matching')
+
+    await run(ctx, itemId, 'match')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'analysis-failed' })
+    expect(rowsOf(ctx)).toEqual([])
+  })
+
+  it('updates the one entry when the same product is scanned again: the newer scan is its source, the first time stays as added', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await catalogued(ctx)
+    const first = await reach(ctx, 'matching')
+    await run(ctx, first.itemId, 'match')
+    const firstAt = ctx.now()
+    ctx.advance(HOUR)
+    const second = await reach(ctx, 'matching')
+
+    await run(ctx, second.itemId, 'match')
+
+    const rows = rowsOf(ctx)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ productId, formulationId, scanId: second.scanId, itemId: second.itemId, addedAt: firstAt, lastScannedAt: ctx.now() })
+    expect(ctx.now().getTime()).toBe(firstAt.getTime() + HOUR)
+  })
+
+  it('keeps each profile\'s shelf apart: the same product scanned by two profiles is on both', async () => {
+    const ctx = setup()
+    const { productId } = await catalogued(ctx)
+    const mine = await reach(ctx, 'matching')
+    const scan = await create(ctx, [markedJpeg(2)], { ip: OTHER_IP, userId: OTHER_USER, profileId: OTHER_PROFILE })
+    const theirs = scan.items[0].id as string
+    await run(ctx, theirs, 'recognise')
+    await run(ctx, mine.itemId, 'match')
+    await run(ctx, theirs, 'match')
+
+    expect(rowsOf(ctx).map((r) => [r.productId, r.itemId])).toEqual([[productId, mine.itemId]])
+    expect(rowsOf(ctx, OTHER_PROFILE).map((r) => [r.productId, r.itemId])).toEqual([[productId, theirs]])
   })
 })
 

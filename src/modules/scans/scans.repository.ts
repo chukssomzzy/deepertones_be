@@ -5,6 +5,7 @@ import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
 import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
+import { profileProducts } from '../shelf/shelf.table'
 import { PHOTO_HELD_STATES } from './scans.types'
 import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
@@ -76,6 +77,12 @@ export class D1ScansRepository {
    * `backPhoto` is the upload this move records for the daily quotas. It goes in the same batch as the update and is
    * written only if the item is in the `expected` state, so it is recorded exactly when the update applies: the insert
    * runs first, while the state is still what it was. `retake` is the same for a retaken front photo.
+   *
+   * A move into `ready` or `unidentified` also puts the item on its profile's shelf, in the same batch and after the update, so
+   * the item is on the shelf if and only if it got there (see the shelf section of docs/architecture.md). The shelf write is
+   * guarded by the item now holding the patched state and `updatedAt`, so a lost race writes nothing; it is also skipped, with the
+   * move still applying, when the scan has no profile or names none. That guard is why `updatedAt` is required on these moves: the
+   * method throws before writing anything when it is missing.
    */
   async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
     const update = this.db
@@ -86,11 +93,15 @@ export class D1ScansRepository {
     const statements: BatchItem<'sqlite'>[] = []
     if (backPhoto) statements.push(this.db.insert(scanBackPhotos).select(this.uploadIfStill(backPhoto, expected)))
     if (retake) statements.push(this.db.insert(scanRetakes).select(this.uploadIfStill(retake, expected)))
-    if (statements.length === 0) return (await update).length === 1
+    const shelved = patch.state === 'ready' || patch.state === 'unidentified' ? patch.state : null
+    if (shelved && !patch.updatedAt) throw new Error('updatedAt is required when an item moves into ready or unidentified')
+    if (statements.length === 0 && !shelved) return (await update).length === 1
 
     statements.push(update)
+    if (shelved) statements.push(this.shelve(itemId, shelved, patch.updatedAt))
     const results = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
-    return (results[results.length - 1] as { id: string }[]).length === 1
+    const updated = shelved ? results[results.length - 2] : results[results.length - 1]
+    return (updated as { id: string }[]).length === 1
   }
 
   /**
@@ -118,7 +129,8 @@ export class D1ScansRepository {
    */
   async fanOut(input: {
     photo: { id: string; patch: PhotoPatch }
-    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    // Never into ready or unidentified: only updateItem puts an item on its profile's shelf.
+    placeholder: { id: string; from: ItemState; patch: ItemPatch & { state?: Exclude<ItemState, 'ready' | 'unidentified'> } }
     siblings: NewSibling[]
     maxItems: number
   }): Promise<{ placeholderMoved: boolean }> {
@@ -343,6 +355,35 @@ export class D1ScansRepository {
   private uploadIfStill(upload: NewBackPhoto | NewRetake, expected: ItemState) {
     return sql`select ${upload.id}, ${upload.itemId}, ${upload.userId}, ${upload.ipHash}, ${upload.uploadedAt.getTime()}
         where exists (select 1 from ${scanItems} where ${scanItems.id} = ${upload.itemId} and ${scanItems.state} = ${expected})`
+  }
+
+  /**
+   * The shelf write for an item that has just moved to `state` at `at`: one INSERT ... SELECT that selects nothing unless the item holds
+   * that state and time (so only the winner of the guarded update writes), and its scan names a profile that exists. A product row for the
+   * same profile and product is updated to this item (latest wins; a removed row is restored; `added_at` stays); a no-label row for an
+   * item already on the shelf is left alone. A `ready` item with no product is not shelved.
+   */
+  private shelve(itemId: string, state: 'ready' | 'unidentified', at: Date) {
+    const product = state === 'ready'
+    const row = sql`select ${crypto.randomUUID()}, ${profiles.id}, ${product ? 'product' : 'no-label'}, ${product ? sql`${scanItems.productId}` : sql`null`}, ${product ? sql`${scanItems.formulationId}` : sql`null`},
+        ${scans.id}, ${scanItems.id}, ${at.getTime()}, ${at.getTime()}, null, null
+        from ${scanItems} join ${scans} on ${scans.id} = ${scanItems.scanId} join ${profiles} on ${profiles.id} = ${scans.profileId}
+        where ${scanItems.id} = ${itemId} and ${scanItems.state} = ${state} and ${scanItems.updatedAt} = ${at.getTime()}${product ? sql` and ${scanItems.productId} is not null` : sql``}`
+    const insert = this.db.insert(profileProducts).select(row)
+    return product
+      ? insert.onConflictDoUpdate({
+          target: [profileProducts.profileId, profileProducts.productId],
+          targetWhere: sql`${profileProducts.productId} is not null`,
+          set: {
+            formulationId: sql`excluded.formulation_id`,
+            scanId: sql`excluded.scan_id`,
+            itemId: sql`excluded.item_id`,
+            lastScannedAt: sql`excluded.last_scanned_at`,
+            removedAt: null,
+            removedReason: null,
+          },
+        })
+      : insert.onConflictDoNothing() // only the item index can clash: a no-label row has no product
   }
 
   /** The sibling as a SELECT that yields it only while its scan holds fewer than `maxItems` items, for an INSERT ... SELECT (one value per column, in the table's order). */
