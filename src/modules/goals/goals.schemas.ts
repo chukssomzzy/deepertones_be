@@ -2,7 +2,7 @@ import { z } from '@hono/zod-openapi'
 import { SafetyResponse } from '../safety/safety.schemas'
 import { GOALS } from './goals.vocabulary'
 
-const GoalName = z.enum(GOALS).openapi({ description: 'One of the five goals the app offers.', example: 'fade-dark-marks' })
+const GoalName = z.enum(GOALS).openapi({ description: 'One of the six goals the app offers.', example: 'fade-dark-marks' })
 
 // Exactly one of the two: strict objects mean a body with both, or with neither, matches neither.
 export const SetGoalBody = z

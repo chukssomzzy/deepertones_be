@@ -4,7 +4,7 @@ import { goalReaderReadGoalPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { GoalReader, GoalReading } from './goal-reader.provider'
 
-/** Sorts typed words into one of the five goals with Claude. The model is not trusted: a reply off the schema is "no goal", not a failed call. */
+/** Sorts typed words into one of the six goals with Claude. The model is not trusted: a reply off the schema is "no goal", not a failed call. */
 export class AnthropicGoalReader implements GoalReader {
   // Haiku 5.5's adaptive thinking counts against max_tokens: a small budget can be spent thinking and cut the answer off.
   private static readonly MAX_TOKENS = 4096

@@ -25,6 +25,9 @@ export type Severity = (typeof SEVERITIES)[number]
 // TRAITS mirror Perfect Corp skin-analysis concern types (acne, spots, redness, oiliness, hydration, pores, texture,
 // wrinkles) + Fitzpatrick I-VI + onboarding goals. The exact Perfect Corp field names are unconfirmed (a skin-type
 // field in particular): check its API schema before personalisation ships, then rename here and re-analyse.
+// `goal:calm-repair` is last because it came after the other five: it is for skin made thin, red or reactive by a strong cream, which is
+// the product's primary user (CONTEXT.md). ANALYSIS_VERSION was not bumped for it, so analyses made before it simply lack the trait until
+// they are next re-analysed.
 export const TRAITS = [
   'acne-prone',
   'dark-spots',
@@ -47,6 +50,7 @@ export const TRAITS = [
   'goal:fade-dark-marks',
   'goal:brighter',
   'goal:glow',
+  'goal:calm-repair',
 ] as const
 export type Trait = (typeof TRAITS)[number]
 

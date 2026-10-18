@@ -28,7 +28,7 @@ describe('GOAL_ANSWERS_VERSION', () => {
 })
 
 describe('answerFor', () => {
-  it('gives each goal its own title, so the five chips lead to five different answers', () => {
+  it('gives each goal its own title, so every chip leads to a different answer', () => {
     const titles = new Set(GOALS.map((goal: Goal) => answerFor(goal, false).title))
 
     expect(titles.size).toBe(GOALS.length)
@@ -85,5 +85,29 @@ describe('answerFor', () => {
 
   it.each(GOALS.flatMap((goal: Goal): [Goal, boolean][] => [[goal, false], [goal, true]]))('never says in %s (wants lighter: %s) that stopping and starting a product keeps skin unsettled', (goal: Goal, wantsLighter: boolean) => {
     expect(textOf(goal, wantsLighter)).not.toMatch(/stopping and starting/i)
+  })
+})
+
+// calm-repair is for skin made reactive by a lightening, bleaching, toning or steroid cream (CONTEXT.md, the primary user). Stopping such a
+// cream suddenly causes a rebound, which is what sent Amara back to it, so the product plans a dated step-down and says up front that a
+// flare can happen. Its copy must never tell her to simply stop.
+describe('answerFor calm-repair', () => {
+  const text = () => textOf('calm-repair', false)
+
+  it('is called "Calm, healthy skin again"', () => {
+    expect(answerFor('calm-repair', false).title).toBe('Calm, healthy skin again')
+  })
+
+  it('never tells the user to stop a product outright, because stopping a steroid or lightening cream suddenly causes a rebound', () => {
+    expect(text().trim()).not.toBe('')
+    expect(text()).not.toMatch(/\bstop (using|it|them)\b/i)
+  })
+
+  it('mentions a step-down, a taper or going step by step', () => {
+    expect(text()).toMatch(/step[- ]down|taper|step by step/i)
+  })
+
+  it('says a flare, or skin getting worse before it gets better, can be expected', () => {
+    expect(text()).toMatch(/flare|worse before/i)
   })
 })

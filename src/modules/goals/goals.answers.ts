@@ -69,6 +69,15 @@ const PLANS: Record<Goal, Plan> = {
     inTheWay:
       'Over-cleansing and scrubbing, which strip the skin and leave it looking dull, and skipping sun protection.',
   },
+  'calm-repair': {
+    title: 'Calm, healthy skin again',
+    howLong:
+      'If a strong cream has left your skin thin, red or easily upset, it often gets worse before it gets better, and a flare in the first few weeks is expected. It does not mean you are doing something wrong. Calming usually takes weeks, and skin that has thinned can take months.',
+    helps:
+      'A very short, gentle routine and sun protection every day. Anything that is hurting your skin comes off on a dated step-down plan, a little at a time rather than all at once, so that changing it does not cause a crash.',
+    inTheWay:
+      'Strong or stinging products, scrubbing, and stopping and restarting a strong cream. We\'ll check what you use and plan a step-down.',
+  },
 }
 
 // One note whichever goal the person was sorted into: what they asked for gets a real routine, and the one honest thing is said once.

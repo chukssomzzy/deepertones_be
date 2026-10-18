@@ -226,7 +226,7 @@ export const RESEARCH_CASES: ResearchCase[] = [
  * `goal: null`.
  */
 export const GOAL_CASES: GoalCase[] = [
-  // Plain goals, one way or another of saying each of the five.
+  // Plain goals, one way or another of saying each of the six.
   { id: 'make-face-clear', text: 'make my face clear', expect: { goal: 'clear-skin', wantsLighter: false } },
   { id: 'fresh-face-pidgin', text: 'I wan fresh face', expect: { goal: 'glow', wantsLighter: false } },
   { id: 'remove-dark-spots', text: 'remove dark spots for my face', expect: { goal: 'fade-dark-marks', wantsLighter: false } },
@@ -237,7 +237,7 @@ export const GOAL_CASES: GoalCase[] = [
   { id: 'even-skin-tone', text: 'even out my skin tone', expect: { goal: 'even-tone', wantsLighter: false } },
   { id: 'dull-want-brighter', text: 'my skin is dull, I want it brighter', expect: { goal: 'brighter', wantsLighter: false } },
   { id: 'uneven-patches', text: 'uneven patches on my face', expect: { goal: 'even-tone', wantsLighter: false } },
-  { id: 'tired-want-radiant', text: 'my skin looks tired, I want it radiant', expect: { goal: 'glow', wantsLighter: false } },
+  { id: 'tired-want-radiant', text: 'my skin looks tired, I want it radiant', expect: { goal: 'brighter', wantsLighter: false } },
   { id: 'shine', text: 'I want my skin to shine', expect: { goal: 'glow', wantsLighter: false } },
   { id: 'pimple-marks', text: 'pimple marks on my cheeks', expect: { goal: 'fade-dark-marks', wantsLighter: false } },
   { id: 'oily-blackheads', text: 'oily T-zone and blackheads', expect: { goal: 'clear-skin', wantsLighter: false } },
@@ -251,15 +251,24 @@ export const GOAL_CASES: GoalCase[] = [
   { id: 'fairer-for-wedding', text: 'make me look fairer for my wedding', expect: { goal: 'brighter', wantsLighter: true } },
   { id: 'lighten-skin-tone', text: 'lighten my skin tone', expect: { goal: 'brighter', wantsLighter: true } },
 
-  // Mentioning lightening is not asking for it. The important part of each is wantsLighter false; the goal is the closest of the five.
-  // Someone who bleached and wants to recover is Amara: she is not asking to be lighter, and the colour note would be a lecture.
-  { id: 'repair-from-bleaching', text: 'repair my skin from bleaching', expect: { goal: 'clear-skin', wantsLighter: false } },
-  { id: 'stopped-toning-cream', text: 'I stopped using toning cream and my face is bad', expect: { goal: 'clear-skin', wantsLighter: false } },
+  // Mentioning lightening is not asking for it. The important part of each is wantsLighter false. Someone who bleached or used a toning
+  // cream and wants to recover is Amara: she is not asking to be lighter, and the colour note would be a lecture.
+  { id: 'repair-from-bleaching', text: 'repair my skin from bleaching', expect: { goal: 'calm-repair', wantsLighter: false } },
+  { id: 'stopped-toning-cream', text: 'I stopped using toning cream and my face is bad', expect: { goal: 'calm-repair', wantsLighter: false } },
+  // Skin damaged or made reactive by a lightening, bleaching, toning or steroid cream, or sensitive and reactive in general: calm-repair.
+  { id: 'burns-since-cream', text: 'my skin burns since I used that cream', expect: { goal: 'calm-repair', wantsLighter: false } },
+  { id: 'thin-and-red', text: 'my face is thin and red', expect: { goal: 'calm-repair', wantsLighter: false } },
+  { id: 'steroid-cream-damage', text: 'steroid cream damaged my face', expect: { goal: 'calm-repair', wantsLighter: false } },
+  { id: 'sensitive-everything-stings', text: 'my skin is very sensitive, everything stings', expect: { goal: 'calm-repair', wantsLighter: false } },
+  { id: 'heal-after-bleaching', text: 'I want my skin to heal after bleaching', expect: { goal: 'calm-repair', wantsLighter: false } },
   { id: 'dark-knuckles-from-bleach', text: 'fix dark knuckles from bleach', expect: { goal: 'fade-dark-marks', wantsLighter: false } },
   { id: 'lighten-dark-spots', text: 'lighten my dark spots', expect: { goal: 'fade-dark-marks', wantsLighter: false } },
   { id: 'lighter-scars', text: 'make my scars lighter', expect: { goal: 'fade-dark-marks', wantsLighter: false } },
   { id: 'no-bleach-even-skin', text: "I don't want to bleach, I want even skin", expect: { goal: 'even-tone', wantsLighter: false } },
   { id: 'love-my-colour-clear-pimples', text: "I don't want lighter skin, I love my colour, just clear the pimples", expect: { goal: 'clear-skin', wantsLighter: false } },
+
+  // Wanting to bleach again, whatever the skin looks like now, is still asking to be lighter.
+  { id: 'bleach-again-getting-dark', text: 'I want to bleach again, my skin is getting dark', expect: { goal: 'brighter', wantsLighter: true } },
 
   // Not a skin goal (including a refusal to be lighter with nothing else to sort): no goal, and no colour note.
   { id: 'not-want-to-be-fair', text: "I don't want to be fair", expect: { goal: null, wantsLighter: false } },

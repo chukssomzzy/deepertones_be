@@ -8,7 +8,7 @@ export type GoalReading = {
 }
 
 /**
- * Sorts words a user typed about their skin ("make my face clear") into one of the five goals.
+ * Sorts words a user typed about their skin ("make my face clear") into one of the six goals.
  * Adapters throw their vendor's errors for failures the caller can act on; "no goal in these words" is a result, not an error.
  */
 export interface GoalReader {
