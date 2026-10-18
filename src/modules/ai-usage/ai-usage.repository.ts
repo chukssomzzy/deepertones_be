@@ -11,9 +11,9 @@ export class D1AiUsageRepository {
   constructor(private readonly db: Db) {}
 
   /**
-   * Reserves `estimateMicros` if what is already committed since `since` plus this estimate is within `capMicros`.
-   * ONE conditional INSERT ... SELECT, so simultaneous requests cannot both take the last of the budget (a read followed
-   * by a write would let both through). False, with nothing stored, when it would pass the cap.
+   * Stores the reservation, always: an environment-wide limit never refuses a call. Says whether what is committed since `since`,
+   * this reservation included, passes `capMicros`, so the caller can raise an alert. The insert and the sum are ONE batch (a
+   * transaction on D1), so the answer is not made stale by a call that lands between them.
    */
   async insertReservation(input: {
     id: string
@@ -23,14 +23,19 @@ export class D1AiUsageRepository {
     createdAt: Date
     capMicros: number
     since: Date
-  }): Promise<boolean> {
-    // Raw SQL because Drizzle has no conditional insert. The column list is the table's own, in ai-usage.table.ts.
-    const inserted = await this.db.all<{ id: string }>(sql`
-      insert into ai_usage (id, job, model, status, estimate_micros, created_at)
-      select ${input.id}, ${input.job}, ${input.model}, 'reserved', ${input.estimateMicros}, ${input.createdAt.getTime()}
-      where (select ${committed} from ${aiUsage} where ${gte(aiUsage.createdAt, input.since)}) + ${input.estimateMicros} <= ${input.capMicros}
-      returning id`)
-    return inserted.length === 1
+  }): Promise<{ overCap: boolean }> {
+    const [, [total]] = await this.db.batch([
+      this.db.insert(aiUsage).values({
+        id: input.id,
+        job: input.job,
+        model: input.model,
+        status: 'reserved',
+        estimateMicros: input.estimateMicros,
+        createdAt: input.createdAt,
+      }),
+      this.db.select({ micros: sql<number>`${committed}` }).from(aiUsage).where(gte(aiUsage.createdAt, input.since)),
+    ])
+    return { overCap: (total?.micros ?? 0) > input.capMicros }
   }
 
   /** Only a reservation that is still open can be settled, so the first settlement stands and a released one stays unbilled. */

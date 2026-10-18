@@ -18,6 +18,14 @@ import type { ProductImage } from '../../src/providers/product-analysis/product-
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import type { ProductForm } from '../../src/providers/product-research/product-researcher.provider'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
+import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
+import { MemoryEmailSender } from '../../src/providers/email/memory.email'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
+
+/** An alerting service that goes nowhere: these tests are not about ops alerts. */
+const quietOpsAlerts = () =>
+  new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 
 // The scan HTTP routes through the Worker's real entrypoint, with the frontend's typed client, real local D1 and R2.
 // The scan queue's producer is replaced by a recorder and the steps are driven by hand through the Worker's queue
@@ -274,6 +282,7 @@ const cataloguedProduct = async (brand: string, name: string, { analysed = true,
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
   })
   const resolved = await catalog.resolve({ brand, name, category: 'skin', ...(form ? { form } : {}) })
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)

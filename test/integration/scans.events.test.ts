@@ -16,6 +16,14 @@ import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memo
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import { parseFrame, sseReader, type SseReader } from './sse'
+import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
+import { MemoryEmailSender } from '../../src/providers/email/memory.email'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
+
+/** An alerting service that goes nowhere: these tests are not about ops alerts. */
+const quietOpsAlerts = () =>
+  new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 
 // GET /api/v1/scans/products/{scanId}/events through the real Worker: bearer auth, the ownership check, the snapshot, and the live
 // frames a scan's background steps cause. The steps are driven the way production drives them, through the Worker's
@@ -97,6 +105,7 @@ const catalogued = async (brand: string, name: string) => {
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
   })
   const resolved = await catalog.resolve({ brand, name, category: 'skin' })
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
