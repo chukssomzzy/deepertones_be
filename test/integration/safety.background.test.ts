@@ -104,12 +104,16 @@ const catalogued = async (brand: string) => {
 type Call = { body: any }
 const jobOf = (call: Call) => {
   if ((call.body.tools ?? []).some((tool: { name: string }) => tool.name === 'web_search')) return 'research'
-  if (Object.keys(call.body.output_config?.format?.schema?.properties ?? {}).includes('mentions')) return 'read-mentions'
+  const properties = Object.keys(call.body.output_config?.format?.schema?.properties ?? {})
+  if (properties.includes('mentions')) return 'read-mentions'
+  if (properties.includes('same')) return 'same-product'
   return 'other'
 }
 const countOf = (calls: Call[], job: string) => calls.filter((call) => jobOf(call) === job).length
 
-type Answers = { 'read-mentions'?: () => Response; research?: () => Response }
+type Answers = { 'read-mentions'?: () => Response; research?: () => Response; 'same-product'?: () => Response }
+// A new product of a brand that has similar ones is put to the model as a possible spelling of one of them; these tests have no such twins, so the answer is no.
+const notTheSame = () => messageResponse({ content: [textBlock(JSON.stringify({ same: false }))], usage: CHEAP_USAGE })
 /** The Worker builds its own container per queue message, so the SDK picks up the global fetch. Anything but the Anthropic API gets a 404 (a stock image lookup, say). */
 const stubAnthropic = (answers: Answers) => {
   const calls: Call[] = []
@@ -118,7 +122,7 @@ const stubAnthropic = (answers: Answers) => {
     const call = { body: JSON.parse(init!.body as string) }
     calls.push(call)
     const job = jobOf(call) as keyof Answers
-    const answer = answers[job]
+    const answer = answers[job] ?? (job === 'same-product' ? notTheSame : undefined)
     if (!answer) throw new Error(`unexpected ${job} request`)
     return answer()
   })
@@ -142,6 +146,8 @@ const runQueue = async (queue: string, body: unknown, attempts = 1) => {
   await worker.queue!(batch, testEnv, ctx)
   return getQueueResult(batch, ctx)
 }
+/** The messages queued for one answer's parse. The database is shared by the whole file, so a sweep also queues the pending rows other tests left; a test reads only its own. */
+const messagesFor = ({ safetyId }: Saved) => parseQueued.filter((message) => (message.body as { safetyId: string }).safetyId === safetyId)
 const parseNow = (saved: Saved, attempts = 1) => runQueue(MAIN, { safetyId: saved.safetyId }, attempts)
 
 describe('the job registry the Worker runs', () => {
@@ -344,16 +350,81 @@ describe('the safety parse and a newer answer', () => {
 })
 
 describe('the safety parse reaching the dead-letter queue', () => {
-  it('marks the answer\'s parse failed, calling nobody, and keeps the words', async () => {
+  const DAY = 24 * 60 * 60 * 1000
+  const nextMidnightAfter = (ms: number) => Math.floor(ms / DAY) * DAY + DAY
+
+  /** A parse whose retries ran out: its first message, dead-lettered. Answers the row as it stood after. */
+  const deadLettered = async (saved: Saved) => {
+    const first = messagesFor(saved)[0]!.body
+    const before = Date.now()
+    const result = await runQueue(DEAD_LETTER, first, 5)
+    const after = Date.now()
+    return { first, result, row: (await safetyRows.find(saved.safetyId))!, between: [before, after] as const }
+  }
+
+  it('gives the answer one more try tomorrow: pending again, marked retried and due at the next midnight UTC, with nothing queued and nobody called', async () => {
     const saved = await reaction('Caro White and fragrance')
     const calls = stubAnthropic({})
+    const queuedBefore = parseQueued.length
 
-    const result = await runQueue(DEAD_LETTER, { safetyId: saved.safetyId }, 5)
+    const { result, row, between } = await deadLettered(saved)
 
     expect(result.explicitAcks).toEqual(['m'])
     expect(calls).toEqual([])
-    expect(await stateOf(saved)).toBe('failed')
-    expect(await safetyRows.find(saved.safetyId)).toMatchObject({ reactionText: 'Caro White and fragrance', choices: ['reaction'] })
+    // Nothing at all was queued, for this answer or any other: a queue delay cannot reach tomorrow, so the daily sweep does it.
+    expect(parseQueued).toHaveLength(queuedBefore)
+    expect(row).toMatchObject({ parseState: 'pending', parseRetried: true, reactionText: 'Caro White and fragrance', choices: ['reaction'] })
+    expect([nextMidnightAfter(between[0]), nextMidnightAfter(between[1])]).toContain(row.parseDueAt!.getTime())
+  })
+
+  it('runs the second try for real: the sweep queues the message when the row is due, and the Worker parses it', async () => {
+    const brand = freshBrand()
+    await catalogued(brand)
+    const saved = await reaction(`${brand} and fragrance`)
+    const { row } = await deadLettered(saved)
+    const queuedBefore = messagesFor(saved).length
+
+    await container.safety.requeueDueParses(row.parseDueAt!)
+
+    expect(messagesFor(saved)).toHaveLength(queuedBefore + 1)
+    const retry = messagesFor(saved)[queuedBefore]!
+    expect(retry.delaySeconds ?? 0).toBe(0)
+    const calls = stubAnthropic({ 'read-mentions': mentionsReply(productMention(brand), ingredientMention('fragrance')) })
+
+    // The message as the sweep queued it. (A message with the key of the first one would be acked as the finished, failed run it replaces.)
+    const result = await runQueue(MAIN, retry.body)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(result.retryMessages).toEqual([])
+    expect(calls.map(jobOf)).toEqual(['read-mentions'])
+    expect(await stateOf(saved)).toBe('done')
+    expect((await mentionsOf(saved)).map((m) => m.resolution)).toEqual(['resolved', null])
+  })
+
+  it('does not queue the second try before the row is due', async () => {
+    const saved = await reaction('Caro White and fragrance')
+    const { row } = await deadLettered(saved)
+    const queuedBefore = messagesFor(saved).length
+
+    await container.safety.requeueDueParses(new Date(row.parseDueAt!.getTime() - 1))
+
+    expect(messagesFor(saved)).toHaveLength(queuedBefore)
+  })
+
+  it('marks the parse failed for good when the second try is dead-lettered too, keeping the words, and queues nothing more', async () => {
+    const saved = await reaction('Caro White and fragrance')
+    const { row } = await deadLettered(saved)
+    await container.safety.requeueDueParses(row.parseDueAt!)
+    const second = messagesFor(saved).at(-1)!.body
+    const queuedBefore = messagesFor(saved).length
+    const calls = stubAnthropic({})
+
+    const result = await runQueue(DEAD_LETTER, second, 5)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(calls).toEqual([])
+    expect(await safetyRows.find(saved.safetyId)).toMatchObject({ parseState: 'failed', parseRetried: true, reactionText: 'Caro White and fragrance', choices: ['reaction'] })
+    expect(messagesFor(saved)).toHaveLength(queuedBefore)
   })
 
   it('keeps a finished parse as it was when a dead letter arrives for it', async () => {
@@ -365,6 +436,94 @@ describe('the safety parse reaching the dead-letter queue', () => {
 
     expect(result.explicitAcks).toEqual(['m'])
     expect(await stateOf(saved)).toBe('done')
+  })
+})
+
+describe('the safety parse of a product nobody has found a list for', () => {
+  const guestHeaders = async () => {
+    const ip = `10.${(Number(runSalt) + 21) % 250}.${Math.floor(counter / 250) % 250}.${(counter++ % 250) + 1}`
+    const res = await worker.fetch!(
+      new Request('http://deepertones.test/api/v1/auth/anonymous', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'cf-connecting-ip': ip },
+        body: JSON.stringify({ deviceId: `device-safety-bg-${runSalt}-${counter++}`, platform: 'ios' }),
+      }) as never,
+      testEnv,
+      createExecutionContext(),
+    )
+    const body = (await res.json()) as { data: { tokens: { accessToken: string } } }
+    return { 'cf-connecting-ip': ip, Authorization: `Bearer ${body.data.tokens.accessToken}` }
+  }
+  const searchFor = async (q: string) => {
+    const res = await worker.fetch!(new Request(`http://deepertones.test/api/v1/products/search?q=${encodeURIComponent(q)}`, { headers: await guestHeaders() }) as never, testEnv, createExecutionContext())
+    expect(res.status).toBe(200)
+    return ((await res.json()) as { data: { products: { id: string; brand: string }[] } }).data.products
+  }
+
+  it('does not make a made-up name searchable: "Zorblax Megacream", researched and not found, is in the catalog but nobody sees it', async () => {
+    const brand = `Zorblax${runSalt}n${counter++}z`
+    const saved = await reaction(`${brand} Megacream`)
+    stubAnthropic({ 'read-mentions': mentionsReply(productMention(brand, { name: 'Megacream' })), research: researchFindsNothing })
+
+    const result = await parseNow(saved)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    const [mention] = await mentionsOf(saved)
+    expect(mention).toMatchObject({ kind: 'product', resolution: 'unresolved', productId: expect.any(String) })
+    expect(await stateOf(saved)).toBe('done')
+    expect(await searchFor(brand)).toEqual([])
+    expect(await searchFor(`${brand} megacream`)).toEqual([])
+  })
+
+  it('does not make it searchable while the research is still to come either', async () => {
+    const brand = `Zorblax${runSalt}n${counter++}z`
+    const saved = await reaction(`${brand} Megacream`)
+    stubAnthropic({ 'read-mentions': mentionsReply(productMention(brand, { name: 'Megacream' })), research: overloaded })
+
+    const result = await parseNow(saved)
+
+    expect(result.retryMessages).toEqual([{ msgId: 'm' }])
+    const hits = await searchFor(brand)
+    expect({ brand, hits }).toEqual({ brand, hits: [] })
+  })
+
+  it('does list a product whose ingredients the research did find: hiding is for products with no list', async () => {
+    const brand = `Realish${runSalt}n${counter++}z`
+    const saved = await reaction(`${brand} Cream`)
+    stubAnthropic({ 'read-mentions': mentionsReply(productMention(brand, { name: 'Cream' })), research: researchFinds })
+
+    await parseNow(saved)
+
+    const [mention] = await mentionsOf(saved)
+    expect((await searchFor(brand)).map((p) => p.id)).toEqual([mention!.productId])
+  })
+})
+
+describe('the safety parse when the profile has gone', () => {
+  it('acks a job whose user was deleted after the answer was saved, storing nothing and calling nobody', async () => {
+    const saved = await reaction('Caro White and fragrance')
+    expect(await users.deleteUsers([saved.userId])).toBe(1)
+    const calls = stubAnthropic({})
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+
+    const result = await parseNow(saved)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(result.retryMessages).toEqual([])
+    expect(calls).toEqual([])
+    expect(await safetyRows.find(saved.safetyId)).toBeNull()
+    expect(await safetyRows.mentions(saved.safetyId)).toEqual([])
+    for (const spy of spies) for (const call of spy.mock.calls) expect(JSON.stringify(call)).not.toContain('Caro White')
+  })
+
+  it('acks a dead letter for it too', async () => {
+    const saved = await reaction('Caro White and fragrance')
+    await users.deleteUsers([saved.userId])
+
+    const result = await runQueue(DEAD_LETTER, { safetyId: saved.safetyId }, 5)
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(await safetyRows.find(saved.safetyId)).toBeNull()
   })
 })
 

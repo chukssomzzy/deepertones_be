@@ -151,7 +151,7 @@ describe('wrangler.jsonc scan queues', () => {
 })
 
 // Onboarding's safety parse: one queue (and its dead-letter queue) per environment, like the scan items. Nobody waits for it, so the
-// consumer keeps the standard 5 attempts and nothing is asked of its batching.
+// consumer keeps the standard 5 attempts and takes one message at a time.
 describe('wrangler.jsonc parse-safety queue', () => {
   it.each(scanBlocks)('%s produces to the parse-safety queue as PARSE_SAFETY_QUEUE', (_, block, environment) => {
     expect(block?.queues?.producers?.find((p) => p.binding === 'PARSE_SAFETY_QUEUE')?.queue).toBe(`deepertones-parse-safety-${environment}`)
@@ -161,6 +161,14 @@ describe('wrangler.jsonc parse-safety queue', () => {
     const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-parse-safety-${environment}`)
 
     expect(consumer).toMatchObject({ max_retries: 4, dead_letter_queue: `deepertones-parse-safety-dlq-${environment}` })
+  })
+
+  // A parse is a model read and a catalog research per message, and a batch is retried or acked as a whole: one message at a time keeps one slow
+  // research from holding up, or re-running, the others.
+  it.each(scanBlocks)('%s hands the parse-safety consumer one message at a time', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-parse-safety-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 1 })
   })
 
   it.each(scanBlocks)('%s consumes the parse-safety dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
@@ -208,7 +216,7 @@ describe('wrangler.jsonc rate limits', () => {
 type SimpleLimit = { name: string; namespace_id: string; simple?: { limit: number; period: number } }
 const scanLimitBlocks = scanBlocks as unknown as [string, { ratelimits?: SimpleLimit[] } | undefined, string][]
 
-describe('wrangler.jsonc scan, goal and product search route rate limits', () => {
+describe('wrangler.jsonc scan, goal, safety and product search route rate limits', () => {
   const limiters: [string, number][] = [
     ['SCAN_CREATE_IP_LIMITER', 20],
     ['SCAN_CREATE_USER_LIMITER', 10],
@@ -228,6 +236,9 @@ describe('wrangler.jsonc scan, goal and product search route rate limits', () =>
     // Typed goal words: each may cost a model call. The route cannot tell words from chips before it validates the body, so chips count too.
     ['GOAL_SET_IP_LIMITER', 20],
     ['GOAL_SET_USER_LIMITER', 10],
+    // Saved reaction and prescription words queue a parse that can research a product into the shared catalog, and a guest costs nothing to make: as tight as the goal's.
+    ['SAFETY_SET_IP_LIMITER', 20],
+    ['SAFETY_SET_USER_LIMITER', 10],
     // Search runs as the user types (a request every keystroke or two, and no AI), so it is far looser than the routes that cost something.
     ['PRODUCT_SEARCH_IP_LIMITER', 120],
     ['PRODUCT_SEARCH_USER_LIMITER', 60],

@@ -4,7 +4,9 @@ import type { SafetyMentionRow, SafetyRow } from './safety.types'
 
 // The one clock every fixture hangs off; later times are offsets from it.
 const BASE = new Date('2030-06-15T12:00:00.000Z')
-const MINUTE = 60 * 1000
+const SECOND = 1000
+const MINUTE = 60 * SECOND
+const HOUR = 60 * MINUTE
 const at = (offsetMs: number) => new Date(BASE.getTime() + offsetMs)
 
 type Account = { userId: string; profileId: string }
@@ -29,6 +31,7 @@ const rowOf = (profileId: string, over: Partial<SafetyRow> = {}): SafetyRow => (
   prescriptionText: null,
   parseState: 'none',
   parseDueAt: null,
+  parseRetried: false,
   createdAt: BASE,
   ...over,
 })
@@ -256,6 +259,140 @@ export const safetyRepositoryContract = (name: string, make: () => SafetyContrac
         const { repository } = await make()
 
         await expect(repository.setParseState(`safety-${crypto.randomUUID()}`, 'failed')).resolves.toBeUndefined()
+      })
+    })
+
+    describe('parse retried', () => {
+      it('is false for a row appended that way, and true for one appended with it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const plain = rowOf(profileId, { createdAt: at(MINUTE) })
+        const retried = rowOf(profileId, { choices: ['reaction'], reactionText: 'x', parseState: 'pending', parseDueAt: at(5 * MINUTE), parseRetried: true, createdAt: at(2 * MINUTE) })
+        await repository.append(plain)
+        await repository.append(retried)
+
+        expect((await repository.find(plain.id))!.parseRetried).toBe(false)
+        expect((await repository.find(retried.id))!.parseRetried).toBe(true)
+      })
+
+      it('retryParseAt puts the row back to pending, marks it retried and sets its due time, changing nothing else', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = rowOf(profileId, { choices: ['reaction'], reactionText: 'Caro White', parseState: 'pending', parseDueAt: at(MINUTE), createdAt: at(MINUTE) })
+        await repository.append(row)
+
+        await repository.retryParseAt(row.id, at(13 * HOUR))
+
+        const found = (await repository.find(row.id))!
+        expect(found).toMatchObject({ parseState: 'pending', parseRetried: true, choices: ['reaction'], reactionText: 'Caro White', prescriptionText: null })
+        expect(found.parseDueAt!.getTime()).toBe(at(13 * HOUR).getTime())
+        expect(found.createdAt.getTime()).toBe(at(MINUTE).getTime())
+      })
+
+      it('retryParseAt leaves the profile\'s other rows as they were', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const older = rowOf(profileId, { reactionText: 'old', choices: ['reaction'], parseState: 'pending', parseDueAt: at(MINUTE), createdAt: at(MINUTE) })
+        const newer = rowOf(profileId, { reactionText: 'new', choices: ['reaction'], parseState: 'pending', parseDueAt: at(2 * MINUTE), createdAt: at(2 * MINUTE) })
+        await repository.append(older)
+        await repository.append(newer)
+
+        await repository.retryParseAt(newer.id, at(HOUR))
+
+        expect(await repository.find(older.id)).toMatchObject({ parseState: 'pending', parseRetried: false, parseDueAt: at(MINUTE) })
+      })
+
+      it('retryParseAt does nothing, and does not fail, for a row that does not exist', async () => {
+        const { repository } = await make()
+
+        await expect(repository.retryParseAt(`safety-${crypto.randomUUID()}`, at(HOUR))).resolves.toBeUndefined()
+      })
+
+      it('setParseState leaves the retried mark as it is', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = rowOf(profileId, { choices: ['reaction'], reactionText: 'x', parseState: 'pending', parseDueAt: at(MINUTE), parseRetried: true })
+        await repository.append(row)
+
+        await repository.setParseState(row.id, 'failed')
+
+        expect(await repository.find(row.id)).toMatchObject({ parseState: 'failed', parseRetried: true })
+      })
+    })
+
+    describe('pending parses that are due', () => {
+      // The database is shared by every test of the D1 run, and other tests leave pending rows, so a test reads back only the rows it made.
+      const pending = (profileId: string, dueAt: Date | null, over: Partial<SafetyRow> = {}) =>
+        rowOf(profileId, { choices: ['reaction'], reactionText: 'x', parseState: 'pending', parseDueAt: dueAt, ...over })
+      const mine = (found: SafetyRow[], rows: { id: string }[]) => found.filter((row) => rows.some((r) => r.id === row.id))
+
+      it('lists a pending row whose due time is now or earlier, and not one due a millisecond later (the boundary)', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const earlier = pending(profileId, at(HOUR - 1), { createdAt: at(MINUTE) })
+        const exact = pending(profileId, at(HOUR), { createdAt: at(2 * MINUTE) })
+        const later = pending(profileId, at(HOUR + 1), { createdAt: at(3 * MINUTE) })
+        for (const row of [earlier, exact, later]) await repository.append(row)
+
+        const found = mine(await repository.pendingDue(at(HOUR), 1000), [earlier, exact, later])
+
+        expect(idsOf(found).sort()).toEqual([earlier.id, exact.id].sort())
+      })
+
+      it('lists only pending rows: not done, failed or none, however long overdue', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const rows = (['pending', 'done', 'failed', 'none'] as const).map((parseState, i) => pending(profileId, at(MINUTE), { parseState, createdAt: at(i * MINUTE) }))
+        for (const row of rows) await repository.append(row)
+
+        const found = mine(await repository.pendingDue(at(30 * 24 * HOUR), 1000), rows)
+
+        expect(idsOf(found)).toEqual([rows[0]!.id])
+      })
+
+      it('lists rows of every profile, with the row as stored', async () => {
+        const { repository, newAccount } = await make()
+        const [ada, bo] = [await newAccount(), await newAccount()]
+        const [adas, bos] = [pending(ada.profileId, at(MINUTE)), pending(bo.profileId, at(MINUTE), { parseRetried: true })]
+        await repository.append(adas)
+        await repository.append(bos)
+
+        const found = mine(await repository.pendingDue(at(HOUR), 1000), [adas, bos])
+
+        expect(found.map((row) => [row.id, row.profileId, row.parseRetried]).sort()).toEqual([[adas.id, ada.profileId, false], [bos.id, bo.profileId, true]].sort())
+      })
+
+      it('lists the longest overdue first', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const [third, first, second] = [pending(profileId, at(3 * MINUTE)), pending(profileId, at(MINUTE)), pending(profileId, at(2 * MINUTE))]
+        for (const row of [third, first, second]) await repository.append(row)
+
+        expect(idsOf(mine(await repository.pendingDue(at(HOUR), 1000), [first, second, third]))).toEqual([first.id, second.id, third.id])
+      })
+
+      it('returns at most `limit` rows, the longest overdue ones', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        for (const [i, offset] of [3, 1, 2].entries()) await repository.append(pending(profileId, at(offset * MINUTE), { createdAt: at(i * SECOND) }))
+
+        // Other tests may have left pending rows, so the limited answers are compared with the unlimited one, not with a fixed list.
+        const all = idsOf(await repository.pendingDue(at(HOUR), 10_000))
+        expect(all.length).toBeGreaterThanOrEqual(3)
+        expect(idsOf(await repository.pendingDue(at(HOUR), 2))).toEqual(all.slice(0, 2))
+        expect(idsOf(await repository.pendingDue(at(HOUR), 1))).toEqual(all.slice(0, 1))
+        expect(await repository.pendingDue(at(HOUR), 0)).toEqual([])
+      })
+
+      it('does not list a retried row until its new due time', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = pending(profileId, at(MINUTE))
+        await repository.append(row)
+        await repository.retryParseAt(row.id, at(13 * HOUR))
+
+        expect(mine(await repository.pendingDue(at(13 * HOUR - 1), 1000), [row])).toEqual([])
+        expect(idsOf(mine(await repository.pendingDue(at(13 * HOUR), 1000), [row]))).toEqual([row.id])
       })
     })
 

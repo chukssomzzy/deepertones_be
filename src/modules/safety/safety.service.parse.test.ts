@@ -21,6 +21,7 @@ const T0 = new Date('2030-06-15T12:00:00.000Z')
 const SECOND = 1000
 const MINUTE = 60 * SECOND
 const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
 const at = (offsetMs: number) => new Date(T0.getTime() + offsetMs)
 
 const errorOf = async (promise: Promise<unknown>) => {
@@ -225,17 +226,52 @@ describe('SafetyService.set and the parse it queues', () => {
       expect(queued().map((q) => q.delaySeconds)).toEqual([2400])
     })
 
-    it('counts an hour from the time the last answer was saved, not from when its parse is due: each answer with words pushes the next one on', async () => {
+    // The hour is measured from the due time of the newest answer with words whose parse is due or has run (parseDueAt <= now). An answer whose parse
+    // is still in the future is being replaced by this one: it never parses, so it holds nothing back, and this one takes its place at the same hour.
+    it('does not count an answer whose parse is still in the future: it is replaced by this one, which is due when that one was', async () => {
       await reactionAnswer()
       setClock(10 * MINUTE)
-      await reactionAnswer('Movate cream')
+      const second = await reactionAnswer('Movate cream') // due at 60 minutes
       setClock(20 * MINUTE)
       jobs.enqueued.length = 0
 
-      await reactionAnswer('Betnovate')
+      const third = await reactionAnswer('Betnovate')
 
-      // Saved 10 minutes ago, not 20: the 3000 seconds that remain of the hour, not the 2400 after the first answer.
-      expect(queued().map((q) => q.delaySeconds)).toEqual([3000])
+      // Measured from the first answer (due now), not the second (due at 60 minutes): 40 minutes, so due at 60 minutes, not at 70 (3000 seconds, which
+      // counting the second answer's save time gave) nor at 120.
+      expect(queued().map((q) => q.delaySeconds)).toEqual([2400])
+      expect((await rowOf(second)).parseDueAt).toEqual(at(HOUR))
+      expect((await rowOf(third)).parseDueAt).toEqual(at(HOUR))
+    })
+
+    it.each([
+      ['one second before the earlier answer\'s parse is due: it is still in the future, so it does not count', 59 * MINUTE + 59 * SECOND, 1, HOUR],
+      ['exactly when the earlier answer\'s parse is due (the boundary): it counts', HOUR, 3600, 2 * HOUR],
+      ['a minute after it is due', 61 * MINUTE, 3540, 2 * HOUR],
+    ])('chains the hours from each parse that is due: A at 0 (due 0), B at 10 minutes (due 60), and C %s', async (_label, cAt, expectedDelay, expectedDueAt) => {
+      await reactionAnswer()
+      setClock(10 * MINUTE)
+      const b = await reactionAnswer('Movate cream')
+      expect((await rowOf(b)).parseDueAt).toEqual(at(HOUR))
+      setClock(cAt)
+      jobs.enqueued.length = 0
+
+      const c = await reactionAnswer('Betnovate')
+
+      // At 61 minutes: B's parse is due (at 60), so C waits a whole hour after it, until 120, not until 70 an hour after B was saved.
+      expect(queued()).toEqual([{ job: 'parse-safety', body: { safetyId: c }, delaySeconds: expectedDelay }])
+      expect((await rowOf(c)).parseDueAt).toEqual(at(expectedDueAt))
+    })
+
+    it('counts a parse that has run, a long time ago or not, as due: the answer before it is measured from its due time too', async () => {
+      const a = await reactionAnswer()
+      await parse(a)
+      setClock(30 * MINUTE)
+      jobs.enqueued.length = 0
+
+      await reactionAnswer('Movate cream')
+
+      expect(queued().map((q) => q.delaySeconds)).toEqual([1800])
     })
 
     it('counts prescription words as words', async () => {
@@ -282,7 +318,8 @@ describe('SafetyService.set and the parse it queues', () => {
 })
 
 describe('SafetyService.current repairing a parse that never ran', () => {
-  const GRACE = 10 * MINUTE
+  // The queue retries for a good part of an hour before it gives up, so a parse is not taken for lost until 45 minutes after it was due.
+  const GRACE = 45 * MINUTE
 
   /** Saves words at T0 (so due at T0), forgets the message the way a lost queue message is forgotten, and returns the row id. */
   const lost = async () => {
@@ -291,7 +328,7 @@ describe('SafetyService.current repairing a parse that never ran', () => {
     return safetyId
   }
 
-  it('queues the parse again, with the same id and no delay, when the row is still pending more than 10 minutes after it was due', async () => {
+  it('queues the parse again, with the same id and no delay, when the row is still pending more than 45 minutes after it was due', async () => {
     const safetyId = await lost()
     setClock(GRACE + 1)
 
@@ -300,9 +337,11 @@ describe('SafetyService.current repairing a parse that never ran', () => {
     expect(queued()).toEqual([{ job: 'parse-safety', body: { safetyId }, delaySeconds: 0 }])
   })
 
-  it('waits while the row is within 10 minutes of its due time, exactly 10 minutes included (the boundary)', async () => {
+  it('waits while the row is within 45 minutes of its due time, exactly 45 minutes included (the boundary)', async () => {
     await lost()
 
+    setClock(10 * MINUTE + 1) // past the old 10 minutes, still waiting
+    await current(AMARA)
     setClock(GRACE - 1)
     await current(AMARA)
     setClock(GRACE)
@@ -501,25 +540,117 @@ describe('SafetyService.parse when the reader cannot read', () => {
     expect(await shape(safetyId)).toEqual([['Caro White', 'resolved', 'product-Caro White']])
     expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done' })
   })
+})
 
-  it('stores nothing from the first text when the second cannot be read yet, so a retry cannot lose what the second text names', async () => {
-    const safetyId = await bothAnswer()
-    // The first read works; the second is the next call to fail.
-    let calls = 0
+describe('SafetyService.parse and a text that cannot be read yet', () => {
+  /** The reaction reads fine; the prescription read fails once, the AI budget being spent, and then reads fine. */
+  const prescriptionFailsOnce = (reaction: Mention[], prescription: Mention[]) => {
+    let failed = false
     reader.respondWith((text) => {
-      if (++calls === 2) throw new AiBudgetExceededError('cap')
-      return text === REACTION ? [product('Caro White')] : [product('Dermovate')]
+      if (text === PRESCRIPTION && !failed) {
+        failed = true
+        throw new AiBudgetExceededError('cap')
+      }
+      return text === REACTION ? reaction : prescription
     })
+  }
+
+  it('keeps what the first text named when the second cannot be read, stored at once and in place', async () => {
+    prescriptionFailsOnce([product('Caro White'), ingredient('fragrance')], [product('Dermovate')])
+    const safetyId = await bothAnswer()
 
     await errorOf(parse(safetyId))
-    expect(await mentionsOf(safetyId)).toEqual([])
+
+    expect((await mentionsOf(safetyId)).map((m) => [m.position, m.source, m.name])).toEqual([
+      [0, 'reaction', 'Caro White'],
+      [1, 'reaction', 'fragrance'],
+    ])
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'pending' })
+  })
+
+  it('reads only the second text on the retry, never the first again, and numbers its mentions on after the first text\'s', async () => {
+    prescriptionFailsOnce([product('Caro White'), ingredient('fragrance')], [product('Dermovate'), ingredient('clobetasol')])
+    const safetyId = await bothAnswer()
+    await errorOf(parse(safetyId))
+    expect(reader.calls).toEqual([REACTION, PRESCRIPTION])
 
     await parse(safetyId)
+
+    expect(reader.calls).toEqual([REACTION, PRESCRIPTION, PRESCRIPTION])
+    expect((await mentionsOf(safetyId)).map((m) => [m.position, m.source, m.name])).toEqual([
+      [0, 'reaction', 'Caro White'],
+      [1, 'reaction', 'fragrance'],
+      [2, 'prescription', 'Dermovate'],
+      [3, 'prescription', 'clobetasol'],
+    ])
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done' })
+  })
+
+  it.each([
+    ['named nothing', (): Mention[] => []],
+    [
+      'was refused',
+      (): Mention[] => {
+        throw new AnthropicRefusalError('refusal')
+      },
+    ],
+  ])('does not read the first text again when it %s and the second could not be read: having read it is not having found something', async (_label, readFirst) => {
+    let failed = false
+    reader.respondWith((text) => {
+      if (text === REACTION) return readFirst()
+      if (!failed) {
+        failed = true
+        throw new AiBudgetExceededError('cap')
+      }
+      return [product('Dermovate')]
+    })
+    const safetyId = await bothAnswer()
+    await errorOf(parse(safetyId))
+
+    await parse(safetyId)
+
+    expect(reader.calls.filter((text) => text === REACTION)).toHaveLength(1)
+    expect(reader.calls.filter((text) => text === PRESCRIPTION)).toHaveLength(2)
+    expect((await mentionsOf(safetyId)).map((m) => [m.position, m.source, m.name])).toEqual([[0, 'prescription', 'Dermovate']])
+  })
+
+  it('reads the first text again, with nothing stored, when it is the first that could not be read', async () => {
+    let failed = false
+    reader.respondWith((text) => {
+      if (text === REACTION && !failed) {
+        failed = true
+        throw new AnthropicUnavailableError('unavailable')
+      }
+      return text === REACTION ? [product('Caro White')] : [product('Dermovate')]
+    })
+    const safetyId = await bothAnswer()
+    await errorOf(parse(safetyId))
+    expect(await mentionsOf(safetyId)).toEqual([])
+    expect(reader.calls).toEqual([REACTION])
+
+    await parse(safetyId)
+
+    expect(reader.calls).toEqual([REACTION, REACTION, PRESCRIPTION])
     expect((await mentionsOf(safetyId)).map((m) => [m.source, m.name])).toEqual([
       ['reaction', 'Caro White'],
       ['prescription', 'Dermovate'],
     ])
-    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done' })
+  })
+
+  it('keeps the cap of three products across the two texts when the second is read on the retry', async () => {
+    prescriptionFailsOnce([product('Caro White'), product('Carotone')], [product('Movate'), product('Dermovate')])
+    const safetyId = await bothAnswer()
+    await errorOf(parse(safetyId))
+
+    await parse(safetyId)
+
+    expect((await mentionsOf(safetyId)).map((m) => [m.name, m.resolution])).toEqual([
+      ['Caro White', 'resolved'],
+      ['Carotone', 'resolved'],
+      ['Movate', 'resolved'],
+      ['Dermovate', 'unresolved'],
+    ])
+    expect(new Set(catalog.resolved.map((i) => i.name))).toEqual(new Set(['Caro White', 'Carotone', 'Movate']))
   })
 })
 
@@ -679,6 +810,85 @@ describe('SafetyService.parse and the limit of three products', () => {
       ['Movate', 'resolved', 'product-Movate'],
       ['Dermovate', 'unresolved', null],
     ])
+  })
+
+  describe('the same product named twice', () => {
+    it('uses one of the three: three different products and a repeat of the first all resolve, and a fourth different one does not', async () => {
+      readerSays({ [REACTION]: [product('Caro White'), product('Carotone'), product('Caro White'), product('Movate'), product('Dermovate')] })
+      const safetyId = await reactionAnswer()
+
+      await parse(safetyId)
+
+      expect((await mentionsOf(safetyId)).map((m) => [m.name, m.resolution])).toEqual([
+        ['Caro White', 'resolved'],
+        ['Carotone', 'resolved'],
+        ['Caro White', 'resolved'],
+        ['Movate', 'resolved'],
+        ['Dermovate', 'unresolved'],
+      ])
+    })
+
+    it('is asked of the catalog once, and both mentions get the one product', async () => {
+      readerSays({ [REACTION]: [product('Caro White'), product('Caro White')] })
+      const safetyId = await reactionAnswer()
+
+      await parse(safetyId)
+
+      expect(catalog.resolved).toHaveLength(1)
+      expect(await shape(safetyId)).toEqual([
+        ['Caro White', 'resolved', 'product-Caro White'],
+        ['Caro White', 'resolved', 'product-Caro White'],
+      ])
+    })
+
+    it('is one product when only case, accents or punctuation differ: the brand and name are compared as the catalog compares them', async () => {
+      readerSays({ [REACTION]: [product('Caro White'), product('CARO  white!', { brand: 'caro white' }), product('Cäro White', { brand: 'Càro WHITE' })] })
+      const safetyId = await reactionAnswer()
+
+      await parse(safetyId)
+
+      expect(catalog.resolved).toHaveLength(1)
+      const stored = await mentionsOf(safetyId)
+      expect(stored.map((m) => m.resolution)).toEqual(['resolved', 'resolved', 'resolved'])
+      expect(new Set(stored.map((m) => m.productId)).size).toBe(1)
+    })
+
+    it('is one product across the two texts, in either order', async () => {
+      readerSays({ [REACTION]: [product('Caro White')], [PRESCRIPTION]: [product('Carotone'), product('Caro White')] })
+      const safetyId = await bothAnswer()
+
+      await parse(safetyId)
+
+      expect(catalog.resolved.map((i) => i.name)).toEqual(['Caro White', 'Carotone'])
+      expect((await mentionsOf(safetyId)).map((m) => [m.source, m.name, m.productId])).toEqual([
+        ['reaction', 'Caro White', 'product-Caro White'],
+        ['prescription', 'Carotone', 'product-Carotone'],
+        ['prescription', 'Caro White', 'product-Caro White'],
+      ])
+    })
+
+    it('gives both mentions the same outcome when research finds nothing: unresolved, with the same product', async () => {
+      catalog.onResolve = () => ({ kind: 'needs-research', productId: 'product-9' })
+      catalog.onResearch = () => ({ kind: 'not-found' })
+      readerSays({ [REACTION]: [product('Caro White'), product('Caro White')] })
+      const safetyId = await reactionAnswer()
+
+      await parse(safetyId)
+
+      expect(catalog.researched).toEqual(['product-9'])
+      expect(await shape(safetyId)).toEqual([
+        ['Caro White', 'unresolved', 'product-9'],
+        ['Caro White', 'unresolved', 'product-9'],
+      ])
+    })
+
+    it('does not make two different products one: a different brand or a different name is its own slot', async () => {
+      readerSays({ [REACTION]: [product('Caro White'), product('Caro White', { brand: 'Carotone' }), product('Caro White Plus', { brand: 'Caro White' })] })
+
+      await parse(await reactionAnswer())
+
+      expect(catalog.resolved).toHaveLength(3)
+    })
   })
 
   it('does not count ingredients', async () => {
@@ -855,22 +1065,67 @@ describe('SafetyService.parse for a row that is not the current answer', () => {
   })
 })
 
-describe('SafetyService.markParseFailed', () => {
-  it('marks a pending row failed, which is where the job lands when its retries run out', async () => {
+describe('SafetyService.markParseFailed, the dead-letter hook', () => {
+  // The queue cannot delay a message to tomorrow, so a parse that ran out of retries is given one more try the next day: it goes back to pending,
+  // due at the next midnight UTC, and the daily sweep (requeueDueParses) queues it then. A second dead letter is final.
+  const START_OF_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate()))
+  const NEXT_MIDNIGHT = new Date(START_OF_DAY.getTime() + DAY)
+  const clockAt = (date: Date) => {
+    clock = date
+  }
+
+  it('puts a pending row back to pending for one more try, marked as retried and due at the next midnight UTC, queuing nothing', async () => {
     const safetyId = await reactionAnswer()
+    jobs.enqueued.length = 0
 
     await markParseFailed(safetyId)
 
-    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'failed' })
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'pending', parseRetried: true, parseDueAt: NEXT_MIDNIGHT })
+    expect(jobs.enqueued).toEqual([])
   })
 
-  it('keeps the words and the choices as they were: a failed parse takes nothing away', async () => {
+  it('starts a row as not retried', async () => {
     const safetyId = await reactionAnswer()
+
+    expect(await rowOf(safetyId)).toMatchObject({ parseRetried: false })
+  })
+
+  it.each([
+    ['at noon, as the row was saved', T0, NEXT_MIDNIGHT],
+    ['a millisecond before midnight', new Date(NEXT_MIDNIGHT.getTime() - 1), NEXT_MIDNIGHT],
+    ['at midnight exactly (the boundary): the next one is a day on, never the instant it is', NEXT_MIDNIGHT, new Date(NEXT_MIDNIGHT.getTime() + DAY)],
+    ['a millisecond after midnight', new Date(NEXT_MIDNIGHT.getTime() + 1), new Date(NEXT_MIDNIGHT.getTime() + DAY)],
+  ])('is due at the first midnight UTC after the dead letter: %s', async (_label, deadLetterAt, expectedDue) => {
+    const safetyId = await reactionAnswer()
+
+    clockAt(deadLetterAt)
+    await markParseFailed(safetyId)
+
+    expect((await rowOf(safetyId)).parseDueAt).toEqual(expectedDue)
+  })
+
+  it('keeps the words, the choices and what the parse had found: a parse that fell over takes nothing away', async () => {
+    prescriptionOnlyFails()
+    const safetyId = await bothAnswer()
+    await errorOf(parse(safetyId))
 
     await markParseFailed(safetyId)
 
-    expect(await rowOf(safetyId)).toMatchObject({ choices: ['reaction'], reactionText: REACTION })
-    expect(await current(AMARA)).toMatchObject({ choices: ['reaction'], reactionText: REACTION })
+    expect(await rowOf(safetyId)).toMatchObject({ choices: ['reaction', 'prescription'], reactionText: REACTION, prescriptionText: PRESCRIPTION })
+    expect(await current(AMARA)).toMatchObject({ choices: ['reaction', 'prescription'], reactionText: REACTION })
+    expect((await mentionsOf(safetyId)).map((m) => m.name)).toEqual(['Caro White'])
+  })
+
+  it('marks a row failed for good on the second dead letter, queuing nothing', async () => {
+    const safetyId = await reactionAnswer()
+    await markParseFailed(safetyId)
+    jobs.enqueued.length = 0
+
+    await markParseFailed(safetyId)
+
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'failed', parseRetried: true })
+    expect(jobs.enqueued).toEqual([])
+    expect(await rowOf(safetyId)).toMatchObject({ reactionText: REACTION })
   })
 
   it('does not undo a parse that finished', async () => {
@@ -880,11 +1135,154 @@ describe('SafetyService.markParseFailed', () => {
 
     await markParseFailed(safetyId)
 
-    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done' })
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done', parseRetried: false })
+  })
+
+  it('leaves a row that has nothing to parse, or has failed already, as it is', async () => {
+    await set(AMARA, { choices: ['pregnant'] })
+    const none = (await repository.current('profile-amara-1'))!.id
+    const failed = await answer(TOLU, { choices: ['reaction'], reactionText: REACTION })
+    await repository.setParseState(failed, 'failed')
+
+    await markParseFailed(none)
+    await markParseFailed(failed)
+
+    expect(await rowOf(none)).toMatchObject({ parseState: 'none', parseRetried: false, parseDueAt: null })
+    expect(await rowOf(failed)).toMatchObject({ parseState: 'failed', parseRetried: false })
   })
 
   it('does not fail for a row that does not exist', async () => {
     await expect(markParseFailed('safety-that-was-never-saved')).resolves.toBeUndefined()
+  })
+
+  describe('and reading the answer meanwhile', () => {
+    it('does not queue the retry from a read before its due time, nor until 45 minutes after it: the sweep is what queues it', async () => {
+      const safetyId = await reactionAnswer()
+      await markParseFailed(safetyId)
+      jobs.enqueued.length = 0
+
+      for (const when of [T0, new Date(NEXT_MIDNIGHT.getTime() - 1), NEXT_MIDNIGHT, new Date(NEXT_MIDNIGHT.getTime() + 45 * MINUTE)]) {
+        clockAt(when)
+        await current(AMARA)
+      }
+      expect(jobs.enqueued).toEqual([])
+
+      clockAt(new Date(NEXT_MIDNIGHT.getTime() + 45 * MINUTE + 1))
+      await current(AMARA)
+      expect(queued()).toEqual([{ job: 'parse-safety', body: expect.objectContaining({ safetyId }), delaySeconds: 0 }])
+    })
+  })
+
+  it('is retried to the end: the sweep queues it at its due time, the parse then runs and finishes', async () => {
+    readerSays({ [REACTION]: [product('Caro White')] })
+    const safetyId = await reactionAnswer()
+    await markParseFailed(safetyId)
+    jobs.enqueued.length = 0
+
+    await service.requeueDueParses(NEXT_MIDNIGHT)
+    expect(queued()).toEqual([{ job: 'parse-safety', body: expect.objectContaining({ safetyId }), delaySeconds: 0 }])
+    clockAt(NEXT_MIDNIGHT)
+    await parse(safetyId)
+
+    expect(await rowOf(safetyId)).toMatchObject({ parseState: 'done' })
+    expect(await shape(safetyId)).toEqual([['Caro White', 'resolved', 'product-Caro White']])
+  })
+
+  /** The prescription read fails and the reaction read finds Caro White: a parse part way. */
+  function prescriptionOnlyFails() {
+    reader.respondWith((text) => {
+      if (text === PRESCRIPTION) throw new AiBudgetExceededError('cap')
+      return [product('Caro White')]
+    })
+  }
+})
+
+describe('SafetyService.requeueDueParses, the daily sweep', () => {
+  const sweep = (now: Date) => service.requeueDueParses(now)
+  const rowsOf = (count: number, from = 0) =>
+    Array.from({ length: count }, (_, i) => actor(`user-sweep-${from + i}`, `profile-sweep-${from + i}`))
+
+  it('queues {safetyId} again, with no delay, for a pending row whose due time has come', async () => {
+    const safetyId = await reactionAnswer()
+    jobs.enqueued.length = 0
+
+    await sweep(T0)
+
+    expect(queued()).toEqual([{ job: 'parse-safety', body: expect.objectContaining({ safetyId }), delaySeconds: 0 }])
+  })
+
+  it('takes a row due exactly now and not one due a millisecond later (the boundary)', async () => {
+    const safetyId = await reactionAnswer()
+    jobs.enqueued.length = 0
+
+    await sweep(new Date(T0.getTime() - 1))
+    expect(jobs.enqueued).toEqual([])
+
+    await sweep(T0)
+    expect(queued().map((q) => (q.body as { safetyId: string }).safetyId)).toEqual([safetyId])
+  })
+
+  it('leaves a row due in the future alone, such as a parse held back for the hour', async () => {
+    await reactionAnswer()
+    setClock(10 * MINUTE)
+    const held = await reactionAnswer('Movate cream') // due at 60 minutes
+    jobs.enqueued.length = 0
+
+    await sweep(at(30 * MINUTE))
+    expect(queued().map((q) => (q.body as { safetyId: string }).safetyId)).not.toContain(held)
+
+    jobs.enqueued.length = 0
+    await sweep(at(HOUR))
+    expect(queued().map((q) => (q.body as { safetyId: string }).safetyId)).toContain(held)
+  })
+
+  it.each(['done', 'failed', 'none'] as const)('leaves a row whose parse state is %s alone, however long overdue', async (state) => {
+    const safetyId = await reactionAnswer()
+    await repository.setParseState(safetyId, state)
+    jobs.enqueued.length = 0
+
+    await sweep(at(30 * DAY))
+
+    expect(jobs.enqueued).toEqual([])
+  })
+
+  it('takes the rows of every profile, not only the caller\'s: it runs with no session', async () => {
+    const ids: string[] = []
+    for (const who of [AMARA, TOLU, AMARA_SECOND_PROFILE]) ids.push(await answer(who, { choices: ['reaction'], reactionText: REACTION }))
+    jobs.enqueued.length = 0
+
+    await expect(sweep(T0)).resolves.not.toThrow()
+
+    expect(new Set(queued().map((q) => (q.body as { safetyId: string }).safetyId))).toEqual(new Set(ids))
+  })
+
+  it.each([
+    [3, 3],
+    [200, 200],
+    [201, 200],
+  ])('queues at most 200 rows in a run (the boundary): %s due rows give %s messages', async (due, queuedCount) => {
+    const ids: string[] = []
+    for (const [i, who] of rowsOf(due).entries()) {
+      setClock(i * SECOND)
+      ids.push(await answer(who, { choices: ['reaction'], reactionText: REACTION }))
+    }
+    jobs.enqueued.length = 0
+
+    await sweep(at(HOUR))
+
+    expect(jobs.enqueued).toHaveLength(queuedCount)
+    // The longest overdue first, so a backlog is worked off in order and no row is passed over for ever.
+    expect(queued().map((q) => (q.body as { safetyId: string }).safetyId)).toEqual(expect.arrayContaining(ids.slice(0, queuedCount)))
+    expect(new Set(queued().map((q) => (q.body as { safetyId: string }).safetyId)).size).toBe(queuedCount)
+  })
+
+  it('logs no words, whatever it queues', async () => {
+    const spies = spyOnConsole()
+    await answer(AMARA, { choices: ['reaction'], reactionText: 'Caro White QZ7' })
+
+    await sweep(T0)
+
+    for (const line of loggedBy(spies)) expect(line).not.toContain('QZ7')
   })
 })
 

@@ -39,12 +39,43 @@ export const createScanReaper = (): ScheduledHandler => async (_controller, env)
 }
 
 /**
+ * The daily cron: the guest cleanup, then the second try of the safety parses that dead-lettered (SafetyService.requeueDueParses, which queues the
+ * pending parses whose due time has come). Each runs whether or not the other failed; a failure is logged and the first one is rethrown after both have
+ * run, so Cloudflare records the run as failed and the next day's run looks at the same work again.
+ */
+export const createDailyJobs = (): ScheduledHandler => {
+  const guestCleanup = createGuestCleanup()
+  return async (controller, env, ctx) => {
+    let failed = false
+    let failure: unknown
+    try {
+      await guestCleanup(controller, env, ctx)
+    } catch (error) {
+      // The cleanup logged it.
+      failed = true
+      failure = error
+    }
+    try {
+      const queued = await buildContainer(env).safety.requeueDueParses(new Date())
+      if (queued > 0) console.log({ job: 'safety-parse-requeue', outcome: 'done', queued })
+    } catch (error) {
+      console.error({ job: 'safety-parse-requeue', outcome: 'failed', error: describeError(error) })
+      if (!failed) {
+        failed = true
+        failure = error
+      }
+    }
+    if (failed) throw failure
+  }
+}
+
+/**
  * The Worker's `scheduled` export: one handler for every cron, which runs the job of the cron that fired and no other.
  * Without this the daily cleanup would run on every cron there is.
  */
 export const createScheduledRouter = (): ScheduledHandler => {
   const jobs = new Map<string, ScheduledHandler>([
-    [GUEST_CLEANUP_CRON, createGuestCleanup()],
+    [GUEST_CLEANUP_CRON, createDailyJobs()],
     [SCAN_REAPER_CRON, createScanReaper()],
   ])
   return async (controller, env, ctx) => {

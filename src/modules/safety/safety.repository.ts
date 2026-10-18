@@ -1,9 +1,9 @@
-import { asc, desc, eq, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, lte, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
-import { profileSafety, safetyMentions } from './safety.table'
-import type { ParseState, SafetyMentionRow, SafetyRow } from './safety.types'
+import { profileSafety, safetyMentions, safetyReads } from './safety.table'
+import type { MentionSource, ParseState, SafetyMentionRow, SafetyRow } from './safety.types'
 
 /** How a product mention ended up: found in the catalog with ingredients, or not (the catalog's product id, when it has one, is kept either way). */
 export type MentionResolution = { resolution: 'resolved' | 'unresolved'; productId: string | null }
@@ -48,12 +48,48 @@ export class D1SafetyRepository {
   }
 
   /**
+   * Puts a row back to `pending` for its one more try: marks it retried and sets when it is due, changing nothing else of it. A row that does not
+   * exist is ignored.
+   */
+  async retryParseAt(id: string, dueAt: Date): Promise<void> {
+    await this.db.update(profileSafety).set({ parseState: 'pending', parseRetried: true, parseDueAt: dueAt }).where(eq(profileSafety.id, id))
+  }
+
+  /**
+   * Up to `limit` pending rows of any profile whose due time is `now` or earlier, the longest overdue first. The state is written as a literal, not a
+   * bound value, so that SQLite can use the partial index on pending rows (`profile_safety_pending_due_idx`) instead of reading every row.
+   */
+  async pendingDue(now: Date, limit: number): Promise<SafetyRow[]> {
+    return this.db
+      .select()
+      .from(profileSafety)
+      .where(and(sql`${profileSafety.parseState} = 'pending'`, lte(profileSafety.parseDueAt, now)))
+      .orderBy(asc(profileSafety.parseDueAt), asc(profileSafety.id))
+      .limit(limit)
+  }
+
+  /**
    * Stores the mentions, all or none (one batch). Rejects a mention whose safety row does not exist. One INSERT per mention keeps each
    * statement under D1's bound-parameter limit. An empty list does nothing.
    */
   async appendMentions(mentions: SafetyMentionRow[]): Promise<void> {
     const [first, ...rest] = mentions.map((mention) => this.db.insert(safetyMentions).values(mention))
     if (first) await this.db.batch([first, ...rest] as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+  }
+
+  /**
+   * Stores what the parse found in ONE of the row's texts, together with the record that the text has been read, in one batch: either both or
+   * neither. An empty list still records the read (a text that named nothing is not read again). Rejects a row that does not exist.
+   */
+  async storeRead(safetyId: string, source: MentionSource, mentions: SafetyMentionRow[]): Promise<void> {
+    const statements: BatchItem<'sqlite'>[] = [...mentions.map((mention) => this.db.insert(safetyMentions).values(mention)), this.db.insert(safetyReads).values({ safetyId, source }).onConflictDoNothing()]
+    await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+  }
+
+  /** Which of the row's texts have been read, in no particular order. */
+  async reads(safetyId: string): Promise<MentionSource[]> {
+    const rows = await this.db.select({ source: safetyReads.source }).from(safetyReads).where(eq(safetyReads.safetyId, safetyId))
+    return rows.map((row) => row.source)
   }
 
   /** The mentions parsed from a row, in the order they were found. */

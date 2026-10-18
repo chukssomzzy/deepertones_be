@@ -115,7 +115,8 @@
       { "queue": "deepertones-push-receipts-dlq-development", "max_batch_size": 10 },
       {
         "queue": "deepertones-parse-safety-development",
-        // Nobody waits for a parse, so batching is left to the defaults.
+        // One message at a time: a parse is a model read and a catalog research, and a batch is retried or acked as a whole.
+        "max_batch_size": 1,
         // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
         "max_retries": 4,
         "dead_letter_queue": "deepertones-parse-safety-dlq-development"
@@ -155,6 +156,8 @@
     { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "1019", "simple": { "limit": 10, "period": 60 } },
     { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "1020", "simple": { "limit": 20, "period": 60 } },
     { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "1021", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SAFETY_SET_IP_LIMITER", "namespace_id": "1022", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SAFETY_SET_USER_LIMITER", "namespace_id": "1023", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -322,7 +325,8 @@
           { "queue": "deepertones-push-receipts-dlq-staging", "max_batch_size": 10 },
           {
             "queue": "deepertones-parse-safety-staging",
-            // Nobody waits for a parse, so batching is left to the defaults.
+            // One message at a time: a parse is a model read and a catalog research, and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
             // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
             "max_retries": 4,
             "dead_letter_queue": "deepertones-parse-safety-dlq-staging"
@@ -361,6 +365,8 @@
         { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "2019", "simple": { "limit": 10, "period": 60 } },
         { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "2020", "simple": { "limit": 20, "period": 60 } },
         { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "2021", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SAFETY_SET_IP_LIMITER", "namespace_id": "2022", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SAFETY_SET_USER_LIMITER", "namespace_id": "2023", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -494,7 +500,8 @@
           { "queue": "deepertones-push-receipts-dlq-production", "max_batch_size": 10 },
           {
             "queue": "deepertones-parse-safety-production",
-            // Nobody waits for a parse, so batching is left to the defaults.
+            // One message at a time: a parse is a model read and a catalog research, and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
             // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
             "max_retries": 4,
             "dead_letter_queue": "deepertones-parse-safety-dlq-production"
@@ -533,6 +540,8 @@
         { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "3019", "simple": { "limit": 10, "period": 60 } },
         { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "3020", "simple": { "limit": 20, "period": 60 } },
         { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "3021", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SAFETY_SET_IP_LIMITER", "namespace_id": "3022", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SAFETY_SET_USER_LIMITER", "namespace_id": "3023", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],

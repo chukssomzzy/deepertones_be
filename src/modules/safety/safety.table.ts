@@ -1,4 +1,5 @@
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { sql } from 'drizzle-orm'
+import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 import { profiles } from '../profiles/profiles.table'
 import type { SafetyChoice } from './safety.vocabulary'
 
@@ -11,6 +12,7 @@ import type { SafetyChoice } from './safety.vocabulary'
  * `parse_state` is where the background parse of the two texts has got to: `none` when there is nothing to parse (and for every row written
  * before the parse existed), `pending` from the save until the parse finishes, then `done`, or `failed` when its retries ran out. `parse_due_at` is
  * when the parse was meant to run (a save within the hour of the last one waits for it); a row still `pending` long after it is queued again.
+ * `parse_retried` is set when a parse that ran out of retries is given one more try the next day; it is never cleared, so a second dead letter is final.
  */
 export const profileSafety = sqliteTable(
   'profile_safety',
@@ -26,9 +28,30 @@ export const profileSafety = sqliteTable(
       .notNull()
       .default('none'),
     parseDueAt: integer('parse_due_at', { mode: 'timestamp_ms' }),
+    parseRetried: integer('parse_retried', { mode: 'boolean' }).notNull().default(false),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (t) => [index('profile_safety_profile_id_created_at_idx').on(t.profileId, t.createdAt)],
+  (t) => [
+    index('profile_safety_profile_id_created_at_idx').on(t.profileId, t.createdAt),
+    // The daily sweep's lookup: only the pending rows, a small set, by due time.
+    index('profile_safety_pending_due_idx').on(t.parseDueAt).where(sql`${t.parseState} = 'pending'`),
+  ],
+)
+
+/**
+ * Which of an answer's two texts the parse has read: a row here means the model was asked about that text and its mentions (none, if it named
+ * nothing or refused) were stored with it. A retry never reads a text twice, so a text that named nothing is not paid for again and a text that did is not
+ * stored twice. Rows go with their safety row (cascade).
+ */
+export const safetyReads = sqliteTable(
+  'safety_reads',
+  {
+    safetyId: text('safety_id')
+      .notNull()
+      .references(() => profileSafety.id, { onDelete: 'cascade' }),
+    source: text('source', { enum: ['reaction', 'prescription'] }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.safetyId, t.source] })],
 )
 
 /**

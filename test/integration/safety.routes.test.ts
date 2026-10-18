@@ -8,6 +8,7 @@ import type { EmailAddress } from '../../src/lib/email-address'
 import { TokenService } from '../../src/modules/auth/tokens.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
+import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
 
@@ -775,13 +776,14 @@ describe('GET /api/v1/me/safety repairing a parse that never ran', () => {
       prescriptionText: null,
       parseState: 'pending',
       parseDueAt: dueAt,
+      parseRetried: false,
       createdAt: dueAt,
     })
     return { accessToken, userId, id }
   }
 
-  it('queues the parse again, with no delay, when the answer is still pending more than 10 minutes after it was due', async () => {
-    const { accessToken, id } = await lostAnswer(11 * MINUTE)
+  it('queues the parse again, with no delay, when the answer is still pending more than 45 minutes after it was due', async () => {
+    const { accessToken, id } = await lostAnswer(46 * MINUTE)
 
     const res = await getSafety(accessToken)
 
@@ -791,8 +793,17 @@ describe('GET /api/v1/me/safety repairing a parse that never ran', () => {
     expect(parseQueued[0]!.delaySeconds ?? 0).toBe(0)
   })
 
-  it('queues nothing while the answer is within 10 minutes of its due time', async () => {
-    const { accessToken } = await lostAnswer(9 * MINUTE)
+  it('queues nothing while the answer is within 45 minutes of its due time, though that is long past the old 10', async () => {
+    const { accessToken } = await lostAnswer(44 * MINUTE)
+
+    const res = await getSafety(accessToken)
+
+    expect(res.status).toBe(200)
+    expect(parseQueued).toEqual([])
+  })
+
+  it('queues nothing for an answer whose parse is still due in the future, such as one given its second try tomorrow', async () => {
+    const { accessToken } = await lostAnswer(-12 * 60 * MINUTE)
 
     const res = await getSafety(accessToken)
 
@@ -810,7 +821,7 @@ describe('GET /api/v1/me/safety repairing a parse that never ran', () => {
   })
 
   it('still answers 200 with the answer when the queue is down', async () => {
-    const { accessToken } = await lostAnswer(11 * MINUTE)
+    const { accessToken } = await lostAnswer(46 * MINUTE)
     parseQueue.failNext = true
 
     const res = await getSafety(accessToken)
@@ -818,4 +829,70 @@ describe('GET /api/v1/me/safety repairing a parse that never ran', () => {
     expect(res.status).toBe(200)
     expect(await dataOf(res)).toMatchObject({ reactionText: 'Caro White and fragrance' })
   })
+})
+
+// Saving words can queue a parse that researches products into the shared catalog, and a guest costs nothing to make, so the route is limited like the goal's:
+// 20 a minute from one address and 10 from one user, the address first, then the sign-in check, then the user.
+describe('PUT /api/v1/me/safety rate limits', () => {
+  const retryAfterOf = (res: Reply) => Number(res.headers.get('Retry-After'))
+  const putFrom = (bearer: string, json: Record<string, unknown>, from: string) =>
+    v1.me.safety.$put({ json: json as never }, { headers: { ...headers(bearer), 'cf-connecting-ip': from } })
+
+  it('documents the 429 in the OpenAPI document, next to the statuses PUT already had', async () => {
+    const res = await fetchWorker('http://deepertones.test/openapi.json')
+    expect(res.status).toBe(200)
+    const doc = (await res.json()) as { paths: Record<string, { put?: { responses: Record<string, unknown> } }> }
+
+    expect(Object.keys(doc.paths['/api/v1/me/safety']!.put!.responses)).toEqual(expect.arrayContaining(['200', '401', '429']))
+  })
+
+  it('answers 429 RATE_LIMITED with Retry-After to the 11th change of one user in a minute, from any address, and saves and queues nothing for it', async () => {
+    const { statuses, limited, accessToken } = await inOneRateWindow(async () => {
+      const { accessToken } = await newGuest()
+      const statuses: number[] = []
+      for (let i = 0; i < 10; i++) statuses.push((await putSafety(accessToken, { choices: ['none'] })).status)
+      parseQueued.length = 0
+      const limited = await putSafety(accessToken, { choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+      statuses.push(limited.status)
+      return { statuses, limited, accessToken }
+    }, { needMs: BURST_NEEDS_MS })
+
+    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(200))
+    expect(statuses[10]).toBe(429)
+    expect(await errorCodeOf(limited)).toBe('RATE_LIMITED')
+    expect(retryAfterOf(limited)).toBeGreaterThan(0)
+    expect(parseQueued).toEqual([])
+    expect(await dataOf<SafetyBody>(await getSafety(accessToken))).toMatchObject({ choices: ['none'], reactionText: null })
+  }, RATE_TEST_TIMEOUT_MS)
+
+  it('answers 429 RATE_LIMITED with Retry-After to the 21st change from one address in a minute, whoever sends it', async () => {
+    const { statuses, limited } = await inOneRateWindow(async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof putFrom>> | undefined
+      for (let i = 0; i < 21; i++) {
+        const res = await putFrom((await newGuest()).accessToken, { choices: ['none'] }, shared)
+        statuses.push(res.status)
+        if ((res.status as number) === 429) limited = res
+      }
+      return { statuses, limited }
+    }, { needMs: BURST_NEEDS_MS })
+
+    expect(statuses.slice(0, 20)).toEqual(Array(20).fill(200))
+    expect(statuses[20]).toBe(429)
+    expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+    expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+  }, RATE_TEST_TIMEOUT_MS)
+
+  it('does not limit reading the answer back', async () => {
+    const { statuses } = await inOneRateWindow(async () => {
+      const { accessToken } = await newGuest()
+      await putSafety(accessToken, { choices: ['none'] })
+      const statuses: number[] = []
+      for (let i = 0; i < 12; i++) statuses.push((await getSafety(accessToken)).status)
+      return { statuses }
+    }, { needMs: BURST_NEEDS_MS })
+
+    expect(statuses).toEqual(Array(12).fill(200))
+  }, RATE_TEST_TIMEOUT_MS)
 })

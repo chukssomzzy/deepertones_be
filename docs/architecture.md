@@ -182,7 +182,9 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   me a reaction" and "I use a prescription" (see "Safety facts (onboarding)"). It is on its own `parse-safety` queue and dead-letter queue in all three `wrangler.jsonc` blocks
   (binding `PARSE_SAFETY_QUEUE`; created before the first deploy that binds them, README "Before the first deploy"). The body is `{ safetyId }` and nothing else, so no word of
   the text is in the queue, and the key is `parse-safety:<safetyId>`. Nobody waits for it, so it lets the defaults batch it, keeps the standard 5 attempts (`max_retries` 4) and
-  retries like the receipt check (30 s x3 up to 600 s); `onDeadLetter` is `markParseFailed`.
+  retries like the receipt check (30 s x3 up to 600 s); `onDeadLetter` is `markParseFailed`. The consumer takes **one message at a time** (`max_batch_size` 1): a parse is a
+  model read and a catalog research, and a batch is retried or acked as a whole. The body may also carry `retry: true`, for the second try the next day: the dispatcher
+  records a dead-lettered run as failed for the key for good, so that message has its own key, `parse-safety:<safetyId>:retry`. The daily cron queues it (see "Guest cleanup").
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body, { delaySeconds? })`, typed by the job's
   schema; the delay holds the message back, for a wait that must not use up retries), with a Cloudflare Queues adapter and an in-memory fake (which records the job name and the bare body, whatever the queue). Services never see bindings.
 - **`buildJobRuntime(env)`** in `container.ts` returns `{ services, jobRuns }` for the dispatcher.
@@ -439,6 +441,10 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
   batch's users stay for the next run.
 - **Failure:** logged as `{ job: 'guest-cleanup', outcome: 'failed', error }` and rethrown so Cloudflare
   records the cron as failed.
+- **The same cron also sweeps the safety parses** (`createDailyJobs` in `jobs/scheduled.ts`): after the cleanup it calls `SafetyService.requeueDueParses`, which queues the
+  parse-safety job for every pending parse whose due time has come (see "Safety facts (onboarding)"). Neither runs inside the other: a cleanup that throws does not stop the
+  sweep, nor a sweep that throws the cleanup, and the first failure is rethrown after both have run so Cloudflare records the cron as failed. The sweep logs
+  `{ job: 'safety-parse-requeue', outcome: 'done', queued }` (only when it queued something) or `{ ..., outcome: 'failed', error }`.
 
 ### Tokens and the auth middleware
 `lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`
@@ -803,7 +809,7 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
-- **Still to come.** Pull request 4 reads the products and ingredients named in reaction and prescription text in the background.
+- **Not part of the goal.** The words typed beside the safety choices (a product that gave a reaction, a prescription) are read in the background by the parse job; see "Safety facts (onboarding)".
 
 ### Safety facts (onboarding)
 `modules/safety` holds `profile_safety` (migration 0024) and `safety_mentions` (migration 0025), `D1SafetyRepository` (`append`, `find`, `current`, `history`,
@@ -833,26 +839,30 @@ two texts is the fourth.
   part of the hook. Neither guard is wired to a route yet.
 - **Parsing the two texts only ever adds caution.** What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove
   any, and nothing the model says about a product's contents is ever kept (see below). A parse that fails, or never runs, takes nothing away.
-- **The parse state** is two columns on `profile_safety` (migration 0025, additive: plain `ADD COLUMN`s, no table rebuild). `parse_state` is `none` (no words, and every
-  row saved before the parse existed), `pending` (words were saved and the parse has not finished), `done` or `failed` (the dead-letter queue was reached). `parse_due_at` is
-  when the parse was meant to run. `set` writes `pending` and queues one `parse-safety` message carrying the row's id for an answer with any words (one message, not two,
+- **The parse state** is three columns on `profile_safety` (migration 0025, additive: plain `ADD COLUMN`s, no table rebuild). `parse_state` is `none` (no words, and every
+  row saved before the parse existed), `pending` (words were saved and the parse has not finished), `done` or `failed` (final). `parse_due_at` is when the parse is due.
+  `parse_retried` (default false) is set when a parse that ran out of retries is given its one more try, and is never cleared. A partial index on `parse_due_at` for the pending rows
+  serves the daily sweep. `set` writes `pending` and queues one `parse-safety` message carrying the row's id for an answer with any words (one message, not two,
   for both texts); an answer without words, or "none of these", is `none` and queues nothing.
-- **At most one parse per profile per hour.** The message is held back (`delaySeconds`) until an hour after the newest earlier answer of the same profile that had
-  words, counted from when that answer was saved and whatever became of its parse (answers without words do not count), and `parse_due_at` is the time it was held to.
-  An hour or more later it is not held. The limit is the service's own: the saves are not rate limited, only the parse is.
+- **At most one parse per profile per hour.** The message is held back (`delaySeconds`) until an hour after the **due time** of the profile's newest answer with words whose
+  parse is due or has run (`parse_due_at` at or before now; answers without words, and rows from before the parse, do not count), never less than 0: `delay = max(0, ceil(anchor.parse_due_at + 1 h - now))`,
+  and `parse_due_at` is now plus that delay. An answer whose parse is still in the future is being replaced by this one and never runs, so it holds nothing back: A at 0, B at 10 minutes and C at 20 minutes
+  give due times 0, 60 and 60 minutes, and a C at 61 minutes (after B's parse fell due at 60) waits until 120. The limit is the service's own; the saves themselves are rate limited (below).
 - **A queue that is down never fails the save.** The enqueue error is logged as `{ outcome: 'parse-enqueue-failed', safetyId }` (no message, no words) and swallowed; the
-  row stays `pending`.
-- **Repair on read.** `current()` (so `GET /safety`) queues the parse again, with no delay, when the current row is still `pending` more than 10 minutes after
-  `parse_due_at` (a lost message, or the queue was down at the save). The row's key makes a repeat one run. It looks only at the current row, answers the same view, and a
-  queue that is down is logged and never fails the read.
+  row stays `pending`, and the repair or the daily sweep queues it again.
+- **Repair on read.** `current()` (so `GET /safety`) queues the parse again, with no delay, when the current row is still `pending` more than **45 minutes** after
+  `parse_due_at` (strictly after: the queue retries for most of an hour before it gives up, so a parse in its retries is not taken for lost; a lost message, or a queue that was down at the save,
+  is). A row on its second try is queued with `retry: true`. The row's key makes a repeat one run. It looks only at the current row, answers the same view, and a
+  queue that is down is logged and never fails the read. A row not yet due (such as one given its second try tomorrow) is never repaired.
 - **`parse(safetyId)`** runs as the system actor, so it never calls `requireUser`, and is safe to run again. A row that does not exist, or is not `pending`, is left alone;
   one that a newer answer of its profile has replaced is marked `done` with no call (the newer one has its own job). Otherwise:
-  1. If nothing is stored for the row yet, it reads the reaction text and then the prescription text with the `MentionReader`, and only when BOTH reads have finished
-     stores every mention in ONE `appendMentions` batch, numbered in the order read (the numbering goes on through the second text). A retry after a read failed
-     therefore reads again and cannot lose what the second text names; once mentions are stored, a retry does not read again. A refusal or a rejected request leaves that
-     text with no mentions (the words still count) and the parse goes on; the AI budget, an outage and a config error throw, and the job retries.
-  2. A product is stored `unresolved` at once when it has no brand or no category (the catalog needs both; the reader leaves a brand null for "the white tub from the
-     market"), and so is every product past the first three that could be looked up in the answer (counted across both texts, in order). The rest are `pending`.
+  1. **Each text is read once.** The reaction text and then the prescription text are read with the `MentionReader`, and each one's mentions are stored AS SOON AS they are read, in ONE
+     batch (`storeRead`) together with a record in `safety_reads` that the text was read. A retry reads only the texts without that record, so a text that named nothing, or was refused,
+     is never paid for again, one that named something is never stored twice, and what the first text named is never lost when the second cannot be read yet. Positions go on from the
+     mentions already stored. A refusal or a rejected request leaves that text with no mentions (the words still count) and the parse goes on; the AI budget, an outage and a config error throw, and the job retries.
+  2. **Three products at most, each once.** A product is stored `unresolved` at once when it has no brand or no category (the catalog needs both; the reader leaves a brand empty for "the white tub from the
+     market"). The others use up the answer's three slots, counted across both texts in the order read and across a retry (the slots already used count). The same product named again (the same
+     `normaliseText` of brand, name and variant) uses no further slot, is looked up once, and every mention of it gets the same outcome; a product past the third is `unresolved`. The rest are `pending`.
      An ingredient has no resolution and is never sent to the catalog.
   3. Each `pending` product is looked up with the same two catalog calls a typed name gets, with no scan item: `resolve({ brand, name, category, variant? })`, and for
      `needs-research` `research(productId)`. `ready`, `needs-analysis`, `analysis-failed` and a `found` research are `resolved` with the catalog's `productId`; `not-found` is
@@ -860,18 +870,23 @@ two texts is the fourth.
      and `ResearchInProgressError` and `CatalogBusyError` from the catalog pass through, each leaving that product `pending` for the retry. Each outcome is stored as soon
      as it is known, so a retry asks the catalog only about the products still `pending`. The parse does not analyse a formulation: that stays the scan's business.
   4. The row is marked `done`.
-  `markParseFailed` (the dead-letter hook) moves a `pending` row to `failed` and leaves a `done` one alone; the words and the choices stay as they were.
+- **A second try the next day.** `markParseFailed` (the dead-letter hook) acts on a `pending` row only. The first dead letter puts it back to `pending` with `parse_retried` set and `parse_due_at` at the
+  next midnight UTC strictly after now (at midnight exactly, the one a day on), and queues nothing: a queue delay cannot reach that far. The daily cron (`requeueDueParses(now)`, see "Guest cleanup")
+  queues `{ safetyId, retry: true }` for every pending row due by then, the longest overdue first and at most 200 a run, the profile's session not needed. The second dead letter is final: `failed`. A
+  `done` or `failed` row, or one with nothing to parse, is left alone. The words, the choices and what had been found stay as they were throughout.
 - **Ingredients never come from model memory.** The reader names only what the person wrote, and a product's ingredients come from the catalog's research alone, so
   a mention is a name the person typed and a `product_id` is a catalog product. Nothing about what is in a product is taken from the model.
 - **`safety_mentions`** (migration 0025): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction` or `prescription`),
   `kind` (`product` or `ingredient`), `brand`, `name`, `variant`, `category` (null for an ingredient or when unknown), `product_id` (a catalog id with no foreign key, like
   `scan_items.product_id`), `resolution` (`pending`, `resolved`, `unresolved`; null for an ingredient), `position` and `created_at`; indexed on (`safety_id`, `position`).
-  `appendMentions` is one `db.batch` (all or nothing; an empty list does nothing). `currentMentions()` answers the current row's mentions in order for the services that
+  `safety_reads` (same migration; `safety_id` FK with cascade, `source`; primary key on both) records the texts that have been read. `appendMentions` and `storeRead` are each one `db.batch`
+  (all or nothing; `appendMentions` of an empty list does nothing, `storeRead` of one still records the read). `currentMentions()` answers the current row's mentions in order for the services that
   will use them; no route exposes them yet, and the `SafetyView` and the API stay exactly as they were.
 - **Logs carry ids and outcomes only**, never the words, a brand or a name, and a successful parse logs nothing of its own (the dispatcher logs `{ job, key, attempt, outcome }`).
   Tests spy on the console to keep it so. The words are user input and may be personal.
-- **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. They have no rate limit of their own:
-  a save is one row, queues a parse when it has words, and calls no model itself.
+- **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. `PUT /safety` is rate limited like `PUT /goal`, in the same order
+  (`SAFETY_SET_IP_LIMITER` 20 a minute per address, then `signedIn()`, then `SAFETY_SET_USER_LIMITER` 10 a minute per user; 429 `RATE_LIMITED` with `Retry-After`; namespace ids 1022/1023, 2022/2023 and 3022/3023): a
+  save can queue a parse that researches a product into the shared catalog, and a guest costs nothing to make. `GET /safety` is not limited. A save calls no model itself.
 
 ### Prompts
 
@@ -1291,7 +1306,10 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   skip the analyse step. Callers (the scan jobs) run one of these per step.
 - **search, namedProduct and choose** serve a user who names a product by hand (see "Product search" and `identifyByName`).
   `search(q)` normalises the query with `normaliseText` and returns at most 10 `{ id, brand, name, variant, category, imageUrl }`, or `[]` for a
-  query with nothing left once normalised (never every product); no model or web call. `namedProduct(id)` is that summary for one id.
+  query with nothing left once normalised (never every product); no model or web call. **It lists only a named product that has at least one formulation** (an `EXISTS` on `formulations`, answered by a covering-index probe on `product_id` (checked with EXPLAIN QUERY PLAN: the scan of `products` is unchanged, and `formulations` is searched by `product_id`), one probe
+  per candidate), found by research or read from a label, however old and analysed or not. A product nobody has found ingredients for (a made-up name a user typed,
+  or one the research did not find, which the safety parse can also create) is in the catalog but not in the search, and does not use up the limit of 10; it appears the
+  moment a formulation is stored for it. `namedProduct(id)` is that summary for one id.
   `choose(id)` is `nextStep` for a product the user picked, the same `ResolveResult` `resolve` gives for it: no lookup by name, no model, nothing
   written. An id the catalog does not hold, and an unnamed product, are `NotFoundError('PRODUCT_NOT_FOUND')` for both.
 - **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest

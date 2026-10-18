@@ -38,6 +38,7 @@ describe('profile_safety in D1', () => {
     prescriptionText: null,
     parseState: 'none' as const,
     parseDueAt: null,
+    parseRetried: false,
     createdAt: new Date(BASE.getTime() + MINUTE),
     ...over,
   })
@@ -64,7 +65,7 @@ describe('profile_safety in D1', () => {
   })
 
   // Rows that existed before the parse (migration 0025) were saved with nothing to parse, so the new columns must default to that.
-  it('gives a row written without a parse state (as every row was before the parse existed) the state none and no due time', async () => {
+  it('gives a row written without a parse state (as every row was before the parse existed) the state none, no due time and no retry', async () => {
     const repository = new D1SafetyRepository(db)
     const guest = await newGuest()
     const id = `safety-${crypto.randomUUID()}`
@@ -73,7 +74,7 @@ describe('profile_safety in D1', () => {
       .bind(id, guest.profileId, JSON.stringify(['pregnant']), BASE.getTime())
       .run()
 
-    expect(await repository.find(id)).toMatchObject({ choices: ['pregnant'], parseState: 'none', parseDueAt: null })
+    expect(await repository.find(id)).toMatchObject({ choices: ['pregnant'], parseState: 'none', parseDueAt: null, parseRetried: false })
   })
 
   it('stores the due time to the millisecond', async () => {
@@ -96,6 +97,7 @@ describe('safety_mentions in D1', () => {
     prescriptionText: null,
     parseState: 'pending' as const,
     parseDueAt: new Date(BASE.getTime() + MINUTE),
+    parseRetried: false,
     createdAt: new Date(BASE.getTime() + MINUTE),
     ...over,
   })

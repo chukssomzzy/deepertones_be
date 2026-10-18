@@ -4,9 +4,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
+import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
+import { SafetyService } from '../../src/modules/safety/safety.service'
 import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
+import { UsersService } from '../../src/modules/users/users.service'
 
 // The Worker's scheduled handler is one export for every cron in wrangler.jsonc. Each cron runs its own job and no other:
 // the daily guest cleanup must not run every 10 minutes, nor the reaper once a day. The crons are pinned to the config in
@@ -67,6 +70,10 @@ const oldWorkerProduct = async (brand: string, name: string) => {
   const id = crypto.randomUUID()
   await env.DB.prepare('INSERT INTO products (id, identity_key, brand_key, kind, brand, name, variant, category, created_at, search_text) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
     .bind(id, `${brand.toLowerCase()}|${name.toLowerCase()}|`, brand.toLowerCase(), 'named', brand, name, null, 'skin', NOW, '')
+    .run()
+  // Search lists only a product with ingredients, as it was once the old Worker had researched it, so these have a formulation too.
+  await env.DB.prepare('INSERT INTO formulations (id, product_id, ingredients, ingredients_key, source_kind, found_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(crypto.randomUUID(), id, JSON.stringify(['Aqua', 'Glycerin']), 'aqua\nglycerin', 'label', NOW)
     .run()
   return id
 }
@@ -169,5 +176,92 @@ describe('the Worker scheduled handler', () => {
     expect(await scans.findItem(stuck)).toMatchObject({ state: 'recognising' })
     expect(await users.findById(guest)).not.toBeNull()
     expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'unknown-cron', cron: '5 5 * * *' }))
+  })
+})
+
+// --- the second try of a safety parse that dead-lettered ---
+
+// A parse that ran out of retries is given one more try the next day (SafetyService.markParseFailed puts it back to pending, due at the next
+// midnight UTC). A queue delay cannot reach that far, so the daily cron queues it: SafetyService.requeueDueParses. The Worker's parse-safety
+// producer is a recorder here, so what the cron queues can be read back.
+describe('the Worker scheduled handler: parses due for their second try', () => {
+  const safetyRows = new D1SafetyRepository(createDb(env.DB))
+  const queuedParses: { body: unknown; delaySeconds: number | undefined }[] = []
+  const parseQueue = { send: async (body: unknown, options?: { delaySeconds?: number }) => void queuedParses.push({ body, delaySeconds: options?.delaySeconds }), sendBatch: async () => {} } as unknown as Queue
+  const fireWithQueue = async (cron: string) => {
+    const ctx = createExecutionContext()
+    await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), { ...env, PARSE_SAFETY_QUEUE: parseQueue } as typeof env, ctx)
+    await waitOnExecutionContext(ctx)
+  }
+  afterEach(() => {
+    queuedParses.length = 0
+  })
+
+  /** A guest whose answer has words and a parse pending, due `dueInMs` from now (negative: it was due that long ago). */
+  const pendingParse = async (dueInMs: number, over: { parseState?: 'pending' | 'done' | 'failed'; parseRetried?: boolean } = {}) => {
+    const userId = crypto.randomUUID()
+    const profileId = crypto.randomUUID()
+    await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    const id = crypto.randomUUID()
+    await safetyRows.append({
+      id,
+      profileId,
+      choices: ['reaction'],
+      reactionText: 'Caro White and fragrance',
+      prescriptionText: null,
+      parseState: over.parseState ?? 'pending',
+      parseDueAt: new Date(NOW + dueInMs),
+      parseRetried: over.parseRetried ?? true,
+      createdAt: new Date(NOW - DAY),
+    })
+    return { userId, id }
+  }
+  const queuedIds = () => queuedParses.map((message) => (message.body as { safetyId: string }).safetyId)
+
+  it('on the daily cron, queues the parse of a pending answer that is due, with no delay', async () => {
+    const { id } = await pendingParse(-HOUR)
+
+    await fireWithQueue(GUEST_CLEANUP_CRON)
+
+    expect(queuedIds()).toContain(id)
+    expect(queuedParses.filter((message) => (message.body as { safetyId: string }).safetyId === id)[0]!.delaySeconds ?? 0).toBe(0)
+  })
+
+  it('on the daily cron, leaves a parse that is not due yet, and one that is finished or failed, alone', async () => {
+    const later = await pendingParse(DAY)
+    const done = await pendingParse(-HOUR, { parseState: 'done' })
+    const failed = await pendingParse(-HOUR, { parseState: 'failed' })
+
+    await fireWithQueue(GUEST_CLEANUP_CRON)
+
+    for (const { id } of [later, done, failed]) expect(queuedIds()).not.toContain(id)
+  })
+
+  it('on the reaper cron, which runs every 10 minutes, queues nothing: the retry is a once-a-day job', async () => {
+    const { id } = await pendingParse(-HOUR)
+
+    await fireWithQueue(SCAN_REAPER_CRON)
+
+    expect(queuedIds()).not.toContain(id)
+  })
+
+  it('still deletes the abandoned guests on the daily cron when the sweep throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(SafetyService.prototype, 'requeueDueParses').mockRejectedValue(new Error('the sweep exploded'))
+    const guest = await abandonedGuest()
+
+    await fireWithQueue(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(await users.findById(guest)).toBeNull()
+  })
+
+  it('still queues the due parses on the daily cron when deleting the abandoned guests throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(UsersService.prototype, 'purgeUnreachableGuests').mockRejectedValue(new Error('the cleanup exploded'))
+    const { id } = await pendingParse(-HOUR)
+
+    await fireWithQueue(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(queuedIds()).toContain(id)
   })
 })

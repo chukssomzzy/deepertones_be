@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "c3204cbf-fbda-4f49-8390-8a93d5a4cb00",
+  "id": "5eb0c5c1-227a-40a2-b77c-4bac84f3a789",
   "prevId": "ea5c10c6-154d-4152-b315-c6b2e5d02c2b",
   "tables": {
     "job_runs": {
@@ -1250,6 +1250,14 @@
           "notNull": false,
           "autoincrement": false
         },
+        "parse_retried": {
+          "name": "parse_retried",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": false
+        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -1266,6 +1274,14 @@
             "created_at"
           ],
           "isUnique": false
+        },
+        "profile_safety_pending_due_idx": {
+          "name": "profile_safety_pending_due_idx",
+          "columns": [
+            "parse_due_at"
+          ],
+          "isUnique": false,
+          "where": "\"profile_safety\".\"parse_state\" = 'pending'"
         }
       },
       "foreignKeys": {
@@ -1401,6 +1417,52 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "safety_reads": {
+      "name": "safety_reads",
+      "columns": {
+        "safety_id": {
+          "name": "safety_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "source": {
+          "name": "source",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "safety_reads_safety_id_profile_safety_id_fk": {
+          "name": "safety_reads_safety_id_profile_safety_id_fk",
+          "tableFrom": "safety_reads",
+          "tableTo": "profile_safety",
+          "columnsFrom": [
+            "safety_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "safety_reads_safety_id_source_pk": {
+          "columns": [
+            "safety_id",
+            "source"
+          ],
+          "name": "safety_reads_safety_id_source_pk"
+        }
+      },
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
