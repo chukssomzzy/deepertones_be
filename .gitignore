@@ -49,3 +49,6 @@ Session.vim
 
 # catalog eval reports
 .eval/
+
+# human layer
+.humanlayer/

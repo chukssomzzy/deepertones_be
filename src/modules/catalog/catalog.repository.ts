@@ -128,12 +128,22 @@ export class D1CatalogRepository {
     if (first) await this.db.batch([first, ...rest])
   }
 
-  /** The brand's newest products first (the later insert wins a tie), so the most recent catalogue entries are compared. */
-  async productsByBrandKey(brandKey: string, limit: number): Promise<Product[]> {
+  /**
+   * Newest first (a later insert wins a tie in createdAt), for every brand whose key is the first word or starts with it and a space.
+   * "brand_key = w or (brand_key >= w || ' ' and brand_key < w || '!')" is a range on the brand_key index: a brand key
+   * holds only letters, digits, dots and single spaces, and a space (0x20) sorts just below "!" (0x21), so the range
+   * is exactly the keys that start with "w ". LIKE would be case-insensitive in SQLite and cannot use the index.
+   */
+  async productsByBrandFamily(firstWord: string, limit: number): Promise<Product[]> {
     return this.db
       .select()
       .from(products)
-      .where(eq(products.brandKey, brandKey))
+      .where(
+        or(
+          eq(products.brandKey, firstWord),
+          and(sql`${products.brandKey} >= ${firstWord} || ' '`, sql`${products.brandKey} < ${firstWord} || '!'`),
+        ),
+      )
       .orderBy(desc(products.createdAt), sql`rowid desc`)
       .limit(limit)
   }

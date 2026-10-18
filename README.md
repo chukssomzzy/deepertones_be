@@ -15,6 +15,7 @@ Serverless API for deepertones: [Hono](https://hono.dev) on Cloudflare Workers.
 | `npm run lint:arch`           | Architecture rules (dependency-cruiser); see docs/architecture.md     |
 | `npm run openapi`             | Regenerate `docs/openapi.json` from the routes (commit the result)    |
 | `npm run openapi:lint`        | Lint `docs/openapi.json` (Redocly; exceptions in `redocly.yaml`)      |
+| `npm run prompts`             | Regenerate `src/prompts/prompts.generated.ts` (commit the result)     |
 | `npm run db:generate`         | Generate a SQL migration from changed `*.table.ts` files              |
 | `npm run db:migrate:local`    | Apply migrations to the local D1 used by `npm run dev`                |
 | `npm run cf-typegen`          | Regenerate `worker-configuration.d.ts` after editing bindings         |
@@ -110,6 +111,15 @@ Every success response is `{ success, status, message, data }`; `data` below is 
 5. **To log out** call `POST /api/v1/auth/logout` with `{ deviceId, platform }` and the bearer token. It signs the user out
    on every device (their other devices' refresh then fails with `TOKEN_INVALID`) and returns a fresh guest session
    to store.
+6. **For push notifications**, after every sign-in, logout, profile switch and token refresh, call `PUT /api/v1/me/push-token` with
+   `{ deviceId, platform, token }` (the same `deviceId`; `token` is the Expo push token) and the bearer token. It answers 204.
+   `DELETE /api/v1/me/push-token` with `{ deviceId }` stops them for this phone (204 even if nothing was registered). Logout and
+   signing a guest in to an existing account delete the tokens they leave behind, so register again after them.
+   `GET`/`PATCH /api/v1/me/notification-settings` read and change `{ scanFinished, scanNeedsYou }` (both on by default; PATCH names at
+   least one). The pushes sent are "your scan is ready" (to the phones on the profile that made the scan), "your scan needs you" (an item
+   needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
+   a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
+   the ids to route the tap.
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
@@ -119,6 +129,7 @@ Error codes to handle (in `error.code`):
 - `AUTH_REQUIRED` (401): no token. `TOKEN_EXPIRED` (401): refresh. `TOKEN_INVALID` (401): start over from step 1.
 - `USER_NOT_FOUND` (404, on `/api/v1/me` and logout): the account is gone; re-bootstrap.
 - `RATE_LIMITED` (429): wait `Retry-After` seconds.
+- `PUSH_TOKEN_INVALID` (400): the token is not an Expo push token.
 - `ACCOUNT_LINKING_UNAVAILABLE` (409): a verified user tried to add a different, unowned email. Not supported yet;
   no code is sent or used. `NOT_A_GUEST` (409) should now be unreachable in practice.
 - `VALIDATION_FAILED` (400), and from the code flow `INVALID_EMAIL`, `OTP_CHANNEL_UNAVAILABLE`, `OTP_COOLDOWN` (429)
@@ -138,7 +149,7 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY` and `ANTHROPIC_API_KEY` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
 ## Product catalog setup
@@ -219,6 +230,35 @@ the setup below. Tests never call ZeptoMail and need no secrets.
 `OTP_CHANNELS` in `wrangler.jsonc` lists the channels people can sign in with; it is `email` today.
 Use a **different** `OTP_PEPPER` in each environment, and never change a pepper while codes are
 live (it invalidates outstanding codes; harmless once 10 minutes have passed).
+
+## Expo push setup
+
+Push notifications go out through the Expo Push Service. The provider is in `src/providers/push`, the send and receipt
+jobs in `src/modules/notifications` (see "Push notifications (Expo)" and "Sending push notifications" in
+`docs/architecture.md`). The backend sends three pushes: "scan ready", "scan needs you" (a confirmation or a back photo) and a
+security alert when a guest signs in to an existing account; "What triggers a push" there says when. Tests never call Expo and need no
+secrets. What is left for the account owner, once per environment (a separate access token per environment is fine but not
+required):
+
+1. In Expo, create a robot user and an access token for it (expo.dev → account → Access tokens).
+2. In the Expo project's settings, turn on **Enhanced security for push notifications**. Expo then refuses a
+   send that does not carry the access token, so a leaked push token cannot be used to message our users.
+3. Upload the credentials Expo needs to reach the phones, to Expo/EAS (`eas credentials`, or the dashboard): the
+   **FCM v1 service-account key** (Android) and the **APNs key** (iOS).
+4. Put the access token in `.dev.vars.staging` and `.dev.vars.production` as `EXPO_ACCESS_TOKEN` (and in `.dev.vars`
+   to try it locally), then push it:
+
+   ```sh
+   npm run secrets:push -- --env staging --apply
+   npm run secrets:push -- --env production --apply
+   ```
+
+5. Create the four push queues for each environment (`push-delivery`, `push-delivery-dlq`, `push-receipts`,
+   `push-receipts-dlq`); the commands are in [Before the first deploy](#before-the-first-deploy), step 3. A deploy that binds
+   a missing queue fails.
+
+Deploys fail until `EXPO_ACCESS_TOKEN` is set on the environment's Worker (it is in `secrets.required`), so do steps 1
+to 5 before merging to `staging` or `main`.
 
 ## WhatsApp OTP setup
 
@@ -314,7 +354,8 @@ There are only two long-lived branches. "production" is the name of the deploy t
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
 unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
-and valid), and a dry-run build of both environments.
+and valid), the prompts (CI regenerates `src/prompts/prompts.generated.ts` and fails if it is stale),
+and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.
 
 Production goes through a release: merging `staging` into `main` makes release-please open a
@@ -348,8 +389,8 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery and
-   the scan items). A deploy that binds a missing queue fails:
+3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery,
+   the scan items, push delivery and push receipts). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
@@ -360,6 +401,14 @@ stopped using it.
    npx wrangler queues create deepertones-scan-items-dlq-staging
    npx wrangler queues create deepertones-scan-items-production
    npx wrangler queues create deepertones-scan-items-dlq-production
+   npx wrangler queues create deepertones-push-delivery-staging
+   npx wrangler queues create deepertones-push-delivery-dlq-staging
+   npx wrangler queues create deepertones-push-delivery-production
+   npx wrangler queues create deepertones-push-delivery-dlq-production
+   npx wrangler queues create deepertones-push-receipts-staging
+   npx wrangler queues create deepertones-push-receipts-dlq-staging
+   npx wrangler queues create deepertones-push-receipts-production
+   npx wrangler queues create deepertones-push-receipts-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

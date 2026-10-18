@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { PRODUCT_FORMS } from '../catalog/catalog.vocabulary'
 import { SCAN_POLICY } from './scans.service'
 import { NO_LABEL_PURPOSES, NO_LABEL_SOURCES, NO_LABEL_USED_FOR } from './scans.vocabulary'
 
@@ -44,6 +45,7 @@ export const ConfirmProductBody = z
     brand: z.string().min(1),
     name: z.string().min(1),
     variant: z.string().optional(),
+    form: z.enum(PRODUCT_FORMS).optional(),
     category: Category,
   })
   .openapi('ConfirmProductBody')
@@ -91,6 +93,7 @@ const ProductResult = z
       brand: z.string(),
       name: z.string(),
       variant: z.string().nullable(),
+      form: z.enum(PRODUCT_FORMS).nullable(),
       category: Category,
       imageUrl: z.string().nullable(),
     }),
@@ -130,7 +133,7 @@ export const ScanItemResponse = z
       }),
     retakesLeft: z.number().int().min(0).optional().openapi({ description: 'Only on an item in `needs-retake`: how many more front photos it may be sent. Absent in every other state.' }),
     recognised: z
-      .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), category: Category })
+      .object({ brand: z.string(), name: z.string(), variant: z.string().nullable(), form: z.enum(PRODUCT_FORMS).nullable(), category: Category })
       .optional()
       .openapi({ description: 'What the photo was read as, or what the user corrected it to. Absent until it has been read.' }),
     product: ProductResult.optional().openapi({ description: 'Only on a `ready` item.' }),

@@ -8,9 +8,9 @@ const readyItem = (): ScanItemView => ({
   position: 0,
   state: 'ready',
   reason: null,
-  recognised: { brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin' },
+  recognised: { brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin' },
   product: {
-    product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
+    product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
     formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: new Date('2030-01-01T00:00:00Z'), analysedAt: null },
     concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
     reference: { version: 'v1', coverage: 'partial' },
@@ -25,15 +25,29 @@ describe('toScanItemResponse', () => {
       position: 0,
       state: 'ready',
       reason: null,
-      recognised: { brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin' },
+      recognised: { brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin' },
       product: {
-        product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, category: 'skin', imageUrl: null },
+        product: { id: 'p1', kind: 'named', brand: 'Glow Co', name: 'Serum', variant: null, form: null, category: 'skin', imageUrl: null },
         formulation: { id: 'f1', ingredients: ['Aqua'], source: { kind: 'web', url: 'https://example.test/serum' }, foundAt: '2030-01-01T00:00:00.000Z', analysedAt: null },
         concerns: [{ kind: 'fragrance', severity: 'low', ingredients: ['Parfum'], why: 'w', whoShouldTakeCare: 'x', traits: ['t'], sources: ['s'] }],
         reference: { version: 'v1', coverage: 'partial' },
       },
       image: { kind: 'stock', url: 'https://example.test/serum.jpg' },
     })
+  })
+
+  it('publishes the form of what was read and of the product, when they have one', () => {
+    const item = readyItem()
+    const sprayed: ScanItemView = {
+      ...item,
+      recognised: { ...item.recognised!, form: 'spray' },
+      product: { ...item.product!, product: { ...item.product!.product, form: 'spray' } },
+    }
+
+    const response = toScanItemResponse(sprayed)
+
+    expect(response.recognised).toEqual({ brand: 'Glow Co', name: 'Serum', variant: null, form: 'spray', category: 'skin' })
+    expect(response.product!.product.form).toBe('spray')
   })
 
   it('leaves out a field the catalog view gains that the response schema does not name', () => {
@@ -98,13 +112,13 @@ describe('toScanItemResponse', () => {
     const named = readyItem()
     const unnamed: ScanItemView = {
       ...named,
-      product: { ...named.product!, product: { id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', imageUrl: null } },
+      product: { ...named.product!, product: { id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, form: null, category: 'other', imageUrl: null } },
     }
 
     const response = toScanItemResponse(unnamed)
 
     expect(toScanItemResponse(named).product!.product).toMatchObject({ kind: 'named' })
-    expect(response.product!.product).toEqual({ id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', imageUrl: null })
+    expect(response.product!.product).toEqual({ id: 'p2', kind: 'unnamed', brand: '', name: '', variant: null, form: null, category: 'other', imageUrl: null })
     expect(ScanItemResponse.safeParse(response).success).toBe(true)
   })
 

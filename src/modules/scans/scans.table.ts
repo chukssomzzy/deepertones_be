@@ -3,6 +3,7 @@ import { index, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-or
 import { users } from '../users/users.table'
 import type { ProductCategory } from '../../providers/product-research/product-researcher.provider'
 import { NO_LABEL_PURPOSES, NO_LABEL_SOURCES, NO_LABEL_USED_FOR } from './scans.vocabulary'
+import { PRODUCT_FORMS } from '../catalog/catalog.vocabulary'
 
 /**
  * One upload of photos. `ip_hash` is an HMAC of the caller's IP (the raw address is never stored), for the per-IP daily
@@ -60,6 +61,7 @@ export const scanItems = sqliteTable(
     recognisedBrand: text('recognised_brand'),
     recognisedName: text('recognised_name'),
     recognisedVariant: text('recognised_variant'),
+    recognisedForm: text('recognised_form', { enum: PRODUCT_FORMS }),
     recognisedCategory: text('recognised_category').$type<ProductCategory>(),
     recognisedConfidence: real('recognised_confidence'),
     productId: text('product_id'),
@@ -97,7 +99,12 @@ export const scanBackPhotos = sqliteTable(
     ipHash: text('ip_hash').notNull(),
     uploadedAt: integer('uploaded_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (t) => [index('scan_back_photos_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt), index('scan_back_photos_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt)],
+  (t) => [
+    // The per-item count and the cascade delete from scan_items both filter on item_id.
+    index('scan_back_photos_item_id_idx').on(t.itemId),
+    index('scan_back_photos_user_id_uploaded_at_idx').on(t.userId, t.uploadedAt),
+    index('scan_back_photos_ip_hash_uploaded_at_idx').on(t.ipHash, t.uploadedAt),
+  ],
 )
 
 /**

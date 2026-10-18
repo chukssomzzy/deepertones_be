@@ -169,6 +169,26 @@ module.exports = {
       to: { path: ['^src/(modules|providers|jobs|middleware)/', '^src/(container|index|docs)\\.ts$'] },
     },
 
+    {
+      name: 'prompts-are-pure',
+      severity: 'error',
+      comment:
+        'Prompts are content: src/prompts/ holds the Markdown prompt files and the module generated from them, with no modules, ' +
+        'providers, jobs, middleware or wiring. The one exception is a type-only import of AiJob from the AI spend provider contract.',
+      from: { path: '^src/prompts/' },
+      to: {
+        path: ['^src/(modules|providers|jobs|middleware)/', '^src/(container|index|docs)\\.ts$'],
+        pathNot: '^src/providers/anthropic/ai-spend\\.provider\\.ts$',
+      },
+    },
+    {
+      name: 'prompts-are-pure',
+      severity: 'error',
+      comment: 'See the rule above: the AI spend provider contract may be imported by src/prompts/ for its types only.',
+      from: { path: '^src/prompts/' },
+      to: { path: '^src/providers/anthropic/ai-spend\\.provider\\.ts$', dependencyTypesNot: ['type-only'] },
+    },
+
     // --- Test code never ships -------------------------------------------------------------
     {
       name: 'no-test-code-in-production',

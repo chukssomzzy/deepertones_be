@@ -30,7 +30,7 @@ const ORIGIN = 'http://deepertones.test'
 
 const runSalt = String(Math.floor(Math.random() * 1e5)).padStart(5, '0')
 let counter = 0
-const freshBrand = () => `EventsBrand${runSalt}x${counter++}`
+const freshBrand = () => `${runSalt}${counter++}x EventsBrand`
 // A new client IP per scan keeps the daily per-IP photo quota from coupling tests to each other.
 const freshIp = () => `198.51.${Math.floor(counter / 250) % 250}.${(counter++ % 250) + 1}`
 
@@ -114,9 +114,9 @@ const stubAnthropic = (...responders: Parameters<typeof stubFetch>) => {
 
 const recognised = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))] })
 const beautyProduct = (brand: string, name: string) =>
-  recognised({ classification: 'beauty-product', brand, name, variant: '', category: 'skin', confidence: 0.92 })
-const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
-const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', category: 'other', confidence: 0 })
+  recognised({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence: 0.92 })
+const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
+const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
 
 /** POST .../retake through the Worker's own entrypoint, with its queue replaced by the quiet one (the real queue would deliver the recognise into another test). */
 const postRetake = async (guest: Guest, scanId: string, itemId: string) => {

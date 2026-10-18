@@ -1,6 +1,7 @@
 # deepertones-be
 
-Hono API on Cloudflare Workers. Before writing code, read `docs/architecture.md` and follow it:
+Hono API on Cloudflare Workers for Deeper Tones, a skin coach for darker skin. Read `CONTEXT.md` for what the
+product is and the lines it never crosses. Before writing code, read `docs/architecture.md` and follow it:
 thin routes → services → repositories (D1/Drizzle), third parties behind providers, wiring only in
 `src/container.ts`. `src/modules/health` is the reference module.
 
