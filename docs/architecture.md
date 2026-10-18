@@ -653,9 +653,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
-  `back-photo` or `confirm`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
+  `back-photo`, `confirm` or `identify`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
-  `scan-needs-you:<scanId>:<need>` (ten items needing a back photo are ONE notification, linking to the first item that asked);
+  `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
   first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
@@ -666,6 +666,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | Where | When | Call | Key |
   | --- | --- | --- | --- |
   | `recognise` | the item moved to `needs-confirmation` | `scanNeedsYou({ need: 'confirm' })` | `scan-needs-you:<scanId>:confirm` |
+  | `recognise` | the 3rd front photo could not be read and the item moved to `needs-identification` (not for the first two, which ask for a retake, nor for a rejected photo) | `scanNeedsYou({ need: 'identify' })` | `scan-needs-you:<scanId>:identify` |
   | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
   | `labelUnreadable` | the item moved back to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo', ask: n })`, `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |

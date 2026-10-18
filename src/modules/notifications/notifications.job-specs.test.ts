@@ -23,6 +23,7 @@ describe('the send-push job', () => {
     ['scan-finished with nothing ready (the boundary: 0 is allowed)', { ...FINISHED, readyCount: 0 }],
     ['scan-needs-you for a back photo', NEEDS_YOU],
     ['scan-needs-you to confirm', { ...NEEDS_YOU, need: 'confirm' }],
+    ['scan-needs-you to identify a product', { ...NEEDS_YOU, need: 'identify' }],
     ['scan-needs-you asking again', { ...NEEDS_YOU, ask: 2 }],
     ['new-sign-in on iOS', SIGN_IN],
     ['new-sign-in on Android', { ...SIGN_IN, platform: 'android' }],
@@ -34,7 +35,7 @@ describe('the send-push job', () => {
   it.each([
     ['a negative ready count (the boundary: -1)', { ...FINISHED, readyCount: -1 }],
     ['a fractional ready count', { ...FINISHED, readyCount: 1.5 }],
-    ['a need that is not back-photo or confirm', { ...NEEDS_YOU, need: 'retake' }],
+    ['a need that is not back-photo, confirm or identify', { ...NEEDS_YOU, need: 'retake' }],
     ['a needs-you body with no item', { ...NEEDS_YOU, itemId: undefined }],
     ['a platform that is not ios, android or null', { ...SIGN_IN, platform: 'windows' }],
     ['a sign-in body with no event id', { ...SIGN_IN, eventId: undefined }],
@@ -57,6 +58,14 @@ describe('the send-push job', () => {
     expect(sendPushSpec.key(NEEDS_YOU as never)).toBe('scan-needs-you:scan-1:back-photo')
     expect(sendPushSpec.key({ ...NEEDS_YOU, itemId: 'item-2' } as never)).toBe('scan-needs-you:scan-1:back-photo')
     expect(sendPushSpec.key({ ...NEEDS_YOU, need: 'confirm' } as never)).toBe('scan-needs-you:scan-1:confirm')
+  })
+
+  it('keys an identify message by scan and need, so ten items to identify are one notification, apart from a back-photo ask and a confirmation', () => {
+    const identify = { ...NEEDS_YOU, need: 'identify' }
+
+    expect(sendPushSpec.key(identify as never)).toBe('scan-needs-you:scan-1:identify')
+    expect(sendPushSpec.key({ ...identify, itemId: 'item-2' } as never)).toBe('scan-needs-you:scan-1:identify')
+    expect(sendPushSpec.key({ ...identify, scanId: 'scan-2' } as never)).toBe('scan-needs-you:scan-2:identify')
   })
 
   it('keys a re-ask by scan, item and ask number, and treats ask 0 as the first ask (the boundary: 0 and 1)', () => {
