@@ -3,14 +3,16 @@
  * and finding the API key. Nothing here calls the API or prints, so all of it is tested (score.test.ts).
  */
 import { readFileSync } from 'node:fs'
+import { normaliseText } from '../../src/lib/normalise-text'
 import { ingredientParts, normaliseIngredient } from '../../src/modules/catalog/catalog.ingredients'
 import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
 import { AI_JOBS, type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
 import { SEVERITIES } from '../../src/modules/catalog/catalog.vocabulary'
 import type { GoalReading } from '../../src/providers/goal-reading/goal-reader.provider'
+import type { Mention } from '../../src/providers/mention-reading/mention-reader.provider'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
 import { parseEnvFile } from '../secrets/plan'
-import type { AnalysisCase, GoalCase, ResearchCase } from './cases'
+import type { AnalysisCase, GoalCase, MentionCase, ResearchCase } from './cases'
 
 /** A concern as checkAnalysis stores it. */
 export type StoredDraft = DraftConcernRow
@@ -87,6 +89,51 @@ export const scoreGoalReading = (c: GoalCase, outcome: GoalOutcome): CaseResult 
   return result(c.id, problems)
 }
 
+export type MentionOutcome = { mentions: Mention[] } | { error: string }
+
+// Words that say what a product is and not which one, so a reader that keeps "cream" in a name, or leaves it out, is not marked down for it.
+const GENERIC_PRODUCT_WORDS: ReadonlySet<string> = new Set(['cream', 'lotion', 'soap', 'gel', 'serum', 'oil', 'jelly'])
+
+/** The words of a product's brand and name together, as the catalog reads text, less the generic ones. The split between brand and name is not scored. */
+const productWords = (brand: string | null, name: string): Set<string> =>
+  new Set(normaliseText(`${brand ?? ''} ${name}`).split(' ').filter((word) => word !== '' && !GENERIC_PRODUCT_WORDS.has(word)))
+
+const sameWords = (a: Set<string>, b: Set<string>): boolean => a.size === b.size && [...a].every((word) => b.has(word))
+
+/** An ingredient as written, whatever the case, accents, punctuation or spacing ("Shea  Butter", "sheabutter"); a plural is another word. */
+const ingredientKey = (name: string): string => normaliseText(name).replaceAll(' ', '')
+
+/**
+ * What the mention reader found against what the case names. A product is found when the words of its brand and name together are the expected ones
+ * (see productWords), and it has a brand exactly when the expected one does. An ingredient is found when its name is the expected one (ingredientKey).
+ * Category and variant are not scored. Each mention found is used once. A missing mention is named by the case's own words; a wrong one is only counted,
+ * because a reader that invents or lists from memory is the failure that matters, and a model's words never go into a problem. A product the reader gave no
+ * brand for that the case does not expect is not counted: it cannot reach the catalog, so it does no harm. Problems, in this order, are fixed codes:
+ * `missing-product:<name>`, `missing-ingredient:<name>`, `extra-products:<n>`, `extra-ingredients:<n>`, and `error:<name>`.
+ */
+export const scoreMentions = (c: MentionCase, outcome: MentionOutcome): CaseResult => {
+  if ('error' in outcome) return result(c.id, [`error:${outcome.error}`])
+
+  const unusedProducts = outcome.mentions.filter((mention) => mention.kind === 'product')
+  const unusedIngredients = outcome.mentions.filter((mention) => mention.kind === 'ingredient').map((mention) => ingredientKey(mention.name))
+  const problems: string[] = []
+  for (const { brand, name } of c.expect.products) {
+    const wanted = productWords(brand, name)
+    const found = unusedProducts.findIndex((mention) => (mention.brand === null) === (brand === null) && sameWords(productWords(mention.brand, mention.name), wanted))
+    if (found === -1) problems.push(`missing-product:${name}`)
+    else unusedProducts.splice(found, 1)
+  }
+  for (const name of c.expect.ingredients) {
+    const found = unusedIngredients.indexOf(ingredientKey(name))
+    if (found === -1) problems.push(`missing-ingredient:${name}`)
+    else unusedIngredients.splice(found, 1)
+  }
+  const extraProducts = unusedProducts.filter((mention) => mention.brand !== null).length
+  if (extraProducts > 0) problems.push(`extra-products:${extraProducts}`)
+  if (unusedIngredients.length > 0) problems.push(`extra-ingredients:${unusedIngredients.length}`)
+  return result(c.id, problems)
+}
+
 const hostOf = (url: string): string | undefined => {
   try {
     return new URL(url).hostname
@@ -103,14 +150,14 @@ export const summarise = (results: CaseResult[]): { total: number; passed: numbe
   return { total, passed, failed: total - passed, passRate: total === 0 ? 0 : passed / total, costMicros }
 }
 
-export type Mode = 'analysis' | 'research' | 'goals' | 'all'
+export type Mode = 'analysis' | 'research' | 'goals' | 'mentions' | 'all'
 export type Args = { mode: Mode; limit: number | undefined; maxUsd: number; models: Partial<Record<AiJob, string>> }
 
-const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'all']
+const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'mentions', 'all']
 export const JOBS: readonly AiJob[] = AI_JOBS
 const DEFAULT_MAX_USD = 2
 export const USAGE =
-  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
+  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
   `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */

@@ -36,6 +36,9 @@ describe('profile_safety in D1', () => {
     choices: ['pregnant' as const],
     reactionText: null,
     prescriptionText: null,
+    parseState: 'none' as const,
+    parseDueAt: null,
+    parseRetried: false,
     createdAt: new Date(BASE.getTime() + MINUTE),
     ...over,
   })
@@ -59,5 +62,92 @@ describe('profile_safety in D1', () => {
     const repository = new D1SafetyRepository(db)
 
     await expect(repository.append(row(crypto.randomUUID()))).rejects.toThrow()
+  })
+
+  // Rows that existed before the parse (migration 0025) were saved with nothing to parse, so the new columns must default to that.
+  it('gives a row written without a parse state (as every row was before the parse existed) the state none, no due time and no retry', async () => {
+    const repository = new D1SafetyRepository(db)
+    const guest = await newGuest()
+    const id = `safety-${crypto.randomUUID()}`
+
+    await env.DB.prepare('INSERT INTO profile_safety (id, profile_id, choices, created_at) VALUES (?, ?, ?, ?)')
+      .bind(id, guest.profileId, JSON.stringify(['pregnant']), BASE.getTime())
+      .run()
+
+    expect(await repository.find(id)).toMatchObject({ choices: ['pregnant'], parseState: 'none', parseDueAt: null, parseRetried: false })
+  })
+
+  it('stores the due time to the millisecond', async () => {
+    const repository = new D1SafetyRepository(db)
+    const guest = await newGuest()
+    const due = new Date(BASE.getTime() + 3_600_123)
+    const saved = row(guest.profileId, { choices: ['reaction'], reactionText: 'x', parseState: 'pending', parseDueAt: due })
+    await repository.append(saved)
+
+    expect((await repository.find(saved.id))!.parseDueAt!.getTime()).toBe(due.getTime())
+  })
+})
+
+describe('safety_mentions in D1', () => {
+  const row = (profileId: string, over: Partial<Parameters<D1SafetyRepository['append']>[0]> = {}) => ({
+    id: `safety-${crypto.randomUUID()}`,
+    profileId,
+    choices: ['reaction' as const],
+    reactionText: 'Caro White and fragrance',
+    prescriptionText: null,
+    parseState: 'pending' as const,
+    parseDueAt: new Date(BASE.getTime() + MINUTE),
+    parseRetried: false,
+    createdAt: new Date(BASE.getTime() + MINUTE),
+    ...over,
+  })
+  const mention = (safetyId: string, over: Partial<Parameters<D1SafetyRepository['appendMentions']>[0][number]> = {}) => ({
+    id: `mention-${crypto.randomUUID()}`,
+    safetyId,
+    source: 'reaction' as const,
+    kind: 'product' as const,
+    brand: 'Caro White',
+    name: 'Caro White',
+    variant: null,
+    category: 'skin',
+    productId: null,
+    resolution: 'pending' as const,
+    position: 0,
+    createdAt: new Date(BASE.getTime() + MINUTE),
+    ...over,
+  })
+
+  it('removes the mentions of a user\'s safety rows with the user (a guest purged by the cleanup), and leaves other accounts\' mentions', async () => {
+    const repository = new D1SafetyRepository(db)
+    const guest = await newGuest()
+    const kept = await newGuest()
+    const goneRow = row(guest.profileId)
+    const keptRow = row(kept.profileId)
+    await repository.append(goneRow)
+    await repository.append(keptRow)
+    await repository.appendMentions([mention(goneRow.id), mention(goneRow.id, { kind: 'ingredient', name: 'fragrance', brand: null, category: null, resolution: null, position: 1 })])
+    await repository.appendMentions([mention(keptRow.id)])
+
+    expect(await users.deleteUsers([guest.userId])).toBe(1)
+
+    expect(await repository.mentions(goneRow.id)).toEqual([])
+    expect(await repository.mentions(keptRow.id)).toHaveLength(1)
+  })
+
+  it('refuses a mention for a safety row that does not exist', async () => {
+    const repository = new D1SafetyRepository(db)
+
+    await expect(repository.appendMentions([mention(`safety-${crypto.randomUUID()}`)])).rejects.toThrow()
+  })
+
+  it('stores nothing of a batch when one of its mentions is refused', async () => {
+    const repository = new D1SafetyRepository(db)
+    const guest = await newGuest()
+    const saved = row(guest.profileId)
+    await repository.append(saved)
+
+    await expect(repository.appendMentions([mention(saved.id), mention(`safety-${crypto.randomUUID()}`, { position: 1 })])).rejects.toThrow()
+
+    expect(await repository.mentions(saved.id)).toEqual([])
   })
 })

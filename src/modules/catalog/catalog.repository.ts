@@ -72,7 +72,8 @@ export class D1CatalogRepository {
    * The named products whose search text contains EVERY word of `query` (already normalised), or has an alias that does, at most
    * `limit`. Words are the space-separated parts, at most the first 8; a query with none finds nothing. Products whose search text starts
    * with the whole query come first, then by search text, then by id, so the order is the same every time. A product reachable more than
-   * one way appears once.
+   * one way appears once. Only a product with at least one formulation is listed: a named product nobody has found ingredients for (a typed
+   * name the research did not find, say) is in the catalog but not in the search, and it does not use up the limit.
    *
    * `instr`, not LIKE: D1 refuses a LIKE pattern over 50 bytes ("pattern too complex") and a query may be 80 characters, and `instr` has
    * no wildcard characters to escape. Like the fake's `includes`, it is case-sensitive: the search text and the query are both normalised.
@@ -88,6 +89,8 @@ export class D1CatalogRepository {
       .where(
         and(
           eq(products.kind, 'named'),
+          // One covering-index probe per candidate product (formulations_product_id_ingredients_key_idx, by product_id); the scan of named products is the same as before.
+          exists(this.db.select({ one: sql`1` }).from(formulations).where(eq(formulations.productId, products.id))),
           or(
             all(sql`${products.searchText}`),
             // The AND is inside the subquery, so all the words must be in ONE alias, not spread over several.

@@ -176,6 +176,13 @@
       "when": 1792349461343,
       "tag": "0024_good_gauntlet",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1792356019982,
+      "tag": "0025_faithful_plazm",
+      "breakpoints": true
     }
   ]
 }

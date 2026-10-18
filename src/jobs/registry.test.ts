@@ -29,6 +29,14 @@ describe('the job registry', () => {
     expect(job!.queue).toBe('push-receipts')
   })
 
+  it('lists the parse-safety job on its own parse-safety queue, with a hook for when its retries run out', () => {
+    const job = jobs.find((j) => j.name === 'parse-safety')
+
+    expect(job).toBeDefined()
+    expect(job!.queue).toBe('parse-safety')
+    expect(job!.onDeadLetter).toBeTypeOf('function')
+  })
+
   it('lists the send-ops-alert job on the shared email queue', () => {
     const job = jobs.find((j) => j.name === 'send-ops-alert')
 

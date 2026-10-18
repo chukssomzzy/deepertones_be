@@ -54,7 +54,7 @@ export class FakeCatalogRepository implements CatalogRepository {
    * The named products that `query` (already normalised) reaches, at most `limit`. The query is split on spaces into at most 8 words (empty ones
    * ignored; none at all finds nothing). A product matches when every word is contained in its search text, or every word is contained in one of
    * its alias keys; the words may come in any order and some of the product's words may be left out. Products whose search text starts with the
-   * whole query come first, then by search text, then by id. A product reachable more than one way appears once.
+   * whole query come first, then by search text, then by id. A product reachable more than one way appears once. A product with no formulation is never listed.
    */
   async search(query: string, limit: number): Promise<Product[]> {
     const words = query.split(' ').filter((word) => word !== '').slice(0, 8)
@@ -64,7 +64,7 @@ export class FakeCatalogRepository implements CatalogRepository {
       containsAll(p.searchText) || [...this.aliases].some(([aliasKey, productId]) => productId === p.id && containsAll(aliasKey))
     const prefixRank = (p: Product) => (p.searchText.startsWith(query) ? 0 : 1)
     return [...this.products.values()]
-      .filter((p) => p.kind === 'named' && reaches(p))
+      .filter((p) => p.kind === 'named' && this.formulations.some((f) => f.productId === p.id) && reaches(p))
       .sort((a, b) => prefixRank(a) - prefixRank(b) || (a.searchText < b.searchText ? -1 : a.searchText > b.searchText ? 1 : 0) || (a.id < b.id ? -1 : 1))
       .slice(0, limit)
       .map((p) => ({ ...p }))
