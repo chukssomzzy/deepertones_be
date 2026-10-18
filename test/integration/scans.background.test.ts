@@ -592,6 +592,20 @@ describe('push notifications queued by the steps, through the Worker queue handl
     expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId, need: 'confirm' }])
   })
 
+  it('queues one scan-needs-you identify push when the third unreadable front photo is read, and none for the first two', async () => {
+    const { userId, scanId, itemId } = await startScan()
+    stubAnthropic(unreadable, labelNotVisible, unreadable)
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    for (const n of [1, 2]) {
+      await asUser(userId, () => container.scans.retake(scanId, itemId, jpegPhoto(), RETAKE_IP))
+      expect(pushQueued).toEqual([])
+      await runQueue(MAIN, { itemId, step: 'recognise', at: AT + n })
+    }
+
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-identification' })
+    expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId, need: 'identify' }])
+  })
+
   it('queues one push when the same finishing step is delivered twice', async () => {
     const { itemId } = await startScan()
     stubAnthropic(face)
