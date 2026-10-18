@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { ScansRepository } from './scans.repository'
-import type { ItemState, NewBackPhoto, NewScan, NewScanItem } from './scans.types'
+import type { ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem } from './scans.types'
 
 const BASE = new Date('2030-06-15T12:00:00.000Z')
 const SECOND = 1000
@@ -34,6 +34,15 @@ const newUpload = (itemId: string, userId: string, uploadedAt: Date, over: Parti
   itemId,
   userId,
   ipHash: fresh('upload-ip'),
+  uploadedAt,
+  ...over,
+})
+
+const newRetake = (itemId: string, userId: string, uploadedAt: Date, over: Partial<NewRetake> = {}): NewRetake => ({
+  id: freshId(),
+  itemId,
+  userId,
+  ipHash: fresh('retake-ip'),
   uploadedAt,
   ...over,
 })
@@ -118,6 +127,10 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
           recognisedConfidence: null,
           productId: null,
           formulationId: null,
+          noLabelSource: null,
+          noLabelPurpose: null,
+          noLabelUsedFor: null,
+          noLabelDescription: null,
         })
         expect(item!.createdAt.getTime()).toBe(at(3 * MINUTE).getTime())
         expect(item!.updatedAt.getTime()).toBe(at(3 * MINUTE).getTime())
@@ -263,6 +276,82 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
 
         expect((await repository.findItem(items[1]!.id))!.state).toBe('recognising')
+      })
+    })
+
+    describe('the answers to an item with no label', () => {
+      const ANSWERS = { noLabelSource: 'market-vendor', noLabelPurpose: 'lighten', noLabelUsedFor: '6-months-2-years', noLabelDescription: 'A tub with no name on it' } as const
+
+      /** An item that has reached needs-identification, the only state the no-label answers are given in. */
+      const awaiting = async () => {
+        const { repository, items } = await seeded(1)
+        const id = items[0]!.id
+        await repository.updateItem(id, 'recognising', { state: 'needs-identification', reason: 'unreadable', photoKey: null, updatedAt: at(MINUTE) })
+        return { repository, id }
+      }
+
+      it('stores all four answers together with the move to unidentified, and gives them back', async () => {
+        const { repository, id } = await awaiting()
+
+        const applied = await repository.updateItem(id, 'needs-identification', { state: 'unidentified', reason: null, ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(applied).toBe(true)
+        const item = await repository.findItem(id)
+        expect(item).toMatchObject({ state: 'unidentified', reason: null, ...ANSWERS })
+        expect(item!.updatedAt.getTime()).toBe(at(2 * MINUTE).getTime())
+      })
+
+      it('leaves the answers null on an item that has not been given any', async () => {
+        const { repository, id } = await awaiting()
+
+        expect(await repository.findItem(id)).toMatchObject({ noLabelSource: null, noLabelPurpose: null, noLabelUsedFor: null, noLabelDescription: null })
+      })
+
+      it('keeps an answer a later patch does not mention, and clears one the patch sets to null', async () => {
+        const { repository, id } = await awaiting()
+        await repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        const applied = await repository.updateItem(id, 'unidentified', { noLabelDescription: null, updatedAt: at(3 * MINUTE) })
+
+        expect(applied).toBe(true)
+        expect(await repository.findItem(id)).toMatchObject({
+          state: 'unidentified',
+          noLabelSource: 'market-vendor',
+          noLabelPurpose: 'lighten',
+          noLabelUsedFor: '6-months-2-years',
+          noLabelDescription: null,
+        })
+      })
+
+      it('stores nothing when the item is in another state: the answers are written only by the guarded move', async () => {
+        const { repository, id } = await awaiting()
+        const before = await repository.findItem(id)
+
+        const applied = await repository.updateItem(id, 'needs-retake', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(applied).toBe(false)
+        expect(await repository.findItem(id)).toEqual(before)
+      })
+
+      it('lets exactly one of two simultaneous moves to unidentified win, and keeps the winner\'s answers', async () => {
+        const { repository, id } = await awaiting()
+
+        const results = await Promise.all([
+          repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, noLabelSource: 'pharmacy', updatedAt: at(2 * MINUTE) }),
+          repository.updateItem(id, 'needs-identification', { state: 'unidentified', ...ANSWERS, noLabelSource: 'gift', updatedAt: at(2 * MINUTE) }),
+        ])
+
+        expect(results.filter(Boolean)).toHaveLength(1)
+        expect((await repository.findItem(id))!.noLabelSource).toBe(results[0] ? 'pharmacy' : 'gift')
+      })
+
+      it('only writes the answers to the item it was asked about', async () => {
+        const { repository, items } = await seeded(2)
+        await repository.updateItem(items[0]!.id, 'recognising', { state: 'needs-identification', updatedAt: at(MINUTE) })
+
+        await repository.updateItem(items[0]!.id, 'needs-identification', { state: 'unidentified', ...ANSWERS, updatedAt: at(2 * MINUTE) })
+
+        expect(await repository.findItem(items[1]!.id)).toMatchObject({ state: 'recognising', noLabelSource: null, noLabelDescription: null })
       })
     })
 
@@ -487,6 +576,239 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         }
 
         expect(await repository.countBackPhotos(second.id)).toBe(0)
+      })
+    })
+
+    // A retake is a new front photo for an item that could not be read. It reuses the item's row, so it has no row of its own to
+    // count: scan_retakes records each one, in the same write that moves the item back to recognising, like a back photo.
+    describe('retakes', () => {
+      const since = at(HOUR)
+
+      /** One item that could not be read: made for `userId` at `createdAt`, and now waiting for a retake. */
+      const awaitingRetakeFor = async (repository: ScansContractSetup['repository'], userId: string, createdAt = at(-5 * HOUR)) => {
+        const scan = newScan(userId, { createdAt })
+        const item = newItem(scan, 0)
+        await repository.createScan(scan, [item])
+        await repository.updateItem(item.id, 'recognising', { state: 'needs-retake', reason: 'unreadable', photoKey: null, updatedAt: at(-4 * HOUR) })
+        return { scan, id: item.id }
+      }
+      const awaitingRetake = async (createdAt?: Date) => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        return { repository, userId, ...(await awaitingRetakeFor(repository, userId, createdAt)) }
+      }
+      /** The retake: a new photo in, the item recognising again, and the upload recorded by the same write. */
+      const retake = (repository: ScansContractSetup['repository'], id: string, userId: string, uploadedAt: Date, over: Partial<NewRetake> = {}) =>
+        repository.updateItem(
+          id,
+          'needs-retake',
+          { state: 'recognising', reason: null, photoKey: `photos/test/${userId}/retake-${uploadedAt.getTime()}.jpg`, updatedAt: uploadedAt },
+          undefined,
+          newRetake(id, userId, uploadedAt, over),
+        )
+      /** The retaken photo could not be read either, so the item asks again. Its photo is deleted; the upload stays recorded. */
+      const failAgain = (repository: ScansContractSetup['repository'], id: string, after: Date) =>
+        repository.updateItem(id, 'recognising', { state: 'needs-retake', reason: 'label-not-visible', photoKey: null, updatedAt: new Date(after.getTime() + MINUTE) })
+
+      it('countRetakes counts the retakes recorded for that item only, and answers 0 for an item with none', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const scan = newScan(userId)
+        const [first, second] = [newItem(scan, 0), newItem(scan, 1)]
+        await repository.createScan(scan, [first, second])
+        for (const item of [first, second]) await repository.updateItem(item.id, 'recognising', { state: 'needs-retake', reason: 'unreadable', photoKey: null, updatedAt: at(MINUTE) })
+        expect(await repository.countRetakes(first.id)).toBe(0)
+
+        for (const [n, minutes] of [[1, 2], [2, 4]] as const) {
+          expect(await retake(repository, first.id, userId, at(minutes * MINUTE))).toBe(true)
+          expect(await repository.countRetakes(first.id)).toBe(n)
+          await failAgain(repository, first.id, at(minutes * MINUTE))
+        }
+
+        expect(await repository.countRetakes(second.id)).toBe(0)
+      })
+
+      it('answers 0 for an unknown item', async () => {
+        const { repository } = await make()
+
+        expect(await repository.countRetakes(freshId())).toBe(0)
+      })
+
+      it('is not a back photo: a retake does not count as one, and a back photo does not count as a retake', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+        await retake(repository, id, userId, at(2 * HOUR))
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(3 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(4 * HOUR) }, newUpload(id, userId, at(4 * HOUR)))
+
+        expect(await repository.countRetakes(id)).toBe(1)
+        expect(await repository.countBackPhotos(id)).toBe(1)
+      })
+
+      it('counts a retake as one more photo, at the time it was uploaded, and keeps counting it after its photo is deleted', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+        expect((await repository.photosSince(userId, since)).count).toBe(0)
+
+        await retake(repository, id, userId, at(2 * HOUR))
+        const stored = await repository.photosSince(userId, since)
+        expect(stored.count).toBe(1)
+        expect(stored.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+
+        await failAgain(repository, id, at(2 * HOUR))
+        expect((await repository.photosSince(userId, since)).count).toBe(1)
+      })
+
+      it('counts every retake an item is sent: three in a row are three photos, not one', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+
+        for (const hours of [1, 2, 3]) {
+          expect(await retake(repository, id, userId, at(hours * HOUR))).toBe(true)
+          await failAgain(repository, id, at(hours * HOUR))
+        }
+
+        const counted = await repository.photosSince(userId, since)
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(at(HOUR).getTime())
+      })
+
+      it('counts a retake only from the cutoff on, inclusive', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+        await retake(repository, id, userId, new Date(since.getTime() - 1))
+        await failAgain(repository, id, new Date(since.getTime() - 1))
+        await retake(repository, id, userId, since)
+
+        const counted = await repository.photosSince(userId, since)
+
+        expect(counted.count).toBe(1)
+        expect(counted.oldest!.getTime()).toBe(since.getTime())
+      })
+
+      it('counts only that user\'s retakes', async () => {
+        const { repository, newUser } = await make()
+        const [mine, theirs] = [await newUser(), await newUser()]
+        const [minePending, theirsPending] = [await awaitingRetakeFor(repository, mine), await awaitingRetakeFor(repository, theirs)]
+        await retake(repository, minePending.id, mine, at(2 * HOUR))
+        await retake(repository, theirsPending.id, theirs, at(2 * HOUR))
+        await failAgain(repository, theirsPending.id, at(2 * HOUR))
+        await retake(repository, theirsPending.id, theirs, at(3 * HOUR))
+
+        expect((await repository.photosSince(mine, since)).count).toBe(1)
+        expect((await repository.photosSince(theirs, since)).count).toBe(2)
+      })
+
+      it('reports the oldest over front photos, back photos and retakes together', async () => {
+        const { repository, userId, id } = await awaitingRetake(at(4 * HOUR))
+        await retake(repository, id, userId, at(3 * HOUR))
+        await repository.updateItem(id, 'recognising', { state: 'needs-back-photo', updatedAt: at(5 * HOUR) })
+        await repository.updateItem(id, 'needs-back-photo', { state: 'reading-label', updatedAt: at(6 * HOUR) }, newUpload(id, userId, at(2 * HOUR)))
+
+        const counted = await repository.photosSince(userId, since)
+
+        expect(counted.count).toBe(3)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+        // And with the retake the oldest, it is the retake's time.
+        const other = await awaitingRetake(at(4 * HOUR))
+        await retake(other.repository, other.id, other.userId, at(90 * MINUTE))
+        expect((await other.repository.photosSince(other.userId, since)).oldest!.getTime()).toBe(at(90 * MINUTE).getTime())
+      })
+
+      it('records a retake only when the update applies: an item in another state, or an unknown one, counts nothing', async () => {
+        const { repository, userId, items } = await seeded(1, { createdAt: at(-5 * HOUR) })
+        const id = items[0]!.id
+
+        const wrongState = await retake(repository, id, userId, at(2 * HOUR))
+        const unknown = await retake(repository, freshId(), userId, at(2 * HOUR))
+
+        expect(wrongState).toBe(false)
+        expect(unknown).toBe(false)
+        expect((await repository.findItem(id))!.state).toBe('recognising')
+        expect(await repository.countRetakes(id)).toBe(0)
+        expect((await repository.photosSince(userId, since)).count).toBe(0)
+      })
+
+      it('lets exactly one of two simultaneous retakes win, and records exactly one', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+
+        const results = await Promise.all([retake(repository, id, userId, at(2 * HOUR)), retake(repository, id, userId, at(2 * HOUR))])
+
+        expect(results.filter(Boolean)).toHaveLength(1)
+        expect(await repository.countRetakes(id)).toBe(1)
+        expect((await repository.photosSince(userId, since)).count).toBe(1)
+      })
+
+      it('applies the patch with the retake: the item is recognising again, with no reason, no recognised fields and the new photo', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+        await repository.updateItem(id, 'needs-retake', { state: 'needs-retake', recognisedBrand: 'Stale', recognisedName: 'Stale', recognisedCategory: 'skin', recognisedConfidence: 0.4, updatedAt: at(-3 * HOUR) })
+
+        await repository.updateItem(
+          id,
+          'needs-retake',
+          { state: 'recognising', reason: null, photoKey: 'photos/test/new.jpg', recognisedBrand: null, recognisedName: null, recognisedVariant: null, recognisedCategory: null, recognisedConfidence: null, updatedAt: at(2 * HOUR) },
+          undefined,
+          newRetake(id, userId, at(2 * HOUR)),
+        )
+
+        expect(await repository.findItem(id)).toMatchObject({
+          state: 'recognising',
+          reason: null,
+          photoKey: 'photos/test/new.jpg',
+          recognisedBrand: null,
+          recognisedName: null,
+          recognisedVariant: null,
+          recognisedCategory: null,
+          recognisedConfidence: null,
+        })
+      })
+
+      it('counts a retake for the address it was uploaded from, not the one the scan was made from', async () => {
+        const { repository, userId, scan, id } = await awaitingRetake()
+        const uploadIp = fresh('retake-from')
+        await retake(repository, id, userId, at(2 * HOUR), { ipHash: uploadIp })
+
+        expect((await repository.photosSinceIp(uploadIp, since)).count).toBe(1)
+        expect(await repository.photosSinceIp(scan.ipHash, since)).toEqual({ count: 0, oldest: null })
+      })
+
+      it('adds the retakes uploaded from the address to its count, and takes the oldest over both', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('retake-mixed-ip')
+        const [alice, bob] = [await newUser(), await newUser()]
+        const a = newScan(alice, { ipHash, createdAt: at(3 * HOUR) })
+        const b = newScan(bob, { createdAt: at(-5 * HOUR) })
+        const [aItem, bItem] = [newItem(a, 0), newItem(b, 0)]
+        await repository.createScan(a, [aItem])
+        await repository.createScan(b, [bItem])
+        await repository.updateItem(bItem.id, 'recognising', { state: 'needs-retake', reason: 'unreadable', photoKey: null, updatedAt: at(-4 * HOUR) })
+        await retake(repository, bItem.id, bob, at(2 * HOUR), { ipHash })
+
+        const counted = await repository.photosSinceIp(ipHash, since)
+
+        expect(counted.count).toBe(2)
+        expect(counted.oldest!.getTime()).toBe(at(2 * HOUR).getTime())
+      })
+
+      it('applies the same inclusive cutoff to the IP count of retakes', async () => {
+        const { repository, userId, id } = await awaitingRetake()
+        const ipHash = fresh('retake-edge-ip')
+        await retake(repository, id, userId, new Date(since.getTime() - 1), { ipHash })
+        await failAgain(repository, id, new Date(since.getTime() - 1))
+        await retake(repository, id, userId, since, { ipHash })
+
+        expect((await repository.photosSinceIp(ipHash, since)).count).toBe(1)
+      })
+
+      it('deleteForUsers removes those users\' retake records too, so their uploads stop counting, and keeps everybody else\'s', async () => {
+        const { repository, newUser } = await make()
+        const [alice, bob] = [await newUser(), await newUser()]
+        const [aliceItem, bobItem] = [await awaitingRetakeFor(repository, alice), await awaitingRetakeFor(repository, bob)]
+        await retake(repository, aliceItem.id, alice, at(2 * HOUR))
+        await retake(repository, bobItem.id, bob, at(2 * HOUR))
+
+        await repository.deleteForUsers([alice])
+
+        expect(await repository.photosSince(alice, at(HOUR))).toEqual({ count: 0, oldest: null })
+        expect(await repository.countRetakes(aliceItem.id)).toBe(0)
+        expect((await repository.photosSince(bob, at(HOUR))).count).toBe(1)
+        expect(await repository.countRetakes(bobItem.id)).toBe(1)
       })
     })
 
@@ -834,7 +1156,7 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
     })
 
     describe('settledScansNotDone', () => {
-      const FINAL: ItemState[] = ['ready', 'rejected', 'failed']
+      const FINAL: ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
       // Far enough back to take in every scan these tests make, so only the test about the bound narrows it.
       const LONG_AGO = at(-30 * 24 * HOUR)
       const freshUser = async () => {
@@ -859,6 +1181,14 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         const found = await repository.settledScansNotDone(FINAL, at(0), LONG_AGO, 1000)
 
         expect(found.find((s) => s.id === settled)).toMatchObject({ id: settled, userId, doneAt: null })
+      })
+
+      it('lists a scan whose items are all final when one of them is unidentified', async () => {
+        const { repository, userId } = await freshUser()
+        const settled = await scanWith(repository, userId, [['unidentified', -HOUR], ['ready', -HOUR]])
+        const only = await scanWith(repository, userId, [['unidentified', -HOUR]])
+
+        expect(await listed(repository, [settled, only])).toEqual([settled, only])
       })
 
       it('leaves out a scan with an item that is not final, even if the others are', async () => {

@@ -1,26 +1,29 @@
 import { PermanentJobError } from '../../jobs/job'
 import { requireUser } from '../../lib/context'
 import { hmacSha256Hex } from '../../lib/crypto'
-import { ConflictError, NotFoundError, RateLimitedError, ValidationError } from '../../lib/errors'
+import { ConflictError, NotFoundError, RateLimitedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { describeUnexpectedError } from '../../lib/safe-error'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
-import { AnthropicRefusalError, AnthropicRequestError } from '../../providers/anthropic/anthropic.provider'
+import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import type { LabelReader, LabelReading } from '../../providers/label-reading/label-reader.provider'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
+import type { NameSplit, NameSplitter } from '../../providers/name-splitting/name-splitter.provider'
 import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/photo-store.provider'
-import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
+import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
-import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError } from '../catalog/catalog.service'
+import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
+import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import type { NotificationsService } from '../notifications/notifications.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { NoLabelPurpose, NoLabelSource, NoLabelUsedFor } from './scans.vocabulary'
 
 export type ScanPolicy = {
   maxPhotosPerScan: number
@@ -29,6 +32,8 @@ export type ScanPolicy = {
   maxPhotoEdge: number
   dailyPhotosPerUser: number
   dailyPhotosPerIp: number
+  /** A front photo that cannot be read is retaken until the item has had this many; the last one sends it to `needs-identification` instead of asking again. */
+  maxFrontPhotos: number
   /** An item that has had this many back photos, and still has no readable label, fails as `label-unreadable` instead of asking again. */
   maxBackPhotos: number
   /** A read below this confidence waits for the user to confirm it. */
@@ -47,6 +52,7 @@ export const SCAN_POLICY: ScanPolicy = {
   maxPhotoEdge: 1600,
   dailyPhotosPerUser: 30,
   dailyPhotosPerIp: 100,
+  maxFrontPhotos: 3,
   maxBackPhotos: 3,
   confirmBelowConfidence: 0.6,
   doneRepairWindowMs: 3 * 60 * 60 * 1000,
@@ -58,10 +64,14 @@ export type ScanItemView = {
   position: number
   state: ItemState
   reason: ItemReason | null
+  /** Only on an item in `needs-retake`: how many more photos it may be sent. */
+  retakesLeft?: number
   /** What the photo was read as (or what the user corrected it to); absent until it has been read. */
   recognised?: { brand: string; name: string; variant: string | null; form: ProductForm | null; category: ProductCategory }
   /** Only on a ready item. */
   product?: ProductView
+  /** Only on an unidentified item: what the user said about a product with no label, and the cautions those answers earn (worked out now, not stored). */
+  noLabel?: { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string; concerns: DraftConcern[]; rulesVersion: number }
   /** The product's stock image if it has one, else the user's own photo through a signed link, else none. */
   image: { kind: 'stock' | 'user'; url: string } | null
 }
@@ -70,11 +80,18 @@ export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
 
 export type ConfirmedProduct = { brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory }
 
+/** What a user says about a product with no label to read. */
+export type NoLabelInput = { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string }
+
+/** How a user names the product of an item they could not photograph: one picked from the catalog (by search), or a name they typed. */
+export type ProductNaming = { productId: string } | { text: string }
+
 export type ScanServiceDeps = {
   repository: ScansRepository
   catalog: ProductCatalogService
   recognizer: ProductRecognizer
   labelReader: LabelReader
+  nameSplitter: NameSplitter
   photos: PhotoStore
   jobs: JobQueue
   events: ScanEvents
@@ -91,6 +108,8 @@ export type ScanServiceDeps = {
 
 // Spelled out because a type outside the class cannot read its private members (TS2341).
 type WorkingState = 'recognising' | 'matching' | 'researching' | 'reading-label' | 'analysing'
+/** What a read back photo changes on its item, and whether the list it gave is already analysed by the current versions. */
+type Filed = { analysed: boolean; patch: Omit<ItemPatch, 'updatedAt'> }
 type ValidPhoto = { image: ProductImage; extension: 'jpg' | 'webp' }
 
 export class ScanService {
@@ -98,9 +117,11 @@ export class ScanService {
   private static readonly HOUR = 60 * ScanService.MINUTE
   private static readonly DAY = 24 * ScanService.HOUR
   private static readonly MAX_TEXT_LENGTH = 120
+  private static readonly MIN_TYPED_NAME_LENGTH = 2
+  private static readonly MAX_DESCRIPTION_LENGTH = 200
   // Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
   private static readonly IP_HASH_INFO = 'deepertones/ip-hash/v1'
-  private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed']
+  private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
   // A control character or an invisible format character (a right-to-left override, a zero-width space).
   private static readonly HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
 
@@ -125,6 +146,16 @@ export class ScanService {
   /** How long a step waits before it asks again whether work another call is doing has finished. */
   private static readonly WAIT_SECONDS = 30
 
+  /** What an item that was named by hand has set and a move back to waiting must clear. */
+  private static readonly NOT_NAMED: Omit<ItemPatch, 'updatedAt'> = {
+    productId: null,
+    formulationId: null,
+    recognisedBrand: null,
+    recognisedName: null,
+    recognisedVariant: null,
+    recognisedCategory: null,
+  }
+
   private static scanNotFound = () => new NotFoundError('SCAN_NOT_FOUND', 'Scan not found')
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static isFinal = (state: ItemState) => ScanService.FINAL_STATES.includes(state)
@@ -133,6 +164,7 @@ export class ScanService {
   private readonly catalog: ProductCatalogService
   private readonly recognizer: ProductRecognizer
   private readonly labelReader: LabelReader
+  private readonly nameSplitter: NameSplitter
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly events: ScanEvents
@@ -149,6 +181,7 @@ export class ScanService {
     this.catalog = deps.catalog
     this.recognizer = deps.recognizer
     this.labelReader = deps.labelReader
+    this.nameSplitter = deps.nameSplitter
     this.photos = deps.photos
     this.jobs = deps.jobs
     this.events = deps.events
@@ -294,14 +327,15 @@ export class ScanService {
   }
 
   /**
-   * The photo of the ingredient list, for an item that asked for one. It counts as one photo against both daily quotas,
+   * The photo of the ingredient list, for an item that asked for one, or one that offers identification (its front photo could not be read
+   * three times, so the back identifies the product). It counts as one photo against both daily quotas,
    * however many an item has had (each upload is recorded, for the address it came from, in the same write that moves the
    * item on), is checked like a front photo, and is kept next to the front one as `<item id>-back.<jpg|webp>`.
    */
   async addBackPhoto(scanId: string, itemId: string, photo: ProductImage, clientIp: string): Promise<ScanItemView> {
     const item = await this.ownedItem(scanId, itemId)
     const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_BACK_PHOTO', 'This item is not waiting for a photo of the back')
-    if (item.state !== 'needs-back-photo') throw notAwaiting()
+    if (item.state !== 'needs-back-photo' && item.state !== 'needs-identification') throw notAwaiting()
     const valid = this.checkPhoto(photo)
     const now = this.now()
     const ipHash = await this.hashIp(clientIp)
@@ -312,7 +346,7 @@ export class ScanService {
     let moved = false
     try {
       moved = await this.transition(item, {
-        from: 'needs-back-photo',
+        from: item.state,
         change: { state: 'reading-label', reason: null, backPhotoKey: key },
         next: 'read-label',
         undo: { backPhotoKey: null },
@@ -328,6 +362,150 @@ export class ScanService {
       throw notAwaiting()
     }
     return this.itemViewOf(itemId)
+  }
+
+  /**
+   * A new front photo for an item whose photo could not be read. Counts as one photo against both daily quotas (recorded, for
+   * the address it came from, in the same write that moves the item on), is checked like a first photo, and is kept under the
+   * front photo's own key scheme, so the photo it replaces (deleted when it failed) never shares a place with it.
+   */
+  async retake(scanId: string, itemId: string, photo: ProductImage, clientIp: string): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_RETAKE', 'This item is not waiting for a retaken photo')
+    if (item.state !== 'needs-retake') throw notAwaiting()
+    const valid = this.checkPhoto(photo)
+    const now = this.now()
+    const ipHash = await this.hashIp(clientIp)
+    await this.assertWithinQuota(item.userId, ipHash, 1, now)
+
+    const key = this.photoKey(item.userId, scanId, itemId, valid.extension)
+    await this.photos.put(key, valid.image)
+    let moved = false
+    try {
+      moved = await this.transition(item, {
+        from: 'needs-retake',
+        change: {
+          state: 'recognising',
+          reason: null,
+          photoKey: key,
+          recognisedBrand: null,
+          recognisedName: null,
+          recognisedVariant: null,
+          recognisedCategory: null,
+          recognisedConfidence: null,
+        },
+        next: 'recognise',
+        undo: { photoKey: null },
+        retake: { id: this.newId(), itemId, userId: item.userId, ipHash, uploadedAt: now },
+      })
+    } catch (error) {
+      await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId, itemId }))
+      throw error
+    }
+    if (!moved) {
+      // Lost a race with another retake. When both wrote the same key the winner owns it, so only a different key is ours to remove.
+      if ((await this.repository.findItem(itemId))?.photoKey !== key) await this.photos.delete(key)
+      throw notAwaiting()
+    }
+    return this.itemViewOf(itemId)
+  }
+
+  /**
+   * Names the product of an item whose front photo could not be read (`needs-retake`, or `needs-identification` once the 3rd could not),
+   * either by a product picked from the catalog (`productId`, from search) or by free text. Sends no photo, so no quota and no retake
+   * is counted.
+   *
+   * Checked in this order, and nothing is paid for until all of it passes: the scan is the caller's (SCAN_NOT_FOUND), the item is waiting
+   * (ITEM_NOT_AWAITING_IDENTIFICATION), the text is clean (INVALID_PRODUCT_TEXT: 2 to 120 characters, no link, markup or hidden character).
+   *
+   * A picked product costs no model call: the item goes where the catalog says that product needs to go (`ready`, `analysing`,
+   * `researching`, or `failed` as `analysis-failed`), exactly as the match step would send it, and shows the product as what it was
+   * recognised as. Typed text costs one split by the model, then goes to `matching` and the match step as a confirmation does. Text the
+   * split says is no product's name, or the model refuses, is NOT_A_PRODUCT_NAME; over the AI spend cap is CatalogBusyError (CATALOG_BUSY), and a model that is down
+   * or whose answer cannot be used is UnavailableError AI_UNAVAILABLE (503). In every one of those the item stays where it was and nothing is queued, so the user can try again.
+   */
+  async identifyByName(scanId: string, itemId: string, naming: ProductNaming): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_IDENTIFICATION', 'This item is not waiting to be identified')
+    if (item.state !== 'needs-retake' && item.state !== 'needs-identification') throw notAwaiting()
+    const moved = 'productId' in naming ? await this.identifyByChoice(item, item.state, naming.productId) : await this.identifyByText(item, item.state, naming.text)
+    if (!moved) throw notAwaiting()
+    return this.itemViewOf(itemId)
+  }
+
+  /**
+   * The user has no label to give: the product is not known and will not be looked up. For an item that offers identification (its 3rd front
+   * photo could not be read) and no other, the item ends as `unidentified` with the user's answers. Its cautions are not stored: they are
+   * worked out from the answers whenever the item is shown. Sends no photo and calls no model, so no quota, retake or job is used.
+   *
+   * Checked in this order: the scan is the caller's (SCAN_NOT_FOUND), the item is offering identification (ITEM_NOT_AWAITING_NO_LABEL), the
+   * description is clean (INVALID_PRODUCT_TEXT, field `description`: at most 200 characters, no link, markup or hidden character). A blank one is none.
+   */
+  async noLabel(scanId: string, itemId: string, answers: NoLabelInput): Promise<ScanItemView> {
+    const item = await this.ownedItem(scanId, itemId)
+    const notAwaiting = () => new ConflictError('ITEM_NOT_AWAITING_NO_LABEL', 'This item is not waiting to say it has no label')
+    if (item.state !== 'needs-identification') throw notAwaiting()
+    const description = answers.description === undefined ? '' : this.cleanText(answers.description, 'description', false, ScanService.MAX_DESCRIPTION_LENGTH)
+    const moved = await this.transition(item, {
+      from: 'needs-identification',
+      change: {
+        state: 'unidentified',
+        reason: null,
+        noLabelSource: answers.source,
+        noLabelPurpose: answers.purpose,
+        noLabelUsedFor: answers.usedFor,
+        noLabelDescription: description === '' ? null : description,
+      },
+    })
+    if (!moved) throw notAwaiting()
+    return this.itemViewOf(itemId)
+  }
+
+  private async identifyByChoice(item: ScanItem, from: ItemState, productId: string): Promise<boolean> {
+    const resolved = await this.catalog.choose(productId)
+    const product = await this.catalog.namedProduct(productId)
+    return this.moveOn(
+      item,
+      from,
+      resolved,
+      { reason: null, recognisedBrand: product.brand, recognisedName: product.name, recognisedVariant: product.variant, recognisedCategory: product.category },
+      ScanService.NOT_NAMED,
+    )
+  }
+
+  private async identifyByText(item: ScanItem, from: ItemState, text: string): Promise<boolean> {
+    const typed = this.cleanText(text, 'text', true)
+    if (typed.length < ScanService.MIN_TYPED_NAME_LENGTH) throw new ValidationError('INVALID_PRODUCT_TEXT', 'The text is not valid', { field: 'text' })
+    const split = await this.split(typed)
+    if (split.kind !== 'product') throw new ValidationError('NOT_A_PRODUCT_NAME', "We couldn't read that as a product name")
+    return this.transition(item, {
+      from,
+      change: {
+        state: 'matching',
+        reason: null,
+        recognisedBrand: split.brand,
+        recognisedName: split.name,
+        recognisedVariant: split.variant ?? null,
+        recognisedCategory: split.category,
+      },
+      next: 'match',
+      undo: ScanService.NOT_NAMED,
+    })
+  }
+
+  /** One paid split. A refusal is an answer (this is no product's name); the spend cap is the catalog being busy; a model that is down, or that cannot be used, is AI_UNAVAILABLE, which blames no limit. */
+  private async split(text: string): Promise<NameSplit> {
+    try {
+      return await this.nameSplitter.split(text)
+    } catch (error) {
+      if (error instanceof AnthropicRefusalError) return { kind: 'not-a-product' }
+      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
+      if (error instanceof AnthropicUnavailableError || error instanceof AnthropicRequestError) {
+        console.error({ outcome: 'split-name-failed', error: describeUnexpectedError(error) })
+        throw new UnavailableError('AI_UNAVAILABLE', "Couldn't read that name right now. Try again in a moment.")
+      }
+      throw error
+    }
   }
 
   /**
@@ -578,7 +756,16 @@ export class ScanService {
 
     // A photo we will not use is deleted at once, before the row says so: a failure here is retried while the item is still recognising.
     if (item.photoKey !== null) await this.photos.delete(item.photoKey)
-    const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product', unreadable: 'unreadable' } as const
+    if (seen.classification === 'unreadable' || seen.classification === 'label-not-visible') {
+      // Every photo sent is a try, the first included: the retakes recorded so far plus this one.
+      const tries = 1 + (await this.repository.countRetakes(item.id))
+      await this.transition(item, {
+        from: 'recognising',
+        change: { state: tries < this.policy.maxFrontPhotos ? 'needs-retake' : 'needs-identification', reason: seen.classification, photoKey: null },
+      })
+      return
+    }
+    const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product' } as const
     await this.transition(item, { from: 'recognising', change: { state: 'rejected', reason: reason[seen.classification], photoKey: null } })
   }
 
@@ -620,26 +807,32 @@ export class ScanService {
       return
     }
 
+    await this.moveOn(item, 'matching', resolved)
+  }
+
+  /**
+   * Moves an item out of `from` to where the catalog says its product needs to go. `also` is what else the move writes, and `undo` what
+   * puts it back if the next step cannot be queued.
+   */
+  private async moveOn(item: ScanItem, from: ItemState, resolved: ResolveResult, also: Omit<ItemPatch, 'updatedAt'> = {}, undo: Omit<ItemPatch, 'updatedAt'> = {}): Promise<boolean> {
     switch (resolved.kind) {
       case 'ready':
-        await this.transition(item, { from: 'matching', change: { state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId } })
-        return
+        return this.transition(item, { from, change: { ...also, state: 'ready', productId: resolved.productId, formulationId: resolved.formulationId }, undo })
       case 'needs-analysis':
-        await this.transition(item, {
-          from: 'matching',
-          change: { state: 'analysing', productId: resolved.productId, formulationId: resolved.formulationId },
+        return this.transition(item, {
+          from,
+          change: { ...also, state: 'analysing', productId: resolved.productId, formulationId: resolved.formulationId },
           next: 'analyse',
+          undo,
         })
-        return
       case 'analysis-failed':
-        await this.transition(item, {
-          from: 'matching',
-          change: { state: 'failed', reason: 'analysis-failed', productId: resolved.productId, formulationId: resolved.formulationId },
+        return this.transition(item, {
+          from,
+          change: { ...also, state: 'failed', reason: 'analysis-failed', productId: resolved.productId, formulationId: resolved.formulationId },
+          undo,
         })
-        return
       case 'needs-research':
-        await this.transition(item, { from: 'matching', change: { state: 'researching', productId: resolved.productId }, next: 'research' })
-        return
+        return this.transition(item, { from, change: { ...also, state: 'researching', productId: resolved.productId }, next: 'research', undo })
     }
   }
 
@@ -671,10 +864,6 @@ export class ScanService {
 
   private async readLabel(item: ScanItem): Promise<void> {
     if (item.state !== 'reading-label') return
-    if (item.productId === null) {
-      await this.fail(item, 'reading-label', 'unavailable')
-      return
-    }
     const key = item.backPhotoKey
     const photo = key === null ? null : await this.photos.get(key)
     if (key === null || !photo) {
@@ -695,16 +884,22 @@ export class ScanService {
       if (!(error instanceof AnthropicRefusalError || error instanceof AnthropicRequestError)) throw error
       reading = { readable: false }
     }
-    let formulationId: string | null = null
+    // An item with no product is being identified by this photo; one that has a product only needs its list.
+    const productId = item.productId
+    let filed: Filed | null = null
     if (reading.readable) {
       try {
-        formulationId = await this.catalog.addLabelIngredients(item.productId, reading.ingredients)
+        filed = productId === null ? await this.identify(reading) : { analysed: false, patch: { formulationId: await this.catalog.addLabelIngredients(productId, reading.ingredients) } }
       } catch (error) {
+        if (productId === null && error instanceof CatalogBusyError) {
+          await this.fail(item, 'reading-label', 'research-busy')
+          return
+        }
         // The catalog refuses a list that is empty, over its bounds, or carries a link or markup: the same as unreadable.
         if (!(error instanceof ValidationError && error.code === 'LABEL_UNREADABLE')) throw error
       }
     }
-    if (formulationId === null) {
+    if (filed === null) {
       // The back photo is deleted; the upload stays counted against the daily quota in its own record.
       await this.photos.delete(key)
       await this.labelUnreadable(item)
@@ -713,23 +908,46 @@ export class ScanService {
     // The photo is deleted after the move, not before: if the next step cannot be queued the move is undone, and the retry needs it.
     const moved = await this.transition(item, {
       from: 'reading-label',
-      change: { state: 'analysing', formulationId, backPhotoKey: null },
-      next: 'analyse',
+      change: { ...filed.patch, state: filed.analysed ? 'ready' : 'analysing', backPhotoKey: null },
+      next: filed.analysed ? undefined : 'analyse',
       undo: { backPhotoKey: key },
     })
     if (moved) await this.photos.delete(key).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId: item.scanId, itemId: item.id }))
   }
 
   /**
+   * Files what an item's back photo gave when the item has no product: the catalog finds or creates the product the label names,
+   * or keeps the bare list. The item shows what the label printed as what it was recognised as, but only when it printed both a
+   * brand and a name; a list with no name leaves it absent.
+   */
+  private async identify(reading: Extract<LabelReading, { readable: true }>): Promise<Filed> {
+    const filed = await this.catalog.fromLabel(reading)
+    const patch = { productId: filed.productId, formulationId: filed.formulationId }
+    if (reading.brand === undefined || reading.name === undefined) return { analysed: filed.analysed, patch }
+    return {
+      analysed: filed.analysed,
+      patch: {
+        ...patch,
+        recognisedBrand: reading.brand,
+        recognisedName: reading.name,
+        recognisedVariant: reading.variant ?? null,
+        recognisedCategory: reading.category ?? 'other',
+      },
+    }
+  }
+
+  /**
    * The back photo could not give a label. Asks for another, unless the item has had `maxBackPhotos` already: then it ends
    * as failed, keeping its front photo like the other failures. Every upload is counted, so the count includes this one.
+   * An item with no product asks by offering identification again; one with a product, for the photo of its ingredients.
    */
   private async labelUnreadable(item: ScanItem): Promise<void> {
     const uploads = await this.repository.countBackPhotos(item.id)
     const ask = uploads < this.policy.maxBackPhotos
+    const asking = item.productId === null ? 'needs-identification' : 'needs-back-photo'
     const moved = await this.transition(item, {
       from: 'reading-label',
-      change: { state: ask ? 'needs-back-photo' : 'failed', reason: 'label-unreadable', backPhotoKey: null },
+      change: { state: ask ? asking : 'failed', reason: 'label-unreadable', backPhotoKey: null },
     })
     // The number of uploads so far is which time the item asks again, and the push's key.
     if (moved && ask) await this.notifyNeedsYou(item, 'back-photo', uploads)
@@ -783,22 +1001,23 @@ export class ScanService {
    * find the item moved on and do nothing, and the item would wait for ever. The undo puts back the item's reason, and
    * whatever else `undo` names (fields the change set that the old state must not keep).
    *
-   * `backPhoto` is the upload this move records for the daily quotas, written with the update. It is not undone: the
-   * photo was stored and sent, and the quota counts what was sent.
+   * `backPhoto` and `retake` are the upload this move records for the daily quotas, written with the update. Neither is
+   * undone: the photo was stored and sent, and the quota counts what was sent.
    */
   private async transition(
     item: ScanItem,
-    { from, change, next, undo = {}, backPhoto }: {
+    { from, change, next, undo = {}, backPhoto, retake }: {
       from: ItemState
       change: Omit<ItemPatch, 'updatedAt'> & { state: ItemState }
       next?: ScanStep
       undo?: Omit<ItemPatch, 'updatedAt'>
       backPhoto?: NewBackPhoto
+      retake?: NewRetake
     },
   ): Promise<boolean> {
     // One reading of the clock for both: the reaper repeats the step with the stored updatedAt, which must be this very key.
     const at = this.now()
-    const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto)
+    const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto, retake)
     if (!applied) return false
     if (next) {
       try {
@@ -860,11 +1079,14 @@ export class ScanService {
       const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
       image = { kind: 'user', url: productPhotoUrl(token) }
     }
+    // A retake whose queueing failed keeps its row (the photo was sent), so a user can retake past the limit and the count must stop at 0.
+    const retakesLeft = item.state === 'needs-retake' ? Math.max(0, this.policy.maxFrontPhotos - 1 - (await this.repository.countRetakes(item.id))) : undefined
     return {
       id: item.id,
       position: item.position,
       state: item.state,
       reason: item.reason,
+      ...(retakesLeft === undefined ? {} : { retakesLeft }),
       ...(item.recognisedBrand !== null && item.recognisedName !== null && item.recognisedCategory !== null
         ? {
             recognised: {
@@ -877,7 +1099,21 @@ export class ScanService {
           }
         : {}),
       ...(product ? { product } : {}),
+      ...this.noLabelView(item),
       image,
+    }
+  }
+
+  private noLabelView(item: ScanItem): Pick<ScanItemView, 'noLabel'> {
+    if (item.state !== 'unidentified' || item.noLabelSource === null || item.noLabelPurpose === null || item.noLabelUsedFor === null) return {}
+    const answers = { source: item.noLabelSource, purpose: item.noLabelPurpose, usedFor: item.noLabelUsedFor }
+    return {
+      noLabel: {
+        ...answers,
+        ...(item.noLabelDescription === null ? {} : { description: item.noLabelDescription }),
+        concerns: cautionFor(answers),
+        rulesVersion: CAUTION_RULES_VERSION,
+      },
     }
   }
 
@@ -896,9 +1132,9 @@ export class ScanService {
     return { image: { bytes: photo.bytes, mediaType: header.mediaType }, extension: header.mediaType === 'image/webp' ? 'webp' : 'jpg' }
   }
 
-  private cleanText(text: string, field: 'brand' | 'name' | 'variant', required: boolean): string {
+  private cleanText(text: string, field: 'brand' | 'name' | 'variant' | 'text' | 'description', required: boolean, maxLength = ScanService.MAX_TEXT_LENGTH): string {
     const trimmed = text.trim()
-    if ((required && trimmed === '') || trimmed.length > ScanService.MAX_TEXT_LENGTH || hasLinkOrMarkup(trimmed) || ScanService.HIDDEN_CHARACTER.test(trimmed)) {
+    if ((required && trimmed === '') || trimmed.length > maxLength || hasLinkOrMarkup(trimmed) || ScanService.HIDDEN_CHARACTER.test(trimmed)) {
       throw new ValidationError('INVALID_PRODUCT_TEXT', `The ${field} is not valid`, { field })
     }
     return trimmed

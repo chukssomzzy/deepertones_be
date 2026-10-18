@@ -8,11 +8,15 @@ export const products = sqliteTable(
     id: text('id').primaryKey(),
     identityKey: text('identity_key').notNull(),
     brandKey: text('brand_key').notNull(),
+    // An unnamed product is a list nobody named: its identity key is "unnamed:" and the list's ingredients key, and its brand and name are ''.
+    kind: text('kind', { enum: ['named', 'unnamed'] }).notNull().default('named'),
     brand: text('brand').notNull(),
     name: text('name').notNull(),
     variant: text('variant'),
     form: text('form', { enum: PRODUCT_FORMS }),
     category: text('category', { enum: CATEGORIES }).notNull(),
+    // brand, name and variant, normalised (catalog.identity normaliseText), for search; '' for an unnamed product, which search never returns.
+    searchText: text('search_text').notNull().default(''),
     imageKey: text('image_key'),
     imageSourceUrl: text('image_source_url'),
     // Set whether or not an image was found, so a product with none is not searched again on every scan.

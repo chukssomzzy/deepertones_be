@@ -4,10 +4,10 @@ import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
-import { scanBackPhotos, scanItems, scans } from './scans.table'
-import type { ItemPatch, ItemState, NewBackPhoto, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import { scanBackPhotos, scanItems, scanRetakes, scans } from './scans.table'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
 
-export type { ItemPatch, NewBackPhoto, NewScan, NewScanItem, Scan, ScanItem }
+export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem }
 
 // D1 allows 100 bound parameters per statement; this many ids leave headroom.
 const ID_CHUNK = 90
@@ -59,22 +59,22 @@ export class D1ScansRepository {
    *
    * `backPhoto` is the upload this move records for the daily quotas. It goes in the same batch as the update and is
    * written only if the item is in the `expected` state, so it is recorded exactly when the update applies: the insert
-   * runs first, while the state is still what it was.
+   * runs first, while the state is still what it was. `retake` is the same for a retaken front photo.
    */
-  async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto): Promise<boolean> {
+  async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
     const update = this.db
       .update(scanItems)
       .set(patch)
       .where(and(eq(scanItems.id, itemId), eq(scanItems.state, expected)))
       .returning({ id: scanItems.id })
-    if (!backPhoto) return (await update).length === 1
+    const statements: BatchItem<'sqlite'>[] = []
+    if (backPhoto) statements.push(this.db.insert(scanBackPhotos).select(this.uploadIfStill(backPhoto, expected)))
+    if (retake) statements.push(this.db.insert(scanRetakes).select(this.uploadIfStill(retake, expected)))
+    if (statements.length === 0) return (await update).length === 1
 
-    const record = this.db.insert(scanBackPhotos).select(
-      sql`select ${backPhoto.id}, ${backPhoto.itemId}, ${backPhoto.userId}, ${backPhoto.ipHash}, ${backPhoto.uploadedAt.getTime()}
-        where exists (select 1 from ${scanItems} where ${scanItems.id} = ${itemId} and ${scanItems.state} = ${expected})`,
-    )
-    const [, rows] = await this.db.batch([record, update])
-    return rows.length === 1
+    statements.push(update)
+    const results = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+    return (results[results.length - 1] as { id: string }[]).length === 1
   }
 
   /** Sets the scan's done time unless it has one (one conditional UPDATE), and says whether it did: of any number of callers exactly one gets true. */
@@ -133,16 +133,16 @@ export class D1ScansRepository {
   }
 
   /**
-   * Photos uploaded by the user at or after `since`: one per item created then, plus one per back photo uploaded then
-   * (a record that survives the back photo being deleted, and that every upload adds). `oldest` is the earliest of them,
+   * Photos uploaded by the user at or after `since`: one per item created then, plus one per back photo and one per retake
+   * uploaded then (records that survive the photo being deleted, and that every upload adds). `oldest` is the earliest of them,
    * or null when there are none.
    */
   async photosSince(userId: string, since: Date): Promise<{ count: number; oldest: Date | null }> {
-    return this.photoCounts(eq(scanItems.userId, userId), eq(scanBackPhotos.userId, userId), since)
+    return this.photoCounts(eq(scanItems.userId, userId), eq(scanBackPhotos.userId, userId), eq(scanRetakes.userId, userId), since)
   }
 
   /**
-   * The same count for every scan made from the given IP hash (and every back photo uploaded from it), whoever made
+   * The same count for every scan made from the given IP hash (and every back photo and retake uploaded from it), whoever made
    * them. Only scans made in the window are looked at, through the (ip_hash, created_at) index, however old the address's history is.
    */
   async photosSinceIp(ipHash: string, since: Date): Promise<{ count: number; oldest: Date | null }> {
@@ -150,12 +150,18 @@ export class D1ScansRepository {
       .select({ id: scans.id })
       .from(scans)
       .where(and(eq(scans.ipHash, ipHash), gte(scans.createdAt, since)))
-    return this.photoCounts(inArray(scanItems.scanId, recentFromThisIp), eq(scanBackPhotos.ipHash, ipHash), since)
+    return this.photoCounts(inArray(scanItems.scanId, recentFromThisIp), eq(scanBackPhotos.ipHash, ipHash), eq(scanRetakes.ipHash, ipHash), since)
   }
 
   /** How many back photos have been uploaded for the item, deleted ones included (their records stay). */
   async countBackPhotos(itemId: string): Promise<number> {
     const [row] = await this.db.select({ count: count() }).from(scanBackPhotos).where(eq(scanBackPhotos.itemId, itemId))
+    return row?.count ?? 0
+  }
+
+  /** How many retakes have been uploaded for the item, whatever became of their photos (their records stay). */
+  async countRetakes(itemId: string): Promise<number> {
+    const [row] = await this.db.select({ count: count() }).from(scanRetakes).where(eq(scanRetakes.itemId, itemId))
     return row?.count ?? 0
   }
 
@@ -201,19 +207,31 @@ export class D1ScansRepository {
     return rows.length
   }
 
-  /** Deletes the users' back-photo records, items and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' back-photo and retake records, items and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
     const statements: BatchItem<'sqlite'>[] = chunks(userIds).flatMap((ids) => [
       this.db.delete(scanBackPhotos).where(inArray(scanBackPhotos.userId, ids)),
+      this.db.delete(scanRetakes).where(inArray(scanRetakes.userId, ids)),
       this.db.delete(scanItems).where(inArray(scanItems.userId, ids)),
       this.db.delete(scans).where(inArray(scans.userId, ids)),
     ])
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
   }
 
-  private async photoCounts(ownedItems: ReturnType<typeof eq>, ownedUploads: ReturnType<typeof eq>, since: Date): Promise<{ count: number; oldest: Date | null }> {
-    const [[front], [back]] = await this.db.batch([
+  /** The upload row as a SELECT that yields it only while its item is still in `expected`, for an INSERT ... SELECT. */
+  private uploadIfStill(upload: NewBackPhoto | NewRetake, expected: ItemState) {
+    return sql`select ${upload.id}, ${upload.itemId}, ${upload.userId}, ${upload.ipHash}, ${upload.uploadedAt.getTime()}
+        where exists (select 1 from ${scanItems} where ${scanItems.id} = ${upload.itemId} and ${scanItems.state} = ${expected})`
+  }
+
+  private async photoCounts(
+    ownedItems: ReturnType<typeof eq>,
+    ownedBackPhotos: ReturnType<typeof eq>,
+    ownedRetakes: ReturnType<typeof eq>,
+    since: Date,
+  ): Promise<{ count: number; oldest: Date | null }> {
+    const [[front], [back], [retaken]] = await this.db.batch([
       this.db
         .select({ count: count(), oldest: min(scanItems.createdAt) })
         .from(scanItems)
@@ -221,9 +239,13 @@ export class D1ScansRepository {
       this.db
         .select({ count: count(), oldest: min(scanBackPhotos.uploadedAt) })
         .from(scanBackPhotos)
-        .where(and(ownedUploads, gte(scanBackPhotos.uploadedAt, since))),
+        .where(and(ownedBackPhotos, gte(scanBackPhotos.uploadedAt, since))),
+      this.db
+        .select({ count: count(), oldest: min(scanRetakes.uploadedAt) })
+        .from(scanRetakes)
+        .where(and(ownedRetakes, gte(scanRetakes.uploadedAt, since))),
     ])
-    return { count: front!.count + back!.count, oldest: earlier(front!.oldest, back!.oldest) }
+    return { count: front!.count + back!.count + retaken!.count, oldest: earlier(earlier(front!.oldest, back!.oldest), retaken!.oldest) }
   }
 }
 

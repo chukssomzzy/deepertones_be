@@ -8,7 +8,7 @@ import { PRODUCT_FORMS, type ProductCategory, type ProductForm } from '../produc
 import type { ProductRecognizer, Recognition } from './product-recognizer.provider'
 
 type Answer = {
-  classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable'
+  classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable' | 'label-not-visible'
   brand: string
   name: string
   variant: string
@@ -26,7 +26,7 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
   private static readonly HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u
   private static readonly UNREADABLE: Recognition = { classification: 'unreadable' }
 
-  private static readonly CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable'] as const
+  private static readonly CLASSIFICATIONS = ['beauty-product', 'other-product', 'face-or-person', 'unreadable', 'label-not-visible'] as const
   private static readonly CATEGORIES = ['skin', 'hair', 'body', 'makeup', 'other'] as const satisfies readonly ProductCategory[]
   private static readonly FORMS = [...PRODUCT_FORMS, 'unknown'] as const
 

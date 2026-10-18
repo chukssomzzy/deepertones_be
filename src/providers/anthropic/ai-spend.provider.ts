@@ -5,10 +5,9 @@
  */
 
 /**
- * What a call is for. Each job can run on its own model. `recognize` and `read-label` are reserved for the scan flow
- * and have no caller yet. The list is a value so the eval script and its drift tests use the same one.
+ * What a call is for. Each job can run on its own model. The list is a value so the eval script and its drift tests use the same one.
  */
-export const AI_JOBS = ['research', 'analysis', 'same-product', 'image-check', 'recognize', 'read-label'] as const
+export const AI_JOBS = ['research', 'analysis', 'same-product', 'image-check', 'recognize', 'read-label', 'split-name'] as const
 export type AiJob = (typeof AI_JOBS)[number]
 
 /** What one API response used, in the API's own units. */

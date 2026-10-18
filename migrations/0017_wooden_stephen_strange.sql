@@ -1,0 +1,1 @@
+ALTER TABLE `products` ADD `kind` text DEFAULT 'named' NOT NULL;

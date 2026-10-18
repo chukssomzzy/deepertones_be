@@ -1,6 +1,6 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemState, NewBackPhoto, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
 
 const copyItem = (item: ScanItem): ScanItem => ({ ...item })
 
@@ -12,6 +12,7 @@ export class FakeScansRepository implements ScansRepository {
   private scans = new Map<string, Scan>()
   private items = new Map<string, ScanItem>()
   private backPhotos = new Map<string, NewBackPhoto>()
+  private retakes = new Map<string, NewRetake>()
   private readonly profiles: FakeProfilesRepository
 
   /** Pass the fake profiles repository a test writes defaults into: `adoptOrphanScans` reads each owner's default from it, as D1 reads the profiles table. */
@@ -43,6 +44,10 @@ export class FakeScansRepository implements ScansRepository {
         recognisedConfidence: null,
         productId: null,
         formulationId: null,
+        noLabelSource: null,
+        noLabelPurpose: null,
+        noLabelUsedFor: null,
+        noLabelDescription: null,
         updatedAt: item.createdAt,
       })
     }
@@ -70,15 +75,16 @@ export class FakeScansRepository implements ScansRepository {
    * Applies the patch only while the item is still in the `expected` state, and says whether it did. A field the patch
    * leaves out is unchanged; one it sets to null is cleared. Nothing changes when the state differs or the item is unknown.
    * `backPhoto` is the upload this move records for the daily quotas: stored together with the patch when it applies, and
-   * not at all when it does not.
+   * not at all when it does not. `retake` is the same for a retaken front photo.
    */
-  async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto): Promise<boolean> {
+  async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
     const item = this.items.get(itemId)
     if (!item || item.state !== expected) return false
     for (const [field, value] of Object.entries(patch)) {
       if (value !== undefined) (item as Record<string, unknown>)[field] = value
     }
     if (backPhoto) this.backPhotos.set(backPhoto.id, { ...backPhoto })
+    if (retake) this.retakes.set(retake.id, { ...retake })
     return true
   }
 
@@ -133,15 +139,15 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
-   * Photos uploaded by the user at or after `since`: one per item created then, plus one per back photo uploaded then
-   * (a record that survives the back photo being deleted, and that every upload adds). `oldest` is the earliest of them,
+   * Photos uploaded by the user at or after `since`: one per item created then, plus one per back photo and one per retake
+   * uploaded then (records that survive the photo being deleted, and that every upload adds). `oldest` is the earliest of them,
    * or null when there are none.
    */
   async photosSince(userId: string, since: Date): Promise<{ count: number; oldest: Date | null }> {
     return this.photoTimes((item) => item.userId === userId, (upload) => upload.userId === userId, since)
   }
 
-  /** The same count for every scan made from the given IP hash (and every back photo uploaded from it), whoever made them. */
+  /** The same count for every scan made from the given IP hash (and every back photo and retake uploaded from it), whoever made them. */
   async photosSinceIp(ipHash: string, since: Date): Promise<{ count: number; oldest: Date | null }> {
     const scanIds = new Set([...this.scans.values()].filter((s) => s.ipHash === ipHash && s.createdAt.getTime() >= since.getTime()).map((s) => s.id))
     return this.photoTimes((item) => scanIds.has(item.scanId), (upload) => upload.ipHash === ipHash, since)
@@ -176,7 +182,7 @@ export class FakeScansRepository implements ScansRepository {
     return chosen.length
   }
 
-  /** Deletes the users' scans, items and back-photo records. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' scans, items, back-photo records and retake records. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     const wanted = new Set(userIds)
     for (const [id, scan] of this.scans) {
@@ -188,10 +194,18 @@ export class FakeScansRepository implements ScansRepository {
     for (const [id, upload] of this.backPhotos) {
       if (wanted.has(upload.userId)) this.backPhotos.delete(id)
     }
+    for (const [id, upload] of this.retakes) {
+      if (wanted.has(upload.userId)) this.retakes.delete(id)
+    }
   }
 
   async countBackPhotos(itemId: string): Promise<number> {
     return [...this.backPhotos.values()].filter((upload) => upload.itemId === itemId).length
+  }
+
+  /** How many retakes have been uploaded for the item, whatever became of their photos. */
+  async countRetakes(itemId: string): Promise<number> {
+    return [...this.retakes.values()].filter((upload) => upload.itemId === itemId).length
   }
 
   private photoTimes(ownsItem: (item: ScanItem) => boolean, ownsUpload: (upload: NewBackPhoto) => boolean, since: Date) {
@@ -199,7 +213,7 @@ export class FakeScansRepository implements ScansRepository {
     for (const item of this.items.values()) {
       if (ownsItem(item) && item.createdAt.getTime() >= since.getTime()) times.push(item.createdAt.getTime())
     }
-    for (const upload of this.backPhotos.values()) {
+    for (const upload of [...this.backPhotos.values(), ...this.retakes.values()]) {
       if (ownsUpload(upload) && upload.uploadedAt.getTime() >= since.getTime()) times.push(upload.uploadedAt.getTime())
     }
     return { count: times.length, oldest: times.length === 0 ? null : new Date(Math.min(...times)) }

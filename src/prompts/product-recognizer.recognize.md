@@ -1,5 +1,5 @@
 ---
-purpose: Name the product in a photo, or say it is not a beauty product, a person or face, or unreadable.
+purpose: Name the product in a photo, or say it is not a beauty product, a person or face, a product whose label can't be seen, or unreadable.
 usedBy: AnthropicProductRecognizer.recognize
 job: recognize
 version: none
@@ -10,6 +10,7 @@ Classify the photo:
 - beauty-product: a beauty or personal-care product (skin care, hair, body, makeup, fragrance, deodorant) whose brand and name you can read on the packaging.
 - other-product: a product that is not beauty or personal care.
 - face-or-person: a person or a face, with no product you can read.
+- label-not-visible: a beauty or personal-care product is in the photo, but its label is turned away, covered (by a hand, a cap or a wrapper) or out of frame, so no brand or name can be seen.
 - unreadable: blurry, dark, cropped or empty, or the brand or name is not legible.
 
 For a beauty-product, give the brand, the name, the variant, the form (spray, roll-on, stick, cream, lotion, gel, oil, serum, liquid, bar, powder or balm), a category (skin, hair, body, makeup or other) and your confidence from 0 to 1. For anything else use empty strings, category other and confidence 0.
