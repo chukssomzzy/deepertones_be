@@ -1282,8 +1282,8 @@ export class ScanService {
    * Lets go of the front photos an item that has just moved no longer needs; `item` is the item as the move left it. A photo is
    * wanted only while an item using it is `recognising` or `needs-confirmation`, because only then may the user be shown it. So the
    * item's own photo (a product scan's) goes when the item is in any other state, and its scan photo's image (a shelf scan's) goes
-   * when no item of that photo is in either. Never fails the move
-   * and never undoes it: a photo that stays is found again by the reaper.
+   * when no item of that photo is in either. It never fails the move and never undoes it: a photo that stays is found again by
+   * the reaper.
    */
   private async releasePhotos(item: ScanItem): Promise<void> {
     const ids = { scanId: item.scanId, itemId: item.id }

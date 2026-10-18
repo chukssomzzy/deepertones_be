@@ -1260,7 +1260,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   key is absent in every other state, and `description` is absent when none was given) and `image` (decision C): the product's stock
   image if it has one, else the user's own photo through a signed link (`/api/v1/scans/products/photos/<token>`) while it is still
   stored (the item's own `photo_key`, else its shelf photo's), else `null`. Because a photo is released once no item needs it (below), a
-  user's photo is shown only while the item is `recognising` or `needs-confirmation`; **a product scan that is `ready` with no stock image
+  user's photo is shown while it is still stored, which is in practice only while the item is `recognising` or `needs-confirmation`; **a product scan that is `ready` with no stock image
   therefore shows `image: null`** (it showed the user's photo before #74), and the app shows the brand and name. `scanView` reads the scan's
   photos once, not once per item. The stream's events carry the same item, and an event for a moved item never links the photo that move released.
 - **Front photo lifecycle** (#74, decision C). A front photo is **held** only while an item using it may still be shown it for a decision: the
