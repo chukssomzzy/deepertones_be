@@ -3,6 +3,8 @@ import { type Actor, runAs, runWithContext } from '../../lib/context'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { AnthropicConfigError, AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import { MemoryGoalReader } from '../../providers/goal-reading/memory.goal-reader'
+import { FakeSafetyRepository } from '../safety/safety.repository.fake'
+import { SafetyService } from '../safety/safety.service'
 import { GOAL_ANSWERS_VERSION, answerFor } from './goals.answers'
 import { FakeGoalsRepository } from './goals.repository.fake'
 import { GoalsService } from './goals.service'
@@ -34,11 +36,14 @@ const PUBLIC: Actor = { kind: 'public' }
 let clock: Date
 let repository: FakeGoalsRepository
 let reader: MemoryGoalReader
+let safety: SafetyService
 let service: GoalsService
 
 const set = (who: Actor, input: Parameters<GoalsService['set']>[0]) => runAs(who, () => service.set(input))
 const current = (who: Actor) => runAs(who, () => service.current())
 const onboarding = (who: Actor) => runAs(who, () => service.onboarding())
+const requireGoal = (who: Actor) => runAs(who, () => service.requireGoal())
+const setSafety = (who: Actor, input: Parameters<SafetyService['set']>[0]) => runAs(who, () => safety.set(input))
 const tick = () => {
   clock = new Date(clock.getTime() + MINUTE)
 }
@@ -48,7 +53,9 @@ beforeEach(() => {
   repository = new FakeGoalsRepository()
   reader = new MemoryGoalReader()
   let n = 0
-  service = new GoalsService({ repository, reader, now: () => clock, newId: () => `goal-${++n}` })
+  // The real SafetyService over its fake repository, as the AuthService tests use the real NotificationsService: onboarding asks it, never its repository.
+  safety = new SafetyService({ repository: new FakeSafetyRepository(), now: () => clock, newId: () => `safety-${crypto.randomUUID()}` })
+  service = new GoalsService({ repository, reader, safety, now: () => clock, newId: () => `goal-${++n}` })
 })
 
 afterEach(() => {
@@ -461,6 +468,99 @@ describe('GoalsService.onboarding', () => {
 
     expect(await onboarding(AMARA_SECOND_PROFILE)).toEqual({ goal: null, safety: null, next: 'goal' })
     expect((await onboarding(AMARA)).next).toBe('safety')
+  })
+
+  it('stays on the goal step when only the safety question was answered, but carries the safety answer', async () => {
+    const answered = await setSafety(AMARA, { choices: ['pregnant'] })
+
+    expect(await onboarding(AMARA)).toEqual({ goal: null, safety: answered, next: 'goal' })
+  })
+
+  it('stays on the goal step when the safety question was answered and the goal is only unsorted words', async () => {
+    const answered = await setSafety(AMARA, { choices: ['none'] })
+    const saved = await set(AMARA, { text: 'make my face clear' })
+
+    expect(await onboarding(AMARA)).toEqual({ goal: saved, safety: answered, next: 'goal' })
+  })
+
+  it('leads to the shelf once the goal is set and the safety question is answered, carrying both views', async () => {
+    const saved = await set(AMARA, { goal: 'even-tone' })
+    const answered = await setSafety(AMARA, { choices: ['breastfeeding', 'pregnant'] })
+
+    expect(await onboarding(AMARA)).toEqual({ goal: saved, safety: answered, next: 'shelf' })
+  })
+
+  it('leads to the shelf when the answer is "none", which is an answer', async () => {
+    await set(AMARA, { goal: 'glow' })
+    await setSafety(AMARA, { choices: ['none'] })
+
+    expect((await onboarding(AMARA)).next).toBe('shelf')
+  })
+
+  it('leads to the shelf in either order of answering', async () => {
+    await setSafety(TOLU, { choices: ['reaction'], reactionText: 'fragrance' })
+    expect((await onboarding(TOLU)).next).toBe('goal')
+
+    await set(TOLU, { goal: 'brighter' })
+
+    expect((await onboarding(TOLU)).next).toBe('shelf')
+  })
+
+  it('shows the newest safety answer once it was changed', async () => {
+    await set(AMARA, { goal: 'glow' })
+    await setSafety(AMARA, { choices: ['pregnant'] })
+    tick()
+    const changed = await setSafety(AMARA, { choices: ['none'] })
+
+    expect((await onboarding(AMARA)).safety).toEqual(changed)
+  })
+
+  it('asks for safety on a profile that has a goal and no safety answer, while another profile of the account has answered', async () => {
+    await set(AMARA, { goal: 'glow' })
+    await set(AMARA_SECOND_PROFILE, { goal: 'glow' })
+    await setSafety(AMARA, { choices: ['none'] })
+
+    expect((await onboarding(AMARA)).next).toBe('shelf')
+    expect(await onboarding(AMARA_SECOND_PROFILE)).toMatchObject({ safety: null, next: 'safety' })
+  })
+})
+
+describe('GoalsService.requireGoal', () => {
+  it('answers the current goal view once a goal is set', async () => {
+    const saved = await set(AMARA, { goal: 'fade-dark-marks' })
+
+    expect(await requireGoal(AMARA)).toEqual(saved)
+  })
+
+  it('answers 409 GOAL_REQUIRED before anything was set', async () => {
+    const error = await errorOf(requireGoal(AMARA))
+
+    expect(error.name).toBe('ConflictError')
+    expect(error.code).toBe('GOAL_REQUIRED')
+  })
+
+  it('answers 409 GOAL_REQUIRED when only words nobody sorted into a goal were saved', async () => {
+    await set(AMARA, { text: 'make my face clear' })
+
+    expect((await errorOf(requireGoal(AMARA))).code).toBe('GOAL_REQUIRED')
+  })
+
+  it('answers the goal once the pick after unclear words is made', async () => {
+    await set(AMARA, { text: 'make my face clear' })
+    tick()
+    const picked = await set(AMARA, { goal: 'clear-skin' })
+
+    expect(await requireGoal(AMARA)).toEqual(picked)
+  })
+
+  it('answers 409 GOAL_REQUIRED for a profile with no goal while another profile of the account has one', async () => {
+    await set(AMARA, { goal: 'glow' })
+
+    expect((await errorOf(requireGoal(AMARA_SECOND_PROFILE))).code).toBe('GOAL_REQUIRED')
+  })
+
+  it('answers 401 AUTH_REQUIRED, not 409, without a session', async () => {
+    expect((await errorOf(requireGoal(PUBLIC))).code).toBe('AUTH_REQUIRED')
   })
 })
 

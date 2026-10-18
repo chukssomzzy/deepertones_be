@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { SafetyResponse } from '../safety/safety.schemas'
 import { GOALS } from './goals.vocabulary'
 
 const GoalName = z.enum(GOALS).openapi({ description: 'One of the five goals the app offers.', example: 'fade-dark-marks' })
@@ -41,7 +42,7 @@ export const GoalResponse = z
 export const OnboardingResponse = z
   .object({
     goal: GoalResponse.nullable().openapi({ description: 'The current goal, or null when none was set.' }),
-    safety: z.null().openapi({ description: 'Always null until the safety answers are built.' }),
-    next: z.enum(['goal', 'safety']).openapi({ description: 'The first-run step to show next.' }),
+    safety: SafetyResponse.nullable().openapi({ description: 'The current safety answers, or null until the profile answers. Shown even when the goal is not set yet.' }),
+    next: z.enum(['goal', 'safety', 'shelf']).openapi({ description: 'The first-run step to show next.' }),
   })
   .openapi('Onboarding')

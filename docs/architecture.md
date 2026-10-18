@@ -461,6 +461,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `GET /api/v1/me` | bearer | none |
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
 | `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
+| `PUT`/`GET /api/v1/me/safety` | bearer (guests included); see "Safety facts (onboarding)" | none |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
   profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
@@ -734,9 +735,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   up to 600 s.
 
 ### Goals (onboarding)
-`modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `onboarding`).
+`modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `requireGoal`, `onboarding`).
 It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
-is built in four pull requests; this is the second (the five chips, and typed words read by the goal reader).
+is built in four pull requests; the goal is the first two (the five chips, and typed words read by the goal reader), and the safety answers are the third (see "Safety facts (onboarding)").
 
 - **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
   `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the five goals or null, `text` is the user's own
@@ -764,8 +765,11 @@ is built in four pull requests; this is the second (the five chips, and typed wo
   closest?" to words nobody sorted. After a chip, or after words that were already matched, the next chip leaves `text` null, so old words do not
   follow later changes.
 - **Current and onboarding.** `GET /goal` is 404 `GOAL_NOT_SET` only for a profile that never saved anything; saved words with no goal are a view with
-  `goal` and `answer` null. `GET /onboarding` answers `{ goal, safety, next }`: `next` is `goal` until a row has a goal, then `safety`.
-  `safety` is always null for now.
+  `goal` and `answer` null. `GET /onboarding` answers `{ goal, safety, next }`: `next` is `goal` until a row has a goal, then `safety` until the profile has
+  a safety answer ("none of these" is one), then `shelf`. `safety` is the profile's current safety view whichever step it is, because the question can be
+  answered before the goal. `GoalsService` gets it from `SafetyService.currentOrNull()`, never from the safety repository.
+- **The guard.** `requireGoal()` answers the current goal view, or 409 `GOAL_REQUIRED` when the profile has no row or only words with no goal. It is
+  built for the verdict and routine work and is not wired to a route yet.
 - **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so a guest has a goal like anyone, and a second profile of
   an account has its own.
 - **Rate limits on `PUT /goal`.** `GOAL_SET_IP_LIMITER` (20 a minute per address) and `GOAL_SET_USER_LIMITER` (10 a minute per user), in the order
@@ -777,8 +781,36 @@ is built in four pull requests; this is the second (the five chips, and typed wo
 - **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
-- **Still to come.** Pull request 3 adds the safety answers (`profile_safety`) and fills `safety` and `next: 'shelf'`. Pull request 4
-  reads the products and ingredients named in reaction and prescription text in the background.
+- **Still to come.** Pull request 4 reads the products and ingredients named in reaction and prescription text in the background.
+
+### Safety facts (onboarding)
+`modules/safety` holds `profile_safety` (migration 0021), `D1SafetyRepository` (`append`, `current`, `history`) and `SafetyService` (`set`, `current`,
+`currentOrNull`, `requireAnswered`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", and the third pull request of issue #82.
+
+- **The choices.** `SAFETY_CHOICES` (`safety.vocabulary.ts`) is `pregnant`, `breastfeeding`, `reaction` ("a product gave me a reaction"), `prescription` and
+  `none`, in the order the app shows them. The service stores and returns the ticked choices once each, in that order, whatever order or repeats were sent.
+- **The rules, in `SafetyService.set`.** Texts are trimmed first and a text that is empty once trimmed is null, so an empty field says nothing. Then:
+  `none` with any other choice is 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`; a text with words but without its choice ticked (`reactionText` needs
+  `reaction`, `prescriptionText` needs `prescription`, and `none` ticks neither) is 400 `INVALID_SAFETY_ANSWER` with the field named; a text with a link or
+  markup (`hasLinkOrMarkup`) or a control or invisible character (`\p{Cc}`, `\p{Cf}`) is 400 `INVALID_SAFETY_TEXT` with the field named. Ticking a choice and naming nothing
+  is valid and still counts: the caution applies from the tick. Shape is zod: a strict object, `choices` one to five of the vocabulary, each text a
+  string of at most 300 characters (`SAFETY_TEXT_MAX`) once trimmed, else 400 `VALIDATION_FAILED`.
+- **History, as for goals.** `profile_safety` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by `created_at` is the
+  current answer, ties broken by `rowid`. The newest wins even when it is less strict than the one before ("none" can replace "pregnant"); nothing carries over, so a
+  text is kept only if the answer that is current says it. `choices` is a JSON array in a text column. Guest cleanup needs no cleaner of its own, and a guest who signs up
+  keeps the answers (promotion keeps the profile). The migration is additive.
+- **The view.** `{ choices, reactionText, prescriptionText, excludesPregnancyCaution, updatedAt }`, and the presenter returns exactly those five keys.
+  `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked; it is worked out when the row is read, not stored.
+- **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so each profile of an account has its own answers. `GET /safety` is 404
+  `SAFETY_NOT_SET` until the profile has answered.
+- **The guard.** `requireAnswered()` answers the current view, or 409 `SAFETY_ANSWERS_REQUIRED` for a profile that has not answered ("none" is an answer). With
+  `GoalsService.requireGoal()` it is what the verdict and the routine will call, so no routine rests on a missing answer. Scans need neither, so the shelf photo stays
+  part of the hook. Neither guard is wired to a route yet.
+- **Parsing is the next pull request, and it only ever adds caution.** The next pull request reads the products and ingredients named in `reactionText` and
+  `prescriptionText` in the background. What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove any.
+- **Logs never carry the text.** The service logs nothing; tests spy on the console to keep it so. The words are user input and may be personal.
+- **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. They have no rate limit of their own:
+  a save is one row and calls no model.
 
 ### Prompts
 

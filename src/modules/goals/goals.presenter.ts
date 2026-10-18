@@ -1,4 +1,5 @@
 import type { z } from '@hono/zod-openapi'
+import { toSafetyResponse } from '../safety/safety.presenter'
 import type { GoalResponse, OnboardingResponse } from './goals.schemas'
 import type { GoalView, OnboardingView } from './goals.types'
 
@@ -13,6 +14,6 @@ export const toGoalResponse = ({ goal, wantsLighter, text, answer, answersVersio
 
 export const toOnboardingResponse = ({ goal, safety, next }: OnboardingView): z.infer<typeof OnboardingResponse> => ({
   goal: goal && toGoalResponse(goal),
-  safety,
+  safety: safety && toSafetyResponse(safety),
   next,
 })

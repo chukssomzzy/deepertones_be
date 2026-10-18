@@ -125,8 +125,15 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    `{ goal, wantsLighter, text, answer, answersVersion, updatedAt }`, where `answer` is `{ title, howLong, helps, inTheWay, note }` (all
    draft copy for now). Typed words are read by a small model and sorted into a goal; words that ask to be lighter or fairer come back as `brighter` with `wantsLighter` true (and a plain note in `answer`). When no goal is found, or the model is unavailable, the words are saved with `goal` and `answer` null and the answer is still 200, so show the chips; a chip picked next keeps the words. The route is rate limited (10 changes a minute per user, 20 per address, chips included): 429 `RATE_LIMITED`, wait `Retry-After` seconds.
    `GET /api/v1/me/goal` returns the same view (404 `GOAL_NOT_SET` before anything was saved), and `GET /api/v1/me/onboarding` returns
-   `{ goal, safety, next }` with `next` of `goal` or `safety`: use it to resume the first run. Words with a link or markup are a
+   `{ goal, safety, next }` with `next` of `goal`, `safety` or `shelf`: use it to resume the first run. Words with a link or markup are a
    400 `INVALID_GOAL_TEXT`.
+8. **For the safety question** (screen 1.5, after the goal): `PUT /api/v1/me/safety` with `{ choices, reactionText?, prescriptionText? }` and the bearer token,
+   guests included. `choices` is one to five of `pregnant`, `breastfeeding`, `reaction`, `prescription` and `none`; the optional texts (up to 300 characters)
+   name the products or ingredients behind `reaction` and `prescription`. `none` stands alone, and a text needs its own choice ticked (400
+   `INVALID_SAFETY_ANSWER`, with `error.details.field` naming the field); words with a link, markup or an invisible character are a 400 `INVALID_SAFETY_TEXT`.
+   Ticking a choice and naming nothing is fine, and a blank text counts as left out. It answers `{ choices, reactionText, prescriptionText,
+   excludesPregnancyCaution, updatedAt }`; `GET /api/v1/me/safety` returns the same (404 `SAFETY_NOT_SET` before the first answer). The answers can be changed
+   at any time, the newest counts, and a text is kept only if the answer you last sent has it. They are private to the profile. `GET /api/v1/me/onboarding` carries them in `safety`.
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
@@ -138,6 +145,7 @@ Error codes to handle (in `error.code`):
 - `RATE_LIMITED` (429): wait `Retry-After` seconds.
 - `PUSH_TOKEN_INVALID` (400): the token is not an Expo push token.
 - `INVALID_GOAL_TEXT` (400): the typed goal has a link, markup or an invisible character. `GOAL_NOT_SET` (404): no goal saved yet.
+- `INVALID_SAFETY_ANSWER` (400, `details.field` says which): "none" with another choice, or words without their choice. `INVALID_SAFETY_TEXT` (400): the words have a link, markup or an invisible character. `SAFETY_NOT_SET` (404): no safety answer yet.
 - `ACCOUNT_LINKING_UNAVAILABLE` (409): a verified user tried to add a different, unowned email. Not supported yet;
   no code is sent or used. `NOT_A_GUEST` (409) should now be unreachable in practice.
 - `VALIDATION_FAILED` (400), and from the code flow `INVALID_EMAIL`, `OTP_CHANNEL_UNAVAILABLE`, `OTP_COOLDOWN` (429)

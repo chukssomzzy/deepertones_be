@@ -17,6 +17,8 @@ import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
+import { D1SafetyRepository } from './modules/safety/safety.repository'
+import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
 import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
@@ -183,7 +185,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
-  // (push_tokens, notification_settings and profile_goals are not listed: their foreign keys cascade from users or profiles.)
+  // (push_tokens, notification_settings, profile_goals and profile_safety are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
@@ -208,11 +210,21 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const safety = once(
+    () =>
+      new SafetyService({
+        repository: new D1SafetyRepository(db()),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
+      }),
+  )
+
   const goals = once(
     () =>
       new GoalsService({
         repository: new D1GoalsRepository(db()),
         reader: new AnthropicGoalReader(goalReaderAnthropic()),
+        safety: safety(),
         now: () => new Date(),
         newId: () => crypto.randomUUID(),
       }),
@@ -254,6 +266,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get profiles() {
       return profiles()
+    },
+    get safety() {
+      return safety()
     },
     get scans() {
       return scans()

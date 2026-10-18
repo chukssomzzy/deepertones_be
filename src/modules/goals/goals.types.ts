@@ -1,4 +1,5 @@
 import type { GoalAnswer } from './goals.answers'
+import type { SafetyView } from '../safety/safety.types'
 import type { profileGoals } from './goals.table'
 import type { Goal } from './goals.vocabulary'
 
@@ -16,11 +17,11 @@ export type GoalView = {
 }
 
 /** Which first-run step comes next. */
-export type OnboardingStep = 'goal' | 'safety'
+export type OnboardingStep = 'goal' | 'safety' | 'shelf'
 
 export type OnboardingView = {
   goal: GoalView | null
-  /** Always null until the safety answers are built. */
-  safety: null
+  /** The profile's current safety answers, null until it answers (even before the goal is set). */
+  safety: SafetyView | null
   next: OnboardingStep
 }

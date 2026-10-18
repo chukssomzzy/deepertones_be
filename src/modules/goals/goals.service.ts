@@ -1,9 +1,10 @@
 import { requireUser } from '../../lib/context'
-import { NotFoundError, ValidationError } from '../../lib/errors'
+import { ConflictError, NotFoundError, ValidationError } from '../../lib/errors'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import type { GoalReader, GoalReading } from '../../providers/goal-reading/goal-reader.provider'
+import type { SafetyService } from '../safety/safety.service'
 import { GOAL_ANSWERS_VERSION, answerFor } from './goals.answers'
 import type { GoalsRepository } from './goals.repository'
 import type { GoalRow, GoalView, OnboardingView } from './goals.types'
@@ -12,6 +13,8 @@ import type { Goal } from './goals.vocabulary'
 export type GoalsServiceDeps = {
   repository: GoalsRepository
   reader: GoalReader
+  /** Asked through its service for the onboarding step, never through its repository. */
+  safety: Pick<SafetyService, 'currentOrNull'>
   now?: () => Date
   newId?: () => string
 }
@@ -30,12 +33,14 @@ export class GoalsService {
 
   private readonly repository: GoalsRepository
   private readonly reader: GoalReader
+  private readonly safety: Pick<SafetyService, 'currentOrNull'>
   private readonly now: () => Date
   private readonly newId: () => string
 
   constructor(deps: GoalsServiceDeps) {
     this.repository = deps.repository
     this.reader = deps.reader
+    this.safety = deps.safety
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
@@ -74,11 +79,26 @@ export class GoalsService {
     return this.view(row)
   }
 
-  /** Which first-run step comes next: the goal until one is picked (typed words alone do not count), then safety. */
+  /**
+   * The guard for what must not be built on a missing goal (the verdict, the routine): the current goal, or 409 `GOAL_REQUIRED`. Typed words
+   * nobody sorted into a goal are not a goal. Not wired to a route yet.
+   */
+  async requireGoal(): Promise<GoalView> {
+    const { profileId } = requireUser()
+    const row = await this.repository.current(profileId)
+    if (!row?.goal) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    return this.view(row)
+  }
+
+  /**
+   * Which first-run step comes next: the goal until one is picked (typed words alone do not count), then the safety question until it is
+   * answered, then the shelf. The safety answers come along whichever step it is, because the question can be answered before the goal.
+   */
   async onboarding(): Promise<OnboardingView> {
     const { profileId } = requireUser()
     const row = await this.repository.current(profileId)
-    return { goal: row ? this.view(row) : null, safety: null, next: row?.goal ? 'safety' : 'goal' }
+    const safety = await this.safety.currentOrNull()
+    return { goal: row ? this.view(row) : null, safety, next: !row?.goal ? 'goal' : !safety ? 'safety' : 'shelf' }
   }
 
   /**

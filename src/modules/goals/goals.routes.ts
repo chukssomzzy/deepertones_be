@@ -43,7 +43,8 @@ const getOnboarding = defineRoute({
   operationId: 'getOnboarding',
   tags: ['Onboarding'],
   summary: 'Which first-run step comes next',
-  description: '`next` is `goal` until a goal is picked (typed words alone do not count), then `safety`.',
+  description: '`next` is `goal` until a goal is picked (typed words alone do not count), then `safety` until the safety question is answered ("none of these" is an answer), then `shelf`. ' +
+    '`safety` is the current answers whatever the step, or null.',
   security: bearer,
   responses: { 200: success(OnboardingResponse, 'Where the profile is in the first run'), ...errorResponses(401) },
 })
