@@ -37,9 +37,9 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
   private static readonly FORMS = [...PRODUCT_FORMS, 'unknown'] as const
 
   // Every field is required and the object is closed, as structured outputs need. The three text fields also accept a
-  // missing value, read as empty, so a model that leaves one out gets `unreadable` rather than a failed call.
-  private static readonly SCHEMA = z.object({
-    classification: z.enum(AnthropicProductRecognizer.CLASSIFICATIONS),
+  // missing value, read as empty, so a model that leaves one out gets `unreadable` rather than a failed call. Shared by both
+  // schemas, so a field added for one product is added for a shelf's too.
+  private static readonly PRODUCT_FIELDS = {
     brand: AnthropicProductRecognizer.orEmpty(z.string()),
     name: AnthropicProductRecognizer.orEmpty(z.string()),
     variant: AnthropicProductRecognizer.orEmpty(z.string().describe('Empty when the packaging prints no variant')),
@@ -47,6 +47,11 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     form: z.preprocess((value) => value ?? 'unknown', z.enum(AnthropicProductRecognizer.FORMS)),
     category: z.enum(AnthropicProductRecognizer.CATEGORIES),
     confidence: z.number().describe('From 0 to 1'),
+  }
+
+  private static readonly SCHEMA = z.object({
+    classification: z.enum(AnthropicProductRecognizer.CLASSIFICATIONS),
+    ...AnthropicProductRecognizer.PRODUCT_FIELDS,
   })
 
   private static readonly SHELF_MAX_PRODUCTS = 5
@@ -54,16 +59,7 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
 
   private static readonly SHELF_SCHEMA = z.object({
     classification: z.enum(['beauty-product', 'other-product', 'face-or-person', 'unreadable']),
-    products: z.array(
-      z.object({
-        brand: AnthropicProductRecognizer.orEmpty(z.string()),
-        name: AnthropicProductRecognizer.orEmpty(z.string()),
-        variant: AnthropicProductRecognizer.orEmpty(z.string().describe('Empty when the packaging prints no variant')),
-        form: z.preprocess((value) => value ?? 'unknown', z.enum(AnthropicProductRecognizer.FORMS)),
-        category: z.enum(AnthropicProductRecognizer.CATEGORIES),
-        confidence: z.number().describe('From 0 to 1'),
-      }),
-    ),
+    products: z.array(z.object(AnthropicProductRecognizer.PRODUCT_FIELDS)),
     excluded: z.object({
       otherProducts: z.number().describe('Products that are not beauty or personal care'),
       unreadable: z.number().describe('Beauty or personal-care products whose brand or name cannot be read'),
