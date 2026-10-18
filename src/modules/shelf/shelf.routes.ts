@@ -102,11 +102,14 @@ export const shelfRoutes = shelfApp
     return c.body(null, 204)
   })
 
-// defineRoute adds 415 to any route with a body, but these are served by reading the text, which never refuses a Content-Type: do not document it.
-const withoutUnsupportedMediaType = <Route extends { responses: object }>(route: Route): Route => {
+// What these two routes document, registered by hand because they are served by their body-less copies. The middleware is the served
+// route's business and is not OpenAPI (left in, it lands in the spec as an unknown `middleware` key). defineRoute adds 415 to any route
+// with a body, but these read the text, which never refuses a Content-Type: do not document it.
+const asDocumented = <Route extends { responses: object; middleware?: unknown }>(route: Route): Omit<Route, 'middleware'> => {
+  const { middleware: _served, ...documented } = route
   const { 415: _unsupported, ...responses } = route.responses as Record<number, unknown>
-  return { ...route, responses }
+  return { ...documented, responses }
 }
 
-shelfRoutes.openAPIRegistry.registerPath(withoutUnsupportedMediaType(addShelfProduct))
-shelfRoutes.openAPIRegistry.registerPath(withoutUnsupportedMediaType(removeShelfEntry))
+shelfRoutes.openAPIRegistry.registerPath(asDocumented(addShelfProduct))
+shelfRoutes.openAPIRegistry.registerPath(asDocumented(removeShelfEntry))
