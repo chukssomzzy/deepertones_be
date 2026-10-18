@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs, runWithContext } from '../../lib/context'
+import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
+import { AnthropicConfigError, AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
+import { MemoryGoalReader } from '../../providers/goal-reading/memory.goal-reader'
 import { GOAL_ANSWERS_VERSION, answerFor } from './goals.answers'
 import { FakeGoalsRepository } from './goals.repository.fake'
 import { GoalsService } from './goals.service'
 import type { GoalRow } from './goals.types'
+import { GOALS } from './goals.vocabulary'
 
 // The one clock every test hangs off; later times are offsets from it.
 const T0 = new Date('2030-06-15T12:00:00.000Z')
@@ -29,6 +33,7 @@ const PUBLIC: Actor = { kind: 'public' }
 
 let clock: Date
 let repository: FakeGoalsRepository
+let reader: MemoryGoalReader
 let service: GoalsService
 
 const set = (who: Actor, input: Parameters<GoalsService['set']>[0]) => runAs(who, () => service.set(input))
@@ -41,8 +46,9 @@ const tick = () => {
 beforeEach(() => {
   clock = T0
   repository = new FakeGoalsRepository()
+  reader = new MemoryGoalReader()
   let n = 0
-  service = new GoalsService({ repository, now: () => clock, newId: () => `goal-${++n}` })
+  service = new GoalsService({ repository, reader, now: () => clock, newId: () => `goal-${++n}` })
 })
 
 afterEach(() => {
@@ -94,11 +100,11 @@ describe('GoalsService.set with a chip', () => {
 })
 
 describe('GoalsService.set with typed words', () => {
-  it('saves the trimmed words with no goal and no answer, because nothing reads them yet', async () => {
-    const view = await set(AMARA, { text: '  make my face clear  ' })
+  it('saves the trimmed words with no goal and no answer when the reader finds no goal in them', async () => {
+    const view = await set(AMARA, { text: '  what is the weather  ' })
 
-    expect(view).toEqual({ goal: null, wantsLighter: false, text: 'make my face clear', answer: null, answersVersion: GOAL_ANSWERS_VERSION, updatedAt: T0 })
-    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: null, wantsLighter: false, text: 'make my face clear' })
+    expect(view).toEqual({ goal: null, wantsLighter: false, text: 'what is the weather', answer: null, answersVersion: GOAL_ANSWERS_VERSION, updatedAt: T0 })
+    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: null, wantsLighter: false, text: 'what is the weather' })
   })
 
   it('keeps the words as typed apart from the trimming, inner spaces and all', async () => {
@@ -107,23 +113,132 @@ describe('GoalsService.set with typed words', () => {
     expect(view.text).toBe('I  want  my skin  to glow')
   })
 
+  it('asks the reader about the trimmed words, once', async () => {
+    await set(AMARA, { text: '  make my face clear  ' })
+
+    expect(reader.calls).toEqual(['make my face clear'])
+  })
+
+  it('saves the goal the reader found with the trimmed words, and answers with that goal\'s honest answer and no colour note', async () => {
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+
+    const view = await set(AMARA, { text: '  make my face clear  ' })
+
+    expect(view).toEqual({
+      goal: 'clear-skin',
+      wantsLighter: false,
+      text: 'make my face clear',
+      answer: answerFor('clear-skin', false),
+      answersVersion: GOAL_ANSWERS_VERSION,
+      updatedAt: T0,
+    })
+    expect(view.answer!.note).toBeNull()
+    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: 'clear-skin', wantsLighter: false, text: 'make my face clear', profileId: 'profile-amara-1' })
+  })
+
+  it('saves wantsLighter with the goal and answers with the colour note when the reader says the user asked to be lighter', async () => {
+    reader.respondWith(() => ({ goal: 'brighter', wantsLighter: true }))
+
+    const view = await set(AMARA, { text: 'I want to be fairer' })
+
+    expect(view).toEqual({
+      goal: 'brighter',
+      wantsLighter: true,
+      text: 'I want to be fairer',
+      answer: answerFor('brighter', true),
+      answersVersion: GOAL_ANSWERS_VERSION,
+      updatedAt: T0,
+    })
+    expect(view.answer!.note).not.toBeNull()
+    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: 'brighter', wantsLighter: true })
+  })
+
+  it('gives the colour note to no goal the reader sorted without wantsLighter', async () => {
+    for (const goal of GOALS) {
+      reader.respondWith(() => ({ goal, wantsLighter: false }))
+      tick()
+
+      expect((await set(AMARA, { text: `words for ${goal}` })).answer!.note, goal).toBeNull()
+    }
+  })
+
   it.each([
     ['a link', 'see https://evil.example for my goal'],
     ['a link starting www.', 'www.evil.example'],
     ['markup', 'make my <b>face</b> clear'],
     ['a zero-width space', 'make my face\u200Bclear'],
     ['a control character', 'make my face\u0007clear'],
-  ])('refuses words with %s as INVALID_GOAL_TEXT and stores nothing', async (_label, text) => {
+  ])('refuses words with %s as INVALID_GOAL_TEXT, stores nothing and never asks the reader', async (_label, text) => {
     const error = await errorOf(set(AMARA, { text }))
 
     expect(error.code).toBe('INVALID_GOAL_TEXT')
     expect(await repository.history('profile-amara-1')).toEqual([])
+    expect(reader.calls).toEqual([])
   })
 
   it('takes a plain angle bracket as ordinary text', async () => {
     const view = await set(AMARA, { text: 'spots < 1cm gone' })
 
     expect(view.text).toBe('spots < 1cm gone')
+  })
+})
+
+describe('GoalsService.set when the reader cannot read the words', () => {
+  const SECRET_WORDS = 'make my face clear QZ7'
+  // The reason codes are the ones architecture.md promises.
+  const failures: [string, () => Error, string][] = [
+    ['AiBudgetExceededError', () => new AiBudgetExceededError('cap'), 'budget-exceeded'],
+    ['AnthropicUnavailableError', () => new AnthropicUnavailableError('overloaded'), 'unavailable'],
+    ['AnthropicRequestError', () => new AnthropicRequestError('bad request'), 'request-rejected'],
+    ['AnthropicRefusalError', () => new AnthropicRefusalError('refused'), 'refused'],
+  ]
+
+  it.each(failures)('still saves the words with no goal and no answer when the reader throws %s, so the app falls back to the chips', async (_name, error) => {
+    reader.failNextWith(error())
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const view = await set(AMARA, { text: `  ${SECRET_WORDS}  ` })
+
+    expect(view).toEqual({ goal: null, wantsLighter: false, text: SECRET_WORDS, answer: null, answersVersion: GOAL_ANSWERS_VERSION, updatedAt: T0 })
+    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: null, wantsLighter: false, text: SECRET_WORDS })
+    expect((await onboarding(AMARA)).next).toBe('goal')
+  })
+
+  it.each(failures)('logs one { outcome: "goal-read-failed", reason } for %s with its own reason code, and not a word the user typed', async (_name, error, reason) => {
+    reader.failNextWith(error())
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+    const errorSpy = spies[4]!
+
+    await set(AMARA, { text: SECRET_WORDS })
+
+    const logged = spies.flatMap((spy) => spy.mock.calls)
+    expect(logged).toHaveLength(1)
+    expect(errorSpy).toHaveBeenCalledTimes(1)
+    expect(logged[0]).toEqual([{ outcome: 'goal-read-failed', reason }])
+    expect(JSON.stringify(logged)).not.toContain('QZ7')
+  })
+
+  it('lets the next typed words be read again once the outage is over', async () => {
+    reader.failNextWith(new AnthropicUnavailableError('overloaded'))
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    await set(AMARA, { text: 'make my face clear' })
+    tick()
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+
+    const view = await set(AMARA, { text: 'make my face clear' })
+
+    expect(view.goal).toBe('clear-skin')
+  })
+
+  it.each([
+    ['a plain Error', () => new Error('boom')],
+    ['AnthropicConfigError, a setup problem for us to fix rather than an outage to hide', () => new AnthropicConfigError('bad key')],
+  ])('lets %s through, and stores nothing', async (_name, error) => {
+    const failure = error()
+    reader.failNextWith(failure)
+
+    await expect(set(AMARA, { text: 'make my face clear' })).rejects.toBe(failure)
+    expect(await repository.history('profile-amara-1')).toEqual([])
   })
 })
 
@@ -167,6 +282,45 @@ describe('GoalsService.set keeping the words with the pick', () => {
     const view = await set(AMARA, { goal: 'glow' })
 
     expect(view).toMatchObject({ goal: 'glow', text: null })
+  })
+
+  it('leaves the text empty on a chip after words the reader sorted into a goal, so old words do not follow later changes', async () => {
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+    await set(AMARA, { text: 'make my face clear' })
+    tick()
+
+    const view = await set(AMARA, { goal: 'glow' })
+
+    expect(view).toMatchObject({ goal: 'glow', text: null, wantsLighter: false })
+    expect(await repository.current('profile-amara-1')).toMatchObject({ goal: 'glow', text: null })
+  })
+
+  it('copies the words onto the chip picked after the reader found no goal in them', async () => {
+    await set(AMARA, { text: 'something about my forehead' })
+    tick()
+
+    const view = await set(AMARA, { goal: 'even-tone' })
+
+    expect(view).toMatchObject({ goal: 'even-tone', text: 'something about my forehead' })
+  })
+
+  it('copies the words onto the chip picked after the reader failed, because the app fell back to the chips for those words', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    reader.failNextWith(new AnthropicUnavailableError('overloaded'))
+    await set(AMARA, { text: 'make my face clear' })
+    tick()
+
+    const view = await set(AMARA, { goal: 'clear-skin' })
+
+    expect(view).toMatchObject({ goal: 'clear-skin', text: 'make my face clear' })
+  })
+
+  it('never asks the reader about a chip', async () => {
+    await set(AMARA, { goal: 'glow' })
+    tick()
+    await set(AMARA, { goal: 'brighter' })
+
+    expect(reader.calls).toEqual([])
   })
 
   it('keeps the words of an unsorted text across a chip that follows a chip, then text, then chip', async () => {
@@ -219,9 +373,24 @@ describe('GoalsService.current', () => {
     expect((await errorOf(current(AMARA_SECOND_PROFILE))).code).toBe('GOAL_NOT_SET')
   })
 
-  // The routes in this PR cannot set wantsLighter (nothing reads typed words yet), so this row is written directly, as the goal
-  // reader will write it. It pins that the view is computed from the row.
-  it('adds the colour note and the current copy version to a row that asked to be lighter, whatever version it was saved under', async () => {
+  it('adds the colour note to a goal saved from words that asked to be lighter', async () => {
+    reader.respondWith(() => ({ goal: 'brighter', wantsLighter: true }))
+    await set(AMARA, { text: 'I want to be lighter' })
+
+    const view = await current(AMARA)
+
+    expect(view).toEqual({
+      goal: 'brighter',
+      wantsLighter: true,
+      text: 'I want to be lighter',
+      answer: answerFor('brighter', true),
+      answersVersion: GOAL_ANSWERS_VERSION,
+      updatedAt: T0,
+    })
+    expect(view.answer!.note).toMatch(/natural colou?r/i)
+  })
+
+  it('carries the current copy version and the note for a row saved under an older version, so new copy reaches goals saved earlier', async () => {
     await repository.append({ id: 'seeded', profileId: 'profile-amara-1', text: 'I want to be lighter', goal: 'brighter', wantsLighter: true, answersVersion: 0, createdAt: T0 })
 
     const view = await current(AMARA)
@@ -234,6 +403,7 @@ describe('GoalsService.current', () => {
       answersVersion: GOAL_ANSWERS_VERSION,
       updatedAt: T0,
     })
+    expect(view.answersVersion).not.toBe(0)
     expect(view.answer!.note).toMatch(/natural colou?r/i)
   })
 
@@ -271,6 +441,21 @@ describe('GoalsService.onboarding', () => {
     expect(await onboarding(AMARA)).toEqual({ goal: picked, safety: null, next: 'safety' })
   })
 
+  it('leads to safety once the reader sorted the typed words into a goal', async () => {
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+    const saved = await set(AMARA, { text: 'make my face clear' })
+
+    expect(await onboarding(AMARA)).toEqual({ goal: saved, safety: null, next: 'safety' })
+  })
+
+  it('keeps asking for the goal when the reader failed, and shows the saved words', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    reader.failNextWith(new AnthropicUnavailableError('overloaded'))
+    const saved = await set(AMARA, { text: 'make my face clear' })
+
+    expect(await onboarding(AMARA)).toEqual({ goal: saved, safety: null, next: 'goal' })
+  })
+
   it('asks for the goal for a profile that has none, while another profile of the account has one', async () => {
     await set(AMARA, { goal: 'glow' })
 
@@ -280,7 +465,7 @@ describe('GoalsService.onboarding', () => {
 })
 
 describe('GoalsService without a session', () => {
-  it('answers 401 AUTH_REQUIRED from set, current and onboarding, and stores nothing', async () => {
+  it('answers 401 AUTH_REQUIRED from set, current and onboarding, stores nothing and never asks the reader', async () => {
     const codes = [
       (await errorOf(set(PUBLIC, { goal: 'glow' }))).code,
       (await errorOf(set(PUBLIC, { text: 'make my face clear' }))).code,
@@ -290,6 +475,7 @@ describe('GoalsService without a session', () => {
 
     expect(codes).toEqual(['AUTH_REQUIRED', 'AUTH_REQUIRED', 'AUTH_REQUIRED', 'AUTH_REQUIRED'])
     expect(await repository.history('profile-amara-1')).toEqual([])
+    expect(reader.calls).toEqual([])
   })
 
   it('answers 401 TOKEN_EXPIRED when the token it was given has expired', async () => {
@@ -300,10 +486,16 @@ describe('GoalsService without a session', () => {
 })
 
 describe('GoalsService logging', () => {
-  it('never logs what the user typed, whichever way it is saved, read or refused', async () => {
+  it('never logs what the user typed, whichever way it is saved, read, failed or refused', async () => {
     const SECRET_WORDS = 'make my face clear QZ7'
     const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
 
+    await set(AMARA, { text: SECRET_WORDS })
+    tick()
+    reader.respondWith(() => ({ goal: 'brighter', wantsLighter: true }))
+    await set(AMARA, { text: SECRET_WORDS })
+    tick()
+    reader.failNextWith(new AnthropicUnavailableError('overloaded'))
     await set(AMARA, { text: SECRET_WORDS })
     tick()
     await set(AMARA, { goal: 'clear-skin' })
@@ -313,5 +505,15 @@ describe('GoalsService logging', () => {
 
     const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call)))
     for (const line of logged) expect(line).not.toContain('QZ7')
+  })
+
+  it('logs nothing when the reader reads the words, or when a chip is picked', async () => {
+    const spies = (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+
+    await set(AMARA, { text: 'make my face clear' })
+    await set(AMARA, { goal: 'glow' })
+
+    expect(spies.flatMap((spy) => spy.mock.calls)).toEqual([])
   })
 })

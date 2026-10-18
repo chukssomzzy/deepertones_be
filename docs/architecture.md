@@ -736,7 +736,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 ### Goals (onboarding)
 `modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `onboarding`).
 It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
-is built in four pull requests; this is the first (the five chips only).
+is built in four pull requests; this is the second (the five chips, and typed words read by the goal reader).
 
 - **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
   `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the five goals or null, `text` is the user's own
@@ -749,8 +749,15 @@ is built in four pull requests; this is the first (the five chips only).
   change). The view is built when a row is read, so a new version of the copy reaches goals saved earlier. `GOAL_ANSWERS_VERSION` is bumped whenever
   the meaning of any text changes; the view always carries the current one, and each row records the version it was saved under. The copy is a DRAFT that
   needs owner and qualified review before launch.
-- **Typed words are saved with no goal.** `{ text }` is trimmed (1 to 200 characters, by the schema) and stored with `goal` null, no answer and
-  `wants_lighter` false, because nothing reads the words yet (a later pull request sorts them with a small model call). Words with a link or markup
+- **Typed words are read by the goal reader.** `{ text }` is trimmed (1 to 200 characters, by the schema) and checked, then `GoalReader.read` (see
+  "Claude (Anthropic) providers") sorts it into one of the five goals and the service saves `goal` and `wants_lighter` with the words. When the
+  reader finds no goal the words are saved with `goal` null and no answer. **`wantsLighter` always means `brighter`:** words that ask to be lighter,
+  fairer or whiter are saved as `brighter` with `wants_lighter` true, and the answer adds the colour note. That is a sorted request, never a refusal.
+  **A reader that cannot read is not an error for the user.** `AiBudgetExceededError`, `AnthropicUnavailableError`, `AnthropicRequestError` and
+  `AnthropicRefusalError` save the words with `goal` null and `wants_lighter` false (still 200, so the app shows the chips) and log one
+  `{ outcome: 'goal-read-failed', reason }` with a short kebab-case reason (`budget-exceeded`, `unavailable`, `request-rejected`, `refused`). Any other error, an
+  `AnthropicConfigError` above all (a setup problem to fix, not an outage to hide), propagates and nothing is stored. Chips never call the reader,
+  and neither do words refused for a link, markup or a hidden character. Words with a link or markup
   (`hasLinkOrMarkup` from `lib/text-safety`; a bare `<`, as in "spots < 1cm", is fine) or a control or invisible character (`\p{Cc}`, `\p{Cf}`) are
   400 `INVALID_GOAL_TEXT`. Shape and length are zod: exactly one of `goal` and `text`, else 400 `VALIDATION_FAILED`.
 - **The text-carry rule.** A `{ goal }` copies `text` from the current row only when that row's `goal` is null, because the pick answers "which is
@@ -760,12 +767,17 @@ is built in four pull requests; this is the first (the five chips only).
   `goal` and `answer` null. `GET /onboarding` answers `{ goal, safety, next }`: `next` is `goal` until a row has a goal, then `safety`.
   `safety` is always null for now.
 - **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so a guest has a goal like anyone, and a second profile of
-  an account has its own. No rate limit yet: nothing the routes do costs money.
-- **Logs never carry the text.** The service logs nothing; a test spies on the console to keep it so. The words are user input and may be personal.
+  an account has its own.
+- **Rate limits on `PUT /goal`.** `GOAL_SET_IP_LIMITER` (20 a minute per address) and `GOAL_SET_USER_LIMITER` (10 a minute per user), in the order
+  address limit, `signedIn()`, user limit, as the scan routes. They cover chips too: the route cannot tell words from chips before it validates the
+  body, and a typed goal may cost a model call. Over the limit is 429 `RATE_LIMITED` with `Retry-After`, before any model is called; `GET /goal` and
+  `GET /onboarding` are not limited.
+- **Wiring.** The container builds `GoalsService` with `D1GoalsRepository` and `AnthropicGoalReader` over its own client with an 8 s timeout (the read runs
+  inside the user's request on the first screen, so it gives up sooner than the name split's 15 s), so a slow model costs the user a short wait before the chips, not a stuck screen.
+- **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
-- **Still to come.** Pull request 2 sorts typed words into a goal with one small model call (and sets `wants_lighter` for "fairer" or "lighter"),
-  with rate limits on the text path. Pull request 3 adds the safety answers (`profile_safety`) and fills `safety` and `next: 'shelf'`. Pull request 4
+- **Still to come.** Pull request 3 adds the safety answers (`profile_safety`) and fills `safety` and `next: 'shelf'`. Pull request 4
   reads the products and ingredients named in reaction and prescription text in the background.
 
 ### Prompts
@@ -777,7 +789,8 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
-  `product-analyst.same-product.md`, `product-analyst.image-check.md`. The export name is the camelCased file name plus
+  `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
+  `goal-reader.read-goal.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -866,6 +879,10 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   store (see "Catalog images") checks again.
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
+- **Providers and modules.** A provider may import a module's vocabulary file (plain constants and types: `product-researcher.provider.ts` takes
+  `catalog.vocabulary`, the goal reader `goals.vocabulary`). dependency-cruiser enforces that a provider never touches `drizzle-orm`, a `*.table.ts`
+  or `lib/db` (`db-only-in-repositories`) and never value-imports a `*.repository.ts` (`concrete-classes-only-in-container`). It has no rule against
+  a provider importing anything else from a module, so keeping to vocabulary files is a convention that review holds.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
   `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
@@ -879,7 +896,7 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   trimming), with a link, markup or a hidden character (a control character, `\p{Cc}`, or an invisible format character
   such as a right-to-left override or a zero-width space, `\p{Cf}`), or a list of more than 150 entries, becomes
   `unreadable` / `{ readable: false }`, never an error. The link and markup check lives in `lib/text-safety.ts`, shared with
-  the catalog, because a provider may not import from a module.
+  the catalog.
 - **`AnthropicNameSplitter`** (`split-name`, port `NameSplitter`, in `providers/name-splitting/`; `MemoryNameSplitter` is the fake)
   splits a name a user typed into a product: `split(text)` answers `{ kind: 'product', brand, name, variant?, category }` or
   `{ kind: 'not-a-product' }`. The typed text is the only thing in the user message (the system prompt never carries it), the prompt
@@ -893,6 +910,15 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   matches "50ml"; the user may have typed more. A part the model made up, or a typo it corrected, is `not-a-product`, so it cannot put into the shared catalog a name nobody typed. The category is exempt. The brand and name
   must each keep at least one character after normalising. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable
   model and an unusable answer are thrown as the client's errors; `ScanService.identifyByName` decides what each means.
+- **`AnthropicGoalReader`** (`read-goal`, port `GoalReader`, in `providers/goal-reading/`; `MemoryGoalReader` is the fake) sorts the words a user
+  typed as their goal: `read(text)` answers `{ goal, wantsLighter }`, `goal` one of the five or null. The trimmed text is the only thing in the user
+  message (no lead-in, and the system prompt never carries it), and the prompt tells the model it is user-supplied data whose instructions are
+  ignored. The schema is one closed object with a required `goal` (the five goals or `none`, rather than a nullable goal) and a required boolean
+  `wantsLighter`; the schema sent carries no `default` (a root `catch` would add one), so the leniency is in the parse alone: each field `catch`es to absent and a reply that is
+  not an object reads as an empty one, so any reply off the schema is `{ goal: null, wantsLighter: false }`, never a failed call.
+  **`wantsLighter: true` is always `{ goal: 'brighter', wantsLighter: true }`**, whatever goal the model gave: asking to be lighter is a real goal that
+  gets a real answer, not a refusal. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable model and a
+  rejected request are thrown as the client's errors; `GoalsService` decides what each means.
 
 ### AI cost tracking
 Every Claude request is counted against a daily dollar cap. This is the app's only spend cap: by the owner's decision
@@ -940,10 +966,10 @@ there is no Console spend limit behind it, so the code is the backstop.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name) and `_VISION`
+  `recognize`, `read-label`, `split-name`, `read-goal`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name and read-goal) and `_VISION`
   (image-check, recognize and read-label). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `read-label` and `split-name` serve the
-  scan flow (see "Scan module"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
+  scan flow (see "Scan module"); `read-goal` serves onboarding (see "Goals (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
   by the eval's research mode (`npm run eval:catalog -- --mode research`), and the Models API field
@@ -1617,7 +1643,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `abortAllDurableObjects()` after cancelling its streams.
 
 ### Catalog eval
-`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the two model-backed catalog steps against fixed cases in
+`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the model-backed catalog steps, and the goal reader, against fixed cases in
 `scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested.
 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
@@ -1627,8 +1653,12 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
 - **Research mode** runs `AnthropicProductResearcher` on real products sold in Nigeria and checks the product is found
   and the list holds the ingredients we expect. These check retrieval quality, not ground truth: a brand can
   reformulate, so a failing research case may need its data updated.
-- **Cost.** One analysis call per analysis case (6) and one web-search research turn per research case (7, up to 5
-  searches each), run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
+- **Goals mode** runs `AnthropicGoalReader` on `GOAL_CASES`, typed goals in Nigerian English and Pidgin, and scores the goal and `wantsLighter` against what
+  each case expects (`scoreGoalReading`; problem codes `goal:<expected>-got-<actual>`, `wantsLighter:<expected>-got-<actual>` and `error:<name>`).
+  The cases turn on one distinction: `wantsLighter` is true only for someone who asks to be lighter, never for one who mentions a lightening product they
+  used, who lightens spots, or who refuses it. It is part of `--mode all`; `--mode goals` runs it alone (about 40 Haiku calls, a few cents).
+- **Cost.** One analysis call per analysis case (6), one web-search research turn per research case (7, up to 5
+  searches each) and one Haiku call per goal case, run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
   The run is capped in dollars too: the client gets a `MemoryAiSpendLedger` capped at `--max-usd` (default 2), so it
   cannot bill more, and once the cap is reached the remaining cases fail as `AiBudgetExceededError` without a call. The
   console table has a cost column per case and the total in USD; the report carries `costMicros` per case and in `summary`.

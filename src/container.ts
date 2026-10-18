@@ -25,6 +25,7 @@ import { UsersService } from './modules/users/users.service'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
 import { R2CatalogImageStore } from './providers/catalog-images/r2.catalog-image-store'
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
+import { AnthropicGoalReader } from './providers/goal-reading/anthropic.goal-reader'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-reader'
 import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
@@ -95,6 +96,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         recognize: env.ANTHROPIC_MODEL_VISION,
         'read-label': env.ANTHROPIC_MODEL_VISION,
         'split-name': env.ANTHROPIC_MODEL_JUDGE,
+        'read-goal': env.ANTHROPIC_MODEL_JUDGE,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })
@@ -103,6 +105,9 @@ export const buildContainer = (env: CloudflareBindings) => {
   // The split runs inside the user's request (identification), so it gives up after 15 s, not 60: the user is told to try again.
   const SPLIT_NAME_TIMEOUT_MS = 15_000
   const nameSplitterAnthropic = once(() => newAnthropic(SPLIT_NAME_TIMEOUT_MS))
+  // A typed goal is on the first screen and a failure only means the app shows the chips, so the read gives up sooner than the split does.
+  const GOAL_READ_TIMEOUT_MS = 8_000
+  const goalReaderAnthropic = once(() => newAnthropic(GOAL_READ_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -203,7 +208,15 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
-  const goals = once(() => new GoalsService({ repository: new D1GoalsRepository(db()), now: () => new Date(), newId: () => crypto.randomUUID() }))
+  const goals = once(
+    () =>
+      new GoalsService({
+        repository: new D1GoalsRepository(db()),
+        reader: new AnthropicGoalReader(goalReaderAnthropic()),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
+      }),
+  )
 
   const auth = once(
     () =>
