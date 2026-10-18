@@ -43,9 +43,12 @@ const stuckItem = async (ageMs: number) => {
   const scanId = crypto.randomUUID()
   const itemId = crypto.randomUUID()
   const createdAt = new Date(NOW - ageMs)
-  await scans.createScan({ id: scanId, userId, profileId, ipHash: `ip-${scanId}`, createdAt }, [
-    { id: itemId, scanId, userId, position: 0, photoKey: `photos/${env.ENVIRONMENT}/${userId}/${scanId}/${itemId}.jpg`, createdAt },
-  ])
+  const photoId = crypto.randomUUID()
+  await scans.createScan(
+    { id: scanId, kind: 'product', userId, profileId, ipHash: `ip-${scanId}`, createdAt },
+    [{ id: photoId, scanId, userId, position: 0, photoKey: null, createdAt }],
+    [{ id: itemId, scanId, userId, position: 0, photoId, photoKey: `photos/${env.ENVIRONMENT}/${userId}/${scanId}/${itemId}.jpg`, createdAt }],
+  )
   return itemId
 }
 

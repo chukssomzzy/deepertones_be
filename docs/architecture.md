@@ -1442,6 +1442,18 @@ notifications never imports scans) to tell the person when a scan needs them or 
   is `ScanEvents` (`publish` and `subscribe`); `DurableObjectScanEvents` is the production adapter (see "Live updates"),
   and `MemoryScanEvents` records events and subscriptions for tests. The event's item is the service's `ScanItemView`; once
   serialised it is byte for byte the item `GET /api/v1/scans/products/{scanId}` presents (`Date`s become the same ISO strings the presenter writes).
+- **Scan photos and kind** (migration 0020, #74). `scan_photos` records every photo uploaded to a scan, whatever it shows: id, `scan_id`
+  (references scans, cascade), `user_id` (the scan's owner, copied for the cleanup), `position` (unique within the scan), `state`
+  (`recognising` / `recognised` / `rejected`), `photo_key` (null for a product photo, whose image stays on its one item's
+  `scan_items.photo_key`; set for a shelf photo, which holds its own image), `recognition` (the recognizer's whole answer as JSON, null until written),
+  `skipped_not_beauty` / `_unreadable` / `_over_limit` / `_daily_limit` (counts, default 0), `created_at`, `updated_at`; indexed by `(scan_id, position)` (unique) and `user_id`.
+  `scans.kind` (`product` or `shelf`) says what the scan is of, and `scan_items.photo_id` names the `scan_photos` row an item was made from. Both are
+  nullable text with no SQL default, and `photo_id` has no foreign key, for the reason `profile_id` has none: adding a NOT NULL or REFERENCES
+  column to `scans` or `scan_items` (both parents) makes drizzle rebuild the table, which can cascade-delete the rows below it. The migration is therefore
+  two `ALTER TABLE ... ADD` statements plus `CREATE TABLE scan_photos`, with no rebuild. Code always sets both; rows from before read NULL, and
+  `ScansRepository` reads a NULL `kind` as `product`, so `Scan.kind` is never null. `ScanService.create` makes a `product` scan with one photo row per uploaded
+  photo (position = index, no key) and points each item at its photo. `createScan(scan, photos, items)` writes all three in one batch;
+  `photosOf` and `findPhoto` read the photos; `photoKeysForUsers` includes the photo keys and `deleteForUsers` deletes `scan_photos` before `scans`.
 - **Guest cleanup.** The container registers a cleaner `{ name: 'scans', deleteFor }` with the users service, backed by
   `ScanDataCleaner` (`scans.cleaner.ts`), which depends only on the repository and the photo store, so the cleanup does not
   build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos and back

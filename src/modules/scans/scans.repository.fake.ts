@@ -1,6 +1,6 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 const copyItem = (item: ScanItem): ScanItem => ({ ...item })
 
@@ -10,6 +10,7 @@ const copyItem = (item: ScanItem): ScanItem => ({ ...item })
  */
 export class FakeScansRepository implements ScansRepository {
   private scans = new Map<string, Scan>()
+  private photos = new Map<string, ScanPhoto>()
   private items = new Map<string, ScanItem>()
   private backPhotos = new Map<string, NewBackPhoto>()
   private retakes = new Map<string, NewRetake>()
@@ -21,15 +22,36 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
-   * Stores the scan and all its items, or nothing. Every item starts `recognising` with no reason, no recognised
-   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken.
+   * Stores the scan, its photos and all its items, or nothing. Every photo starts `recognising` with no recognition and nothing
+   * skipped, with `updatedAt` equal to `createdAt`. Every item starts `recognising` with no reason, no recognised
+   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken or two photos share a position.
    */
-  async createScan(scan: NewScan, items: NewScanItem[]): Promise<void> {
+  async createScan(scan: NewScan, photos: NewScanPhoto[], items: NewScanItem[]): Promise<void> {
     const ids = items.map((i) => i.id)
-    if (this.scans.has(scan.id) || new Set(ids).size !== ids.length || ids.some((id) => this.items.has(id))) {
+    const photoIds = photos.map((p) => p.id)
+    if (
+      this.scans.has(scan.id) ||
+      new Set(ids).size !== ids.length ||
+      ids.some((id) => this.items.has(id)) ||
+      new Set(photoIds).size !== photoIds.length ||
+      photoIds.some((id) => this.photos.has(id)) ||
+      new Set(photos.map((p) => p.position)).size !== photos.length
+    ) {
       throw new Error('duplicate id')
     }
     this.scans.set(scan.id, { ...scan, doneAt: null })
+    for (const photo of photos) {
+      this.photos.set(photo.id, {
+        ...photo,
+        state: 'recognising',
+        recognition: null,
+        skippedNotBeauty: 0,
+        skippedUnreadable: 0,
+        skippedOverLimit: 0,
+        skippedDailyLimit: 0,
+        updatedAt: photo.createdAt,
+      })
+    }
     for (const item of items) {
       this.items.set(item.id, {
         ...item,
@@ -51,6 +73,19 @@ export class FakeScansRepository implements ScansRepository {
         updatedAt: item.createdAt,
       })
     }
+  }
+
+  /** The scan's photos in position order. */
+  async photosOf(scanId: string): Promise<ScanPhoto[]> {
+    return [...this.photos.values()]
+      .filter((p) => p.scanId === scanId)
+      .sort((a, b) => a.position - b.position)
+      .map((p) => ({ ...p }))
+  }
+
+  async findPhoto(photoId: string): Promise<ScanPhoto | null> {
+    const photo = this.photos.get(photoId)
+    return photo ? { ...photo } : null
   }
 
   async findScan(scanId: string): Promise<Scan | null> {
@@ -153,7 +188,7 @@ export class FakeScansRepository implements ScansRepository {
     return this.photoTimes((item) => scanIds.has(item.scanId), (upload) => upload.ipHash === ipHash, since)
   }
 
-  /** Every photo key and back-photo key still stored for these users' items (nulls left out). */
+  /** Every photo key and back-photo key still stored for these users' items, and every key on their scan photos (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const wanted = new Set(userIds)
     const keys: string[] = []
@@ -161,6 +196,9 @@ export class FakeScansRepository implements ScansRepository {
       if (!wanted.has(item.userId)) continue
       if (item.photoKey !== null) keys.push(item.photoKey)
       if (item.backPhotoKey !== null) keys.push(item.backPhotoKey)
+    }
+    for (const photo of this.photos.values()) {
+      if (wanted.has(photo.userId) && photo.photoKey !== null) keys.push(photo.photoKey)
     }
     return keys
   }
@@ -182,11 +220,14 @@ export class FakeScansRepository implements ScansRepository {
     return chosen.length
   }
 
-  /** Deletes the users' scans, items, back-photo records and retake records. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' scans, photos, items, back-photo records and retake records. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     const wanted = new Set(userIds)
     for (const [id, scan] of this.scans) {
       if (wanted.has(scan.userId)) this.scans.delete(id)
+    }
+    for (const [id, photo] of this.photos) {
+      if (wanted.has(photo.userId)) this.photos.delete(id)
     }
     for (const [id, item] of this.items) {
       if (wanted.has(item.userId)) this.items.delete(id)

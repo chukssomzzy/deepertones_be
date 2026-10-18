@@ -332,6 +332,40 @@ describe('ScanService.create', () => {
     expect(ctx.photos.stored.size).toBe(2)
   })
 
+  it('makes every scan of this route a product scan', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect((await ctx.repository.findScan(scan.id))!.kind).toBe('product')
+  })
+
+  it('records one photo per uploaded photo, in upload order, each still recognising and holding no image of its own', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), webpPhoto(), markedJpeg(3)])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    expect(photos.map((p) => [p.position, p.state, p.photoKey, p.userId, p.scanId])).toEqual([
+      [0, 'recognising', null, USER, scan.id],
+      [1, 'recognising', null, USER, scan.id],
+      [2, 'recognising', null, USER, scan.id],
+    ])
+    expect(new Set(photos.map((p) => p.id)).size).toBe(3)
+    expect(photos.every((p) => p.createdAt.getTime() === T0.getTime())).toBe(true)
+  })
+
+  it('points each item at the photo it was made from, and keeps the image on the item', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), webpPhoto()])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    const items = await ctx.repository.itemsOf(scan.id)
+    expect(items.map((i) => i.photoId)).toEqual(photos.map((p) => p.id))
+    expect(items.map((i) => i.photoKey)).toEqual([photoKey(scan.id, items[0]!.id, 'jpg'), photoKey(scan.id, items[1]!.id, 'webp')])
+  })
+
   it('enqueues one recognise job per item and nothing else', async () => {
     const ctx = setup()
 
@@ -614,9 +648,9 @@ describe('ScanService.create', () => {
       constructor(private readonly store: MemoryPhotoStore) {
         super()
       }
-      override async createScan(scan: Parameters<FakeScansRepository['createScan']>[0], items: Parameters<FakeScansRepository['createScan']>[1]): Promise<void> {
+      override async createScan(...[scan, photos, items]: Parameters<FakeScansRepository['createScan']>): Promise<void> {
         for (const item of items) present.push((await this.store.get(item.photoKey)) !== null)
-        return super.createScan(scan, items)
+        return super.createScan(scan, photos, items)
       }
     }
     const photos = new MemoryPhotoStore({ environment: 'test' })
@@ -3673,9 +3707,11 @@ describe('ScanService.reap: scans the old Worker left without a profile', () => 
     const profiles = new FakeProfilesRepository()
     const ctx = setup({ repository: new FakeScansRepository({ profiles }) })
     const scanId = 'orphan-scan'
-    await ctx.repository.createScan({ id: scanId, userId: owner, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
-      { id: 'orphan-item', scanId, userId: owner, position: 0, photoKey: 'photos/test/orphan.jpg', createdAt: ctx.now() },
-    ])
+    await ctx.repository.createScan(
+      { id: scanId, kind: 'product', userId: owner, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() },
+      [{ id: 'orphan-photo', scanId, userId: owner, position: 0, photoKey: null, createdAt: ctx.now() }],
+      [{ id: 'orphan-item', scanId, userId: owner, position: 0, photoId: 'orphan-photo', photoKey: 'photos/test/orphan.jpg', createdAt: ctx.now() }],
+    )
     return { ctx, profiles, scanId }
   }
   const giveDefault = (profiles: FakeProfilesRepository, userId = USER) =>
@@ -5924,9 +5960,11 @@ describe('ScanService: push notifications', () => {
       const itemId = 'orphan-item'
       const photoKey = 'photos/test/user-1/orphan-scan/orphan-item.jpg'
       await ctx.photos.put(photoKey, markedJpeg(1))
-      await ctx.repository.createScan({ id: scanId, userId: USER, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
-        { id: itemId, scanId, userId: USER, position: 0, photoKey, createdAt: ctx.now() },
-      ])
+      await ctx.repository.createScan(
+        { id: scanId, kind: 'product', userId: USER, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() },
+        [{ id: 'orphan-photo', scanId, userId: USER, position: 0, photoKey: null, createdAt: ctx.now() }],
+        [{ id: itemId, scanId, userId: USER, position: 0, photoId: 'orphan-photo', photoKey, createdAt: ctx.now() }],
+      )
       return { ctx, scanId, itemId }
     }
 

@@ -4,10 +4,10 @@ import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
-import { scanBackPhotos, scanItems, scanRetakes, scans } from './scans.table'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto } from './scans.types'
 
-export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem }
+export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, Scan, ScanItem, ScanPhoto }
 
 // D1 allows 100 bound parameters per statement; this many ids leave headroom.
 const ID_CHUNK = 90
@@ -18,6 +18,9 @@ const chunks = <T>(items: T[]): T[][] => {
   return out
 }
 
+/** A scan row as a Scan: rows from before `kind` existed hold NULL, and are product scans. */
+const asScan = (row: typeof scans.$inferSelect): Scan => ({ ...row, kind: row.kind ?? 'product' })
+
 /** The earlier of two possibly-missing times. */
 const earlier = (a: Date | null, b: Date | null): Date | null => (a && b ? (a < b ? a : b) : (a ?? b))
 
@@ -25,13 +28,15 @@ export class D1ScansRepository {
   constructor(private readonly db: Db) {}
 
   /**
-   * Stores the scan and all its items, or nothing (one batch). Every item starts `recognising` with no reason,
-   * recognised fields, product or back photo, and `updatedAt` equal to `createdAt`; the scan starts with no done time.
-   * Rejects if any id is taken. One INSERT per item keeps each statement under D1's bound-parameter limit.
+   * Stores the scan, its photos and all its items, or nothing (one batch). Every photo starts `recognising` with no recognition
+   * and nothing skipped; every item starts `recognising` with no reason, recognised fields, product or back photo; both have
+   * `updatedAt` equal to `createdAt`, and the scan starts with no done time. Rejects if any id is taken or two photos share a
+   * position. One INSERT per row keeps each statement under D1's bound-parameter limit.
    */
-  async createScan(scan: NewScan, items: NewScanItem[]): Promise<void> {
+  async createScan(scan: NewScan, photos: NewScanPhoto[], items: NewScanItem[]): Promise<void> {
     const statements: BatchItem<'sqlite'>[] = [
       this.db.insert(scans).values({ ...scan, doneAt: null }),
+      ...photos.map((photo) => this.db.insert(scanPhotos).values({ ...photo, updatedAt: photo.createdAt })),
       ...items.map((item) => this.db.insert(scanItems).values({ ...item, updatedAt: item.createdAt })),
     ]
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
@@ -39,6 +44,16 @@ export class D1ScansRepository {
 
   async findScan(scanId: string): Promise<Scan | null> {
     const [row] = await this.db.select().from(scans).where(eq(scans.id, scanId))
+    return row ? asScan(row) : null
+  }
+
+  /** The scan's photos in position order. */
+  async photosOf(scanId: string): Promise<ScanPhoto[]> {
+    return this.db.select().from(scanPhotos).where(eq(scanPhotos.scanId, scanId)).orderBy(asc(scanPhotos.position))
+  }
+
+  async findPhoto(photoId: string): Promise<ScanPhoto | null> {
+    const [row] = await this.db.select().from(scanPhotos).where(eq(scanPhotos.id, photoId))
     return row ?? null
   }
 
@@ -124,12 +139,13 @@ export class D1ScansRepository {
         .select({ one: sql`1` })
         .from(scanItems)
         .where(and(eq(scanItems.scanId, scans.id), ...conditions))
-    return this.db
+    const rows = await this.db
       .select()
       .from(scans)
       .where(and(isNull(scans.doneAt), gte(scans.createdAt, createdSince), exists(itemsOfScan()), notExists(itemsOfScan(or(notInArray(scanItems.state, states), gte(scanItems.updatedAt, before))))))
       .orderBy(asc(scans.createdAt))
       .limit(limit)
+    return rows.map(asScan)
   }
 
   /**
@@ -165,7 +181,7 @@ export class D1ScansRepository {
     return row?.count ?? 0
   }
 
-  /** Every photo key and back-photo key still stored for these users' items (nulls left out). */
+  /** Every photo key and back-photo key still stored for these users' items, and every key on their scan photos (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const keys: string[] = []
     for (const ids of chunks(userIds)) {
@@ -176,6 +192,10 @@ export class D1ScansRepository {
       for (const row of rows) {
         if (row.photoKey !== null) keys.push(row.photoKey)
         if (row.backPhotoKey !== null) keys.push(row.backPhotoKey)
+      }
+      const shelfPhotos = await this.db.select({ photoKey: scanPhotos.photoKey }).from(scanPhotos).where(inArray(scanPhotos.userId, ids))
+      for (const row of shelfPhotos) {
+        if (row.photoKey !== null) keys.push(row.photoKey)
       }
     }
     return keys
@@ -207,13 +227,14 @@ export class D1ScansRepository {
     return rows.length
   }
 
-  /** Deletes the users' back-photo and retake records, items and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' back-photo and retake records, items, scan photos and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
     const statements: BatchItem<'sqlite'>[] = chunks(userIds).flatMap((ids) => [
       this.db.delete(scanBackPhotos).where(inArray(scanBackPhotos.userId, ids)),
       this.db.delete(scanRetakes).where(inArray(scanRetakes.userId, ids)),
       this.db.delete(scanItems).where(inArray(scanItems.userId, ids)),
+      this.db.delete(scanPhotos).where(inArray(scanPhotos.userId, ids)),
       this.db.delete(scans).where(inArray(scans.userId, ids)),
     ])
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])

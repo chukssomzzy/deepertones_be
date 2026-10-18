@@ -28,10 +28,12 @@ const twoUsers = async (ctx: Ctx) => {
       scanId,
       userId,
       position,
+      photoId: `photo-${userId}-${position}`,
       photoKey: `photos/test/${userId}/${scanId}/item-${userId}-${position}.jpg`,
       createdAt: T0,
     }))
-    await ctx.repository.createScan({ id: scanId, userId, profileId: `profile-${userId}`, ipHash: `ip-${userId}`, createdAt: T0 }, items)
+    const scanPhotos = items.map((item) => ({ id: item.photoId, scanId, userId, position: item.position, photoKey: null, createdAt: T0 }))
+    await ctx.repository.createScan({ id: scanId, userId, profileId: `profile-${userId}`, kind: 'product', ipHash: `ip-${userId}`, createdAt: T0 }, scanPhotos, items)
     for (const item of items) await ctx.photos.put(item.photoKey, markedJpeg(item.position))
     const backKey = `photos/test/${userId}/${scanId}/${items[0]!.id}-back.jpg`
     await ctx.photos.put(backKey, markedJpeg(9))
@@ -63,6 +65,23 @@ describe('ScanDataCleaner.deleteForUsers (guest cleanup)', () => {
     expect(await ctx.repository.findScan(theirs!.scanId)).not.toBeNull()
     expect(await ctx.repository.itemsOf(theirs!.scanId)).toHaveLength(2)
     expect((await ctx.repository.photosSince(OTHER_USER, new Date(0))).count).toBe(3)
+  })
+
+  it('deletes a shelf photo kept on a photo row (not on any item) from the bucket, and only that user\'s', async () => {
+    const ctx = setup()
+    const shelfKey = (userId: string) => `photos/test/${userId}/shelf-scan-${userId}/shelf.jpg`
+    for (const userId of [USER, OTHER_USER]) {
+      const scanId = `shelf-scan-${userId}`
+      const photo = { id: `shelf-photo-${userId}`, scanId, userId, position: 0, photoKey: shelfKey(userId), createdAt: T0 }
+      await ctx.repository.createScan({ id: scanId, userId, profileId: `profile-${userId}`, kind: 'shelf', ipHash: `ip-${userId}`, createdAt: T0 }, [photo], [])
+      await ctx.photos.put(shelfKey(userId), markedJpeg(4))
+    }
+
+    await cleanup(() => ctx.cleaner.deleteForUsers([USER]))
+
+    expect([...ctx.photos.stored.keys()]).toEqual([shelfKey(OTHER_USER)])
+    expect(await ctx.repository.photosOf(`shelf-scan-${USER}`)).toEqual([])
+    expect(await ctx.repository.photosOf(`shelf-scan-${OTHER_USER}`)).toHaveLength(1)
   })
 
   it('is safe to repeat, and safe when a photo is already gone', async () => {

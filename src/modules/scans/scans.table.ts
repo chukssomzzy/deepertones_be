@@ -20,6 +20,9 @@ export const scans = sqliteTable(
     // NOT NULL or REFERENCES column to a parent table takes a table rebuild, which could cascade-delete scan_items. A profile
     // dies only with its user, and the user's scans go with the user, so nothing is left dangling. Code always sets it.
     profileId: text('profile_id'),
+    // What the scan is of: one product per photo, or a shelf per photo. Nullable with no SQL default for the same rebuild reason as
+    // profile_id; rows written before the column existed read NULL and are product scans (the repository reads NULL as 'product').
+    kind: text('kind', { enum: ['product', 'shelf'] }),
     ipHash: text('ip_hash').notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     doneAt: integer('done_at', { mode: 'timestamp_ms' }),
@@ -34,6 +37,36 @@ export const scans = sqliteTable(
   ],
 )
 
+/**
+ * One row per photo uploaded to a scan, whatever the photo shows. A product scan has one per item (the item holds the image,
+ * so `photo_key` is null); a shelf scan's photo holds its own image here, and the products found on it become items later.
+ * `recognition` is the recognizer's whole answer as JSON, written when the photo has been read. The `skipped_*` counts are how many
+ * products on the photo were left out, and why. `user_id` is the scan's owner, kept here so the guest cleanup needs no join.
+ */
+export const scanPhotos = sqliteTable(
+  'scan_photos',
+  {
+    id: text('id').primaryKey(),
+    scanId: text('scan_id')
+      .notNull()
+      .references(() => scans.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
+    position: integer('position').notNull(),
+    state: text('state', { enum: ['recognising', 'recognised', 'rejected'] })
+      .notNull()
+      .default('recognising'),
+    photoKey: text('photo_key'),
+    recognition: text('recognition'),
+    skippedNotBeauty: integer('skipped_not_beauty').notNull().default(0),
+    skippedUnreadable: integer('skipped_unreadable').notNull().default(0),
+    skippedOverLimit: integer('skipped_over_limit').notNull().default(0),
+    skippedDailyLimit: integer('skipped_daily_limit').notNull().default(0),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+    updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [uniqueIndex('scan_photos_scan_id_position_idx').on(t.scanId, t.position), index('scan_photos_user_id_idx').on(t.userId)],
+)
+
 /** One photo of one product, and where it has got to. `product_id` and `formulation_id` point into the catalog, which is not this module's, so they carry no foreign key. */
 export const scanItems = sqliteTable(
   'scan_items',
@@ -45,6 +78,10 @@ export const scanItems = sqliteTable(
     // The scan's owner, kept here so the daily quotas and the guest cleanup need no join.
     userId: text('user_id').notNull(),
     position: integer('position').notNull(),
+    // The scan_photos row this item was made from. Plain text with no foreign key: scan_items is a parent table (scan_back_photos and
+    // scan_retakes reference it), so adding a REFERENCES column would take a table rebuild that could cascade-delete them. Code always
+    // sets it on a new item; items from before the column read NULL.
+    photoId: text('photo_id'),
     state: text('state', {
       enum: ['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification', 'unidentified'],
     })

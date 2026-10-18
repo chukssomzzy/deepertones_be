@@ -22,7 +22,7 @@ import type { NotificationsService } from '../notifications/notifications.servic
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, Scan, ScanItem } from './scans.types'
+import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, NewScanPhoto, Scan, ScanItem } from './scans.types'
 import type { NoLabelPurpose, NoLabelSource, NoLabelUsedFor } from './scans.vocabulary'
 
 export type ScanPolicy = {
@@ -217,12 +217,19 @@ export class ScanService {
     const scanId = this.newId()
     const stored = valid.map((photo, position) => {
       const id = this.newId()
-      const item: NewScanItem = { id, scanId, userId, position, photoKey: this.photoKey(userId, scanId, id, photo.extension), createdAt: now }
-      return { item, image: photo.image }
+      const photoId = this.newId()
+      const item: NewScanItem = { id, scanId, userId, position, photoId, photoKey: this.photoKey(userId, scanId, id, photo.extension), createdAt: now }
+      // A product photo's image lives on its one item, so its photo row holds no key.
+      const scanPhoto: NewScanPhoto = { id: photoId, scanId, userId, position, photoKey: null, createdAt: now }
+      return { item, scanPhoto, image: photo.image }
     })
     try {
       await Promise.all(stored.map(({ item, image }) => this.photos.put(item.photoKey, image)))
-      await this.repository.createScan({ id: scanId, userId, profileId, ipHash, createdAt: now }, stored.map(({ item }) => item))
+      await this.repository.createScan(
+        { id: scanId, userId, profileId, kind: 'product', ipHash, createdAt: now },
+        stored.map(({ scanPhoto }) => scanPhoto),
+        stored.map(({ item }) => item),
+      )
     } catch (error) {
       await this.photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
       throw error
