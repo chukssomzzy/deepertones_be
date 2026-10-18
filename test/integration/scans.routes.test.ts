@@ -16,6 +16,7 @@ import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memo
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import type { ProductForm } from '../../src/providers/product-research/product-researcher.provider'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 
 // The scan HTTP routes through the Worker's real entrypoint, with the frontend's typed client, real local D1 and R2.
@@ -28,6 +29,8 @@ const DAY_SECONDS = 24 * 60 * 60
 // The one clock for hand-made tokens: "now" is the real clock the Worker runs on, fixtures are offsets.
 const NOW = Date.now()
 const SCAN_QUEUE = 'deepertones-scan-items-development'
+// The ten-photo body is about 20 MB, and how long workerd takes to upload it grows with machine load.
+const BIG_UPLOAD_TIMEOUT_MS = 30_000
 /** What a request is asked to hold at most, and what the service accepts per photo (SCAN_POLICY). */
 const MAX_PHOTO_BYTES = 2_000_000
 /** One byte over what POST /api/v1/scans/products accepts: 10 photos plus 1,000,000 of multipart framing. */
@@ -79,7 +82,7 @@ type ItemView = {
     concerns: { kind: string; severity: string; ingredients: string[]; why: string; whoShouldTakeCare: string; traits: string[]; sources: string[] }[]
     rulesVersion: number
   }
-  product?: { id: string; kind: string; brand: string; name: string; variant: string | null; category: string; imageUrl: string | null }
+  product?: { id: string; kind: string; brand: string; name: string; variant: string | null; form?: string | null; category: string; imageUrl: string | null }
 }
 type ScanView = { id: string; createdAt: string; items: ItemView[] }
 
@@ -262,7 +265,7 @@ const jobOf = (call: { body: any }) => {
 // --- identifying by typing a name ---
 
 /** A product the catalog already holds, put there the way a scan puts it (researched, and analysed unless said otherwise), or only resolved (`researched: false`). */
-const cataloguedProduct = async (brand: string, name: string, { analysed = true, researched = true } = {}) => {
+const cataloguedProduct = async (brand: string, name: string, { analysed = true, researched = true, form }: { analysed?: boolean; researched?: boolean; form?: ProductForm } = {}) => {
   const researcher = new MemoryProductResearcher()
   researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], sourceUrl: 'https://shop.example/product' }))
   const catalog = new ProductCatalogService({
@@ -272,7 +275,7 @@ const cataloguedProduct = async (brand: string, name: string, { analysed = true,
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
   })
-  const resolved = await catalog.resolve({ brand, name, category: 'skin' })
+  const resolved = await catalog.resolve({ brand, name, category: 'skin', ...(form ? { form } : {}) })
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
   if (!researched) return { productId: resolved.productId, catalog }
   const found = await catalog.research(resolved.productId)
@@ -341,7 +344,7 @@ describe('POST /api/v1/scans/products', () => {
     const eleven = await createScan(await newGuest(), Array.from({ length: 11 }, (_, i) => fileOf(markedJpeg(i), `p${i}`)))
     expect(eleven.status).toBe(400)
     expect(await errorCodeOf(eleven)).toBe('TOO_MANY_IMAGES')
-  })
+  }, BIG_UPLOAD_TIMEOUT_MS)
 
   describe('what it refuses', () => {
     it('refuses a JSON body with 415', async () => {
@@ -1149,6 +1152,23 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/identification', (
         expect(await stateOf(guest, scanId, itemId)).toBe('ready')
         expect(queued).toEqual([])
         expect(calls).toHaveLength(0)
+      })
+
+      it('shows the chosen product\'s form as what the item was recognised as, and null for a product without one', async () => {
+        const guest = await newGuest()
+        const spray = await arrange(guest)
+        const plain = await arrange(guest)
+        const brand = freshBrand()
+        const sprayId = (await cataloguedProduct(brand, 'Dry Impact', { form: 'spray' })).productId
+        const plainId = (await cataloguedProduct(freshBrand(), 'Dry Impact')).productId
+
+        const sprayRes = await identification(guest, spray.scanId, spray.itemId, { productId: sprayId })
+        const plainRes = await identification(guest, plain.scanId, plain.itemId, { productId: plainId })
+
+        expect(sprayRes.status).toBe(202)
+        expect(await read<ItemView>(sprayRes)).toMatchObject({ data: { recognised: { brand, form: 'spray' }, product: { id: sprayId, form: 'spray' } } })
+        expect(await read<ItemView>(plainRes)).toMatchObject({ data: { recognised: { form: null } } })
+        expect(await itemNow(guest, spray.scanId, spray.itemId)).toMatchObject({ recognised: { form: 'spray' } })
       })
 
       it('moves a product whose formulation is not analysed to analysing and queues the analyse step', async () => {
