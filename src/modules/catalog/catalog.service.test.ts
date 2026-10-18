@@ -5,8 +5,12 @@ import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provid
 import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.catalog-image-store'
 import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.product-analyst'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
+import { MemoryEmailSender } from '../../providers/email/memory.email'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import type { ProductForm, ProductIdentity } from '../../providers/product-research/product-researcher.provider'
+import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { brandKey, identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
@@ -17,6 +21,8 @@ import { ANALYSIS_VERSION, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } f
 // The repository contract (fake and D1) is mounted by catalog.repository.test.ts and its integration twin.
 
 const T0 = new Date('2030-06-15T12:00:00.000Z')
+/** Midnight UTC of the day T0 is in: the window the daily budget alerts are kept in. */
+const DAY_START = new Date('2030-06-15T00:00:00.000Z')
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
@@ -56,17 +62,30 @@ const setup = (options: SetupOptions = {}) => {
   const researcher = options.researcher ?? new MemoryProductResearcher()
   const analyst = new MemoryProductAnalyst()
   const images = options.images ?? new MemoryCatalogImageStore()
+  // The real alerting service, so what is asserted is what the owner would be emailed about: one job per kind and window.
+  const alertJobs = new MemoryJobQueue()
+  const opsAlerts = new OpsAlertsService({
+    repository: new FakeOpsAlertsRepository(),
+    jobs: alertJobs,
+    email: new MemoryEmailSender(),
+    recipient: 'ops@example.com',
+    environment: 'test',
+    now: () => clock,
+  })
   const service = new ProductCatalogService({
     repository,
     researcher,
     analyst,
     images,
     imageKeyPrefix: IMAGE_KEY_PREFIX,
+    opsAlerts,
     now: () => clock,
     newId: () => `id-${++n}`,
     ...(options.policy ? { policy: { ...CATALOG_POLICY, ...options.policy } } : {}),
   })
-  return { service, repository, researcher, analyst, images, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
+  /** The kind and window of every alert queued so far. */
+  const alerts = () => alertJobs.enqueued.map((e) => e.body as { kind: string; windowStart: number })
+  return { service, repository, researcher, analyst, images, alerts, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
 }
 type Ctx = ReturnType<typeof setup>
 
@@ -488,6 +507,7 @@ describe('ProductCatalogService.research', () => {
   })
 
   describe('daily budget', () => {
+    const ALERT = [{ kind: 'research-budget', windowStart: DAY_START.getTime() }]
     // A not-found product is not researched again for a week, so each research here is of a different product.
     const products = async (ctx: Ctx, count: number) => {
       const ids: string[] = []
@@ -495,15 +515,47 @@ describe('ProductCatalogService.research', () => {
       return ids
     }
 
-    it('researches while attempts are under the budget and refuses, without calling the researcher, once they reach it', async () => {
+    it('researches every product, even past the budget, and raises research-budget when an attempt goes past it, not before', async () => {
       const ctx = setup({ policy: { dailyResearchBudget: 2 } })
       const [a, b, c] = await products(ctx, 3)
 
       expect(await ctx.service.research(a!)).toEqual({ kind: 'not-found' })
       expect(await ctx.service.research(b!)).toEqual({ kind: 'not-found' })
-      expect(await ctx.service.research(c!)).toEqual({ kind: 'budget-exhausted' })
+      expect(ctx.alerts()).toEqual([])
+      expect(await ctx.service.research(c!)).toEqual({ kind: 'not-found' })
 
-      expect(ctx.researcher.calls).toHaveLength(2)
+      expect(ctx.researcher.calls).toHaveLength(3)
+      expect(ctx.alerts()).toEqual(ALERT)
+    })
+
+    it('stores what it finds past the budget, as it does under it', async () => {
+      const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+      const [first, second] = await products(ctx, 2)
+      await ctx.service.research(first!)
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+
+      const result = await ctx.service.research(second!)
+
+      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(await ctx.repository.latestFormulation(second!)).toMatchObject({ ingredients: CLEAN })
+      expect(ctx.alerts()).toEqual(ALERT)
+    })
+
+    it('never answers budget-exhausted for the budget, however far past it the day goes', async () => {
+      const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+      const ids = await products(ctx, 4)
+
+      const kinds = []
+      for (const id of ids) kinds.push((await ctx.service.research(id)).kind)
+
+      expect(kinds).toEqual(['not-found', 'not-found', 'not-found', 'not-found'])
+    })
+
+    it('raises the alert once for the day, however many attempts go past the budget', async () => {
+      const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+      for (const id of await products(ctx, 4)) await ctx.service.research(id)
+
+      expect(ctx.alerts()).toEqual(ALERT)
     })
 
     it.each([
@@ -514,8 +566,11 @@ describe('ProductCatalogService.research', () => {
       const [first, second] = await products(ctx, 2)
       arrange(ctx)
       await ctx.service.research(first!)
+      expect(ctx.alerts()).toEqual([])
 
-      expect(await ctx.service.research(second!)).toEqual({ kind: 'budget-exhausted' })
+      await ctx.service.research(second!)
+
+      expect(ctx.alerts()).toEqual(ALERT)
     })
 
     it('does not count a failed attempt against the budget, since an outage costs nothing', async () => {
@@ -525,7 +580,8 @@ describe('ProductCatalogService.research', () => {
       await ctx.service.research(first!).catch(() => undefined)
 
       expect(await ctx.service.research(second!)).toEqual({ kind: 'not-found' })
-      expect(ctx.researcher.calls).toHaveLength(1)
+      expect(ctx.researcher.calls).toHaveLength(2)
+      expect(ctx.alerts()).toEqual([])
     })
 
     it('does not count a fresh formulation that is returned without researching', async () => {
@@ -533,18 +589,36 @@ describe('ProductCatalogService.research', () => {
       const first = await researched(ctx)
 
       expect(await ctx.service.research(first.productId)).toEqual({ kind: 'found', formulationId: first.formulationId })
+      expect(ctx.alerts()).toEqual([])
+    })
+
+    it('still skips, without calling the researcher or raising, a product that was not found less than 7 days ago, even past the budget', async () => {
+      const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+      const [first, second] = await products(ctx, 2)
+      await ctx.service.research(first!)
+      await ctx.service.research(second!)
+      expect(ctx.alerts()).toEqual(ALERT)
+      const calls = ctx.researcher.calls.length
+
+      expect(await ctx.service.research(first!)).toEqual({ kind: 'not-found' })
+
+      expect(ctx.researcher.calls).toHaveLength(calls)
+      expect(ctx.alerts()).toEqual(ALERT)
     })
 
     it.each([
-      ['exactly 24 hours ago', DAY, 'budget-exhausted'],
-      ['24 hours and a millisecond ago', DAY + 1, 'not-found'],
-    ] as const)('counts an attempt made %s only while it is within the last 24 hours', async (_label, elapsed, expected) => {
+      ['exactly 24 hours ago', DAY, 1],
+      ['24 hours and a millisecond ago', DAY + 1, 0],
+    ] as const)('counts an attempt made %s only while it is within the last 24 hours (the alert is raised %i time(s))', async (_label, elapsed, raised) => {
       const ctx = setup({ policy: { dailyResearchBudget: 1 } })
       const [first, second] = await products(ctx, 2)
       await ctx.service.research(first!)
       ctx.advance(elapsed)
 
-      expect(await ctx.service.research(second!)).toEqual({ kind: expected })
+      expect(await ctx.service.research(second!)).toEqual({ kind: 'not-found' })
+
+      // The alert's window is the day the attempt was made in, which is the next UTC day for these two.
+      expect(ctx.alerts()).toHaveLength(raised)
     })
   })
 
@@ -1337,21 +1411,32 @@ describe('ProductCatalogService.research of text that came from the web', () => 
 describe('ProductCatalogService.research of a stale product', () => {
   const STALE = FRESH_FOR_DAYS * DAY + 1
 
-  it.each([
-    ['finds nothing', 'not-found'],
-    ['is over budget', 'budget-exhausted'],
-  ] as const)('offers its stale analysed formulation as a fallback when the new research %s', async (_label, kind) => {
-    const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+  it('offers its stale analysed formulation as a fallback when the new research finds nothing', async () => {
+    const ctx = setup()
     const stale = await analysed(ctx)
     ctx.advance(STALE)
     ctx.researcher.respondWith(() => ({ found: false }))
-    if (kind === 'budget-exhausted') {
-      // Another product's research this very day spends the budget of 1.
-      const other = await ctx.service.resolve(identity({ name: 'Foaming Cleanser' }))
-      await ctx.service.research(other.productId)
-    }
 
-    expect(await ctx.service.research(stale.productId)).toEqual({ kind, fallbackFormulationId: stale.formulationId })
+    expect(await ctx.service.research(stale.productId)).toEqual({ kind: 'not-found', fallbackFormulationId: stale.formulationId })
+  })
+
+  it('researches a stale product past the daily budget, rather than offering its stale formulation as a refusal', async () => {
+    const ctx = setup({ policy: { dailyResearchBudget: 1 } })
+    const stale = await analysed(ctx)
+    ctx.advance(STALE)
+    // Another product's research this very day spends the budget of 1.
+    ctx.researcher.respondWith(() => ({ found: false }))
+    const other = await ctx.service.resolve(identity({ name: 'Foaming Cleanser' }))
+    await ctx.service.research(other.productId)
+    expect(ctx.alerts()).toEqual([])
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: [...CLEAN, 'Panthenol'], sourceUrl: SOURCE_URL }))
+    const callsBefore = ctx.researcher.calls.length
+
+    const result = await ctx.service.research(stale.productId)
+
+    expect(result).toEqual({ kind: 'found', formulationId: expect.not.stringMatching(stale.formulationId) })
+    expect(ctx.researcher.calls).toHaveLength(callsBefore + 1)
+    expect(ctx.alerts()).toHaveLength(1)
   })
 
   it('offers its stale analysed formulation as a fallback when the AI spend cap stops the new research', async () => {
@@ -2003,7 +2088,9 @@ describe('ProductCatalogService.analyse attempts', () => {
   })
 
   describe('daily budget', () => {
-    it('analyses while attempts are under the budget and refuses, without calling the analyst, once they reach it', async () => {
+    const ALERT = [{ kind: 'analysis-budget', windowStart: DAY_START.getTime() }]
+
+    it('analyses every formulation, even past the budget, and raises analysis-budget when an attempt goes past it, not before', async () => {
       const ctx = setup({ policy: { dailyAnalysisBudget: 2 } })
       const first = await another(ctx, 0)
       const second = await another(ctx, 1)
@@ -2012,11 +2099,27 @@ describe('ProductCatalogService.analyse attempts', () => {
 
       await ctx.service.analyse(first.formulationId)
       await ctx.service.analyse(second.formulationId)
-      const error = await errorOf(ctx.service.analyse(third.formulationId))
+      expect(ctx.alerts()).toEqual([])
+      await expect(ctx.service.analyse(third.formulationId)).resolves.toBeUndefined()
 
-      expect(error).toBeInstanceOf(CatalogBusyError)
-      expect(error).toBeInstanceOf(UnavailableError)
-      expect(ctx.analyst.calls.analyse).toHaveLength(2)
+      expect(ctx.analyst.calls.analyse).toHaveLength(3)
+      expect((await ctx.service.productView(third.formulationId)).formulation.analysedAt).not.toBeNull()
+      expect(ctx.alerts()).toEqual(ALERT)
+    })
+
+    it('never throws CatalogBusyError for the budget, however far past it the day goes', async () => {
+      const ctx = setup({ policy: { dailyAnalysisBudget: 1 } })
+      ctx.analyst.analyseWith(() => [draft()])
+
+      for (let i = 0; i < 4; i++) await expect(ctx.service.analyse((await another(ctx, i)).formulationId)).resolves.toBeUndefined()
+    })
+
+    it('raises the alert once for the day, however many attempts go past the budget', async () => {
+      const ctx = setup({ policy: { dailyAnalysisBudget: 1 } })
+      ctx.analyst.analyseWith(() => [draft()])
+      for (let i = 0; i < 4; i++) await ctx.service.analyse((await another(ctx, i)).formulationId)
+
+      expect(ctx.alerts()).toEqual(ALERT)
     })
 
     it.each([
@@ -2028,8 +2131,11 @@ describe('ProductCatalogService.analyse attempts', () => {
       const second = await another(ctx, 1)
       arrange(ctx)
       await ctx.service.analyse(first.formulationId).catch(() => undefined)
+      expect(ctx.alerts()).toEqual([])
 
-      await expect(ctx.service.analyse(second.formulationId)).rejects.toBeInstanceOf(CatalogBusyError)
+      await ctx.service.analyse(second.formulationId).catch(() => undefined)
+
+      expect(ctx.alerts()).toEqual(ALERT)
     })
 
     // N2: like a failed research, a failed analysis (an outage) costs nothing, so it does not use up the day's budget.
@@ -2043,12 +2149,13 @@ describe('ProductCatalogService.analyse attempts', () => {
 
       await expect(ctx.service.analyse(second.formulationId)).resolves.toBeUndefined()
       expect(ctx.analyst.calls.analyse).toHaveLength(1)
+      expect(ctx.alerts()).toEqual([])
     })
 
     it.each([
-      ['exactly 24 hours ago', DAY, true],
-      ['24 hours and a millisecond ago', DAY + 1, false],
-    ] as const)('counts an analysis made %s only while it is within the last 24 hours', async (_label, elapsed, busy) => {
+      ['exactly 24 hours ago', DAY, 1],
+      ['24 hours and a millisecond ago', DAY + 1, 0],
+    ] as const)('counts an analysis made %s only while it is within the last 24 hours (the alert is raised %i time(s))', async (_label, elapsed, raised) => {
       const ctx = setup({ policy: { dailyAnalysisBudget: 1 } })
       const first = await another(ctx, 0)
       const second = await another(ctx, 1)
@@ -2056,10 +2163,9 @@ describe('ProductCatalogService.analyse attempts', () => {
       await ctx.service.analyse(first.formulationId)
       ctx.advance(elapsed)
 
-      const outcome = ctx.service.analyse(second.formulationId)
+      await expect(ctx.service.analyse(second.formulationId)).resolves.toBeUndefined()
 
-      if (busy) await expect(outcome).rejects.toBeInstanceOf(CatalogBusyError)
-      else await expect(outcome).resolves.toBeUndefined()
+      expect(ctx.alerts()).toHaveLength(raised)
     })
   })
 })
@@ -2079,6 +2185,14 @@ const buildAround = (analyst: MemoryProductAnalyst, repository: FakeCatalogRepos
     analyst,
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: IMAGE_KEY_PREFIX,
+    opsAlerts: new OpsAlertsService({
+      repository: new FakeOpsAlertsRepository(),
+      jobs: new MemoryJobQueue(),
+      email: new MemoryEmailSender(),
+      recipient: 'ops@example.com',
+      environment: 'test',
+      now: () => clock,
+    }),
     now: () => clock,
     newId: () => `id-${++n}`,
   })

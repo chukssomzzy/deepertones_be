@@ -5,6 +5,7 @@ import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provid
 import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
 import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
+import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
 import { brandFirstWord, brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
@@ -23,9 +24,9 @@ export type CatalogPolicy = {
 }
 
 export const CATALOG_POLICY: CatalogPolicy = {
-  /** New-product research attempts allowed in any rolling 24 hours, whatever their outcome. */
+  /** New-product research attempts in any rolling 24 hours, whatever their outcome, from which an ops alert is raised. They are never refused. */
   dailyResearchBudget: 200,
-  /** Analysis attempts allowed in any rolling 24 hours, whatever their outcome except failed. */
+  /** Analysis attempts in any rolling 24 hours, whatever their outcome except failed, from which an ops alert is raised. They are never refused. */
   dailyAnalysisBudget: 300,
   /** How many of a brand's newest products are compared with a new label. */
   brandScanLimit: 50,
@@ -56,7 +57,10 @@ export class AnalysisInProgressError extends UnavailableError {
   }
 }
 
-/** The day's budget for model calls is spent, or the AI spend cap was reached. Nothing was called; try again later. */
+/**
+ * The AI spend cap stopped a model call. Nothing was called; try again later. Only the eval script's MemoryAiSpendLedger still refuses on a
+ * cap (the real ledger alerts instead), so in production this is not thrown: it stays so the eval's --max-usd really stops spending.
+ */
 export class CatalogBusyError extends UnavailableError {
   constructor() {
     super('CATALOG_BUSY', 'The catalog has reached its daily limit; try again later')
@@ -70,6 +74,8 @@ export type ProductCatalogServiceDeps = {
   images: CatalogImageStore
   /** Where stock images go in the shared public bucket, e.g. `catalog/staging`: the Worker's own corner, apart from the CI-synced assets. */
   imageKeyPrefix: string
+  /** Told when a daily research or analysis budget is passed. Never refuses, and never throws. */
+  opsAlerts: OpsAlertsService
   now?: () => Date
   newId?: () => string
   policy?: CatalogPolicy
@@ -184,6 +190,7 @@ export class ProductCatalogService {
   private readonly analyst: ProductAnalyst
   private readonly images: CatalogImageStore
   private readonly imageKeyPrefix: string
+  private readonly opsAlerts: OpsAlertsService
   private readonly now: () => Date
   private readonly newId: () => string
   private readonly policy: CatalogPolicy
@@ -194,6 +201,7 @@ export class ProductCatalogService {
     this.analyst = deps.analyst
     this.images = deps.images
     this.imageKeyPrefix = deps.imageKeyPrefix
+    this.opsAlerts = deps.opsAlerts
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
     this.policy = deps.policy ?? CATALOG_POLICY
@@ -297,12 +305,13 @@ export class ProductCatalogService {
    * them as a formulation (an identical list is reused and its found time moved to now).
    *
    * Refused without calling the researcher, and without recording an attempt, when the product was not found less than
-   * 7 days ago (so a product nobody can find is not paid for on every scan) or the daily budget is spent. A refusal
-   * carries the product's stale formulation as a fallback when it was analysed by the current versions.
+   * 7 days ago (so a product nobody can find is not paid for on every scan). A refusal carries the product's stale
+   * formulation as a fallback when it was analysed by the current versions. The daily budget never refuses: an attempt past it
+   * raises the research-budget ops alert (once a day) and goes ahead.
    *
    * An attempt is recorded as started BEFORE the researcher is called and settled after the ingredients are stored, so a
    * crash in between still counts against the budget; if that cannot be recorded, nothing is called. A failed attempt (an
-   * outage, or a store that failed) stops counting, and so does one the AI spend cap stopped, which answers
+   * outage, or a store that failed) stops counting, and so does one the eval's spend cap stopped, which answers
    * budget-exhausted. Failing to settle never hides what the researcher did or threw.
    *
    * While the product's last attempt is still 'started' and began less than 5 minutes ago, another call is taken to be
@@ -322,7 +331,7 @@ export class ProductCatalogService {
     }
 
     const attempts = await this.repository.researchAttemptsSince(new Date(now.getTime() - ProductCatalogService.DAY))
-    if (attempts >= this.policy.dailyResearchBudget) return { kind: 'budget-exhausted', ...this.fallbackFor(latest) }
+    if (attempts >= this.policy.dailyResearchBudget) await this.opsAlerts.raise('research-budget')
 
     const attemptId = this.newId()
     await this.repository.recordResearchAttempt({
@@ -336,7 +345,7 @@ export class ProductCatalogService {
     try {
       result = await this.researcher.research(ProductCatalogService.identityOf(product))
     } catch (error) {
-      // The AI spend cap stopped the research: like an outage it settles as failed, so it is not cached as not-found and the next scan may try again.
+      // The eval's spend cap stopped the research (the real ledger never does): like an outage it settles as failed, so it is not cached as not-found and the next scan may try again.
       await this.settleAttempt(attemptId, 'failed')
       if (error instanceof AiBudgetExceededError) return { kind: 'budget-exhausted', ...this.fallbackFor(latest) }
       throw error
@@ -457,13 +466,14 @@ export class ProductCatalogService {
    * Has the model explain the formulation, checks the answer (see checkAnalysis) and stores it in one write.
    *
    * Does nothing when the formulation is already analysed by the current versions, so a repeated job costs nothing.
-   * Refused without calling the model, and without recording an attempt, when the daily budget is spent
-   * (CatalogBusyError), the analysis has been rejected 3 times at these versions (PermanentJobError), or the formulation's
-   * last attempt is still 'started' and began less than 5 minutes ago (AnalysisInProgressError, which is not a rejection).
+   * Refused without calling the model, and without recording an attempt, when the analysis has been rejected 3 times at
+   * these versions (PermanentJobError), or the formulation's last attempt is still 'started' and began less than 5 minutes
+   * ago (AnalysisInProgressError, which is not a rejection). The daily budget never refuses: an attempt past it raises the
+   * analysis-budget ops alert (once a day) and goes ahead.
    * Every other call records one attempt as started BEFORE the model is called, so a crash in between still counts, and
    * settles it afterwards to ok, rejected or failed; if the started attempt cannot be recorded, the model is not called.
    * An answer that passed the check is ok (and counts) even if storing it failed; only a call the model never answered
-   * is failed and stops counting: an outage, or one the AI spend cap stopped, which throws CatalogBusyError.
+   * is failed and stops counting: an outage, or one the eval's spend cap stopped, which throws CatalogBusyError.
    * Failing to settle never changes the result or the error. A rejected answer leaves any
    * earlier analysis as it was and throws AnalysisRejectedError, or PermanentJobError when it was the 3rd rejection.
    */
@@ -478,7 +488,7 @@ export class ProductCatalogService {
     const last = await this.repository.lastAnalysisAttempt(formulationId)
     if (last?.outcome === 'started' && this.isInFlight(last.attemptedAt, now)) throw new AnalysisInProgressError()
     const attempts = await this.repository.analysisAttemptsSince(new Date(now.getTime() - ProductCatalogService.DAY))
-    if (attempts >= this.policy.dailyAnalysisBudget) throw new CatalogBusyError()
+    if (attempts >= this.policy.dailyAnalysisBudget) await this.opsAlerts.raise('analysis-budget')
 
     const product = await this.requireProduct(formulation.productId)
     const flaggedFacts = flagFacts(formulation.ingredients)
