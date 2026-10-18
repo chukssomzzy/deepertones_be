@@ -4545,7 +4545,7 @@ describe('ScanService: push notifications', () => {
 
     it('tells the profile that made the scan, once, with readyCount 0 when nothing came out ready', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4558,14 +4558,14 @@ describe('ScanService: push notifications', () => {
       const ctx = setup()
       await catalogued(ctx)
       recogniseAs(ctx, (marker) => {
-        if (marker === 3) return { classification: 'unreadable' }
+        if (marker === 3) return { classification: 'face-or-person' }
         if (marker === 4) throw new AiBudgetExceededError('cap')
         return seen()
       })
       const scan = await create(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3), markedJpeg(4)])
       const [a, b, c, d] = scan.items.map((i: { id: string }) => i.id) as [string, string, string, string]
       for (const id of [a, b, c, d]) await run(ctx, id, 'recognise')
-      expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'unreadable' })
+      expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'face-or-person' })
       expect(await stateOf(ctx, scan.id, d)).toEqual({ state: 'failed', reason: 'research-busy' })
       await run(ctx, a, 'match')
       expect(pushes(ctx)).toEqual([])
@@ -4580,7 +4580,7 @@ describe('ScanService: push notifications', () => {
       const ctx = setup({ events: () => (events = new ProbeEvents()) })
       let queuedWhenDoneWent = -1
       events.onDone = () => void (queuedWhenDoneWent = ctx.pushJobs.enqueued.length)
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4593,7 +4593,7 @@ describe('ScanService: push notifications', () => {
       let events!: DoneFlaky
       const ctx = setup({ events: () => (events = new DoneFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
 
@@ -4607,7 +4607,7 @@ describe('ScanService: push notifications', () => {
       let events!: DoneFlaky
       const ctx = setup({ events: () => (events = new DoneFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4629,7 +4629,7 @@ describe('ScanService: push notifications', () => {
       let events!: AllFlaky
       const ctx = setup({ events: () => (events = new AllFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4647,7 +4647,7 @@ describe('ScanService: push notifications', () => {
       let events!: AllFlaky
       const ctx = setup({ events: () => (events = new AllFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4662,7 +4662,7 @@ describe('ScanService: push notifications', () => {
 
     it('does not push again when watch re-sends done to a client of a scan that was already marked done', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       await run(ctx, scan.items[0].id, 'recognise')
       expect(pushes(ctx)).toHaveLength(1)
@@ -4675,7 +4675,7 @@ describe('ScanService: push notifications', () => {
 
     it('sends the needs-you push but no finished one while an item still waits for the person', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
       const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4687,7 +4687,7 @@ describe('ScanService: push notifications', () => {
     it('finishes the scan, publishing done, though the push cannot be queued', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       ctx.pushJobs.failNextWith(new Error('queue is down'))
 
@@ -4707,7 +4707,7 @@ describe('ScanService: push notifications', () => {
     it('still publishes done and resolves when the finished push\'s scan read throws, logging push-failed and clearing the done time', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       readFails(ctx)
 
@@ -4724,7 +4724,7 @@ describe('ScanService: push notifications', () => {
     it('has the reaper re-claim that done and queue the finished push under the same key', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       readFails(ctx)
       await run(ctx, scan.items[0].id, 'recognise')
@@ -4771,7 +4771,7 @@ describe('ScanService: push notifications', () => {
     it('skips the finished push, logging push-skipped-no-profile, and still publishes done', async () => {
       const { ctx, scanId, itemId } = await withOrphan()
       const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
 
       await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
 
