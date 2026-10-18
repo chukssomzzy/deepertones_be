@@ -90,6 +90,7 @@ const catalogViewOf = (formulationId: string) =>
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
   }).productView(formulationId)
 /** The formulation the stored item points at. */
 const formulationIdOf = async (itemId: string) => (await new D1ScansRepository(createDb(env.DB)).findItem(itemId))!.formulationId!
