@@ -185,6 +185,11 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
     },
   )
 
+  it('lists OPS_ALERT_EMAIL as a var, never a secret: an address in .dev.vars is skipped, not sent', () => {
+    expect(NOT_SECRETS).toHaveProperty('OPS_ALERT_EMAIL')
+    expect(SECRETS).not.toHaveProperty('OPS_ALERT_EMAIL')
+  })
+
   it('no longer lists ANTHROPIC_MODEL, which wrangler.jsonc replaced with one variable per job', () => {
     expect(NOT_SECRETS).not.toHaveProperty('ANTHROPIC_MODEL')
   })

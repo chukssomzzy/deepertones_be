@@ -65,6 +65,13 @@ describe('wrangler.jsonc product catalog config', () => {
     expect(block?.vars?.AI_DAILY_BUDGET_USD).toBe(expected.dailyBudgetUsd)
   })
 
+  // Where the owner is emailed when an environment-wide limit trips or Claude refuses our account (see "Ops alerts" in docs/architecture.md).
+  // Not a secret, and empty is allowed: the owner fills it in, and an empty one makes the alert job log and ack instead of sending.
+  it.each(blocks)('%s sets OPS_ALERT_EMAIL, a string, so the alert job can read it', (_, block) => {
+    expect(block?.vars).toHaveProperty('OPS_ALERT_EMAIL')
+    expect(typeof block?.vars?.OPS_ALERT_EMAIL).toBe('string')
+  })
+
   it.each(blocks)('%s sets where catalog images are served from', (_, block, expected) => {
     expect(block?.vars?.CATALOG_IMAGES_PUBLIC_URL).toBe(expected.publicUrl)
   })
@@ -122,6 +129,19 @@ describe('wrangler.jsonc scan queues', () => {
     const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-scan-items-dlq-${environment}`)
 
     expect(consumer).toMatchObject({ max_batch_size: 10 })
+  })
+
+  // The shared email queue (the ops alert email now, every other email kind later): one queue (and its dead-letter queue) per environment, like the others.
+  it.each(scanBlocks)('%s produces to the email queue as EMAIL_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'EMAIL_QUEUE')?.queue).toBe(`deepertones-email-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the email queue with a dead-letter queue, and consumes that dead-letter queue too', (_, block, environment) => {
+    const main = block?.queues?.consumers?.find((c) => c.queue === `deepertones-email-${environment}`)
+    const deadLetter = block?.queues?.consumers?.find((c) => c.queue === `deepertones-email-dlq-${environment}`)
+
+    expect(main).toMatchObject({ dead_letter_queue: `deepertones-email-dlq-${environment}` })
+    expect(deadLetter).toBeDefined()
   })
 
   it.each(scanBlocks)('%s keeps the OTP delivery queue it already had', (_, block, environment) => {

@@ -6,8 +6,7 @@ import { readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { describeUnexpectedError } from '../../lib/safe-error'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
-import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
-import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
+import { AnthropicConfigError, AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import type { LabelReader, LabelReading } from '../../providers/label-reading/label-reader.provider'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { NameSplit, NameSplitter } from '../../providers/name-splitting/name-splitter.provider'
@@ -19,6 +18,7 @@ import type { ScanEvents } from '../../providers/scan-events/scan-events.provide
 import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductSummary, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
 import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import type { NotificationsService } from '../notifications/notifications.service'
+import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
@@ -102,6 +102,8 @@ export type ScanServiceDeps = {
   jobs: JobQueue
   events: ScanEvents
   notifications: NotificationsService
+  /** Told when Claude refuses our account, so the owner is emailed. Never throws. */
+  opsAlerts: OpsAlertsService
   /** Signs the photo links. photo-link.ts derives its own key from it. */
   photoLinkSecret: string
   /** Keys the IP hash, so a leaked table cannot be reversed by hashing every address. */
@@ -156,6 +158,8 @@ export class ScanService {
   private static readonly ADOPT_BATCH = 500
   /** How long a step waits before it asks again whether work another call is doing has finished. */
   private static readonly WAIT_SECONDS = 30
+  /** How long a step waits before asking Claude again after it refused our account (no credit, a bad key, permissions): someone has to fix it, so no point asking sooner. */
+  private static readonly ACCOUNT_WAIT_SECONDS = 5 * 60
 
   /** What an item that was named by hand has set and a move back to waiting must clear. */
   private static readonly NOT_NAMED: Omit<ItemPatch, 'updatedAt'> = {
@@ -181,6 +185,7 @@ export class ScanService {
   private readonly jobs: JobQueue
   private readonly events: ScanEvents
   private readonly notifications: NotificationsService
+  private readonly opsAlerts: OpsAlertsService
   readonly #photoLinkSecret: string
   readonly #ipHashSecret: string
   private readonly environment: PhotoEnvironment
@@ -198,6 +203,7 @@ export class ScanService {
     this.jobs = deps.jobs
     this.events = deps.events
     this.notifications = deps.notifications
+    this.opsAlerts = deps.opsAlerts
     this.#photoLinkSecret = deps.photoLinkSecret
     this.#ipHashSecret = deps.ipHashSecret
     this.environment = deps.environment
@@ -465,8 +471,8 @@ export class ScanService {
    * A picked product costs no model call: the item goes where the catalog says that product needs to go (`ready`, `analysing`,
    * `researching`, or `failed` as `analysis-failed`), exactly as the match step would send it, and shows the product as what it was
    * recognised as. Typed text costs one split by the model, then goes to `matching` and the match step as a confirmation does. Text the
-   * split says is no product's name, or the model refuses, is NOT_A_PRODUCT_NAME; over the AI spend cap is CatalogBusyError (CATALOG_BUSY), and a model that is down
-   * or whose answer cannot be used is UnavailableError AI_UNAVAILABLE (503). In every one of those the item stays where it was and nothing is queued, so the user can try again.
+   * split says is no product's name, or the model refuses, is NOT_A_PRODUCT_NAME; and a model that is down, whose answer cannot be used, or that
+   * refuses our account (which also emails the owner) is UnavailableError AI_UNAVAILABLE (503). In every one of those the item stays where it was and nothing is queued, so the user can try again.
    */
   async identifyByName(scanId: string, itemId: string, naming: ProductNaming): Promise<ScanItemView> {
     const item = await this.ownedItem(scanId, itemId)
@@ -537,14 +543,14 @@ export class ScanService {
     })
   }
 
-  /** One paid split. A refusal is an answer (this is no product's name); the spend cap is the catalog being busy; a model that is down, or that cannot be used, is AI_UNAVAILABLE, which blames no limit. */
+  /** One paid split. A refusal is an answer (this is no product's name); a model that is down, that cannot be used, or that refuses our account is AI_UNAVAILABLE, which blames no limit and tells the user nothing of our account. */
   private async split(text: string): Promise<NameSplit> {
     try {
       return await this.nameSplitter.split(text)
     } catch (error) {
       if (error instanceof AnthropicRefusalError) return { kind: 'not-a-product' }
-      if (error instanceof AiBudgetExceededError) throw new CatalogBusyError()
-      if (error instanceof AnthropicUnavailableError || error instanceof AnthropicRequestError) {
+      if (error instanceof AnthropicConfigError) await this.opsAlerts.raise('ai-account')
+      if (error instanceof AnthropicUnavailableError || error instanceof AnthropicRequestError || error instanceof AnthropicConfigError) {
         console.error({ outcome: 'split-name-failed', error: describeUnexpectedError(error) })
         throw new UnavailableError('AI_UNAVAILABLE', "Couldn't read that name right now. Try again in a moment.")
       }
@@ -574,6 +580,16 @@ export class ScanService {
   async advance(itemId: string, step: ScanStep): Promise<void> {
     const item = await this.repository.findItem(itemId)
     if (!item) return
+    try {
+      await this.runStep(item, step)
+    } catch (error) {
+      // Claude refused OUR account, whichever call it was: that is ours to fix and never the user's, so the item waits (see waitOnAccount).
+      if (!(error instanceof AnthropicConfigError)) throw error
+      await this.waitOnAccount(item, step)
+    }
+  }
+
+  private runStep(item: ScanItem, step: ScanStep): Promise<void> {
     switch (step) {
       case 'recognise':
         return this.recognise(item)
@@ -804,8 +820,8 @@ export class ScanService {
   }
 
   /**
-   * Asks the recognizer about a `recognising` item's photo. The AI spend cap fails the item as `research-busy`; a refusal to look at the
-   * photo is `onRefusal` (a photo nothing can be read from); an answer that cannot be used fails it as `unavailable` and is permanent
+   * Asks the recognizer about a `recognising` item's photo. A refusal to look at the photo is `onRefusal` (a photo nothing can be read
+   * from); an answer that cannot be used fails it as `unavailable` and is permanent
    * (the same photo would get the same answer, so a retry would only pay again). Any other error is left for the queue to retry.
    * Undefined means the item has been failed and there is nothing more to do.
    */
@@ -813,10 +829,6 @@ export class ScanService {
     try {
       return await ask()
     } catch (error) {
-      if (error instanceof AiBudgetExceededError) {
-        await this.fail(item, 'recognising', 'research-busy')
-        return undefined
-      }
       if (error instanceof AnthropicRefusalError) return onRefusal
       if (error instanceof AnthropicRequestError) {
         await this.fail(item, 'recognising', 'unavailable')
@@ -1019,20 +1031,13 @@ export class ScanService {
       await this.fail(item, 'matching', 'unavailable')
       return
     }
-    let resolved
-    try {
-      resolved = await this.catalog.resolve({
-        brand: item.recognisedBrand,
-        name: item.recognisedName,
-        category: item.recognisedCategory,
-        ...(item.recognisedVariant === null ? {} : { variant: item.recognisedVariant }),
-        ...(item.recognisedForm === null ? {} : { form: item.recognisedForm }),
-      })
-    } catch (error) {
-      if (!(error instanceof CatalogBusyError)) throw error
-      await this.fail(item, 'matching', 'research-busy')
-      return
-    }
+    const resolved = await this.catalog.resolve({
+      brand: item.recognisedBrand,
+      name: item.recognisedName,
+      category: item.recognisedCategory,
+      ...(item.recognisedVariant === null ? {} : { variant: item.recognisedVariant }),
+      ...(item.recognisedForm === null ? {} : { form: item.recognisedForm }),
+    })
 
     await this.moveOn(item, 'matching', resolved)
   }
@@ -1085,7 +1090,8 @@ export class ScanService {
     } else if (result.kind === 'not-found') {
       if (await this.transition(item, { from: 'researching', change: { state: 'needs-back-photo' } })) await this.notifyNeedsYou(item, 'back-photo')
     } else {
-      await this.fail(item, 'researching', 'research-busy')
+      // Only the eval's spend cap answers this (the real ledger never refuses), so it cannot happen here; if it did, the queue would try again later.
+      throw new CatalogBusyError()
     }
   }
 
@@ -1103,10 +1109,6 @@ export class ScanService {
     try {
       reading = await this.labelReader.read(photo)
     } catch (error) {
-      if (error instanceof AiBudgetExceededError) {
-        await this.fail(item, 'reading-label', 'research-busy')
-        return
-      }
       // A refusal, or an answer that cannot be used, is the same as a label that cannot be read: another photo may do better.
       if (!(error instanceof AnthropicRefusalError || error instanceof AnthropicRequestError)) throw error
       reading = { readable: false }
@@ -1118,10 +1120,6 @@ export class ScanService {
       try {
         filed = productId === null ? await this.identify(reading) : { analysed: false, patch: { formulationId: await this.catalog.addLabelIngredients(productId, reading.ingredients) } }
       } catch (error) {
-        if (productId === null && error instanceof CatalogBusyError) {
-          await this.fail(item, 'reading-label', 'research-busy')
-          return
-        }
         // The catalog refuses a list that is empty, over its bounds, or carries a link or markup: the same as unreadable.
         if (!(error instanceof ValidationError && error.code === 'LABEL_UNREADABLE')) throw error
       }
@@ -1193,10 +1191,6 @@ export class ScanService {
         await this.waitFor(item, 'analyse')
         return
       }
-      if (error instanceof CatalogBusyError) {
-        await this.fail(item, 'analysing', 'research-busy')
-        return
-      }
       if (error instanceof PermanentJobError) {
         // The catalog has given up on this formulation. Failing the item and rethrowing lets the job runner record the run as failed.
         await this.fail(item, 'analysing', 'analysis-failed')
@@ -1217,6 +1211,16 @@ export class ScanService {
    */
   private async waitFor(item: ScanItem, step: ScanStep): Promise<void> {
     await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: this.now().getTime() }, { delaySeconds: ScanService.WAIT_SECONDS })
+  }
+
+  /**
+   * Claude refused our account (no credit, a bad key, permissions), which no user can fix. The item stays where it is and the same step
+   * is queued again 5 minutes on, under a key of its own, so waiting uses none of the message's retries; the reaper's 2 hour limit
+   * bounds it. The owner is emailed, at most once an hour however many items wait. A throw (the message cannot be queued) is left to the queue.
+   */
+  private async waitOnAccount(item: ScanItem, step: ScanStep): Promise<void> {
+    await this.opsAlerts.raise('ai-account')
+    await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step, at: this.now().getTime() }, { delaySeconds: ScanService.ACCOUNT_WAIT_SECONDS })
   }
 
   /**
