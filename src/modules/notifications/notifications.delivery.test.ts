@@ -145,6 +145,13 @@ describe('NotificationsService enqueueing', () => {
     expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe('scan-needs-you:scan-1:confirm')
   })
 
+  it('queues a scan-needs-you push to identify under its own key, so it is a notification apart from a back-photo ask and a confirmation', async () => {
+    await service.scanNeedsYou({ userId: 'user-ada', profileId: 'profile-ada-1', scanId: 'scan-1', itemId: 'item-4', need: 'identify' })
+
+    expect(jobs.enqueued[0]).toMatchObject({ job: 'send-push', body: needsYou({ itemId: 'item-4', need: 'identify' }) })
+    expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe('scan-needs-you:scan-1:identify')
+  })
+
   it.each([
     ['no ask', undefined, 'scan-needs-you:scan-1:back-photo'],
     ['ask 0', 0, 'scan-needs-you:scan-1:back-photo'],
@@ -389,6 +396,18 @@ describe('NotificationsService.deliver: settings', () => {
     expect((push.sent[0]!.data as { kind: string }).kind).toBe('scan-finished')
   })
 
+  it('puts an identify push behind the same scanNeedsYou switch: off sends nothing, on sends it', async () => {
+    await setSettings(ADA, { scanNeedsYou: false })
+    await deliver(needsYou({ need: 'identify' }))
+    expect(push.sent).toEqual([])
+
+    await setSettings(ADA, { scanNeedsYou: true })
+    await deliver(needsYou({ need: 'identify' }))
+
+    expect(push.sent).toHaveLength(1)
+    expect(push.sent[0]).toMatchObject({ title: 'Your scan needs you', body: "We couldn't read a product. Tell us what it is" })
+  })
+
   it('reads the switch when it sends, so turning it off after the event queued still stops the push', async () => {
     await service.scanFinished({ userId: 'user-ada', profileId: 'profile-ada-1', scanId: 'scan-1', readyCount: 2 })
     await setSettings(ADA, { scanFinished: false })
@@ -441,6 +460,7 @@ describe('NotificationsService.deliver: what the phone shows', () => {
   it.each([
     ['back-photo', 'We need a photo of the back of a product'],
     ['confirm', 'Please confirm a product we were not sure about'],
+    ['identify', "We couldn't read a product. Tell us what it is"],
   ])('asks for %s in generic words and links to the exact item', async (need, body) => {
     await deliver(needsYou({ need, scanId: 'scan-7', itemId: 'item-9' }))
 
