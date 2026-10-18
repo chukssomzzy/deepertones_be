@@ -739,6 +739,343 @@
           "products"
         ]
       },
+      "OnboardingContent": {
+        "type": "object",
+        "properties": {
+          "locale": {
+            "type": "string",
+            "description": "The language the text is in: `en`, whatever was asked for.",
+            "example": "en"
+          },
+          "contentVersion": {
+            "type": "string",
+            "description": "A hash of everything below. It is also the `ETag` (in quotes)."
+          },
+          "goalScreen": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "subtitle": {
+                "type": "string"
+              },
+              "placeholder": {
+                "type": "string",
+                "description": "Placeholder of the box where the user types a goal in their own words."
+              },
+              "footnote": {
+                "type": "string"
+              },
+              "continueLabel": {
+                "type": "string"
+              },
+              "loginLabel": {
+                "type": "string"
+              },
+              "chips": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "enum": [
+                        "clear-skin",
+                        "even-tone",
+                        "fade-dark-marks",
+                        "brighter",
+                        "glow",
+                        "calm-repair"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ]
+                },
+                "description": "The goals to offer, in display order. Each `id` is accepted by `PUT /api/v1/me/goal`."
+              }
+            },
+            "required": [
+              "title",
+              "subtitle",
+              "placeholder",
+              "footnote",
+              "continueLabel",
+              "loginLabel",
+              "chips"
+            ]
+          },
+          "answerScreen": {
+            "type": "object",
+            "properties": {
+              "subtitle": {
+                "type": "string"
+              },
+              "howLongLabel": {
+                "type": "string"
+              },
+              "helpsLabel": {
+                "type": "string"
+              },
+              "inTheWayLabel": {
+                "type": "string"
+              },
+              "continueLabel": {
+                "type": "string"
+              },
+              "changeLabel": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "subtitle",
+              "howLongLabel",
+              "helpsLabel",
+              "inTheWayLabel",
+              "continueLabel",
+              "changeLabel"
+            ]
+          },
+          "answers": {
+            "type": "object",
+            "properties": {
+              "clear-skin": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              },
+              "even-tone": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              },
+              "fade-dark-marks": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              },
+              "brighter": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              },
+              "glow": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              },
+              "calm-repair": {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "howLong": {
+                    "type": "string"
+                  },
+                  "helps": {
+                    "type": "string"
+                  },
+                  "inTheWay": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "title",
+                  "howLong",
+                  "helps",
+                  "inTheWay"
+                ]
+              }
+            },
+            "required": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair"
+            ],
+            "description": "The answer card for each goal. It is the same text `PUT /api/v1/me/goal` answers with, without `note`."
+          },
+          "colourNote": {
+            "type": "string",
+            "description": "Add to the answer card only when the user's own words asked to be lighter. It is the `note` that `PUT /api/v1/me/goal` sends in that case."
+          },
+          "safetyScreen": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "subtitle": {
+                "type": "string"
+              },
+              "footnote": {
+                "type": "string"
+              },
+              "continueLabel": {
+                "type": "string"
+              },
+              "choices": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "enum": [
+                        "pregnant",
+                        "breastfeeding",
+                        "reaction",
+                        "prescription",
+                        "none"
+                      ]
+                    },
+                    "label": {
+                      "type": "string"
+                    },
+                    "field": {
+                      "type": "object",
+                      "properties": {
+                        "label": {
+                          "type": "string",
+                          "description": "The label of the text box."
+                        },
+                        "hint": {
+                          "type": "string",
+                          "description": "Smaller text under the box."
+                        }
+                      },
+                      "required": [
+                        "label"
+                      ],
+                      "description": "The text box to show under this choice once it is ticked. Absent when the choice takes no words."
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "label"
+                  ]
+                },
+                "description": "The choices to offer, in display order. Each `id` is accepted in `choices` of `PUT /api/v1/me/safety`."
+              }
+            },
+            "required": [
+              "title",
+              "subtitle",
+              "footnote",
+              "continueLabel",
+              "choices"
+            ]
+          }
+        },
+        "required": [
+          "locale",
+          "contentVersion",
+          "goalScreen",
+          "answerScreen",
+          "answers",
+          "colourNote",
+          "safetyScreen"
+        ]
+      },
       "Scan": {
         "type": "object",
         "properties": {
@@ -2960,6 +3297,119 @@
           },
           "429": {
             "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/onboarding/content": {
+      "get": {
+        "operationId": "getOnboardingContent",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "The text of the first-run screens",
+        "description": "Everything the app shows on the goal, answer and safety screens (1.2 to 1.5): the questions, labels and button text, the goal chips and safety choices with their ids, and the answer card for each goal. The app fetches this first and renders from it, so a copy change, a new chip or a new choice needs a deploy and not an app release. No token is needed, and one that is sent is ignored; the content is the same for everyone. `locale` falls back to `en` for anything else and is never an error. `contentVersion` is a hash of the content and is also the `ETag`: send it back in `If-None-Match` to get an empty 304 while nothing changed. Sent with `Cache-Control: public, max-age=300, stale-while-revalidate=86400`.",
+        "security": [],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "description": "The language to write the screens in. Only `en` ships now; anything else, or nothing, gets `en`, and `locale` in the response says which.",
+              "example": "en"
+            },
+            "required": false,
+            "description": "The language to write the screens in. Only `en` ships now; anything else, or nothing, gets `en`, and `locale` in the response says which.",
+            "name": "locale",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The text of the first-run screens",
+            "headers": {
+              "ETag": {
+                "description": "The content version, in quotes.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "`public, max-age=300, stale-while-revalidate=86400`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/OnboardingContent"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "304": {
+            "description": "The `If-None-Match` ETag is the current one; no body",
+            "headers": {
+              "ETag": {
+                "description": "The content version, in quotes.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "description": "`public, max-age=300, stale-while-revalidate=86400`",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
             "content": {
               "application/json": {
                 "schema": {
