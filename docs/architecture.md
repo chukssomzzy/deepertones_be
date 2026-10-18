@@ -1456,8 +1456,8 @@ notifications never imports scans) to tell the person when a scan needs them or 
   `photosOf` and `findPhoto` read the photos; `photoKeysForUsers` includes the photo keys and `deleteForUsers` deletes `scan_photos` before `scans`.
 - **Guest cleanup.** The container registers a cleaner `{ name: 'scans', deleteFor }` with the users service, backed by
   `ScanDataCleaner` (`scans.cleaner.ts`), which depends only on the repository and the photo store, so the cleanup does not
-  build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos and back
-  photos from the bucket first, then their back-photo and retake rows, items and scans, so a bucket failure leaves the rows (and so
+  build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos, back
+  photos and shelf photos from the bucket first, then their back-photo and retake rows, items, scan photos and scans, so a bucket failure leaves the rows (and so
   the keys) for the next run; both halves are safe to repeat, and the repository chunks the ids under D1's bound-parameter limit.
 - **Public signed photo links.** `photoForLink(token)` takes no user and reads no request context: an app image component
   cannot send an Authorization header, so the link is the capability. The token is the signed, 5-minute photo link from

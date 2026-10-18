@@ -286,6 +286,18 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         expect(await repository.findItem(item.id)).toBeNull()
       })
 
+      it('refuses two items at the same position in one scan, and stores nothing of that batch', async () => {
+        const { repository, newUser } = await make()
+        const scan = newScan(await newUser())
+        const [first, clash] = [newItem(scan, 0), newItem(scan, 0)]
+        const photos = [newPhoto(scan, 0, { id: first.photoId }), newPhoto(scan, 1, { id: clash.photoId })]
+
+        await expect(repository.createScan(scan, photos, [first, clash])).rejects.toThrow()
+
+        expect(await repository.findScan(scan.id)).toBeNull()
+        expect(await repository.findItem(first.id)).toBeNull()
+      })
+
       it('allows the same position in two different scans', async () => {
         const { repository, newUser } = await make()
         const userId = await newUser()

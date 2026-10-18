@@ -24,7 +24,8 @@ export class FakeScansRepository implements ScansRepository {
   /**
    * Stores the scan, its photos and all its items, or nothing. Every photo starts `recognising` with no recognition and nothing
    * skipped, with `updatedAt` equal to `createdAt`. Every item starts `recognising` with no reason, no recognised
-   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken or two photos share a position.
+   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken, or two photos or two items of the
+   * scan share a position, as D1's unique indexes do.
    */
   async createScan(scan: NewScan, photos: NewScanPhoto[], items: NewScanItem[]): Promise<void> {
     const ids = items.map((i) => i.id)
@@ -35,7 +36,8 @@ export class FakeScansRepository implements ScansRepository {
       ids.some((id) => this.items.has(id)) ||
       new Set(photoIds).size !== photoIds.length ||
       photoIds.some((id) => this.photos.has(id)) ||
-      new Set(photos.map((p) => p.position)).size !== photos.length
+      new Set(photos.map((p) => p.position)).size !== photos.length ||
+      new Set(items.map((i) => i.position)).size !== items.length
     ) {
       throw new Error('duplicate id')
     }
