@@ -13,7 +13,7 @@ export type SafetyServiceDeps = {
 
 /**
  * The ticked choices, and the words typed beside "a product gave me a reaction" and "I use a prescription". The wire schema makes sure the
- * choices are one to five known ones and each text is at most 300 characters once trimmed; the rules between them are the service's.
+ * choices are one to 20 known ones (repeats are collapsed here) and each text is at most 300 characters once trimmed; the rules between them are the service's.
  */
 export type SetSafetyInput = { choices: SafetyChoice[]; reactionText?: string; prescriptionText?: string }
 
@@ -43,16 +43,17 @@ export class SafetyService {
   }
 
   /**
-   * Saves the answers for the caller's profile. The choices are kept once each, in the vocabulary's order. A text that is empty once trimmed
-   * counts as no text, so an empty field says nothing; a text with words in it needs its choice ticked ("none" included in that: it says none
-   * of it applies) and no link, markup or invisible character. Nothing carries over from the answer before. Never logs the words.
+   * Saves the answers for the caller's profile. The choices are kept once each, in the vocabulary's order. A text is trimmed and every run of
+   * whitespace in it made one space; one that is then empty counts as no text, so an empty field says nothing. A text with words in it needs its
+   * choice ticked ("none" included in that: it says none of it applies) and no link, markup or other control or invisible character. Nothing
+   * carries over from the answer before. Never logs the words.
    */
   async set(input: SetSafetyInput): Promise<SafetyView> {
     const { profileId } = requireUser()
     const choices = SAFETY_CHOICES.filter((choice) => input.choices.includes(choice))
     const texts: Record<TextField, string | null> = {
-      reactionText: input.reactionText?.trim() || null,
-      prescriptionText: input.prescriptionText?.trim() || null,
+      reactionText: SafetyService.tidy(input.reactionText),
+      prescriptionText: SafetyService.tidy(input.prescriptionText),
     }
     if (choices.includes('none') && choices.length > 1) {
       throw new ValidationError('INVALID_SAFETY_ANSWER', '"None of these" cannot be combined with another choice', { field: 'choices' })
@@ -95,6 +96,12 @@ export class SafetyService {
     const view = await this.currentOrNull()
     if (!view) throw new ConflictError('SAFETY_ANSWERS_REQUIRED', 'Answer the safety question first')
     return view
+  }
+
+  // Trimmed, with every run of whitespace (a line break, a tab) made one space, so a list written over several lines is one line. This comes before
+  // everything that looks at the text, which is why a stray control character is still found: it is not whitespace. Empty is no text.
+  private static tidy(text: string | undefined): string | null {
+    return text?.trim().replace(/\s+/g, ' ') || null
   }
 
   private view(row: SafetyRow): SafetyView {

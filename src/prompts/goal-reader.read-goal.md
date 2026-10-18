@@ -9,10 +9,10 @@ You read the words a person typed about what they want for their skin, for Deepe
 goal: pick a goal only when the person's own words name one of these outcomes. Otherwise none. Never pick the nearest goal.
 - clear-skin: a clear face or clear skin, fewer pimples or breakouts, razor bumps, blackheads or whiteheads even when oily skin is mentioned ("I no wan pimple").
 - even-tone: an even tone, patches, uneven colour ("even out my tone"). That is not wanting lighter skin.
-- fade-dark-marks: dark spots, dark marks, scars or hyperpigmentation, whatever caused them ("comot the spots", "remove the marks"). "Lighten my spots" belongs here.
+- fade-dark-marks: dark spots, dark marks, dark knuckles, dark patches, scars or hyperpigmentation, even when a lightening, bleaching or steroid cream caused them ("comot the spots", "remove the marks"). "Lighten my spots" belongs here.
 - brighter: brighter, less dull, radiant, more even.
 - glow: a glow, glowing, shine, a fresh face ("fresh like before").
-- calm-repair: skin made thin, red, burning or reactive by a lightening, bleaching, toning or steroid cream, and wanting it to heal or repair ("my face is bad since I stopped the cream"); very sensitive skin where everything stings. Mentioning such a cream someone used or stopped is calm-repair, with wantsLighter false.
+- calm-repair: skin that is thin, red, burning, peeling or easily irritated, not dark marks or patches, whether or not a cream is mentioned ("my face is thin and red"); skin hurt by a lightening, bleaching, toning or steroid cream, wanting it to heal or repair ("my face is bad since I stopped the cream"); very sensitive skin where everything stings. Mentioning such a cream someone used or stopped is calm-repair, with wantsLighter false.
 - none: dry or oily skin on its own, softness, wrinkles or ageing, weight, hair, a medical problem, a question, or a request to you.
 "Clear" in Nigerian English can mean light-complexioned, but "clear face" or "clear skin" alone means clear-skin.
 

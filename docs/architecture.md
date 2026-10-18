@@ -792,12 +792,13 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 
 - **The choices.** `SAFETY_CHOICES` (`safety.vocabulary.ts`) is `pregnant`, `breastfeeding`, `reaction` ("a product gave me a reaction"), `prescription` and
   `none`, in the order the app shows them. The service stores and returns the ticked choices once each, in that order, whatever order or repeats were sent.
-- **The rules, in `SafetyService.set`.** Texts are trimmed first and a text that is empty once trimmed is null, so an empty field says nothing. Then:
+- **The rules, in `SafetyService.set`.** Each text is trimmed and every run of whitespace in it (a line break, a tab) is made one space, so a list written over
+  several lines is saved as one line; a text that is empty after that is null, so an empty field says nothing. This comes before every check below. Then:
   `none` with any other choice is 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`; a text with words but without its choice ticked (`reactionText` needs
   `reaction`, `prescriptionText` needs `prescription`, and `none` ticks neither) is 400 `INVALID_SAFETY_ANSWER` with the field named; a text with a link or
-  markup (`hasLinkOrMarkup`) or a control or invisible character (`\p{Cc}`, `\p{Cf}`) is 400 `INVALID_SAFETY_TEXT` with the field named. Ticking a choice and naming nothing
-  is valid and still counts: the caution applies from the tick. Shape is zod: a strict object, `choices` one to five of the vocabulary, each text a
-  string of at most 300 characters (`SAFETY_TEXT_MAX`) once trimmed, else 400 `VALIDATION_FAILED`.
+  markup (`hasLinkOrMarkup`) or any other control or invisible character (`\p{Cc}`, `\p{Cf}`; line breaks and tabs are gone by then) is 400 `INVALID_SAFETY_TEXT` with the field named. Ticking a choice and naming nothing
+  is valid and still counts: the caution applies from the tick. Shape is zod: a strict object, `choices` one to 20 entries of the vocabulary (repeats are collapsed by the service, so the limit only stops a silly body), each text a
+  string of at most 300 characters (`SAFETY_TEXT_MAX`) once trimmed, counted as typed before whitespace is collapsed, else 400 `VALIDATION_FAILED`.
 - **History, as for goals.** `profile_safety` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by `created_at` is the
   current answer, ties broken by `rowid`. The newest wins even when it is less strict than the one before ("none" can replace "pregnant"); nothing carries over, so a
   text is kept only if the answer that is current says it. `choices` is a JSON array in a text column. Guest cleanup needs no cleaner of its own, and a guest who signs up

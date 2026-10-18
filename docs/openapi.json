@@ -639,19 +639,19 @@
               "example": "pregnant"
             },
             "minItems": 1,
-            "maxItems": 5,
-            "description": "What applies, one to five of the choices. Repeats are collapsed. `none` cannot be combined with another choice: 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`."
+            "maxItems": 20,
+            "description": "What applies, one to 20 entries from the five choices. Repeats are collapsed, so the answer has each choice once. `none` cannot be combined with another choice: 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`."
           },
           "reactionText": {
             "type": "string",
             "maxLength": 300,
-            "description": "The products or ingredients that gave a reaction, up to 300 characters once trimmed. Optional even when `reaction` is ticked; blank counts as left out. Words without `reaction` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText`.",
+            "description": "The products or ingredients that gave a reaction, up to 300 characters once trimmed (counted as typed). Line breaks and tabs are fine: every run of whitespace is saved as one space. Optional even when `reaction` is ticked; blank counts as left out. Words without `reaction` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText`.",
             "example": "Caro White and fragrance"
           },
           "prescriptionText": {
             "type": "string",
             "maxLength": 300,
-            "description": "The prescription cream or tablets, up to 300 characters once trimmed. Optional even when `prescription` is ticked; blank counts as left out. Words without `prescription` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `prescriptionText`.",
+            "description": "The prescription cream or tablets, up to 300 characters once trimmed (counted as typed). Line breaks and tabs are fine: every run of whitespace is saved as one space. Optional even when `prescription` is ticked; blank counts as left out. Words without `prescription` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `prescriptionText`.",
             "example": "clobetasol"
           }
         },
@@ -2696,7 +2696,7 @@
           "Onboarding"
         ],
         "summary": "Say what changes what is safe for you",
-        "description": "Guests included. Send `choices` (one to five of `pregnant`, `breastfeeding`, `reaction`, `prescription`, `none`) and, optionally, `reactionText` and `prescriptionText` (up to 300 characters each once trimmed). `none` stands alone: with another choice it is 400 `INVALID_SAFETY_ANSWER` (`details.field` `choices`). Words need their own choice ticked, `none` included: otherwise 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText` or `prescriptionText`. A blank text counts as left out, and a ticked choice with no words is kept as it is. Words with a link, markup or an invisible character are 400 `INVALID_SAFETY_TEXT` with `details.field`. Every change is kept with its date and the newest is the current answer; nothing carries over from the one before. `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked.",
+        "description": "Guests included. Send `choices` (up to 20 entries from `pregnant`, `breastfeeding`, `reaction`, `prescription`, `none`) and, optionally, `reactionText` and `prescriptionText` (up to 300 characters each once trimmed; every run of whitespace, line breaks and tabs included, is saved as one space). `none` stands alone: with another choice it is 400 `INVALID_SAFETY_ANSWER` (`details.field` `choices`). Words need their own choice ticked, `none` included: otherwise 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText` or `prescriptionText`. A blank text counts as left out, and a ticked choice with no words is kept as it is. Words with a link, markup or an invisible character are 400 `INVALID_SAFETY_TEXT` with `details.field`. Every change is kept with its date and the newest is the current answer; nothing carries over from the one before. `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked.",
         "security": [
           {
             "bearerAuth": []

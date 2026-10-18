@@ -11,7 +11,7 @@ const setSafety = defineRoute({
   tags: ['Onboarding'],
   summary: 'Say what changes what is safe for you',
   description:
-    'Guests included. Send `choices` (one to five of `pregnant`, `breastfeeding`, `reaction`, `prescription`, `none`) and, optionally, `reactionText` and `prescriptionText` (up to 300 characters each once trimmed). ' +
+    'Guests included. Send `choices` (up to 20 entries from `pregnant`, `breastfeeding`, `reaction`, `prescription`, `none`) and, optionally, `reactionText` and `prescriptionText` (up to 300 characters each once trimmed; every run of whitespace, line breaks and tabs included, is saved as one space). ' +
     '`none` stands alone: with another choice it is 400 `INVALID_SAFETY_ANSWER` (`details.field` `choices`). Words need their own choice ticked, `none` included: otherwise 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText` or `prescriptionText`. ' +
     'A blank text counts as left out, and a ticked choice with no words is kept as it is. Words with a link, markup or an invisible character are 400 `INVALID_SAFETY_TEXT` with `details.field`. ' +
     'Every change is kept with its date and the newest is the current answer; nothing carries over from the one before. `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked.',
