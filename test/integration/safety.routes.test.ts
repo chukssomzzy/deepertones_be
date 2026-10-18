@@ -6,6 +6,7 @@ import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { TokenService } from '../../src/modules/auth/tokens.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
+import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
 
 // The safety routes through the Worker's public surface, as the app uses them: the typed client against the real entrypoint and real
 // local D1. No model is involved in this step (the goal is picked with a chip, and the safety answers are only stored), so nothing
@@ -16,12 +17,27 @@ const ZEPTO_URL = 'https://zeptomail.test/v1.1/email'
 
 // Messages the Worker puts on the OTP queue. Delivery is driven by hand (see codeFor).
 const queued: unknown[] = []
+// Messages it puts on the parse-safety queue, with the delay each asked for. A real local queue would hand them to whichever test is running by
+// then, so the Worker's producer is a recorder (that the job does its work is safety.background.test.ts). `parseQueueDown` makes the next send fail.
+const parseQueued: { body: unknown; delaySeconds: number | undefined }[] = []
+const parseQueue = {
+  failNext: false,
+  async send(body: unknown, options?: { delaySeconds?: number }) {
+    if (this.failNext) {
+      this.failNext = false
+      throw new Error('queue is down')
+    }
+    parseQueued.push({ body, delaySeconds: options?.delaySeconds })
+  },
+  async sendBatch() {},
+}
 const WORKER_ENV = {
   ...env,
   OTP_CHANNELS: 'email',
   ZEPTOMAIL_API_URL: ZEPTO_URL,
   ZEPTOMAIL_API_KEY: 'test-key',
   OTP_DELIVERY_QUEUE: { send: async (body: unknown) => void queued.push(body) } as unknown as Queue,
+  PARSE_SAFETY_QUEUE: parseQueue as unknown as Queue,
 }
 
 const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) =>
@@ -35,6 +51,8 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   queued.length = 0
+  parseQueued.length = 0
+  parseQueue.failNext = false
 })
 
 const runSalt = String(Math.floor(Math.random() * 1e6))
@@ -547,5 +565,163 @@ describe('the safety answers and logs', () => {
     await putSafety(accessToken, { choices: ['pregnant'], reactionText: 'Caro White QZ7' })
 
     for (const spy of spies) for (const call of spy.mock.calls) expect(JSON.stringify(call)).not.toContain('QZ7')
+  })
+})
+
+// The parse itself is safety.background.test.ts. Here: what saving and reading do to the queue. The parse state is not in the view (the API shape does not
+// change), so the saved row is read back from D1 through the id the message carries.
+describe('PUT /api/v1/me/safety and the parse it queues', () => {
+  const safetyRows = new D1SafetyRepository(db)
+  const profileIdOf = async (bearer: string) => (await dataOf<{ profile: { id: string } }>(await v1.me.$get({}, { headers: headers(bearer) }))).profile.id
+  const queuedIds = () => parseQueued.map((message) => (message.body as { safetyId: string }).safetyId)
+
+  it('queues one parse-safety message, carrying only the id of the row it saved, for the reaction words "Caro White and fragrance"', async () => {
+    const { accessToken } = await newGuest()
+
+    const res = await putSafety(accessToken, { choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+
+    expect(res.status).toBe(200)
+    expect(parseQueued).toHaveLength(1)
+    expect(Object.keys(parseQueued[0]!.body as object)).toEqual(['safetyId'])
+    expect(parseQueued[0]!.delaySeconds ?? 0).toBe(0)
+    const saved = await safetyRows.find(queuedIds()[0]!)
+    expect(saved).toMatchObject({ profileId: await profileIdOf(accessToken), reactionText: 'Caro White and fragrance', parseState: 'pending' })
+  })
+
+  it('queues one for prescription words, and one, not two, for an answer with both', async () => {
+    const { accessToken } = await newGuest()
+
+    await putSafety(accessToken, { choices: ['prescription'], prescriptionText: 'Dermovate' })
+    expect(parseQueued).toHaveLength(1)
+
+    parseQueued.length = 0
+    const other = await newGuest()
+    await putSafety(other.accessToken, { choices: ['reaction', 'prescription'], reactionText: 'fragrance', prescriptionText: 'Dermovate' })
+    expect(parseQueued).toHaveLength(1)
+  })
+
+  it.each([
+    ['no words', { choices: ['pregnant', 'reaction', 'prescription'] }],
+    ['blank words', { choices: ['reaction'], reactionText: '   ' }],
+    ['"none of these"', { choices: ['none'] }],
+    ['an answer refused for words without their choice', { choices: ['pregnant'], reactionText: 'Caro White' }],
+    ['an answer refused for a link', { choices: ['reaction'], reactionText: 'see https://evil.example' }],
+  ])('queues nothing for %s', async (_label, json) => {
+    const { accessToken } = await newGuest()
+
+    await putSafety(accessToken, json)
+
+    expect(parseQueued).toEqual([])
+  })
+
+  it('holds the parse of a second answer with words, saved within the hour, back by about an hour', async () => {
+    const { accessToken } = await newGuest()
+    await putSafety(accessToken, { choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+
+    await putSafety(accessToken, { choices: ['reaction'], reactionText: 'Movate cream' })
+
+    expect(parseQueued).toHaveLength(2)
+    expect(parseQueued[0]!.delaySeconds ?? 0).toBe(0)
+    const held = parseQueued[1]!.delaySeconds!
+    expect(held).toBeGreaterThan(3590)
+    expect(held).toBeLessThanOrEqual(3600)
+    expect(queuedIds()[1]).not.toBe(queuedIds()[0])
+  })
+
+  it('does not hold back the parse of another account saved in the same hour', async () => {
+    const amara = await newGuest()
+    const tolu = await newGuest()
+    await putSafety(amara.accessToken, { choices: ['reaction'], reactionText: 'Caro White' })
+
+    await putSafety(tolu.accessToken, { choices: ['reaction'], reactionText: 'Movate cream' })
+
+    expect(parseQueued.map((message) => message.delaySeconds ?? 0)).toEqual([0, 0])
+  })
+
+  it('saves the answer and answers 200 with the usual view when the queue is down, leaving the row pending', async () => {
+    const { accessToken } = await newGuest()
+    parseQueue.failNext = true
+
+    const res = await putSafety(accessToken, { choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toMatchObject({ choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+    expect(await dataOf(await getSafety(accessToken))).toMatchObject({ reactionText: 'Caro White and fragrance' })
+    expect(parseQueued).toEqual([])
+    expect(await safetyRows.current(await profileIdOf(accessToken))).toMatchObject({ parseState: 'pending' })
+  })
+
+  it('does not add the parse to the view: still exactly the five keys', async () => {
+    const { accessToken } = await newGuest()
+
+    const body = await answer(accessToken, { choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+
+    expect(Object.keys(body).sort()).toEqual(['choices', 'excludesPregnancyCaution', 'prescriptionText', 'reactionText', 'updatedAt'])
+  })
+})
+
+describe('GET /api/v1/me/safety repairing a parse that never ran', () => {
+  const safetyRows = new D1SafetyRepository(db)
+  const MINUTE = 60 * 1000
+
+  /**
+   * An answer whose queue message was lost long ago: still pending, and due `agoMs` before now. The real clock cannot be moved, and a
+   * save always dates a row now, so the aged row is written as a lost-message save would have left it by now.
+   */
+  const lostAnswer = async (agoMs: number) => {
+    const { accessToken, userId } = await newGuest()
+    const profileId = (await dataOf<{ profile: { id: string } }>(await v1.me.$get({}, { headers: headers(accessToken) }))).profile.id
+    const id = `safety-${crypto.randomUUID()}`
+    const dueAt = new Date(Date.now() - agoMs)
+    await safetyRows.append({
+      id,
+      profileId,
+      choices: ['reaction'],
+      reactionText: 'Caro White and fragrance',
+      prescriptionText: null,
+      parseState: 'pending',
+      parseDueAt: dueAt,
+      createdAt: dueAt,
+    })
+    return { accessToken, userId, id }
+  }
+
+  it('queues the parse again, with no delay, when the answer is still pending more than 10 minutes after it was due', async () => {
+    const { accessToken, id } = await lostAnswer(11 * MINUTE)
+
+    const res = await getSafety(accessToken)
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toMatchObject({ choices: ['reaction'], reactionText: 'Caro White and fragrance' })
+    expect(parseQueued.map((message) => message.body)).toEqual([{ safetyId: id }])
+    expect(parseQueued[0]!.delaySeconds ?? 0).toBe(0)
+  })
+
+  it('queues nothing while the answer is within 10 minutes of its due time', async () => {
+    const { accessToken } = await lostAnswer(9 * MINUTE)
+
+    const res = await getSafety(accessToken)
+
+    expect(res.status).toBe(200)
+    expect(parseQueued).toEqual([])
+  })
+
+  it('queues nothing for an answer whose parse is finished, however long ago', async () => {
+    const { accessToken, id } = await lostAnswer(3 * 60 * MINUTE)
+    await safetyRows.setParseState(id, 'done')
+
+    await getSafety(accessToken)
+
+    expect(parseQueued).toEqual([])
+  })
+
+  it('still answers 200 with the answer when the queue is down', async () => {
+    const { accessToken } = await lostAnswer(11 * MINUTE)
+    parseQueue.failNext = true
+
+    const res = await getSafety(accessToken)
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toMatchObject({ reactionText: 'Caro White and fragrance' })
   })
 })

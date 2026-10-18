@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs, runWithContext } from '../../lib/context'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
+import { MemoryMentionReader } from '../../providers/mention-reading/memory.mention-reader'
 import { FakeSafetyRepository } from './safety.repository.fake'
 import { SafetyService } from './safety.service'
 import type { SafetyRow } from './safety.types'
@@ -27,6 +29,16 @@ const AMARA_SECOND_PROFILE = actor('user-amara', 'profile-amara-2')
 const TOLU = actor('user-tolu', 'profile-tolu-1', 'verified')
 const PUBLIC: Actor = { kind: 'public' }
 
+// Saving and reading answers never reaches the catalog; the parse's own tests (safety.service.parse.test.ts) script one.
+const NO_CATALOG = {
+  resolve: async () => {
+    throw new Error('these tests never reach the catalog')
+  },
+  research: async () => {
+    throw new Error('these tests never reach the catalog')
+  },
+}
+
 let clock: Date
 let repository: FakeSafetyRepository
 let service: SafetyService
@@ -44,7 +56,7 @@ beforeEach(() => {
   clock = T0
   repository = new FakeSafetyRepository()
   let n = 0
-  service = new SafetyService({ repository, now: () => clock, newId: () => `safety-${++n}` })
+  service = new SafetyService({ repository, reader: new MemoryMentionReader(), catalog: NO_CATALOG, jobs: new MemoryJobQueue(), now: () => clock, newId: () => `safety-${++n}` })
 })
 
 afterEach(() => {

@@ -7,8 +7,9 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product, split-name and read-goal.
-const VAR_OF_JOB: Record<AiJob, string> = {
+// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product, split-name, read-goal and
+// read-mentions. (`read-mentions` is named here, not only through AiJob, so this file compiles before the job is in the list.)
+const VAR_OF_JOB: Record<AiJob | 'read-mentions', string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
   'same-product': 'ANTHROPIC_MODEL_JUDGE',
@@ -17,6 +18,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'read-label': 'ANTHROPIC_MODEL_VISION',
   'split-name': 'ANTHROPIC_MODEL_JUDGE',
   'read-goal': 'ANTHROPIC_MODEL_JUDGE',
+  'read-mentions': 'ANTHROPIC_MODEL_JUDGE',
 }
 
 describe('the eval default models', () => {
@@ -32,6 +34,11 @@ describe('the eval default models', () => {
   it('run the goal read on the cheap judge model: it sorts words for the app, it is not text the user reads', () => {
     expect(AI_JOBS).toContain('read-goal')
     expect(DEFAULT_MODELS['read-goal']).toBe('claude-haiku-5-5')
+  })
+
+  it('run the mention read on the cheap judge model: it names what the person wrote for the app, it is not text the user reads', () => {
+    expect(AI_JOBS).toContain('read-mentions')
+    expect((DEFAULT_MODELS as Record<string, string>)['read-mentions']).toBe('claude-haiku-5-5')
   })
 
   it('cover exactly the jobs there are', () => {

@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
-import type { AnalysisCase, GoalCase, ResearchCase } from './cases'
-import { loadEnv, parseArgs, scoreAnalysis, scoreGoalReading, scoreResearch, summarise } from './score'
+import type { Mention } from '../../src/providers/mention-reading/mention-reader.provider'
+import type { AnalysisCase, GoalCase, MentionCase, ResearchCase } from './cases'
+import { loadEnv, parseArgs, scoreAnalysis, scoreGoalReading, scoreMentions, scoreResearch, summarise } from './score'
 
 const PRODUCT = { brand: 'Test Brand', name: 'Test Cream', category: 'skin' } as const
 
@@ -251,6 +252,169 @@ describe('scoreGoalReading', () => {
   })
 })
 
+describe('scoreMentions', () => {
+  // The matching, pinned here and described on scoreMentions: a product is found when the words of its brand and name together are the words of the
+  // expected ones (case, accents and punctuation ignored, "&" as "and", and the generic words cream, lotion, soap, gel, serum, oil and jelly left out),
+  // and it has a brand exactly when the expected one does. An ingredient is found when its name is the expected one with case, accents, punctuation and
+  // spacing ignored. Category and variant are not scored. Each mention found is used once.
+  const expected = (products: MentionCase['expect']['products'], ingredients: string[] = []): MentionCase => ({ id: 'mention-1', text: 'unused here', expect: { products, ingredients } })
+  const product = (brand: string | null, name: string, over: Record<string, unknown> = {}): Mention => ({ kind: 'product', brand, name, category: 'skin', ...over }) as Mention
+  const ingredient = (name: string): Mention => ({ kind: 'ingredient', name })
+  const read = (...mentions: Mention[]) => ({ mentions })
+
+  const CARO = { brand: 'Caro White', name: 'Caro White' }
+
+  describe('passing', () => {
+    it('passes when the reader found exactly the products and ingredients the case expects', () => {
+      const c = expected([CARO], ['fragrance'])
+
+      expect(scoreMentions(c, read(product('Caro White', 'Caro White'), ingredient('fragrance')))).toEqual({ id: 'mention-1', pass: true, problems: [] })
+    })
+
+    it('passes a case that expects nothing when the reader found nothing', () => {
+      expect(scoreMentions(expected([]), read())).toEqual({ id: 'mention-1', pass: true, problems: [] })
+    })
+
+    it('does not mind the order the mentions come in', () => {
+      const c = expected([CARO, { brand: 'Carotone', name: 'Carotone' }], ['fragrance', 'parabens'])
+
+      const found = read(ingredient('parabens'), product('Carotone', 'Carotone'), ingredient('fragrance'), product('Caro White', 'Caro White'))
+
+      expect(scoreMentions(c, found).pass).toBe(true)
+    })
+
+    it('ignores case, accents and punctuation in a product', () => {
+      expect(scoreMentions(expected([{ brand: "L'Oréal", name: 'Paris' }]), read(product('LOREAL', 'paris!'))).pass).toBe(true)
+    })
+
+    it.each([
+      ['the brand and name as typed', 'Caro White', 'Caro White'],
+      ['the brand split from the name differently: Caro | White', 'Caro', 'White'],
+      ['the whole name as the brand and a repeat as the name', 'Caro White', 'Caro White'],
+      ['the whole name as the brand and one of its words as the name', 'Caro White', 'White'],
+    ])('finds Caro White when the reader gave %s', (_label, brand, name) => {
+      expect(scoreMentions(expected([CARO]), read(product(brand, name))).pass).toBe(true)
+    })
+
+    it.each([
+      ['Movate cream', { brand: 'Movate', name: 'Movate' }],
+      ['Movate cream', { brand: 'Movate', name: 'Movate cream' }],
+      ['Movate cream', { brand: 'Movate', name: 'Cream' }],
+    ])('does not count the generic word "cream" against a reader that left it out or put it in (%s)', (_label, found) => {
+      expect(scoreMentions(expected([{ brand: 'Movate', name: 'Movate cream' }]), read(product(found.brand, found.name))).pass).toBe(true)
+    })
+
+    it.each([
+      ['Dove soap', 'Dove', 'Dove'],
+      ['Dove soap', 'Dove', 'soap'],
+      ['Skin Light cream', 'Skin Light', 'Skin Light'],
+    ])('does not count the generic words soap and cream either: %s', (name, brand, found) => {
+      expect(scoreMentions(expected([{ brand, name }]), read(product(brand, found))).pass).toBe(true)
+    })
+
+    it('reads "&" as "and"', () => {
+      expect(scoreMentions(expected([{ brand: 'Fair and White', name: 'Fair and White' }]), read(product('Fair & White', 'Fair & White'))).pass).toBe(true)
+    })
+
+    it('does not score the category or the variant', () => {
+      const found = product('Caro White', 'Caro White', { category: null, variant: 'Extra' })
+
+      expect(scoreMentions(expected([CARO]), read(found)).pass).toBe(true)
+    })
+
+    it('ignores case and spacing in an ingredient: "Shea  Butter" and "sheabutter" are "shea butter"', () => {
+      expect(scoreMentions(expected([], ['shea butter']), read(ingredient('Shea  Butter'))).pass).toBe(true)
+      expect(scoreMentions(expected([], ['shea butter']), read(ingredient('sheabutter'))).pass).toBe(true)
+    })
+
+    it('lets the reader give a product with no brand beside the ones expected: it cannot reach the catalog, so it does no harm', () => {
+      expect(scoreMentions(expected([]), read(product(null, 'white tub'))).pass).toBe(true)
+      expect(scoreMentions(expected([CARO]), read(product('Caro White', 'Caro White'), product(null, 'toning cream'))).pass).toBe(true)
+    })
+  })
+
+  describe('a product the case expects with no brand', () => {
+    const brandless = expected([{ brand: null, name: 'white tub' }])
+
+    it('is found only as a product with no brand', () => {
+      expect(scoreMentions(brandless, read(product(null, 'White Tub'))).pass).toBe(true)
+      expect(scoreMentions(brandless, read(product('White', 'tub'))).problems).toEqual(['missing-product:white tub', 'extra-products:1'])
+    })
+  })
+
+  describe('failing', () => {
+    it('names the product that was not found, by the case\'s own name for it, and counts the one that was found instead', () => {
+      expect(scoreMentions(expected([CARO]), read(product('Carotone', 'Carotone')))).toEqual({
+        id: 'mention-1',
+        pass: false,
+        problems: ['missing-product:Caro White', 'extra-products:1'],
+      })
+    })
+
+    it('fails a product the reader found without the brand the case expects, since that product could never be looked up', () => {
+      expect(scoreMentions(expected([{ brand: 'Movate', name: 'Movate cream' }]), read(product(null, 'Movate cream'))).problems).toEqual(['missing-product:Movate cream'])
+    })
+
+    it('names the ingredient that was not found', () => {
+      expect(scoreMentions(expected([], ['lanolin', 'fragrance']), read(ingredient('lanolin'))).problems).toEqual(['missing-ingredient:fragrance'])
+    })
+
+    it('fails a product with a word more or fewer than the case expects, beyond the generic words', () => {
+      expect(scoreMentions(expected([CARO]), read(product('Caro White', 'Caro White Facial'))).pass).toBe(false)
+      expect(scoreMentions(expected([CARO]), read(product('Caro', 'Caro'))).pass).toBe(false)
+    })
+
+    it('fails an ingredient the case did not expect, and counts it without naming it: a reader that lists ingredients from memory is the failure that matters', () => {
+      const result = scoreMentions(expected([{ brand: 'Dove', name: 'Dove soap' }]), read(product('Dove', 'Dove soap'), ingredient('stearic acid'), ingredient('sodium cocoate')))
+
+      expect(result).toEqual({ id: 'mention-1', pass: false, problems: ['extra-ingredients:2'] })
+    })
+
+    it('fails a product with a brand that the case did not expect, and counts it', () => {
+      expect(scoreMentions(expected([]), read(product('Nivea', 'Creme'))).problems).toEqual(['extra-products:1'])
+    })
+
+    it('does not match an ingredient in a different form: "fragrances" is not "fragrance"', () => {
+      expect(scoreMentions(expected([], ['fragrance']), read(ingredient('fragrances'))).problems).toEqual(['missing-ingredient:fragrance', 'extra-ingredients:1'])
+    })
+
+    it('uses each mention once: the same ingredient twice is one found and one extra', () => {
+      expect(scoreMentions(expected([], ['fragrance']), read(ingredient('fragrance'), ingredient('Fragrance'))).problems).toEqual(['extra-ingredients:1'])
+    })
+
+    it('uses each mention once: the same product twice is one found and one extra', () => {
+      expect(scoreMentions(expected([CARO]), read(product('Caro White', 'Caro White'), product('Caro White', 'Caro White'))).problems).toEqual(['extra-products:1'])
+    })
+
+    it('does not take a product for an ingredient, or the other way round', () => {
+      expect(scoreMentions(expected([CARO]), read(ingredient('Caro White'))).problems).toEqual(['missing-product:Caro White', 'extra-ingredients:1'])
+      expect(scoreMentions(expected([], ['fragrance']), read(product('fragrance', 'fragrance'))).problems).toEqual(['missing-ingredient:fragrance', 'extra-products:1'])
+    })
+
+    it('reports missing products, then missing ingredients, then extra products, then extra ingredients, and in the case\'s order within each', () => {
+      const c = expected([CARO, { brand: 'Movate', name: 'Movate' }], ['fragrance', 'parabens'])
+
+      const result = scoreMentions(c, read(product('Nivea', 'Creme'), ingredient('lanolin')))
+
+      expect(result.problems).toEqual(['missing-product:Caro White', 'missing-product:Movate', 'missing-ingredient:fragrance', 'missing-ingredient:parabens', 'extra-products:1', 'extra-ingredients:1'])
+    })
+
+    it('fails a case that expects nothing when the reader found something', () => {
+      expect(scoreMentions(expected([]), read(ingredient('fragrance'))).problems).toEqual(['extra-ingredients:1'])
+    })
+
+    it('never puts a word the model wrote into a problem', () => {
+      const result = scoreMentions(expected([]), read(product('Sekret Brand', 'Sekret Cream'), ingredient('sekret acid')))
+
+      expect(JSON.stringify(result)).not.toMatch(/sekret/i)
+    })
+  })
+
+  it('fails with the error name when the adapter threw', () => {
+    expect(scoreMentions(expected([CARO]), { error: 'AnthropicUnavailableError' })).toEqual({ id: 'mention-1', pass: false, problems: ['error:AnthropicUnavailableError'] })
+  })
+})
+
 describe('summarise', () => {
   const result = (pass: boolean) => ({ id: 'x', pass, problems: pass ? [] : ['p'] })
 
@@ -291,7 +455,7 @@ describe('parseArgs', () => {
     expect(args.models).toEqual({})
   })
 
-  it.each(['analysis', 'research', 'goals', 'all'] as const)('accepts --mode %s', (mode) => {
+  it.each(['analysis', 'research', 'goals', 'mentions', 'all'] as const)('accepts --mode %s', (mode) => {
     expect(parseArgs(['--mode', mode]).mode).toBe(mode)
   })
 
@@ -311,7 +475,7 @@ describe('parseArgs', () => {
     expect(parseArgs(argv as string[]).maxUsd).toBe(expected)
   })
 
-  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'read-label', 'split-name', 'read-goal'])('reads --model %s=<model> as an override for that job', (job) => {
+  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'read-label', 'split-name', 'read-goal', 'read-mentions'])('reads --model %s=<model> as an override for that job', (job) => {
     expect(parseArgs(['--model', `${job}=claude-haiku-5-5`]).models).toEqual({ [job]: 'claude-haiku-5-5' })
   })
 

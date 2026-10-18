@@ -126,6 +126,37 @@ describe('wrangler.jsonc scan queues', () => {
   })
 })
 
+// Onboarding's safety parse: one queue (and its dead-letter queue) per environment, like the scan items. Nobody waits for it, so the
+// consumer keeps the standard 5 attempts and nothing is asked of its batching.
+describe('wrangler.jsonc parse-safety queue', () => {
+  it.each(scanBlocks)('%s produces to the parse-safety queue as PARSE_SAFETY_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'PARSE_SAFETY_QUEUE')?.queue).toBe(`deepertones-parse-safety-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the parse-safety queue with 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-parse-safety-${environment}`)
+
+    expect(consumer).toMatchObject({ max_retries: 4, dead_letter_queue: `deepertones-parse-safety-dlq-${environment}` })
+  })
+
+  it.each(scanBlocks)('%s consumes the parse-safety dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-parse-safety-dlq-${environment}`)
+
+    expect(consumer).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps every queue it already had', (_, block, environment) => {
+    const bindings = Object.fromEntries((block?.queues?.producers ?? []).map((p) => [p.binding, p.queue]))
+
+    expect(bindings).toMatchObject({
+      OTP_DELIVERY_QUEUE: `deepertones-otp-delivery-${environment}`,
+      SCAN_ITEMS_QUEUE: `deepertones-scan-items-${environment}`,
+      PUSH_DELIVERY_QUEUE: `deepertones-push-delivery-${environment}`,
+      PUSH_RECEIPTS_QUEUE: `deepertones-push-receipts-${environment}`,
+    })
+  })
+})
+
 // A namespace_id is an account-wide counter: two bindings that share one share their counts, across environments too.
 describe('wrangler.jsonc rate limits', () => {
   const all = scanBlocks.flatMap(([place, block]) => (block?.ratelimits ?? []).map((limit) => ({ place, ...limit })))

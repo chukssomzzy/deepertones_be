@@ -29,6 +29,14 @@ describe('the job registry', () => {
     expect(job!.queue).toBe('push-receipts')
   })
 
+  it('lists the parse-safety job on its own parse-safety queue, with a hook for when its retries run out', () => {
+    const job = jobs.find((j) => j.name === 'parse-safety')
+
+    expect(job).toBeDefined()
+    expect(job!.queue).toBe('parse-safety')
+    expect(job!.onDeadLetter).toBeTypeOf('function')
+  })
+
   it('gives every job its own name and its own queue, so a backlog in one never delays another', () => {
     expect(new Set(jobs.map((j) => j.name)).size).toBe(jobs.length)
     expect(new Set(jobs.map((j) => queueNames(j.queue, 'test').main)).size).toBe(jobs.length)

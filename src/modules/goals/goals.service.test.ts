@@ -3,6 +3,8 @@ import { type Actor, runAs, runWithContext } from '../../lib/context'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import { AnthropicConfigError, AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
 import { MemoryGoalReader } from '../../providers/goal-reading/memory.goal-reader'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
+import { MemoryMentionReader } from '../../providers/mention-reading/memory.mention-reader'
 import { FakeSafetyRepository } from '../safety/safety.repository.fake'
 import { SafetyService } from '../safety/safety.service'
 import { GOAL_ANSWERS_VERSION, answerFor } from './goals.answers'
@@ -33,6 +35,16 @@ const AMARA_SECOND_PROFILE = actor('user-amara', 'profile-amara-2')
 const TOLU = actor('user-tolu', 'profile-tolu-1', 'verified')
 const PUBLIC: Actor = { kind: 'public' }
 
+// Onboarding asks the safety service for the answer and nothing else, so what it parses with is never reached here.
+const NO_CATALOG = {
+  resolve: async () => {
+    throw new Error('the goals tests never reach the catalog')
+  },
+  research: async () => {
+    throw new Error('the goals tests never reach the catalog')
+  },
+}
+
 let clock: Date
 let repository: FakeGoalsRepository
 let reader: MemoryGoalReader
@@ -54,7 +66,14 @@ beforeEach(() => {
   reader = new MemoryGoalReader()
   let n = 0
   // The real SafetyService over its fake repository, as the AuthService tests use the real NotificationsService: onboarding asks it, never its repository.
-  safety = new SafetyService({ repository: new FakeSafetyRepository(), now: () => clock, newId: () => `safety-${crypto.randomUUID()}` })
+  safety = new SafetyService({
+    repository: new FakeSafetyRepository(),
+    reader: new MemoryMentionReader(),
+    catalog: NO_CATALOG,
+    jobs: new MemoryJobQueue(),
+    now: () => clock,
+    newId: () => `safety-${crypto.randomUUID()}`,
+  })
   service = new GoalsService({ repository, reader, safety, now: () => clock, newId: () => `goal-${++n}` })
 })
 
