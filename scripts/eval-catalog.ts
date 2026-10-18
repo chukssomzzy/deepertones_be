@@ -1,7 +1,7 @@
 // Runs the catalog's model-backed steps against fixed cases and reports how many held: `npm run eval:catalog`.
 // Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real, billed calls. It is report-only, is never part
 // of `npm test`, and never prints the key, a prompt or raw model output: only case ids, fixed problem codes and timings.
-//   --mode analysis|research|goals|all   (default all; goals is about 40 Haiku calls, a few cents)    --limit N   cases per mode
+//   --mode analysis|research|goals|mentions|all   (default all; goals is about 40 Haiku calls and mentions about 22, a few cents each)    --limit N   cases per mode
 //   --max-usd N   stop spending at N dollars (default 2)    --model JOB=MODEL   run a job on another model (repeatable)
 // Each job runs on the model wrangler.jsonc gives it (Haiku for research, vision and judging, Sonnet for the analysis)
 // unless --model says otherwise. Spend is counted by a MemoryAiSpendLedger capped at --max-usd, so a runaway run cannot
@@ -16,19 +16,22 @@ import { AnthropicClient } from '../src/providers/anthropic/anthropic.client'
 import { AnthropicConfigError } from '../src/providers/anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../src/providers/anthropic/memory.ai-spend-ledger'
 import { AnthropicGoalReader } from '../src/providers/goal-reading/anthropic.goal-reader'
+import { AnthropicMentionReader } from '../src/providers/mention-reading/anthropic.mention-reader'
 import { AnthropicProductAnalyst } from '../src/providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductResearcher } from '../src/providers/product-research/anthropic.product-researcher'
-import { ANALYSIS_CASES, GOAL_CASES, RESEARCH_CASES } from './eval/cases'
+import { ANALYSIS_CASES, GOAL_CASES, MENTION_CASES, RESEARCH_CASES } from './eval/cases'
 import { DEFAULT_MODELS } from './eval/models'
 import {
   type AnalysisOutcome,
   type CaseResult,
   type GoalOutcome,
   loadEnv,
+  type MentionOutcome,
   parseArgs,
   type ResearchOutcome,
   scoreAnalysis,
   scoreGoalReading,
+  scoreMentions,
   scoreResearch,
   summarise,
 } from './eval/score'
@@ -90,6 +93,7 @@ const main = async (): Promise<number> => {
   const analyst = new AnthropicProductAnalyst(client)
   const researcher = new AnthropicProductResearcher(client)
   const goalReader = new AnthropicGoalReader(client)
+  const mentionReader = new AnthropicMentionReader(client)
 
   const startedAt = new Date()
   console.log(
@@ -97,7 +101,7 @@ const main = async (): Promise<number> => {
   )
   console.log(`Models: analysis ${models.analysis}, research ${models.research}, same-product ${models['same-product']}, image-check ${models['image-check']}`)
 
-  const report: { startedAt: string; models: Record<AiJob, string>; maxUsd: number; mode: string; analysis?: Timed[]; research?: Timed[]; goals?: Timed[] } = {
+  const report: { startedAt: string; models: Record<AiJob, string>; maxUsd: number; mode: string; analysis?: Timed[]; research?: Timed[]; goals?: Timed[]; mentions?: Timed[] } = {
     startedAt: startedAt.toISOString(),
     models,
     maxUsd: args.maxUsd,
@@ -136,13 +140,19 @@ const main = async (): Promise<number> => {
       )
       printTable('Goals', report.goals)
     }
+    if (args.mode === 'all' || args.mode === 'mentions') {
+      report.mentions = await runEach(MENTION_CASES.slice(0, args.limit), ledger, async (c) =>
+        scoreMentions(c, await attempt<MentionOutcome>(async () => ({ mentions: await mentionReader.read(c.text) }))),
+      )
+      printTable('Mentions', report.mentions)
+    }
   } catch (error) {
     if (!(error instanceof SetupError)) throw error
     console.error(error.message)
     return 2
   }
 
-  const all = [...(report.analysis ?? []), ...(report.research ?? []), ...(report.goals ?? [])]
+  const all = [...(report.analysis ?? []), ...(report.research ?? []), ...(report.goals ?? []), ...(report.mentions ?? [])]
   const summary = summarise(all)
   console.log(`\nOverall: ${summary.passed}/${summary.total} passed, ${usd(summary.costMicros)} spent`)
 

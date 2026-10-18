@@ -1163,6 +1163,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         const w = word()
         const [one, other] = [mine(w, 'a'), mine(w, 'b')]
         for (const p of [one, other]) await repo.createProduct(p)
+        // Search lists only products with ingredients, so the one it must find has a formulation.
+        await repo.createFormulation(newFormulation(one.id))
 
         await repo.setSearchText(one.id, `acme ${w} filled`)
 
@@ -1199,6 +1201,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           const w = word()
           const made = [mine(w, 'a'), mine(w, 'b'), mine(w, 'c')]
           for (const p of made) await repo.createProduct(p)
+          // Search lists only products with ingredients.
+          for (const p of made) await repo.createFormulation(newFormulation(p.id))
 
           await repo.setSearchTexts(made.map((p, i) => ({ id: p.id, searchText: `acme ${w} text${i}` })))
 
@@ -1264,6 +1268,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           const w = word()
           const made = Array.from({ length: 500 }, (_, i) => mine(w, String(i).padStart(3, '0')))
           for (const p of made) await repo.createProduct(p)
+          // Search lists only products with ingredients; the one the search below must find has them.
+          await repo.createFormulation(newFormulation(made[250]!.id))
 
           await repo.setSearchTexts(made.map((p, i) => ({ id: p.id, searchText: `acme ${w} n${i}z` })))
 
@@ -1290,11 +1296,20 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         return newProduct({ brand, name: rest.join(' '), brandKey: fresh('brand'), searchText, ...over })
       }
       const idsOf = (products: { id: string }[]) => products.map((p) => p.id)
+      /**
+       * A product the catalog has ingredients for. Search lists only those (a product nobody has found a list for is hidden, see the tests on
+       * that below), so every fixture a test needs search to find is made with this.
+       */
+      const listed = async (repo: CatalogRepository, input: NewProduct) => {
+        const product = await repo.createProduct(input)
+        await repo.createFormulation(newFormulation(product.id))
+        return product
+      }
 
       it('finds a named product by a fragment in the middle of its search text, and returns the stored product', async () => {
         const repo = await make()
         const w = word()
-        const product = await repo.createProduct(searchable(`acme ${w} glow serum`, { variant: 'Night', category: 'skin' }))
+        const product = await listed(repo, searchable(`acme ${w} glow serum`, { variant: 'Night', category: 'skin' }))
 
         const found = await repo.search(`${w} glow`, 10)
 
@@ -1305,7 +1320,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
       it('finds a product by a fragment at the very start and at the very end of its search text', async () => {
         const repo = await make()
         const w = word()
-        const product = await repo.createProduct(searchable(`acme glow ${w}`))
+        const product = await listed(repo, searchable(`acme glow ${w}`))
 
         expect(idsOf(await repo.search('acme', 10))).toContain(product.id)
         expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
@@ -1313,14 +1328,14 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
 
       it('finds nothing for text that no search text or alias contains', async () => {
         const repo = await make()
-        await repo.createProduct(searchable(`acme ${word()} glow`))
+        await listed(repo, searchable(`acme ${word()} glow`))
 
         expect(await repo.search(word(), 10)).toEqual([])
       })
 
       it('finds nothing, rather than every product, for an empty query', async () => {
         const repo = await make()
-        await repo.createProduct(searchable(`acme ${word()} glow`))
+        await listed(repo, searchable(`acme ${word()} glow`))
 
         expect(await repo.search('', 10)).toEqual([])
       })
@@ -1334,11 +1349,89 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         expect(await repo.search('aqua', 10)).not.toContainEqual(expect.objectContaining({ kind: 'unnamed' }))
       })
 
+      describe('a product with no formulation', () => {
+        it('is not found, though its search text matches', async () => {
+          const repo = await make()
+          const w = word()
+          await repo.createProduct(searchable(`acme ${w} glow serum`))
+
+          expect(await repo.search(w, 10)).toEqual([])
+          expect(await repo.search(`${w} glow`, 10)).toEqual([])
+        })
+
+        it('is found once a formulation is stored for it, whether it came from the web or from a label', async () => {
+          const repo = await make()
+          const [web, label] = [word(), word()]
+          const fromWeb = await repo.createProduct(searchable(`acme ${web} serum`))
+          const fromLabel = await repo.createProduct(searchable(`acme ${label} serum`))
+          expect(await repo.search(web, 10)).toEqual([])
+          expect(await repo.search(label, 10)).toEqual([])
+
+          await repo.createFormulation(newFormulation(fromWeb.id, { sourceKind: 'web' }))
+          await repo.createFormulation(newFormulation(fromLabel.id, { sourceKind: 'label', sourceUrl: null }))
+
+          expect(idsOf(await repo.search(web, 10))).toEqual([fromWeb.id])
+          expect(idsOf(await repo.search(label, 10))).toEqual([fromLabel.id])
+        })
+
+        it('is found with a formulation however old it is or whether it was analysed', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} serum`))
+
+          await repo.createFormulation(newFormulation(product.id, { foundAt: at(-400 * 24 * HOUR) }))
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+        })
+
+        it('is not listed because another product has a formulation: each product needs its own', async () => {
+          const repo = await make()
+          const w = word()
+          const hidden = await repo.createProduct(searchable(`acme ${w} ghost`))
+          const shown = await listed(repo, searchable(`acme ${w} real`))
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([shown.id])
+          expect(idsOf(await repo.search(w, 10))).not.toContain(hidden.id)
+        })
+
+        it('is not found through an alias until it has a formulation, and then is', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          await repo.addAlias(`acme|${w} wash|`, product.id)
+          expect(await repo.search(w, 10)).toEqual([])
+
+          await repo.createFormulation(newFormulation(product.id))
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+        })
+
+        it('still lists a product with a formulation through its aliases, once, however many formulations it has', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await listed(repo, searchable(`acme ${word()} cleanser`))
+          await repo.createFormulation(newFormulation(product.id))
+          await repo.addAlias(`acme|${w} wash|`, product.id)
+          await repo.addAlias(`acme|${w} foam|night`, product.id)
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+        })
+
+        it('does not use up the limit: products with no formulation ahead of listed ones leave the listed ones their places', async () => {
+          const repo = await make()
+          const w = word()
+          for (const suffix of ['a', 'b', 'c']) await repo.createProduct(searchable(`${w} ${suffix}`))
+          const shown = [await listed(repo, searchable(`${w} d`)), await listed(repo, searchable(`${w} e`))]
+
+          expect(idsOf(await repo.search(w, 2))).toEqual(shown.map((p) => p.id))
+        })
+      })
+
       describe('through an alias', () => {
         it('finds a product by text in one of its aliases, when its own search text does not contain it', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          const product = await listed(repo, searchable(`acme ${word()} cleanser`))
           await repo.addAlias(`acme|${w} wash|`, product.id)
 
           expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
@@ -1347,8 +1440,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('does not return a product for another product\'s alias', async () => {
           const repo = await make()
           const w = word()
-          const owner = await repo.createProduct(searchable(`acme ${word()} cleanser`))
-          const other = await repo.createProduct(searchable(`beta ${word()} cleanser`))
+          const owner = await listed(repo, searchable(`acme ${word()} cleanser`))
+          const other = await listed(repo, searchable(`beta ${word()} cleanser`))
           await repo.addAlias(`acme|${w} wash|`, owner.id)
 
           expect(idsOf(await repo.search(w, 10))).toEqual([owner.id])
@@ -1358,7 +1451,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('returns a product reachable through its search text and an alias once, and through two aliases once', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${w} cleanser`))
+          const product = await listed(repo, searchable(`acme ${w} cleanser`))
           await repo.addAlias(`acme|${w} wash|`, product.id)
           await repo.addAlias(`acme|${w} foam|night`, product.id)
 
@@ -1370,7 +1463,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('finds a product by words in a different order, and by words that leave some of its own out', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${w} glow serum`))
+          const product = await listed(repo, searchable(`acme ${w} glow serum`))
 
           expect(idsOf(await repo.search(`serum ${w}`, 10))).toEqual([product.id])
           expect(idsOf(await repo.search(`${w} serum`, 10))).toEqual([product.id])
@@ -1380,7 +1473,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('finds nothing when one of the words is in neither the search text nor an alias', async () => {
           const repo = await make()
           const w = word()
-          await repo.createProduct(searchable(`acme ${w} glow serum`))
+          await listed(repo, searchable(`acme ${w} glow serum`))
 
           expect(await repo.search(`${w} serum ${word()}`, 10)).toEqual([])
         })
@@ -1388,7 +1481,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('matches each word as a fragment, not as a whole word', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${w} glowing serums`))
+          const product = await listed(repo, searchable(`acme ${w} glowing serums`))
 
           expect(idsOf(await repo.search(`${w} glow serum`, 10))).toEqual([product.id])
         })
@@ -1396,7 +1489,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('ignores empty words, so extra spaces change nothing, and finds nothing for a query of only spaces', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${w} glow serum`))
+          const product = await listed(repo, searchable(`acme ${w} glow serum`))
 
           expect(idsOf(await repo.search(`  ${w}   glow  `, 10))).toEqual([product.id])
           expect(await repo.search('   ', 10)).toEqual([])
@@ -1405,7 +1498,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('looks at the first 8 words only: a 9th that nothing contains is ignored, while an 8th that nothing contains is not', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`${w} a b c d e f g`))
+          const product = await listed(repo, searchable(`${w} a b c d e f g`))
 
           expect(idsOf(await repo.search(`${w} a b c d e f g ${word()}`, 10))).toEqual([product.id])
           expect(await repo.search(`${w} a b c d e f ${word()} g`, 10)).toEqual([])
@@ -1418,7 +1511,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           const base = words.join(' ')
           const text = `${base}${'x'.repeat(80 - base.length)}`
           expect(text).toHaveLength(80)
-          const product = await repo.createProduct(searchable(text))
+          const product = await listed(repo, searchable(text))
 
           expect(idsOf(await repo.search(text, 10))).toEqual([product.id])
           expect(await repo.search(`${w}${'y'.repeat(80 - w.length)}`, 10)).toEqual([])
@@ -1428,7 +1521,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('finds a product when every word is in one of its aliases, even words that are not in its search text, and across the "|" between brand and name', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          const product = await listed(repo, searchable(`acme ${word()} cleanser`))
           await repo.addAlias(`acme|${w} foaming wash|night`, product.id)
 
           expect(idsOf(await repo.search(`wash ${w}`, 10))).toEqual([product.id])
@@ -1438,7 +1531,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('does not combine the search text and an alias: words split between them find nothing', async () => {
           const repo = await make()
           const [inText, inAlias] = [word(), word()]
-          const product = await repo.createProduct(searchable(`acme ${inText} cleanser`))
+          const product = await listed(repo, searchable(`acme ${inText} cleanser`))
           await repo.addAlias(`acme|${inAlias} wash|`, product.id)
 
           expect(await repo.search(`${inText} ${inAlias}`, 10)).toEqual([])
@@ -1447,7 +1540,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('does not combine two aliases either', async () => {
           const repo = await make()
           const [one, two] = [word(), word()]
-          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          const product = await listed(repo, searchable(`acme ${word()} cleanser`))
           await repo.addAlias(`acme|${one} wash|`, product.id)
           await repo.addAlias(`acme|${two} foam|`, product.id)
 
@@ -1457,7 +1550,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('returns a product once though its search text and two of its aliases all match', async () => {
           const repo = await make()
           const w = word()
-          const product = await repo.createProduct(searchable(`acme ${w} cleanser`))
+          const product = await listed(repo, searchable(`acme ${w} cleanser`))
           await repo.addAlias(`acme|${w} wash|`, product.id)
           await repo.addAlias(`acme|${w} foam|night`, product.id)
 
@@ -1468,8 +1561,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('ranks a search text that starts with the whole query before one that only holds all its words, though the other sorts first', async () => {
           const repo = await make()
           const w = word()
-          const holds = await repo.createProduct(searchable(`${w} aloe butter`))
-          const starts = await repo.createProduct(searchable(`${w} butter cream`))
+          const holds = await listed(repo, searchable(`${w} aloe butter`))
+          const starts = await listed(repo, searchable(`${w} butter cream`))
 
           expect(idsOf(await repo.search(`${w} butter`, 10))).toEqual([starts.id, holds.id])
         })
@@ -1479,7 +1572,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('returns at most `limit` products: the first ones in the order below, not any ten', async () => {
           const repo = await make()
           const w = word()
-          for (const suffix of ['d', 'b', 'e', 'a', 'c']) await repo.createProduct(searchable(`${w} ${suffix}`))
+          for (const suffix of ['d', 'b', 'e', 'a', 'c']) await listed(repo, searchable(`${w} ${suffix}`))
 
           const found = await repo.search(w, 3)
 
@@ -1489,7 +1582,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('returns everything when fewer products match than the limit, and exactly `limit` at the boundary', async () => {
           const repo = await make()
           const w = word()
-          for (const suffix of ['a', 'b', 'c']) await repo.createProduct(searchable(`${w} ${suffix}`))
+          for (const suffix of ['a', 'b', 'c']) await listed(repo, searchable(`${w} ${suffix}`))
 
           expect(await repo.search(w, 4)).toHaveLength(3)
           expect(await repo.search(w, 3)).toHaveLength(3)
@@ -1501,8 +1594,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('puts a product whose search text starts with the query before one that only contains it, though the other sorts first alphabetically', async () => {
           const repo = await make()
           const w = word()
-          const contains = await repo.createProduct(searchable(`acme ${w} glow`))
-          const prefix = await repo.createProduct(searchable(`${w} body butter`))
+          const contains = await listed(repo, searchable(`acme ${w} glow`))
+          const prefix = await listed(repo, searchable(`${w} body butter`))
 
           // "acme ..." sorts before "w..." on its own, so only the prefix rule can put the other first.
           expect(idsOf(await repo.search(w, 10))).toEqual([prefix.id, contains.id])
@@ -1513,7 +1606,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           const w = word()
           const prefixes = [`${w} c`, `${w} a`, `${w} b`]
           const containing = [`acme ${w} z`, `acme ${w} y`]
-          for (const text of [...prefixes, ...containing]) await repo.createProduct(searchable(text))
+          for (const text of [...prefixes, ...containing]) await listed(repo, searchable(text))
 
           const found = await repo.search(w, 10)
 
@@ -1524,7 +1617,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           const repo = await make()
           const w = word()
           // Created in the reverse of the expected order, with ids that do not come from the clock.
-          for (const suffix of ['c', 'a', 'b']) await repo.createProduct(searchable(`acme ${w} glow`, { id: `${w}-${suffix}` }))
+          for (const suffix of ['c', 'a', 'b']) await listed(repo, searchable(`acme ${w} glow`, { id: `${w}-${suffix}` }))
 
           expect(idsOf(await repo.search(w, 10))).toEqual([`${w}-a`, `${w}-b`, `${w}-c`])
         })
@@ -1532,7 +1625,7 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         it('gives the same order every time it is asked', async () => {
           const repo = await make()
           const w = word()
-          for (const text of [`acme ${w} b`, `${w} z`, `acme ${w} a`, `${w} y`]) await repo.createProduct(searchable(text))
+          for (const text of [`acme ${w} b`, `${w} z`, `acme ${w} a`, `${w} y`]) await listed(repo, searchable(text))
 
           const first = idsOf(await repo.search(w, 10))
 

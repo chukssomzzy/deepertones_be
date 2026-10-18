@@ -180,8 +180,15 @@
     {
       "idx": 25,
       "version": "6",
-      "when": 1792359288911,
-      "tag": "0025_calm_morbius",
+      "when": 1792356019982,
+      "tag": "0025_faithful_plazm",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1792359977169,
+      "tag": "0026_gifted_firebrand",
       "breakpoints": true
     }
   ]

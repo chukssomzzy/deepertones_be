@@ -75,16 +75,25 @@ const search = (guest: Guest, q: string, from?: string) => productsApi.search.$g
 // --- products, made the way a scan makes them ---
 
 const analyst = new MemoryProductAnalyst()
+const researcher = new MemoryProductResearcher()
 const catalog = new ProductCatalogService({
   repository: new D1CatalogRepository(createDb(env.DB)),
-  researcher: new MemoryProductResearcher(),
+  researcher,
   analyst,
   images: new MemoryCatalogImageStore(),
   imageKeyPrefix: 'catalog/test',
   opsAlerts: quietOpsAlerts(),
 })
-const resolved = async (brand: string, name: string, over: { variant?: string; form?: ProductForm; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' } = {}) =>
+type Made = { variant?: string; form?: ProductForm; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' }
+const resolvedWithoutIngredients = async (brand: string, name: string, over: Made = {}) =>
   (await catalog.resolve({ brand, name, category: over.category ?? 'skin', ...(over.variant ? { variant: over.variant } : {}), ...(over.form ? { form: over.form } : {}) })).productId
+// Search lists only a product the catalog has ingredients for, so a product these tests need search to find has a list, read from a label as a scan's back photo is.
+// (`resolvedWithoutIngredients` is the product a typed name made before anyone found its list, which search hides.)
+const resolved = async (brand: string, name: string, over: Made = {}) => {
+  const id = await resolvedWithoutIngredients(brand, name, over)
+  await catalog.addLabelIngredients(id, ['Aqua', 'Glycerin'])
+  return id
+}
 
 describe('GET /api/v1/products/search', () => {
   it('finds products by a fragment of their brand, name and variant, as { id, brand, name, variant, form, category, imageUrl }, in a list under `products`', async () => {
@@ -192,6 +201,70 @@ describe('GET /api/v1/products/search', () => {
 
     expect((await hitsOf(await search(guest, 'hydrating cleanser'))).filter((h) => h.id === id)).toHaveLength(1)
     expect((await hitsOf(await search(guest, brand))).map((h) => h.id)).toEqual([id])
+  })
+
+  describe('a product the catalog has no ingredients for', () => {
+    it('is not listed: a named product that nobody has found a list for is hidden, though its name matches the query', async () => {
+      const guest = await newGuest()
+      const brand = word()
+      await resolvedWithoutIngredients(brand, 'Hydrating Cleanser')
+
+      const res = await search(guest, `${brand} hydrating`)
+
+      expect(res.status).toBe(200)
+      expect(await hitsOf(res)).toEqual([])
+    })
+
+    it('is listed once a formulation is stored for it: found by research, and found the same way by a back label', async () => {
+      const guest = await newGuest()
+      const [researchedBrand, labelBrand] = [word(), word()]
+      const byResearch = await resolvedWithoutIngredients(researchedBrand, 'Hydrating Cleanser')
+      const byLabel = await resolvedWithoutIngredients(labelBrand, 'Hydrating Cleanser')
+      expect(await hitsOf(await search(guest, researchedBrand))).toEqual([])
+      expect(await hitsOf(await search(guest, labelBrand))).toEqual([])
+
+      researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'Glycerin'], sourceUrl: 'https://shop.example/product' }))
+      expect(await catalog.research(byResearch)).toMatchObject({ kind: 'found' })
+      await catalog.addLabelIngredients(byLabel, ['Aqua', 'Glycerin'])
+      researcher.respondWith(() => ({ found: false }))
+
+      expect((await hitsOf(await search(guest, researchedBrand))).map((h) => h.id)).toEqual([byResearch])
+      expect((await hitsOf(await search(guest, labelBrand))).map((h) => h.id)).toEqual([byLabel])
+    })
+
+    it('stays hidden when research finds no ingredients for it', async () => {
+      const guest = await newGuest()
+      const brand = word()
+      const id = await resolvedWithoutIngredients(brand, 'Megacream')
+      researcher.respondWith(() => ({ found: false }))
+
+      expect(await catalog.research(id)).toEqual({ kind: 'not-found' })
+
+      expect(await hitsOf(await search(guest, brand))).toEqual([])
+    })
+
+    it('does not hide a product that has ingredients from the products of the same brand that have none', async () => {
+      const guest = await newGuest()
+      const brand = word()
+      await resolvedWithoutIngredients(brand, 'Ghost Serum')
+      const real = await resolved(brand, 'Real Serum')
+
+      expect((await hitsOf(await search(guest, brand))).map((h) => h.id)).toEqual([real])
+    })
+
+    it('is not found through an alias until it has ingredients, and then it is', async () => {
+      const guest = await newGuest()
+      const brand = word()
+      const id = await resolvedWithoutIngredients(brand, 'Hydrating Facial Cleanser')
+      analyst.sameProductWith(() => true)
+      expect(await resolvedWithoutIngredients(brand, 'Hydrating Cleanser')).toBe(id)
+      analyst.sameProductWith(() => false)
+      expect(await hitsOf(await search(guest, `${brand} hydrating cleanser`))).toEqual([])
+
+      await catalog.addLabelIngredients(id, ['Aqua', 'Glycerin'])
+
+      expect((await hitsOf(await search(guest, `${brand} hydrating cleanser`))).map((h) => h.id)).toEqual([id])
+    })
   })
 
   it('costs no model call: nothing leaves the Worker', async () => {
