@@ -16,6 +16,7 @@ export const MODELS: Record<AiJob, string> = {
   'same-product': MODEL,
   'image-check': MODEL,
   recognize: MODEL,
+  'recognize-shelf': MODEL,
   'read-label': MODEL,
   'split-name': MODEL,
 }
@@ -26,6 +27,7 @@ export const ROUTED_MODELS: Record<AiJob, string> = {
   'same-product': 'claude-opus-5-5',
   'image-check': 'claude-haiku-5-5',
   recognize: 'claude-opus-5-5',
+  'recognize-shelf': 'claude-sonnet-5-5',
   'read-label': 'claude-sonnet-5-5',
   'split-name': 'claude-haiku-5-5',
 }

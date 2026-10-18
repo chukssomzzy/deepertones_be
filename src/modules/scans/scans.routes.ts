@@ -3,7 +3,7 @@ import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
-import { BackPhotoBody, ConfirmProductBody, CreateScanBody, IdentifyProductBody, ItemParams, NoLabelBody, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
+import { BackPhotoBody, ConfirmProductBody, CreateScanBody, CreateShelfScanBody, IdentifyProductBody, ItemParams, NoLabelBody, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
 import { SCAN_POLICY } from './scans.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -11,6 +11,7 @@ const bearer = [{ bearerAuth: [] }]
 // Room for the multipart framing around the photos. bodyLimit runs before the form is read, so an oversized upload is never buffered.
 const FRAMING_BYTES = 1_000_000
 const MAX_SCAN_BODY_BYTES = SCAN_POLICY.maxPhotosPerScan * SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+const MAX_SHELF_BODY_BYTES = SCAN_POLICY.maxShelfPhotos * SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 const MAX_BACK_PHOTO_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 const MAX_RETAKE_BODY_BYTES = SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
 
@@ -36,6 +37,29 @@ const createScan = defineRoute({
   responses: { 202: success(ScanResponse, 'The scan, with every item recognising'), ...errorResponses(401, 413, 429) },
 })
 
+const createShelfScan = defineRoute({
+  method: 'post',
+  path: '/shelf',
+  operationId: 'createShelfScan',
+  tags: ['Product scans'],
+  summary: 'Start a product scan from 1 to 3 photos of a shelf',
+  description:
+    'Multipart, one `photos` part per photo. Each photo is read in the background for up to 5 products, each of which becomes an item beside the others from its photo; ' +
+    'a scan holds at most 20 items, and the rest are counted in the photo\'s `skipped`. Each product read counts against the daily limit (30 per user and 100 per address, 429 SCAN_DAILY_LIMIT ' +
+    'when the photos alone would pass it; products left out for it are counted in `skipped.dailyLimit`). The response is the scan with one `recognising` item per photo: follow it with ' +
+    '`GET /api/v1/scans/products/{scanId}/events` or poll `GET /api/v1/scans/products/{scanId}`, whose `photos` say how each photo went. One bad photo refuses the whole scan.',
+  security: bearer,
+  // The order and the reasons are createScan's; the limiters are the shelf route's own so that neither route spends the other's allowance.
+  middleware: [
+    rateLimit('SCAN_SHELF_IP_LIMITER', 'ip'),
+    signedIn(),
+    rateLimit('SCAN_SHELF_USER_LIMITER', 'user'),
+    bodyLimit({ maxSize: MAX_SHELF_BODY_BYTES }),
+  ],
+  request: { body: multipartBody(CreateShelfScanBody) },
+  responses: { 202: success(ScanResponse, 'The scan, with one recognising item per photo'), ...errorResponses(401, 413, 429) },
+})
+
 const getScan = defineRoute({
   method: 'get',
   path: '/{scanId}',
@@ -56,7 +80,7 @@ const watchScan = defineRoute({
   summary: 'Follow a product scan live, as server-sent events',
   description:
     'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the scan exactly as ' +
-    '`GET /api/v1/scans/products/{scanId}` returns it; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
+    '`GET /api/v1/scans/products/{scanId}` returns it; then, on a shelf scan, one `photo` for each photo as it is read (state and `skipped` counts, as that response shows them), always before the `item` events of its products; then one `item` per change, whose data is the item as that response shows it; then `done` (data `{}`) once every item is ' +
     '`ready`, `rejected`, `failed` or `unidentified`, after which the server closes the stream. A scan that is already finished gets `snapshot` and `done` at once. ' +
     'A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
     'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
@@ -179,6 +203,14 @@ export const scanRoutes = openapiApp()
       clientIp: c.req.header('cf-connecting-ip') ?? FALLBACK_IP,
     })
     return ok(c, toScanResponse(scan), 'Scan started', 202)
+  })
+  .openapi(createShelfScan, async (c) => {
+    const { photos } = c.req.valid('form')
+    const scan = await c.var.services.scans.createShelf({
+      photos: await Promise.all(photos.map(toProductImage)),
+      clientIp: c.req.header('cf-connecting-ip') ?? FALLBACK_IP,
+    })
+    return ok(c, toScanResponse(scan), 'Shelf scan started', 202)
   })
   .openapi(getScan, async (c) => ok(c, toScanResponse(await c.var.services.scans.getScan(c.req.valid('param').scanId)), 'Scan found'))
   .openapi(watchScan, async (c) => c.var.services.scans.watch(c.req.valid('param').scanId))

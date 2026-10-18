@@ -1167,6 +1167,48 @@ describe('ProductCatalogService.productView', () => {
   })
 })
 
+describe('ProductCatalogService.productSummary', () => {
+  it('gives the product\'s identity and its public image URL, and nothing of its formulation or concerns', async () => {
+    const ctx = setup()
+    ctx.images.respondTo(IMAGE_URL, JPEG)
+    ctx.analyst.imageShowsProductWith(() => true)
+    const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
+    ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
+    ctx.images.respondToPage(SOURCE_URL, IMAGE_URL)
+    const found = await ctx.service.research(productId)
+    if (found.kind !== 'found') throw new Error('expected found')
+
+    const summary = await ctx.service.productSummary(found.formulationId)
+
+    expect(summary).toEqual({
+      id: productId,
+      kind: 'named',
+      brand: 'CeraVe',
+      name: 'Hydrating Facial Cleanser',
+      variant: 'Night',
+      form: null,
+      category: 'skin',
+      imageUrl: ctx.images.publicUrl(`${IMAGE_KEY_PREFIX}/products/${productId}.jpg`),
+    })
+  })
+
+  it('has no image URL for a product with no image', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await researched(ctx)
+
+    expect(await ctx.service.productSummary(formulationId)).toMatchObject({ id: productId, variant: null, imageUrl: null })
+  })
+
+  it('says the product was not found for an unknown formulation id', async () => {
+    const { service } = setup()
+
+    const error = await errorOf(service.productSummary('no-such-formulation'))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+})
+
 describe('ProductCatalogService.research without asking the researcher', () => {
   const productFor = async (ctx: Ctx, who = identity()) => (await ctx.service.resolve(who)).productId
 
@@ -3120,13 +3162,13 @@ describe('ProductCatalogService.search', () => {
   const callsToAi = (ctx: Ctx) => ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length
   const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
 
-  it('finds a named product by a fragment of its brand, name and variant, as { id, brand, name, variant, form, category, imageUrl } and nothing more', async () => {
+  it('finds a named product by a fragment of its brand, name and variant, as { id, kind, brand, name, variant, form, category, imageUrl } and nothing more', async () => {
     const ctx = setup()
     const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
 
     const found = await ctx.service.search('facial cleanser')
 
-    expect(found).toEqual([{ id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', form: null, category: 'skin', imageUrl: null }])
+    expect(found).toEqual([{ id: productId, kind: 'named', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', form: null, category: 'skin', imageUrl: null }])
   })
 
   it('gives a null variant for a product with none, and the stock image\'s public URL for one that has an image', async () => {
@@ -3135,7 +3177,7 @@ describe('ProductCatalogService.search', () => {
     await ctx.repository.setProductImage(productId, { key: 'catalog/test/products/cerave.jpg', sourceUrl: IMAGE_URL, checkedAt: T0 })
 
     expect(await ctx.service.search('cerave')).toEqual([
-      { id: productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
+      { id: productId, kind: 'named', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
     ])
   })
 
@@ -3151,8 +3193,8 @@ describe('ProductCatalogService.search', () => {
     expect(found).toHaveLength(2)
     expect(found).toEqual(
       expect.arrayContaining([
-        { id: spray.productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'spray', category: 'body', imageUrl: null },
-        { id: rollOn.productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'roll-on', category: 'body', imageUrl: null },
+        { id: spray.productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'spray', category: 'body', imageUrl: null },
+        { id: rollOn.productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'roll-on', category: 'body', imageUrl: null },
       ]),
     )
   })
@@ -3288,11 +3330,11 @@ describe('ProductCatalogService.search', () => {
 })
 
 describe('ProductCatalogService.namedProduct', () => {
-  it('reads a named product back as { id, brand, name, variant, form, category, imageUrl }, with the form it was made with', async () => {
+  it('reads a named product back as { id, kind, brand, name, variant, form, category, imageUrl }, with the form it was made with', async () => {
     const ctx = setup()
     const { productId } = await ctx.service.resolve(identity({ brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', category: 'body', form: 'spray' }))
 
-    expect(await ctx.service.namedProduct(productId)).toEqual({ id: productId, brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', form: 'spray', category: 'body', imageUrl: null })
+    expect(await ctx.service.namedProduct(productId)).toEqual({ id: productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', form: 'spray', category: 'body', imageUrl: null })
   })
 
   it('gives a null form for a product made without one', async () => {

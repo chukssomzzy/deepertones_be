@@ -12,17 +12,18 @@ import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { NameSplit, NameSplitter } from '../../providers/name-splitting/name-splitter.provider'
 import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/photo-store.provider'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
-import type { ProductRecognizer, Recognition } from '../../providers/product-recognition/product-recognizer.provider'
+import type { ProductRecognizer, Recognition, ShelfProduct, ShelfRecognition } from '../../providers/product-recognition/product-recognizer.provider'
 import type { ProductCategory, ProductForm } from '../../providers/product-research/product-researcher.provider'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
-import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductView, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
+import { AnalysisInProgressError, CatalogBusyError, type ProductCatalogService, type ProductSummary, ResearchInProgressError, type ResolveResult } from '../catalog/catalog.service'
 import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { advanceScanItemSpec, type ScanStep } from './scans.job-specs'
 import { productPhotoUrl } from './scans.paths'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, Scan, ScanItem } from './scans.types'
+import { PHOTO_HELD_STATES } from './scans.types'
+import type { ItemPatch, ItemReason, ItemState, NewBackPhoto, NewRetake, NewScanItem, NewScanPhoto, NewSibling, Scan, ScanItem, ScanKind, ScanPhoto } from './scans.types'
 import type { NoLabelPurpose, NoLabelSource, NoLabelUsedFor } from './scans.vocabulary'
 
 export type ScanPolicy = {
@@ -44,6 +45,10 @@ export type ScanPolicy = {
    * nothing and would only make every sweep read more.
    */
   doneRepairWindowMs: number
+  /** A shelf scan holds at most this many photos, each read for up to 5 products. */
+  maxShelfPhotos: number
+  /** A scan holds at most this many items, whatever it was made of. */
+  maxItemsPerScan: number
 }
 
 export const SCAN_POLICY: ScanPolicy = {
@@ -56,11 +61,15 @@ export const SCAN_POLICY: ScanPolicy = {
   maxBackPhotos: 3,
   confirmBelowConfidence: 0.6,
   doneRepairWindowMs: 3 * 60 * 60 * 1000,
+  maxShelfPhotos: 3,
+  maxItemsPerScan: 20,
 }
 
 /** What the app shows for one item. Built by the service so a presenter, the stream and the events all say the same thing. */
 export type ScanItemView = {
   id: string
+  /** The scan photo the item was read from; null only for an item from before the column. */
+  photoId: string | null
   position: number
   state: ItemState
   reason: ItemReason | null
@@ -68,15 +77,23 @@ export type ScanItemView = {
   retakesLeft?: number
   /** What the photo was read as (or what the user corrected it to); absent until it has been read. */
   recognised?: { brand: string; name: string; variant: string | null; form: ProductForm | null; category: ProductCategory }
-  /** Only on a ready item. */
-  product?: ProductView
+  /** Only on a ready item: who the product is, not its ingredients or concerns. */
+  product?: ProductSummary
   /** Only on an unidentified item: what the user said about a product with no label, and the cautions those answers earn (worked out now, not stored). */
   noLabel?: { source: NoLabelSource; purpose: NoLabelPurpose; usedFor: NoLabelUsedFor; description?: string; concerns: DraftConcern[]; rulesVersion: number }
-  /** The product's stock image if it has one, else the user's own photo through a signed link, else none. */
+  /** The product's stock image if it has one, else the user's own photo (the item's, or its shelf photo's) through a signed link while it is still stored, else none. */
   image: { kind: 'stock' | 'user'; url: string } | null
 }
 
-export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
+/** One uploaded photo of a scan, and how its reading went. `skipped` counts what a shelf photo showed that did not become an item; all zero on a product scan. */
+export type ScanPhotoView = {
+  id: string
+  position: number
+  state: ScanPhoto['state']
+  skipped: { notBeauty: number; unreadable: number; overLimit: number; dailyLimit: number }
+}
+
+export type ScanView = { id: string; createdAt: Date; kind: ScanKind; photos: ScanPhotoView[]; items: ScanItemView[] }
 
 export type ConfirmedProduct = { brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory }
 
@@ -121,6 +138,8 @@ export class ScanService {
   private static readonly MAX_TEXT_LENGTH = 120
   private static readonly MIN_TYPED_NAME_LENGTH = 2
   private static readonly MAX_DESCRIPTION_LENGTH = 200
+  /** Products read from one shelf photo, and so the width of a shelf photo's run of item positions: photo p owns p * 5 to p * 5 + 4, its placeholder first. */
+  private static readonly PRODUCTS_PER_PHOTO = 5
   // Names the use of ipHashSecret; a different info derives an unrelated key, so this one is not the device-id hashing key.
   private static readonly IP_HASH_INFO = 'deepertones/ip-hash/v1'
   private static readonly FINAL_STATES: readonly ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
@@ -164,6 +183,7 @@ export class ScanService {
   private static scanNotFound = () => new NotFoundError('SCAN_NOT_FOUND', 'Scan not found')
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static isFinal = (state: ItemState) => ScanService.FINAL_STATES.includes(state)
+  private static isHeld = (state: ItemState) => PHOTO_HELD_STATES.includes(state)
 
   private readonly repository: ScansRepository
   private readonly catalog: ProductCatalogService
@@ -211,10 +231,26 @@ export class ScanService {
    * burst limits on the route bound that.
    */
   async create(input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
+    return this.startScan('product', this.policy.maxPhotosPerScan, input)
+  }
+
+  /**
+   * Starts a shelf scan: 1 to `maxShelfPhotos` photos, each read in the background for up to 5 products. Checked, stored and
+   * refused exactly as `create` is, with one difference in what is stored: each photo keeps its own image (under its own id), and
+   * gets one placeholder item in `recognising`, at position `photo position * 5`, with no image of its own. The placeholder becomes the
+   * photo's first product when it is read, and the others become items beside it (see `recogniseShelf`). The quota counts one per photo
+   * here; the products found are counted when they are made.
+   */
+  async createShelf(input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
+    return this.startScan('shelf', this.policy.maxShelfPhotos, input)
+  }
+
+  /** What `create` and `createShelf` share: check every photo, take the quota, put the photos then save the scan, and queue a recognise job per item. */
+  private async startScan(kind: ScanKind, maxPhotos: number, input: { photos: ProductImage[]; clientIp: string }): Promise<ScanView> {
     const { userId, profileId } = requireUser()
     if (input.photos.length === 0) throw new ValidationError('NO_IMAGES', 'Send at least one photo')
-    if (input.photos.length > this.policy.maxPhotosPerScan) {
-      throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${this.policy.maxPhotosPerScan} photos`)
+    if (input.photos.length > maxPhotos) {
+      throw new ValidationError('TOO_MANY_IMAGES', `A scan holds at most ${maxPhotos} photos`)
     }
     const valid = input.photos.map((photo) => this.checkPhoto(photo))
     const now = this.now()
@@ -224,14 +260,30 @@ export class ScanService {
     const scanId = this.newId()
     const stored = valid.map((photo, position) => {
       const id = this.newId()
-      const item: NewScanItem = { id, scanId, userId, position, photoKey: this.photoKey(userId, scanId, id, photo.extension), createdAt: now }
-      return { item, image: photo.image }
+      const photoId = this.newId()
+      // The image lives on the item of a product scan, so its photo row holds no key; on the photo of a shelf scan, so its item holds none.
+      const key = this.photoKey(userId, scanId, kind === 'shelf' ? photoId : id, photo.extension)
+      const item: NewScanItem = {
+        id,
+        scanId,
+        userId,
+        position: kind === 'shelf' ? position * ScanService.PRODUCTS_PER_PHOTO : position,
+        photoId,
+        photoKey: kind === 'shelf' ? null : key,
+        createdAt: now,
+      }
+      const scanPhoto: NewScanPhoto = { id: photoId, scanId, userId, position, photoKey: kind === 'shelf' ? key : null, createdAt: now }
+      return { item, scanPhoto, key, image: photo.image }
     })
     try {
-      await Promise.all(stored.map(({ item, image }) => this.photos.put(item.photoKey, image)))
-      await this.repository.createScan({ id: scanId, userId, profileId, ipHash, createdAt: now }, stored.map(({ item }) => item))
+      await Promise.all(stored.map(({ key, image }) => this.photos.put(key, image)))
+      await this.repository.createScan(
+        { id: scanId, userId, profileId, kind, ipHash, createdAt: now },
+        stored.map(({ scanPhoto }) => scanPhoto),
+        stored.map(({ item }) => item),
+      )
     } catch (error) {
-      await this.photos.deleteMany(stored.map(({ item }) => item.photoKey)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
+      await this.photos.deleteMany(stored.map(({ key }) => key)).catch(() => console.error({ outcome: 'photo-cleanup-failed', scanId }))
       throw error
     }
 
@@ -246,7 +298,7 @@ export class ScanService {
           .catch(() => console.error({ outcome: 'mark-failed-failed', scanId, itemId: item.id }))
       }
     }
-    return this.scanView({ id: scanId, createdAt: now }, await this.repository.itemsOf(scanId), now)
+    return this.scanView({ id: scanId, createdAt: now, kind }, await this.repository.itemsOf(scanId), now)
   }
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is SCAN_NOT_FOUND, with no hint that it exists. */
@@ -261,15 +313,16 @@ export class ScanService {
    *
    * The snapshot is read before the stream opens, and a change stored in between would reach no one: it was published
    * while nobody listened, and the snapshot predates it. So once the stream is open the items are read again, each one
-   * that differs from the snapshot (in state or time) is sent as an `item`, and if every item is final the scan is marked
+   * that differs from the snapshot (in state or time) is sent as an `item` (a shelf photo whose state or counts differ, as a `photo`, before the items), and if every item is final the scan is marked
    * done (if it was not) and `done` is sent, which also ends the stream. `done` is sent whenever all are final, even for a
    * scan already marked: this client has not had it. That covers a scan finished before the client came, and a `done` lost
    * while nobody was connected. A failure to send any of this is logged and never fails the stream.
    */
   async watch(scanId: string): Promise<Response> {
     const { scan, items } = await this.ownedScan(scanId)
-    const stream = await this.events.subscribe(scanId, await this.scanView(scan, items, this.now()))
-    await this.catchUp(scanId, items)
+    const view = await this.scanView(scan, items, this.now())
+    const stream = await this.events.subscribe(scanId, view)
+    await this.catchUp(scanId, items, view.photos)
     return stream
   }
 
@@ -282,20 +335,30 @@ export class ScanService {
   }
 
   /** What `watch` owes a client that opened its stream on `snapshot`: every change stored since, then `done` if the scan is over. */
-  private async catchUp(scanId: string, snapshot: ScanItem[]): Promise<void> {
+  private async catchUp(scanId: string, snapshot: ScanItem[], snapshotPhotos: ScanPhotoView[]): Promise<void> {
     let items: ScanItem[]
+    let photos: ScanPhoto[]
     try {
-      items = await this.repository.itemsOf(scanId)
+      ;[items, photos] = await Promise.all([this.repository.itemsOf(scanId), this.repository.photosOf(scanId)])
     } catch {
       console.error({ outcome: 'publish-failed', scanId })
       return
+    }
+    const shownPhotos = new Map(snapshotPhotos.map((photo) => [photo.id, JSON.stringify(photo)]))
+    for (const photo of photos.map(ScanService.photoView)) {
+      if (shownPhotos.get(photo.id) === JSON.stringify(photo)) continue
+      try {
+        await this.events.publish(scanId, { type: 'photo', photo })
+      } catch {
+        console.error({ outcome: 'publish-failed', scanId, photoId: photo.id })
+      }
     }
     const seen = new Map(snapshot.map((item) => [item.id, item]))
     for (const item of items) {
       const before = seen.get(item.id)
       if (before && before.state === item.state && before.updatedAt.getTime() === item.updatedAt.getTime()) continue
       try {
-        await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now()) })
+        await this.events.publish(scanId, { type: 'item', item: await this.itemView(item, this.now(), photos) })
       } catch {
         console.error({ outcome: 'publish-failed', scanId, itemId: item.id })
       }
@@ -604,8 +667,27 @@ export class ScanService {
         console.error({ outcome: 'reap-failed', scanId: item.scanId, itemId: item.id })
       }
     }
+    await this.releaseMissedPhotos()
     await this.sendMissingDone(now)
     return { requeued, failed }
+  }
+
+  /**
+   * Releases the photos an earlier release missed (the bucket refused the delete, or the worker died between the delete and the clear):
+   * product photos still held by an item that no longer needs them, and shelf photos none of whose items needs them. Each read has its
+   * own budget of `REAP_BATCH`, oldest first. A failure is logged by id and does not stop the sweep.
+   */
+  private async releaseMissedPhotos(): Promise<void> {
+    try {
+      for (const item of await this.repository.itemsWithReleasablePhoto(ScanService.REAP_BATCH)) {
+        await this.releaseKey(item.photoKey!, { scanId: item.scanId, itemId: item.id }, (key) => this.repository.clearItemPhotoKey(item.id, key))
+      }
+      for (const photo of await this.repository.shelfPhotosToRelease(ScanService.REAP_BATCH)) {
+        await this.releaseKey(photo.photoKey!, { scanId: photo.scanId, photoId: photo.id }, (key) => this.repository.clearShelfPhotoKey(photo.id, key))
+      }
+    } catch {
+      console.error({ outcome: 'photo-release-sweep-failed' })
+    }
   }
 
   /**
@@ -725,6 +807,11 @@ export class ScanService {
 
   private async recognise(item: ScanItem): Promise<void> {
     if (item.state !== 'recognising') return
+    // A shelf placeholder holds no image of its own: its photo does.
+    const shelfPhoto = item.photoKey === null && item.photoId !== null ? await this.repository.findPhoto(item.photoId) : null
+    // Also a photo already read whose image was released: a retry goes on from the stored answer.
+    if (shelfPhoto && (shelfPhoto.photoKey || shelfPhoto.recognition !== null)) return this.recogniseShelf(item, shelfPhoto)
+
     let seen = this.earlierRead(item)
     if (!seen) {
       const photo = item.photoKey === null ? null : await this.photos.get(item.photoKey)
@@ -732,20 +819,8 @@ export class ScanService {
         await this.fail(item, 'recognising', 'photo-missing')
         return
       }
-      try {
-        seen = await this.recognizer.recognize(photo)
-      } catch (error) {
-        // The model declined to look at the photo: a photo nothing can be read from.
-        if (!(error instanceof AnthropicRefusalError)) {
-          if (error instanceof AnthropicRequestError) {
-            // The same photo would get the same answer, so a retry would only pay again.
-            await this.fail(item, 'recognising', 'unavailable')
-            throw new PermanentJobError('The model gave no usable answer for this photo', { cause: error })
-          }
-          throw error
-        }
-        seen = { classification: 'unreadable' }
-      }
+      seen = await this.askRecognizer<Recognition>(item, () => this.recognizer.recognize(photo), { classification: 'unreadable' })
+      if (!seen) return
     }
 
     if (seen.classification === 'beauty-product') {
@@ -782,6 +857,205 @@ export class ScanService {
     }
     const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product' } as const
     await this.transition(item, { from: 'recognising', change: { state: 'rejected', reason: reason[seen.classification], photoKey: null } })
+  }
+
+  /**
+   * Asks the recognizer about a `recognising` item's photo. A refusal to look at the photo is `onRefusal` (a photo nothing can be read
+   * from); an answer that cannot be used fails it as `unavailable` and is permanent
+   * (the same photo would get the same answer, so a retry would only pay again). Any other error is left for the queue to retry.
+   * Undefined means the item has been failed and there is nothing more to do.
+   */
+  private async askRecognizer<T>(item: ScanItem, ask: () => Promise<T>, onRefusal: T): Promise<T | undefined> {
+    try {
+      return await ask()
+    } catch (error) {
+      if (error instanceof AnthropicRefusalError) return onRefusal
+      if (error instanceof AnthropicRequestError) {
+        await this.fail(item, 'recognising', 'unavailable')
+        throw new PermanentJobError('The model gave no usable answer for this photo', { cause: error })
+      }
+      throw error
+    }
+  }
+
+  /**
+   * ---- The shelf path of `recognise`: one photo, up to 5 products. ----
+   *
+   * The placeholder (the photo's item, at its first slot) takes the first product; the others become new items at the photo's
+   * following slots (`photo position * 5 + rank`, the same on every retry, so two photos read at once cannot collide). Everything the
+   * read changes is written by one `ScansRepository.fanOut` batch, so a retry or a repeated delivery can neither duplicate nor lose a
+   * product, and the scan cannot be done before its new items exist. The photo's whole answer is stored with it, so a retry after a
+   * failed enqueue reads the stored answer instead of paying for the model again.
+   *
+   * Nothing readable (decision A): the image is deleted FIRST (a failure is retried while the item is still recognising), then the
+   * photo and the placeholder are rejected for the answer's classification. There is never a retake for a shelf photo.
+   *
+   * Products are first collapsed (the same brand, name, variant and form, ignoring case and spacing, are one product; the first is
+   * kept). Then, in turn, three limits drop the least confident (the recognizer lists the most confident first), each counted on the photo:
+   * 5 per photo and the scan's `maxItemsPerScan` (both `skippedOverLimit`), then the day's allowance (`skippedDailyLimit`), which is
+   * the smaller of the user's and the scan address's, the placeholder already counted. The placeholder is never dropped.
+   *
+   * One answer per photo: a fresh model answer is stored on the photo (`storeRecognition`, first writer wins) BEFORE anything else is
+   * done, and the photo is read back, so every retry and every concurrent delivery goes on with the stored (winner's) answer. A
+   * rejection whose `fanOut` failed after the image was deleted therefore retries into the same rejection, not `photo-missing`.
+   *
+   * Two accepted races, like `create`'s quota: the daily allowance is read, not reserved, so concurrent photos can each pass it and
+   * the day may be exceeded by up to 4 extras per concurrent photo; and a sibling the SQL cap guard drops because another photo filled
+   * the scan first is not counted in `skippedOverLimit` (the count was made from the items read before the write).
+   */
+  private async recogniseShelf(item: ScanItem, photo: ScanPhoto): Promise<void> {
+    const read = await this.shelfRead(item, photo)
+    if (!read) return
+    if (read.products.length === 0) return this.rejectShelfPhoto(item, photo, read)
+
+    const at = this.now()
+    const scan = await this.repository.findScan(item.scanId)
+    if (!scan) return
+    const { products, overLimit } = await this.withinScanCap(item.scanId, ScanService.collapse(read.products))
+    const extras = products.length - 1
+    const allowed = Math.min(extras, await this.dailyAllowanceLeft(scan, at))
+    const kept = products.slice(0, 1 + allowed)
+    const stateOf = (product: ShelfProduct) => (product.confidence >= this.policy.confirmBelowConfidence ? ('matching' as const) : ('needs-confirmation' as const))
+    const siblings: NewSibling[] = kept.slice(1).map((product, index) => ({
+      id: this.newId(),
+      scanId: item.scanId,
+      userId: item.userId,
+      position: photo.position * ScanService.PRODUCTS_PER_PHOTO + 1 + index,
+      photoId: photo.id,
+      photoKey: null,
+      createdAt: at,
+      state: stateOf(product),
+      ...ScanService.recognisedFields(product),
+    }))
+
+    const { placeholderMoved } = await this.repository.fanOut({
+      photo: { id: photo.id, patch: { state: 'recognised', recognition: JSON.stringify(read), ...ScanService.skipped({ read, overLimit, dailyLimit: extras - allowed }), updatedAt: at } },
+      placeholder: { id: item.id, from: 'recognising', patch: { state: stateOf(kept[0]!), ...ScanService.recognisedFields(kept[0]!), updatedAt: at } },
+      siblings,
+      maxItems: this.policy.maxItemsPerScan,
+    })
+    if (!placeholderMoved) return
+    // Before the placeholder's match is queued, which can fail and put the placeholder back: its retry goes on from the stored answer, not the image.
+    // And before any event, so none links an image that is going. Nothing waiting for a confirmation means the image is not needed at all.
+    await this.releasePhotos({ ...item, state: stateOf(kept[0]!) })
+    await this.startShelfItems(item, photo, stateOf(kept[0]!), at)
+  }
+
+  /**
+   * The photo's answer: the one stored with it by an earlier attempt or a concurrent delivery, else the recognizer's, stored first
+   * and read back so that the answer used is the one that won. Undefined when the item has been failed instead.
+   */
+  private async shelfRead(item: ScanItem, photo: ScanPhoto): Promise<ShelfRecognition | undefined> {
+    const earlier = ScanService.storedShelfRead(photo.recognition)
+    if (earlier) return earlier
+    const image = photo.photoKey === null ? null : await this.photos.get(photo.photoKey)
+    if (!image) {
+      await this.fail(item, 'recognising', 'photo-missing')
+      return undefined
+    }
+    const fresh = await this.askRecognizer<ShelfRecognition>(item, () => this.recognizer.recognizeShelf(image), { classification: 'unreadable', products: [], excluded: { otherProducts: 0, unreadable: 0 } })
+    await this.repository.storeRecognition(photo.id, JSON.stringify(fresh), this.now())
+    const stored = ScanService.storedShelfRead((await this.repository.findPhoto(photo.id))?.recognition ?? null)
+    return stored ?? fresh
+  }
+
+  /** No readable product: the image goes first, then the photo and its placeholder are rejected, and the scan may be done. */
+  private async rejectShelfPhoto(item: ScanItem, photo: ScanPhoto, read: ShelfRecognition): Promise<void> {
+    if (photo.photoKey !== null) await this.photos.delete(photo.photoKey)
+    const at = this.now()
+    const reason = read.classification === 'other-product' ? 'not-a-beauty-product' : read.classification === 'face-or-person' ? 'face-or-person' : 'unreadable'
+    const { placeholderMoved } = await this.repository.fanOut({
+      photo: { id: photo.id, patch: { state: 'rejected', photoKey: null, recognition: JSON.stringify(read), ...ScanService.skipped({ read, overLimit: 0, dailyLimit: 0 }), updatedAt: at } },
+      placeholder: { id: item.id, from: 'recognising', patch: { state: 'rejected', reason, updatedAt: at } },
+      siblings: [],
+      maxItems: this.policy.maxItemsPerScan,
+    })
+    if (!placeholderMoved) return
+    // Normally a no-op, the photo's key was cleared by the same batch; it matters when the photo had already been read and kept its key.
+    await this.releasePhotos({ ...item, state: 'rejected' })
+    await this.publishPhoto(item.scanId, photo.id)
+    await this.publish(item.scanId, item.id)
+  }
+
+  /**
+   * What follows a read whose placeholder moved: its `match` first (if it cannot be queued the move is undone and the error rethrown, as
+   * `transition` does, and the retry reuses the stored answer), then each new item's, in rank order (a failure is logged by id and
+   * left to the reaper, the item stays `matching`), one "needs you" push for the photo if any of its items waits for a confirmation, and
+   * the item events. The placeholder's uses this attempt's time `at` (its move just stored it); each new item's uses its own stored `updatedAt`, which on a retry is the first attempt's, the key the reaper reuses.
+   */
+  private async startShelfItems(item: ScanItem, photo: ScanPhoto, placeholderState: 'matching' | 'needs-confirmation', at: Date): Promise<void> {
+    if (placeholderState === 'matching') await this.queueNext(item, { from: 'recognising', to: 'matching', next: 'match', at })
+    let all: ScanItem[]
+    try {
+      all = await this.repository.itemsOf(item.scanId)
+    } catch {
+      // The placeholder has moved and its step is queued: failing the job now would only be retried into a no-op.
+      return void console.error({ outcome: 'publish-failed', scanId: item.scanId, itemId: item.id })
+    }
+    const mine = all.filter((candidate) => candidate.photoId === photo.id)
+    for (const sibling of mine.filter((candidate) => candidate.id !== item.id && candidate.state === 'matching')) {
+      try {
+        await this.jobs.enqueue(advanceScanItemSpec, { itemId: sibling.id, step: 'match', at: sibling.updatedAt.getTime() })
+      } catch {
+        console.error({ outcome: 'enqueue-failed', scanId: item.scanId, itemId: sibling.id })
+      }
+    }
+    const waiting = mine.find((candidate) => candidate.state === 'needs-confirmation')
+    if (waiting) await this.notifyNeedsYou(waiting, 'confirm')
+    await this.publishPhoto(item.scanId, photo.id)
+    for (const published of mine) await this.publish(item.scanId, published.id)
+  }
+
+  /** Keeps the first 5 products and as many as the scan's cap leaves room for beside the items it holds, counting the rest as over the limit. The first is never dropped. */
+  private async withinScanCap(scanId: string, products: ShelfProduct[]): Promise<{ products: ShelfProduct[]; overLimit: number }> {
+    const held = (await this.repository.itemsOf(scanId)).length
+    const room = Math.max(0, this.policy.maxItemsPerScan - held)
+    const kept = products.slice(0, ScanService.PRODUCTS_PER_PHOTO).slice(0, 1 + room)
+    return { products: kept, overLimit: products.length - kept.length }
+  }
+
+  /** How many more products the scan's user and its address may add today, the smaller of the two; every item already stored (the placeholder too) is counted. */
+  private async dailyAllowanceLeft(scan: Scan, at: Date): Promise<number> {
+    const totals = await this.dailyTotals(scan.userId, scan.ipHash, at)
+    return Math.max(0, Math.min(...totals.map(({ taken, limit }) => limit - taken.count)))
+  }
+
+  private static storedShelfRead(json: string | null): ShelfRecognition | undefined {
+    if (json === null) return undefined
+    try {
+      const parsed = JSON.parse(json) as Partial<ShelfRecognition> | null
+      return parsed && Array.isArray(parsed.products) && parsed.excluded ? (parsed as ShelfRecognition) : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** The same product, whatever its case or spacing, once; the first is kept. */
+  private static collapse(products: ShelfProduct[]): ShelfProduct[] {
+    const normal = (text: string | undefined) => (text ?? '').trim().replace(/\s+/g, ' ').toLowerCase()
+    const seen = new Set<string>()
+    return products.filter((product) => {
+      const key = JSON.stringify([product.brand, product.name, product.variant, product.form].map(normal))
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  private static recognisedFields(product: ShelfProduct) {
+    return {
+      recognisedBrand: product.brand,
+      recognisedName: product.name,
+      recognisedVariant: product.variant || null,
+      recognisedForm: product.form ?? null,
+      recognisedCategory: product.category,
+      recognisedConfidence: product.confidence,
+    }
+  }
+
+  /** What the photo records of the products left out: the recognizer's own counts, and the ones the limits cut. */
+  private static skipped({ read, overLimit, dailyLimit }: { read: ShelfRecognition; overLimit: number; dailyLimit: number }) {
+    return { skippedNotBeauty: read.excluded.otherProducts, skippedUnreadable: read.excluded.unreadable, skippedOverLimit: overLimit, skippedDailyLimit: dailyLimit }
   }
 
   /**
@@ -1026,18 +1300,61 @@ export class ScanService {
     const at = this.now()
     const applied = await this.repository.updateItem(item.id, from, { ...change, updatedAt: at }, backPhoto, retake)
     if (!applied) return false
-    if (next) {
-      try {
-        await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: next, at: at.getTime() })
-      } catch (error) {
-        await this.repository
-          .updateItem(item.id, change.state, { reason: item.reason, ...undo, state: from, updatedAt: this.now() })
-          .catch(() => console.error({ outcome: 'undo-failed', scanId: item.scanId, itemId: item.id }))
-        throw error
-      }
-    }
+    if (next) await this.queueNext(item, { from, to: change.state, next, at, undo })
+    // After the next step is queued (a move that is undone must still have its photo), before the event, so the event never links a photo that is going.
+    await this.releasePhotos({ ...item, state: change.state, photoKey: change.photoKey === undefined ? item.photoKey : change.photoKey })
     await this.publish(item.scanId, item.id)
     return true
+  }
+
+  /**
+   * Lets go of the front photos an item that has just moved no longer needs; `item` is the item as the move left it. A photo is
+   * wanted only while an item using it is `recognising` or `needs-confirmation`, because only then may the user be shown it. So the
+   * item's own photo (a product scan's) goes when the item is in any other state, and its scan photo's image (a shelf scan's) goes
+   * when no item of that photo is in either. It never fails the move and never undoes it: a photo that stays is found again by
+   * the reaper.
+   */
+  private async releasePhotos(item: ScanItem): Promise<void> {
+    const ids = { scanId: item.scanId, itemId: item.id }
+    if (item.photoKey !== null && !ScanService.isHeld(item.state)) {
+      await this.releaseKey(item.photoKey, ids, (key) => this.repository.clearItemPhotoKey(item.id, key))
+    }
+    if (item.photoId === null) return
+    const photoId = item.photoId
+    try {
+      const photo = await this.repository.findPhoto(photoId)
+      if (!photo?.photoKey) return
+      const items = await this.repository.itemsOf(item.scanId)
+      if (items.some((candidate) => candidate.photoId === photoId && ScanService.isHeld(candidate.state))) return
+      await this.releaseKey(photo.photoKey, ids, (key) => this.repository.clearShelfPhotoKey(photoId, key))
+    } catch {
+      console.error({ outcome: 'photo-release-failed', ...ids })
+    }
+  }
+
+  /** Deletes the object, THEN clears the key that named it: a key never points at nothing, and a failure between the two leaves the key for the reaper. Logs ids only, never the key. */
+  private async releaseKey(key: string, ids: { scanId: string; itemId?: string; photoId?: string }, clear: (key: string) => Promise<boolean>): Promise<void> {
+    try {
+      await this.photos.delete(key)
+      await clear(key)
+    } catch {
+      console.error({ outcome: 'photo-release-failed', ...ids })
+    }
+  }
+
+  /**
+   * Queues `next`, stamped `at`, for an item that has just moved from `from` to `to`. If it cannot be queued the move is undone (the item's
+   * reason is put back, with whatever else `undo` names) and the error rethrown: see `transition`.
+   */
+  private async queueNext(item: ScanItem, { from, to, next, at, undo = {} }: { from: ItemState; to: ItemState; next: ScanStep; at: Date; undo?: Omit<ItemPatch, 'updatedAt'> }): Promise<void> {
+    try {
+      await this.jobs.enqueue(advanceScanItemSpec, { itemId: item.id, step: next, at: at.getTime() })
+    } catch (error) {
+      await this.repository
+        .updateItem(item.id, to, { reason: item.reason, ...undo, state: from, updatedAt: this.now() })
+        .catch(() => console.error({ outcome: 'undo-failed', scanId: item.scanId, itemId: item.id }))
+      throw error
+    }
   }
 
   /**
@@ -1057,6 +1374,16 @@ export class ScanService {
     }
   }
 
+  /** Sends the shelf photo as it now is, before the events of its items. A failure is logged, never thrown: the change is already stored. */
+  private async publishPhoto(scanId: string, photoId: string): Promise<void> {
+    try {
+      const photo = await this.repository.findPhoto(photoId)
+      if (photo) await this.events.publish(scanId, { type: 'photo', photo: ScanService.photoView(photo) })
+    } catch {
+      console.error({ outcome: 'publish-failed', scanId, photoId })
+    }
+  }
+
   /** An item is owned through its scan: the scan's profile decides, not the item's own user_id, which only feeds the quotas. */
   private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
     const { items } = await this.ownedScan(scanId)
@@ -1071,25 +1398,42 @@ export class ScanService {
     return this.itemView(item, this.now())
   }
 
-  private async scanView(scan: Pick<Scan, 'id' | 'createdAt'>, items: ScanItem[], now: Date): Promise<ScanView> {
-    return { id: scan.id, createdAt: scan.createdAt, items: await Promise.all(items.map((item) => this.itemView(item, now))) }
+  private static photoView(photo: ScanPhoto): ScanPhotoView {
+    return {
+      id: photo.id,
+      position: photo.position,
+      state: photo.state,
+      skipped: { notBeauty: photo.skippedNotBeauty, unreadable: photo.skippedUnreadable, overLimit: photo.skippedOverLimit, dailyLimit: photo.skippedDailyLimit },
+    }
   }
 
-  private async itemView(item: ScanItem, now: Date): Promise<ScanItemView> {
-    const product = item.state === 'ready' && item.formulationId !== null ? await this.catalog.productView(item.formulationId) : undefined
-    const stock = product?.product.imageUrl ?? null
+  private async scanView(scan: Pick<Scan, 'id' | 'createdAt' | 'kind'>, items: ScanItem[], now: Date): Promise<ScanView> {
+    const photos = await this.repository.photosOf(scan.id)
+    return { id: scan.id, createdAt: scan.createdAt, kind: scan.kind, photos: photos.map(ScanService.photoView), items: await Promise.all(items.map((item) => this.itemView(item, now, photos))) }
+  }
+
+  /** `photos` is the scan's photos when the caller already has them; without them a shelf item's photo is read for itself. */
+  private async itemView(item: ScanItem, now: Date, photos?: ScanPhoto[]): Promise<ScanItemView> {
+    const product = item.state === 'ready' && item.formulationId !== null ? await this.catalog.productSummary(item.formulationId) : undefined
+    const stock = product?.imageUrl ?? null
     let image: ScanItemView['image'] = null
     if (stock !== null) {
       image = { kind: 'stock', url: stock }
-    } else if (item.photoKey !== null) {
-      const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
-      const token = await signPhotoLink({ key: item.photoKey, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
-      image = { kind: 'user', url: productPhotoUrl(token) }
+    } else {
+      // The item's own photo (a product scan), else its scan photo's (a shelf scan), in either case only while it is still stored.
+      const photo = item.photoKey !== null || item.photoId === null ? undefined : (photos?.find((candidate) => candidate.id === item.photoId) ?? (await this.repository.findPhoto(item.photoId)))
+      const key = item.photoKey ?? photo?.photoKey ?? null
+      if (key !== null) {
+        const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
+        const token = await signPhotoLink({ key, userId: item.userId, expiresAt }, this.#photoLinkSecret, now)
+        image = { kind: 'user', url: productPhotoUrl(token) }
+      }
     }
     // A retake whose queueing failed keeps its row (the photo was sent), so a user can retake past the limit and the count must stop at 0.
     const retakesLeft = item.state === 'needs-retake' ? Math.max(0, this.policy.maxFrontPhotos - 1 - (await this.repository.countRetakes(item.id))) : undefined
     return {
       id: item.id,
+      photoId: item.photoId,
       position: item.position,
       state: item.state,
       reason: item.reason,
@@ -1161,18 +1505,23 @@ export class ScanService {
    * exactly 24 hours ago still counts). The wait is until the oldest counted photo leaves the window.
    */
   private async assertWithinQuota(userId: string, ipHash: string, adding: number, now: Date): Promise<void> {
-    const since = new Date(now.getTime() - ScanService.DAY)
-    const [mine, theirs] = await Promise.all([this.repository.photosSince(userId, since), this.repository.photosSinceIp(ipHash, since)])
     const waits: number[] = []
-    for (const [taken, limit] of [
-      [mine, this.policy.dailyPhotosPerUser],
-      [theirs, this.policy.dailyPhotosPerIp],
-    ] as const) {
+    for (const { taken, limit } of await this.dailyTotals(userId, ipHash, now)) {
       if (taken.count + adding <= limit) continue
       waits.push(taken.oldest ? Math.max(1, Math.ceil((taken.oldest.getTime() + ScanService.DAY - now.getTime()) / 1000)) : 60)
     }
     if (waits.length > 0) {
       throw new RateLimitedError('SCAN_DAILY_LIMIT', 'You have reached the daily limit for product photos', { retryAfterSeconds: Math.max(...waits) })
     }
+  }
+
+  /** What the user and the address have taken in the last 24 hours, each with its limit. */
+  private async dailyTotals(userId: string, ipHash: string, now: Date) {
+    const since = new Date(now.getTime() - ScanService.DAY)
+    const [mine, theirs] = await Promise.all([this.repository.photosSince(userId, since), this.repository.photosSinceIp(ipHash, since)])
+    return [
+      { taken: mine, limit: this.policy.dailyPhotosPerUser },
+      { taken: theirs, limit: this.policy.dailyPhotosPerIp },
+    ]
   }
 }

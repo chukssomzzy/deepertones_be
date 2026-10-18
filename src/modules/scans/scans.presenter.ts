@@ -1,10 +1,10 @@
 import type { z } from '@hono/zod-openapi'
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
-import type { ProductView } from '../catalog/catalog.service'
-import type { ScanItemResponse, ScanResponse } from './scans.schemas'
-import type { ScanItemView, ScanView } from './scans.service'
+import type { ProductSummary } from '../catalog/catalog.service'
+import type { ScanItemResponse, ScanPhotoResponse, ScanResponse } from './scans.schemas'
+import type { ScanItemView, ScanPhotoView, ScanView } from './scans.service'
 
-type ConcernResponse = NonNullable<z.infer<typeof ScanItemResponse>['product']>['concerns'][number]
+type ConcernResponse = NonNullable<z.infer<typeof ScanItemResponse>['noLabel']>['concerns'][number]
 
 const toConcernResponse = (concern: ConcernResponse): ConcernResponse => ({
   kind: concern.kind,
@@ -16,27 +16,16 @@ const toConcernResponse = (concern: ConcernResponse): ConcernResponse => ({
   sources: concern.sources,
 })
 
-// Every field is named, so a field added to the catalog's view is not published by accident.
-const toProductResponse = ({ product, formulation, concerns, reference }: ProductView): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
-  product: {
-    id: product.id,
-    kind: product.kind,
-    brand: product.brand,
-    name: product.name,
-    variant: product.variant,
-    form: product.form,
-    category: product.category,
-    imageUrl: product.imageUrl,
-  },
-  formulation: {
-    id: formulation.id,
-    ingredients: formulation.ingredients,
-    source: { kind: formulation.source.kind, url: formulation.source.url },
-    foundAt: formulation.foundAt.toISOString(),
-    analysedAt: formulation.analysedAt?.toISOString() ?? null,
-  },
-  concerns: concerns.map(toConcernResponse),
-  reference: { version: reference.version, coverage: reference.coverage },
+// Every field is named, so a field added to the catalog's summary is not published by accident.
+const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
+  id: product.id,
+  kind: product.kind,
+  brand: product.brand,
+  name: product.name,
+  variant: product.variant,
+  form: product.form,
+  category: product.category,
+  imageUrl: product.imageUrl,
 })
 
 const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, rulesVersion }: NonNullable<ScanItemView['noLabel']>): NonNullable<z.infer<typeof ScanItemResponse>['noLabel']> => ({
@@ -50,6 +39,7 @@ const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, ru
 
 export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemResponse> => ({
   id: item.id,
+  photoId: item.photoId,
   position: item.position,
   state: item.state,
   reason: item.reason,
@@ -70,9 +60,23 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
   image: item.image ? { kind: item.image.kind, url: item.image.url } : null,
 })
 
+export const toScanPhotoResponse = (photo: ScanPhotoView): z.infer<typeof ScanPhotoResponse> => ({
+  id: photo.id,
+  position: photo.position,
+  state: photo.state,
+  skipped: {
+    notBeauty: photo.skipped.notBeauty,
+    unreadable: photo.skipped.unreadable,
+    overLimit: photo.skipped.overLimit,
+    dailyLimit: photo.skipped.dailyLimit,
+  },
+})
+
 export const toScanResponse = (scan: ScanView): z.infer<typeof ScanResponse> => ({
   id: scan.id,
   createdAt: scan.createdAt.toISOString(),
+  kind: scan.kind,
+  photos: scan.photos.map(toScanPhotoResponse),
   items: scan.items.map(toScanItemResponse),
 })
 
