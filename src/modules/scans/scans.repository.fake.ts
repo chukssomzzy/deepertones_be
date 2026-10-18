@@ -1,4 +1,5 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
+import { FakeShelfStore } from '../shelf/shelf.store.fake'
 import type { ScansRepository } from './scans.repository'
 import { PHOTO_HELD_STATES } from './scans.types'
 import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
@@ -17,10 +18,18 @@ export class FakeScansRepository implements ScansRepository {
   private backPhotos = new Map<string, NewBackPhoto>()
   private retakes = new Map<string, NewRetake>()
   private readonly profiles: FakeProfilesRepository
+  private readonly knowsProfiles: boolean
+  private readonly shelf: FakeShelfStore
 
-  /** Pass the fake profiles repository a test writes defaults into: `adoptOrphanScans` reads each owner's default from it, as D1 reads the profiles table. */
-  constructor(options: { profiles?: FakeProfilesRepository } = {}) {
+  /**
+   * Pass the fake profiles repository a test writes defaults into: `adoptOrphanScans` reads each owner's default from it, as D1 reads the profiles table.
+   * `shelf` is the store the shelf rows go into, to share with a reader. A shelf row needs its profile to exist, as D1's join does: when no
+   * profiles repository is given (tests that never create profiles) any profile id on a scan counts as existing.
+   */
+  constructor(options: { profiles?: FakeProfilesRepository; shelf?: FakeShelfStore } = {}) {
     this.profiles = options.profiles ?? new FakeProfilesRepository()
+    this.knowsProfiles = options.profiles !== undefined
+    this.shelf = options.shelf ?? new FakeShelfStore()
   }
 
   /**
@@ -115,11 +124,19 @@ export class FakeScansRepository implements ScansRepository {
    * leaves out is unchanged; one it sets to null is cleared. Nothing changes when the state differs or the item is unknown.
    * `backPhoto` is the upload this move records for the daily quotas: stored together with the patch when it applies, and
    * not at all when it does not. `retake` is the same for a retaken front photo.
+   *
+   * A move into `ready` or `unidentified` also shelves the item, as D1 does in the same batch: it throws, changing nothing, when the patch has no
+   * `updatedAt`; a `ready` product row for the profile and product is updated to this item (latest wins, a removed row is restored, `added_at`
+   * stays), a `ready` item with no product is not shelved, and an `unidentified` item gets one no-label row. Nothing is shelved when the scan
+   * has no profile or the profile does not exist.
    */
   async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
+    const shelved = patch.state === 'ready' || patch.state === 'unidentified' ? patch.state : null
+    if (shelved && !patch.updatedAt) throw new Error('updatedAt is required when an item moves into ready or unidentified')
     const item = this.items.get(itemId)
     if (!item || item.state !== expected) return false
     this.apply(item, patch)
+    if (shelved) await this.shelve(item, shelved)
     if (backPhoto) this.backPhotos.set(backPhoto.id, { ...backPhoto })
     if (retake) this.retakes.set(retake.id, { ...retake })
     return true
@@ -340,6 +357,24 @@ export class FakeScansRepository implements ScansRepository {
   /** How many retakes have been uploaded for the item, whatever became of their photos. */
   async countRetakes(itemId: string): Promise<number> {
     return [...this.retakes.values()].filter((upload) => upload.itemId === itemId).length
+  }
+
+  private async shelve(item: ScanItem, state: 'ready' | 'unidentified'): Promise<void> {
+    const profileId = this.scans.get(item.scanId)?.profileId
+    if (!profileId || (this.knowsProfiles && !(await this.profiles.findById(profileId)))) return
+    const at = item.updatedAt
+    if (state === 'unidentified') {
+      if (this.shelf.rows.some((r) => r.itemId === item.id && r.productId === null)) return
+      this.shelf.rows.push({ id: crypto.randomUUID(), profileId, kind: 'no-label', productId: null, formulationId: null, scanId: item.scanId, itemId: item.id, addedAt: at, lastScannedAt: at, removedAt: null, removedReason: null })
+      return
+    }
+    if (item.productId === null) return
+    const existing = this.shelf.rows.find((r) => r.profileId === profileId && r.productId === item.productId)
+    if (existing) {
+      Object.assign(existing, { formulationId: item.formulationId, scanId: item.scanId, itemId: item.id, lastScannedAt: at, removedAt: null, removedReason: null })
+      return
+    }
+    this.shelf.rows.push({ id: crypto.randomUUID(), profileId, kind: 'product', productId: item.productId, formulationId: item.formulationId, scanId: item.scanId, itemId: item.id, addedAt: at, lastScannedAt: at, removedAt: null, removedReason: null })
   }
 
   /** Sets each field the patch names; a field left out (undefined) is unchanged, and null clears. */

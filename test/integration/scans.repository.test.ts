@@ -1,7 +1,9 @@
 import { env } from 'cloudflare:workers'
+import { eq } from 'drizzle-orm'
 import { createDb } from '../../src/lib/db'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { scansRepositoryContract } from '../../src/modules/scans/scans.repository.contract'
+import { profileProducts } from '../../src/modules/shelf/shelf.table'
 import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { users as usersTable } from '../../src/modules/users/users.table'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
@@ -30,6 +32,11 @@ scansRepositoryContract('D1', () => {
       const id = crypto.randomUUID()
       await profiles.insert({ id, userId, displayName: null, isDefault: true, createdAt: BASE })
       return id
+    },
+    shelfOf: (profileId) => db.select().from(profileProducts).where(eq(profileProducts.profileId, profileId)),
+    // Stands in for the shelf module's remove, which comes later: it marks the row as that remove will.
+    removeFromShelf: async (entryId, reason, at) => {
+      await db.update(profileProducts).set({ removedAt: at, removedReason: reason }).where(eq(profileProducts.id, entryId))
     },
   }
 })
