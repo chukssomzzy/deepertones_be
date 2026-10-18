@@ -11,18 +11,31 @@ type ScheduledHandler = (controller: ScheduledController, env: CloudflareBinding
 
 /**
  * The scan reaper (ScanService.reap): queues again the steps of items stuck in a working state, fails the ones stuck for
- * over 2 hours. It reads no request context, so it needs no actor. A failure is logged and rethrown so Cloudflare records
+ * over 2 hours. It then fills the search text of products that have none (ProductCatalogService.fillSearchText), also when the sweep failed. It reads no request context, so it needs no actor. A sweep failure is logged and rethrown (after the fill) so Cloudflare records
  * the run as failed; the next sweep, 10 minutes on, looks at the same items again.
  */
 export const createScanReaper = (): ScheduledHandler => async (_controller, env) => {
   const job = 'scan-reaper'
+  const container = buildContainer(env)
+  let sweepFailed = false
+  let sweepError: unknown
   try {
-    const { requeued, failed } = await buildContainer(env).scans.reap(new Date())
+    const { requeued, failed } = await container.scans.reap(new Date())
     console.log({ job, outcome: 'done', requeued, failed })
   } catch (error) {
     console.error({ job, outcome: 'failed', error: describeError(error) })
-    throw error
+    sweepFailed = true
+    sweepError = error
   }
+  // Catalog upkeep rides on this cron: search text for products a Worker that did not know the column made. After the sweep, which is the
+  // job's purpose and spends the Worker's subrequests first; in its own try, so a failure here never fails the sweep nor is hidden by it.
+  try {
+    const filled = await container.catalog.fillSearchText()
+    if (filled > 0) console.log({ job, outcome: 'search-text-filled', filled })
+  } catch (error) {
+    console.error({ job, outcome: 'search-text-fill-failed', error: describeError(error) })
+  }
+  if (sweepFailed) throw sweepError
 }
 
 /**

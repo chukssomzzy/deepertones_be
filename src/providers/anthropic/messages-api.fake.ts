@@ -17,6 +17,7 @@ export const MODELS: Record<AiJob, string> = {
   'image-check': MODEL,
   recognize: MODEL,
   'read-label': MODEL,
+  'split-name': MODEL,
 }
 /** A different priced model per job, so a test can tell which model a job was routed to. */
 export const ROUTED_MODELS: Record<AiJob, string> = {
@@ -26,6 +27,7 @@ export const ROUTED_MODELS: Record<AiJob, string> = {
   'image-check': 'claude-haiku-5-5',
   recognize: 'claude-opus-5-5',
   'read-label': 'claude-sonnet-5-5',
+  'split-name': 'claude-haiku-5-5',
 }
 /** A cap no test comes near, for tests that are not about the cap. */
 export const BIG_CAP_MICROS = 1_000_000_000_000

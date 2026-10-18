@@ -118,7 +118,15 @@
     { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "1006", "simple": { "limit": 20, "period": 60 } },
     { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "1007", "simple": { "limit": 10, "period": 60 } },
     { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "1008", "simple": { "limit": 10, "period": 60 } },
-    { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "1009", "simple": { "limit": 20, "period": 60 } }
+    { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "1009", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_RETAKE_IP_LIMITER", "namespace_id": "1010", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_RETAKE_USER_LIMITER", "namespace_id": "1011", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SCAN_IDENTIFY_IP_LIMITER", "namespace_id": "1012", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "1013", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "1016", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "1017", "simple": { "limit": 10, "period": 60 } },
+    { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
+    { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
 
   // Two crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
@@ -286,7 +294,15 @@
         { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "2006", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "2007", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "2008", "simple": { "limit": 10, "period": 60 } },
-        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "2009", "simple": { "limit": 20, "period": 60 } }
+        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "2009", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_RETAKE_IP_LIMITER", "namespace_id": "2010", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_RETAKE_USER_LIMITER", "namespace_id": "2011", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_IDENTIFY_IP_LIMITER", "namespace_id": "2012", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "2013", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "2016", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "2017", "simple": { "limit": 10, "period": 60 } },
+        { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
+        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
       // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
@@ -420,7 +436,15 @@
         { "name": "SCAN_CREATE_IP_LIMITER", "namespace_id": "3006", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_CREATE_USER_LIMITER", "namespace_id": "3007", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_BACK_PHOTO_USER_LIMITER", "namespace_id": "3008", "simple": { "limit": 10, "period": 60 } },
-        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "3009", "simple": { "limit": 20, "period": 60 } }
+        { "name": "SCAN_BACK_PHOTO_IP_LIMITER", "namespace_id": "3009", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_RETAKE_IP_LIMITER", "namespace_id": "3010", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_RETAKE_USER_LIMITER", "namespace_id": "3011", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_IDENTIFY_IP_LIMITER", "namespace_id": "3012", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "3013", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "3016", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "3017", "simple": { "limit": 10, "period": 60 } },
+        { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
+        { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],
       // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
       "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },

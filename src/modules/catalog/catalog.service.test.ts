@@ -7,7 +7,7 @@ import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.pr
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import type { ProductForm, ProductIdentity } from '../../providers/product-research/product-researcher.provider'
-import { identityKey } from './catalog.identity'
+import { brandKey, identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
 import { AnalysisRejectedError, CATALOG_POLICY, CatalogBusyError, ProductCatalogService } from './catalog.service'
@@ -1033,6 +1033,7 @@ describe('ProductCatalogService.productView', () => {
     expect(view).toEqual({
       product: {
         id: productId,
+        kind: 'named',
         brand: 'CeraVe',
         name: 'Hydrating Facial Cleanser',
         variant: 'Night',
@@ -1100,12 +1101,14 @@ describe('ProductCatalogService.productSummary', () => {
     const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
     ctx.researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
     ctx.images.respondToPage(SOURCE_URL, IMAGE_URL)
-    await ctx.service.research(productId)
+    const found = await ctx.service.research(productId)
+    if (found.kind !== 'found') throw new Error('expected found')
 
-    const summary = await ctx.service.productSummary(productId)
+    const summary = await ctx.service.productSummary(found.formulationId)
 
     expect(summary).toEqual({
       id: productId,
+      kind: 'named',
       brand: 'CeraVe',
       name: 'Hydrating Facial Cleanser',
       variant: 'Night',
@@ -1117,15 +1120,15 @@ describe('ProductCatalogService.productSummary', () => {
 
   it('has no image URL for a product with no image', async () => {
     const ctx = setup()
-    const { productId } = await researched(ctx)
+    const { productId, formulationId } = await researched(ctx)
 
-    expect(await ctx.service.productSummary(productId)).toMatchObject({ id: productId, variant: null, imageUrl: null })
+    expect(await ctx.service.productSummary(formulationId)).toMatchObject({ id: productId, variant: null, imageUrl: null })
   })
 
-  it('says the product was not found for an unknown product id', async () => {
+  it('says the product was not found for an unknown formulation id', async () => {
     const { service } = setup()
 
-    const error = await errorOf(service.productSummary('no-such-product'))
+    const error = await errorOf(service.productSummary('no-such-formulation'))
 
     expect(error).toBeInstanceOf(NotFoundError)
     expect(error.code).toBe('PRODUCT_NOT_FOUND')
@@ -2443,5 +2446,957 @@ describe('ProductCatalogService.analyse attempt accounting', () => {
 
       await quietly(async () => expect(ctx.service.analyse(formulationId)).rejects.toBeInstanceOf(AnalysisRejectedError))
     })
+  })
+})
+
+// The identity key of the product that holds a list nobody named: "unnamed:" and the list's ingredients key (lower case, one per line).
+const CLEAN_UNNAMED_KEY = 'unnamed:aqua\nglycerin\ncetearyl alcohol'
+const MERCURY_UNNAMED_KEY = 'unnamed:aqua\nmercury\nglycerin'
+
+describe('ProductCatalogService.resolve: the kind of a product', () => {
+  it('creates a product from a label as a named one', async () => {
+    const { service, repository } = setup()
+
+    await service.resolve(identity())
+
+    expect(await repository.findProductByKey(identityKey(identity()))).toMatchObject({ kind: 'named' })
+  })
+})
+
+describe('ProductCatalogService.fromLabel: an ingredient list with no name', () => {
+  it('creates an unnamed product keyed by the list, with no brand, name or variant and the category other, and stores the list as a label formulation', async () => {
+    const ctx = setup()
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    expect(result).toMatchObject({ productId: expect.any(String), formulationId: expect.any(String) })
+    expect(await ctx.repository.findProductByKey(CLEAN_UNNAMED_KEY)).toMatchObject({
+      id: result.productId,
+      kind: 'unnamed',
+      brand: '',
+      name: '',
+      variant: null,
+      category: 'other',
+      createdAt: T0,
+    })
+    expect(await ctx.repository.findFormulation(result.formulationId)).toMatchObject({
+      productId: result.productId,
+      ingredients: CLEAN,
+      sourceKind: 'label',
+      sourceUrl: null,
+      foundAt: T0,
+      analysisVersion: null,
+    })
+  })
+
+  it('takes the category from the label when it printed one', async () => {
+    const ctx = setup()
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, category: 'hair' })
+
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ kind: 'unnamed', category: 'hair', brand: '', name: '' })
+  })
+
+  it.each([
+    ['a brand alone', { brand: 'Glow Co' }],
+    ['a name alone', { name: 'Bright Tone Serum' }],
+    ['a variant alone', { variant: 'Night' }],
+    ['a brand and a variant', { brand: 'Glow Co', variant: 'Night' }],
+  ] as const)('treats %s as no name at all: the product is unnamed, with empty brand and name', async (_label, partial) => {
+    const ctx = setup()
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, ...partial })
+
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null })
+    expect(await ctx.repository.findProductByKey(CLEAN_UNNAMED_KEY)).toMatchObject({ id: result.productId })
+  })
+
+  it('gives the same product and formulation to the same list again, whoever it comes from, creating nothing new', async () => {
+    const ctx = setup()
+    const first = await ctx.service.fromLabel({ ingredients: CLEAN })
+    ctx.advance(HOUR)
+
+    const again = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    expect(again).toMatchObject({ productId: first.productId, formulationId: first.formulationId })
+  })
+
+  it('reads a list written another way as the same list: case, spacing and a trailing footnote mark do not matter', async () => {
+    const ctx = setup()
+    const first = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    const again = await ctx.service.fromLabel({ ingredients: ['AQUA', '  Glycerin* ', 'cetearyl   alcohol'] })
+
+    expect(again).toMatchObject({ productId: first.productId, formulationId: first.formulationId })
+  })
+
+  it('treats a list in another order, or with an ingredient more, as a different list with its own product and formulation', async () => {
+    const ctx = setup()
+    const first = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    const reordered = await ctx.service.fromLabel({ ingredients: ['Glycerin', 'Aqua', 'Cetearyl Alcohol'] })
+    const longer = await ctx.service.fromLabel({ ingredients: [...CLEAN, 'Phenoxyethanol'] })
+
+    for (const other of [reordered, longer]) {
+      expect(other.productId).not.toBe(first.productId)
+      expect(other.formulationId).not.toBe(first.formulationId)
+    }
+    expect(reordered.productId).not.toBe(longer.productId)
+  })
+
+  it('ends with one product and one formulation when two scans of the same list arrive at once', async () => {
+    const ctx = setup()
+
+    const [a, b] = await Promise.all([ctx.service.fromLabel({ ingredients: CLEAN }), ctx.service.fromLabel({ ingredients: CLEAN })])
+
+    expect(a).toMatchObject({ productId: b.productId, formulationId: b.formulationId })
+    expect(await ctx.repository.findProductByKey(CLEAN_UNNAMED_KEY)).toMatchObject({ id: a.productId })
+  })
+
+  it('analyses the list once: the same list from another scan finds it analysed, and analysing it again calls nothing', async () => {
+    const ctx = setup()
+    const first = await ctx.service.fromLabel({ ingredients: CLEAN })
+    await ctx.service.analyse(first.formulationId)
+
+    const second = await ctx.service.fromLabel({ ingredients: CLEAN })
+    await ctx.service.analyse(second.formulationId)
+
+    expect(second.formulationId).toBe(first.formulationId)
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+    expect((await ctx.service.productView(second.formulationId)).formulation.analysedAt).toEqual(T0)
+  })
+
+  it('never researches or asks whether two products are the same: no model is called to store a list', async () => {
+    const ctx = setup()
+
+    await ctx.service.fromLabel({ ingredients: CLEAN })
+    await ctx.service.fromLabel({ ingredients: WITH_MERCURY, category: 'skin' })
+
+    expect(ctx.researcher.calls).toEqual([])
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+    expect(ctx.analyst.calls.analyse).toEqual([])
+  })
+
+  const entries = (count: number) => Array.from({ length: count }, (_, i) => `Ingredient ${i}`)
+
+  it.each([
+    ['150 entries', entries(150)],
+    ['an entry of 120 characters', ['Aqua', 'a'.repeat(120)]],
+    ['an entry of 120 characters once trimmed', ['Aqua', `  ${'a'.repeat(120)}  `]],
+  ])('accepts %s', async (_label, ingredients) => {
+    const ctx = setup()
+
+    await expect(ctx.service.fromLabel({ ingredients })).resolves.toMatchObject({ productId: expect.any(String), formulationId: expect.any(String) })
+  })
+
+  it.each([
+    ['an empty list', []],
+    ['151 entries', entries(151)],
+    ['an entry of 121 characters', ['Aqua', 'a'.repeat(121)]],
+    ['an entry of 121 characters once trimmed', ['Aqua', `  ${'a'.repeat(121)}  `]],
+    ['a blank entry', ['Aqua', '   ', 'Glycerin']],
+    ['an entry with a link', ['Aqua', 'see http://evil.example']],
+    ['an entry with markup', ['Aqua', '<script>evil()</script>']],
+    ['an entry with a control character', ['Aqua', 'Glyc\u0007erin']],
+  ])('rejects %s as an unreadable label, and creates no product and no formulation', async (_label, ingredients) => {
+    const ctx = setup()
+
+    const error = await errorOf(ctx.service.fromLabel({ ingredients }))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('LABEL_UNREADABLE')
+    expect(await ctx.repository.findProductByKey(`unnamed:${ingredients.map((i) => i.trim().toLowerCase()).join('\n')}`)).toBeNull()
+  })
+})
+
+describe('ProductCatalogService.fromLabel: an ingredient list with a brand and name', () => {
+  const GLOW = identity({ brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+
+  it('creates the named product the label names and stores the list as its label formulation, without researching it', async () => {
+    const ctx = setup()
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' })
+
+    const product = await ctx.repository.findProductByKey('glow co|bright tone serum|night|')
+    expect(product).toMatchObject({ id: result.productId, kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin', createdAt: T0 })
+    expect(await ctx.repository.findFormulation(result.formulationId)).toMatchObject({
+      productId: result.productId,
+      ingredients: CLEAN,
+      sourceKind: 'label',
+      sourceUrl: null,
+      foundAt: T0,
+    })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('files a product whose label printed no category under other', async () => {
+    const ctx = setup()
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum' })
+
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ kind: 'named', category: 'other', variant: null })
+  })
+
+  it('does not make an unnamed product as well', async () => {
+    const ctx = setup()
+
+    await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+
+    expect(await ctx.repository.findProductByKey(CLEAN_UNNAMED_KEY)).toBeNull()
+  })
+
+  it('leaves the new product ready for analysis, as a researched one would be: resolving it later says needs-analysis, then ready once analysed', async () => {
+    const ctx = setup()
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+
+    expect(await ctx.service.resolve(GLOW)).toEqual({ kind: 'needs-analysis', productId: result.productId, formulationId: result.formulationId })
+
+    await ctx.service.analyse(result.formulationId)
+
+    expect(await ctx.service.resolve(GLOW)).toEqual({ kind: 'ready', productId: result.productId, formulationId: result.formulationId })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('finds a product the catalog already holds, however the label spells it, and reuses its identical list without calling the researcher again', async () => {
+    const ctx = setup()
+    const known = await analysed(ctx)
+    const researches = ctx.researcher.calls.length
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'CERAVE', name: 'hydrating  facial cleanser 236 ml', category: 'skin' })
+
+    expect(result).toMatchObject({ productId: known.productId, formulationId: known.formulationId })
+    expect(ctx.researcher.calls).toHaveLength(researches)
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+  })
+
+  it('stores a materially different list for a known product as a new label formulation, leaving the researched one as it was', async () => {
+    const ctx = setup()
+    const known = await analysed(ctx)
+
+    const result = await ctx.service.fromLabel({ ingredients: [...CLEAN, 'Phenoxyethanol'], brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' })
+
+    expect(result.productId).toBe(known.productId)
+    expect(result.formulationId).not.toBe(known.formulationId)
+    expect(await ctx.repository.findFormulation(result.formulationId)).toMatchObject({ productId: known.productId, sourceKind: 'label', analysisVersion: null })
+    expect(await ctx.repository.findFormulation(known.formulationId)).toMatchObject({ sourceKind: 'web', analysisVersion: ANALYSIS_VERSION })
+  })
+
+  it('gives a different variant its own product', async () => {
+    const ctx = setup()
+    const day = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Day', category: 'skin' })
+
+    const night = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' })
+
+    expect(night.productId).not.toBe(day.productId)
+  })
+
+  describe('a name that nearly matches one the catalog holds', () => {
+    const KNOWN = identity({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow' })
+    const LABEL = { ingredients: CLEAN, brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster', category: 'skin' } as const
+
+    it('asks the model whether it is the same product, and uses the product it says it is, remembering the spelling', async () => {
+      const ctx = setup()
+      const known = await ctx.service.resolve(KNOWN)
+      ctx.analyst.sameProductWith(() => true)
+
+      const first = await ctx.service.fromLabel(LABEL)
+      const second = await ctx.service.fromLabel(LABEL)
+
+      expect(first.productId).toBe(known.productId)
+      expect(second.productId).toBe(known.productId)
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+      expect(ctx.researcher.calls).toEqual([])
+      expect(await ctx.repository.findFormulation(first.formulationId)).toMatchObject({ productId: known.productId, sourceKind: 'label' })
+    })
+
+    it('creates a new product when the model says it is a different one', async () => {
+      const ctx = setup()
+      const known = await ctx.service.resolve(KNOWN)
+
+      const result = await ctx.service.fromLabel(LABEL)
+
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+      expect(result.productId).not.toBe(known.productId)
+      expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ kind: 'named', name: 'Radiance Serum Vitamin Glow Booster' })
+    })
+
+    it('throws CatalogBusyError, creating no product and storing no list, when the AI spend cap stops the question', async () => {
+      const ctx = setup()
+      await ctx.service.resolve(KNOWN)
+      ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+
+      const error = await errorOf(ctx.service.fromLabel(LABEL))
+
+      expect(error).toBeInstanceOf(CatalogBusyError)
+      expect(await ctx.repository.findProductByKey(identityKey(LABEL))).toBeNull()
+    })
+  })
+
+  it.each([
+    ['an empty list', []],
+    ['an entry with a link', ['Aqua', 'see http://evil.example']],
+    ['an entry of 121 characters', ['Aqua', 'a'.repeat(121)]],
+  ])('rejects %s as an unreadable label before it creates the product the label names', async (_label, ingredients) => {
+    const ctx = setup()
+
+    const error = await errorOf(ctx.service.fromLabel({ ingredients, brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' }))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('LABEL_UNREADABLE')
+    expect(await ctx.repository.findProductByKey(identityKey(GLOW))).toBeNull()
+  })
+})
+
+describe('ProductCatalogService.fromLabel: a product identified after its list was stored without a name', () => {
+  const LABEL = { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as const
+
+  /** An unnamed product whose list is analysed, with one concern. */
+  const analysedUnnamed = async (ctx: Ctx) => {
+    const unnamed = await ctx.service.fromLabel({ ingredients: WITH_MERCURY })
+    ctx.analyst.analyseWith(() => [draft()])
+    await ctx.service.analyse(unnamed.formulationId)
+    ctx.advance(HOUR)
+    return unnamed
+  }
+
+  it('moves the unnamed formulation, with its analysis and concerns, to the named product, keeping its id, and removes the unnamed product', async () => {
+    const ctx = setup()
+    const unnamed = await analysedUnnamed(ctx)
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    expect(result.formulationId).toBe(unnamed.formulationId)
+    expect(result.productId).not.toBe(unnamed.productId)
+    expect(await ctx.repository.findFormulation(unnamed.formulationId)).toMatchObject({ productId: result.productId, analysisVersion: ANALYSIS_VERSION })
+    expect(await ctx.repository.findProductById(unnamed.productId)).toBeNull()
+    expect(await ctx.repository.findProductByKey(MERCURY_UNNAMED_KEY)).toBeNull()
+  })
+
+  it('shows the moved formulation as the named product\'s, with its concerns, to an item that already pointed at it', async () => {
+    const ctx = setup()
+    const unnamed = await analysedUnnamed(ctx)
+    const before = await ctx.service.productView(unnamed.formulationId)
+    expect(before.product).toMatchObject({ kind: 'unnamed', brand: '', name: '' })
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    const after = await ctx.service.productView(unnamed.formulationId)
+    expect(after.product).toMatchObject({ id: result.productId, kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+    expect(after.concerns).toEqual(before.concerns)
+    expect(after.concerns).toHaveLength(1)
+    expect(after.formulation).toEqual(before.formulation)
+  })
+
+  it('does not pay for the analysis again: the named product resolves as ready, and the analyst was called once', async () => {
+    const ctx = setup()
+    const unnamed = await analysedUnnamed(ctx)
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    expect(await ctx.service.resolve(identity({ brand: 'Glow Co', name: 'Bright Tone Serum' }))).toEqual({
+      kind: 'ready',
+      productId: result.productId,
+      formulationId: unnamed.formulationId,
+    })
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('moves an unnamed formulation onto a named product that already has other lists, which keep their own', async () => {
+    const ctx = setup()
+    const web = await analysed(ctx, { who: identity({ brand: 'Glow Co', name: 'Bright Tone Serum' }) })
+    const unnamed = await analysedUnnamed(ctx)
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    expect(result.productId).toBe(web.productId)
+    expect(result.formulationId).toBe(unnamed.formulationId)
+    expect(await ctx.repository.findFormulation(web.formulationId)).toMatchObject({ productId: web.productId, sourceKind: 'web' })
+    expect(await ctx.repository.findFormulation(unnamed.formulationId)).toMatchObject({ productId: web.productId, sourceKind: 'label' })
+    expect(await ctx.repository.findProductById(unnamed.productId)).toBeNull()
+  })
+
+  it('uses the named product\'s existing formulation when it already has that exact list, and leaves the unnamed formulation viewable for anyone still pointing at it', async () => {
+    const ctx = setup()
+    ctx.analyst.analyseWith(() => [draft()])
+    const named = await analysed(ctx, { who: identity({ brand: 'Glow Co', name: 'Bright Tone Serum' }), ingredients: WITH_MERCURY })
+    const unnamed = await analysedUnnamed(ctx)
+    expect(unnamed.formulationId).not.toBe(named.formulationId)
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    expect(result).toMatchObject({ productId: named.productId, formulationId: named.formulationId })
+    expect((await ctx.service.productView(named.formulationId)).product).toMatchObject({ kind: 'named', id: named.productId })
+    // An item that was shown the unnamed list keeps working: its formulation is not deleted from under it.
+    expect((await ctx.service.productView(unnamed.formulationId)).formulation.id).toBe(unnamed.formulationId)
+  })
+
+  it('leaves an unnamed product with another list alone', async () => {
+    const ctx = setup()
+    const other = await ctx.service.fromLabel({ ingredients: CLEAN })
+    await analysedUnnamed(ctx)
+
+    await ctx.service.fromLabel({ ingredients: WITH_MERCURY, ...LABEL })
+
+    expect(await ctx.repository.findProductByKey(CLEAN_UNNAMED_KEY)).toMatchObject({ id: other.productId, kind: 'unnamed' })
+    expect(await ctx.repository.findFormulation(other.formulationId)).toMatchObject({ productId: other.productId })
+  })
+
+  it('moves an unnamed list that was never analysed too, leaving the named product needing analysis', async () => {
+    const ctx = setup()
+    const unnamed = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, ...LABEL })
+
+    expect(result.formulationId).toBe(unnamed.formulationId)
+    expect(await ctx.service.resolve(identity({ brand: 'Glow Co', name: 'Bright Tone Serum' }))).toEqual({
+      kind: 'needs-analysis',
+      productId: result.productId,
+      formulationId: unnamed.formulationId,
+    })
+  })
+})
+
+describe('ProductCatalogService.productView: the kind of the product', () => {
+  it('says an unnamed product is unnamed, with empty brand and name, no variant, no image, and the concerns of its list', async () => {
+    const ctx = setup()
+    const { formulationId } = await ctx.service.fromLabel({ ingredients: WITH_MERCURY })
+    ctx.analyst.analyseWith(() => [draft()])
+    await ctx.service.analyse(formulationId)
+
+    const view = await ctx.service.productView(formulationId)
+
+    expect(view.product).toEqual({ id: expect.any(String), kind: 'unnamed', brand: '', name: '', variant: null, form: null, category: 'other', imageUrl: null })
+    expect(view.formulation).toMatchObject({ id: formulationId, ingredients: WITH_MERCURY, source: { kind: 'label', url: null }, analysedAt: T0 })
+    expect(view.concerns).toHaveLength(1)
+    expect(view.concerns[0]).toMatchObject({ kind: 'banned-substance', severity: 'high', ingredients: ['Mercury'] })
+  })
+
+  it('says a product made from a label with a name is named', async () => {
+    const ctx = setup()
+    const { formulationId } = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+
+    expect((await ctx.service.productView(formulationId)).product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum' })
+  })
+})
+
+describe('ProductCatalogService.fromLabel: an adoption another product wins', () => {
+  /** A catalog repository in which a rival product adopts the formulation just before the one under test gets to. */
+  class LosesTheRace extends FakeCatalogRepository {
+    rival: string | undefined
+    override async adoptUnnamedFormulation(formulationId: string, productId: string): Promise<void> {
+      if (this.rival) {
+        const rival = this.rival
+        this.rival = undefined
+        await super.adoptUnnamedFormulation(formulationId, rival)
+      }
+      return super.adoptUnnamedFormulation(formulationId, productId)
+    }
+  }
+
+  it('never reports the other product\'s formulation as its own: it stores the list as a formulation of its product and leaves the winner\'s alone', async () => {
+    const repository = new LosesTheRace()
+    const ctx = setup({ repository })
+    const unnamed = await ctx.service.fromLabel({ ingredients: WITH_MERCURY })
+    repository.rival = (await ctx.service.resolve(identity({ brand: 'Rival Co', name: 'Other Serum' }))).productId
+
+    const result = await ctx.service.fromLabel({ ingredients: WITH_MERCURY, brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+
+    expect(result.productId).not.toBe(repository.rival)
+    expect(result.formulationId).not.toBe(unnamed.formulationId)
+    expect(await repository.findFormulation(result.formulationId)).toMatchObject({ productId: result.productId, ingredients: WITH_MERCURY, sourceKind: 'label' })
+    expect(await repository.findFormulation(unnamed.formulationId)).toMatchObject({ productId: expect.any(String) })
+    expect((await repository.findFormulation(unnamed.formulationId))!.productId).not.toBe(result.productId)
+    expect(ctx.researcher.calls).toEqual([])
+  })
+})
+
+describe('ProductCatalogService.fromLabel: a named label that prints no category', () => {
+  const ACME = 'Acme'
+  const KNOWN = identity({ brand: ACME, name: 'Radiance Serum Vitamin Glow' })
+  // Word overlap with the label's name (Jaccard): KNOWN 4/5 = 0.8, HAIR 3/5 = 0.6 (exactly the threshold).
+  const LABEL = { ingredients: CLEAN, brand: ACME, name: 'Radiance Serum Vitamin Glow Booster' }
+  const HAIR = identity({ brand: ACME, name: 'Radiance Serum Vitamin', category: 'hair' })
+
+  it('reuses the product the label exactly matches by brand, name and variant, leaving its category as it was', async () => {
+    const ctx = setup()
+    const known = await ctx.service.resolve(identity({ variant: 'Night' }))
+
+    const result = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'CERAVE', name: 'hydrating facial cleanser', variant: 'night' })
+
+    expect(result.productId).toBe(known.productId)
+    expect(await ctx.repository.findProductById(known.productId)).toMatchObject({ category: 'skin', kind: 'named' })
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+  })
+
+  it('offers a near-miss name to the judge against a product of any category, and reuses the product when the judge says it is the same, writing no new one', async () => {
+    const ctx = setup()
+    const known = await ctx.service.resolve(KNOWN)
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.fromLabel(LABEL)
+
+    expect(result.productId).toBe(known.productId)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(await ctx.repository.productsByBrandFamily('acme', 10)).toHaveLength(1)
+    expect(await ctx.repository.findProductById(known.productId)).toMatchObject({ category: 'skin', name: 'Radiance Serum Vitamin Glow' })
+    expect(await ctx.repository.findFormulation(result.formulationId)).toMatchObject({ productId: known.productId, sourceKind: 'label' })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('remembers the spelling as an alias, so the same label is not put to the judge again', async () => {
+    const ctx = setup()
+    const known = await ctx.service.resolve(KNOWN)
+    ctx.analyst.sameProductWith(() => true)
+    await ctx.service.fromLabel(LABEL)
+
+    const again = await ctx.service.fromLabel(LABEL)
+
+    expect(again.productId).toBe(known.productId)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+  })
+
+  it('asks the judge about near misses of every category, not just one, up to the usual limit', async () => {
+    const ctx = setup()
+    await ctx.service.resolve(KNOWN)
+    await ctx.service.resolve(HAIR)
+
+    await ctx.service.fromLabel(LABEL)
+
+    expect(ctx.analyst.calls.sameProduct.map(([, candidate]) => candidate.name).sort()).toEqual(['Radiance Serum Vitamin', 'Radiance Serum Vitamin Glow'])
+  })
+
+  it('creates the product with the category other when the label matches no one and the judge says no', async () => {
+    const ctx = setup()
+    const known = await ctx.service.resolve(KNOWN)
+
+    const result = await ctx.service.fromLabel(LABEL)
+
+    expect(result.productId).not.toBe(known.productId)
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ kind: 'named', category: 'other', name: 'Radiance Serum Vitamin Glow Booster' })
+  })
+
+  it('creates the product with the category other when nothing in the catalog is near its name, without asking the judge', async () => {
+    const ctx = setup()
+    await ctx.service.resolve(identity({ brand: ACME, name: 'Zinc Mask Clay' }))
+
+    const result = await ctx.service.fromLabel(LABEL)
+
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ category: 'other' })
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+  })
+
+  it('still keeps products of another category apart when the label DOES print a category: no question to the judge, a new product', async () => {
+    const ctx = setup()
+    const known = await ctx.service.resolve(KNOWN)
+
+    const result = await ctx.service.fromLabel({ ...LABEL, category: 'hair' })
+
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+    expect(result.productId).not.toBe(known.productId)
+    expect(await ctx.repository.findProductById(result.productId)).toMatchObject({ category: 'hair' })
+  })
+})
+
+
+describe('ProductCatalogService: the search text of a product', () => {
+  const searchTextOf = async (ctx: Ctx, productId: string) => (await ctx.repository.findProductById(productId))!.searchText
+
+  it('is the brand, name and variant, lower case, with accents and punctuation folded and "+" read as plus', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }))
+
+    expect(await searchTextOf(ctx, productId)).toBe('loreal paris revitalift creme spf 50 plus')
+  })
+
+  it('is just the brand and name, with no trailing space, when the product has no variant', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await searchTextOf(ctx, productId)).toBe('cerave hydrating facial cleanser')
+  })
+
+  it('reads "&" as "and" and drops apostrophes, the way the identity key does', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.resolve(identity({ brand: "Johnson's", name: 'Baby Oil & Lotion', category: 'body' }))
+
+    expect(await searchTextOf(ctx, productId)).toBe('johnsons baby oil and lotion')
+  })
+
+  it('is set on a named product created from a back label too', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN, brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' })
+
+    expect(await searchTextOf(ctx, productId)).toBe('glow co bright tone serum night')
+  })
+
+  it('is empty for an unnamed product', async () => {
+    const ctx = setup()
+
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    expect(await searchTextOf(ctx, productId)).toBe('')
+  })
+})
+
+describe('ProductCatalogService.search', () => {
+  const LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K']
+  const callsToAi = (ctx: Ctx) => ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length
+  const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
+
+  it('finds a named product by a fragment of its brand, name and variant, as { id, kind, brand, name, variant, form, category, imageUrl } and nothing more', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ variant: 'Night' }))
+
+    const found = await ctx.service.search('facial cleanser')
+
+    expect(found).toEqual([{ id: productId, kind: 'named', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', form: null, category: 'skin', imageUrl: null }])
+  })
+
+  it('gives a null variant for a product with none, and the stock image\'s public URL for one that has an image', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    await ctx.repository.setProductImage(productId, { key: 'catalog/test/products/cerave.jpg', sourceUrl: IMAGE_URL, checkedAt: T0 })
+
+    expect(await ctx.service.search('cerave')).toEqual([
+      { id: productId, kind: 'named', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin', imageUrl: 'https://images.test/catalog/test/products/cerave.jpg' },
+    ])
+  })
+
+  it.each([
+    ['upper case', 'CERAVE HYDRATING'],
+    ['surrounding and repeated spaces', '  cerave    hydrating  '],
+    ['an accent', 'céravé hydrating'],
+    ['punctuation', 'cerave, hydrating!'],
+  ])('normalises the query the way the search text is normalised: %s', async (_label, query) => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search(query))).toEqual([productId])
+  })
+
+  it('finds an accented, punctuated product by the plain text a user types', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème' }))
+
+    expect(idsOf(await ctx.service.search('loreal revitalift creme'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search("L'Oréal"))).toEqual([productId])
+  })
+
+  it('finds a product by words in another order, and by words that skip some of its own', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: 'La Roche-Posay', name: 'Effaclar Purifying Foaming Gel' }))
+
+    expect(idsOf(await ctx.service.search('gel effaclar'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('Roche foaming'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('effaclar sunscreen'))).toEqual([])
+  })
+
+  it.each([['nothing but spaces', '   '], ['nothing but punctuation', '!!'], ['an empty string', '']])('finds nothing, rather than every product, for %s', async (_label, query) => {
+    const ctx = setup()
+    await ctx.service.resolve(identity())
+
+    expect(await ctx.service.search(query)).toEqual([])
+  })
+
+  it.each([
+    ['one letter and punctuation', 'a!'],
+    ['one letter', 'a'],
+    ['one digit between spaces', ' 5 '],
+    ['punctuation around one letter', '...c...'],
+  ])('finds nothing for a query that is under 2 characters once normalised: %s', async (_label, query) => {
+    const ctx = setup()
+    await ctx.service.resolve(identity({ brand: 'Acme', name: 'Cleanser 5' }))
+
+    expect(await ctx.service.search(query)).toEqual([])
+  })
+
+  it('finds a product for a query of exactly 2 characters once normalised', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search('ce'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('!!ce!!'))).toEqual([productId])
+  })
+
+  it('finds nothing for text no product contains', async () => {
+    const ctx = setup()
+    await ctx.service.resolve(identity())
+
+    expect(await ctx.service.search('sunscreen')).toEqual([])
+  })
+
+  it('never returns an unnamed product, though its identity key holds the words of its list', async () => {
+    const ctx = setup()
+    await ctx.service.fromLabel({ ingredients: CLEAN })
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(idsOf(await ctx.service.search('aqua'))).toEqual([])
+    expect(idsOf(await ctx.service.search('unnamed'))).toEqual([])
+    expect(idsOf(await ctx.service.search('cerave'))).toEqual([productId])
+  })
+
+  it('reaches a product through an alias it was given, once, though its own search text matches too', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    // A spelling the model confirms as the same product is remembered as an alias.
+    ctx.analyst.sameProductWith(() => true)
+    expect((await ctx.service.resolve(identity({ name: 'Hydrating Cleanser' }))).productId).toBe(productId)
+
+    expect(idsOf(await ctx.service.search('hydrating cleanser'))).toEqual([productId])
+    expect(idsOf(await ctx.service.search('cerave'))).toEqual([productId])
+  })
+
+  it('returns at most 10 products: ten matches give ten, eleven give the first ten in order', async () => {
+    const ctx = setup()
+    const ids: string[] = []
+    // One brand, names that differ in the last word only (3 of 4 words shared is below the near-miss threshold, so nothing asks the model).
+    for (const letter of LETTERS.slice(0, 10)) ids.push((await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${letter}` }))).productId)
+
+    expect(idsOf(await ctx.service.search('glow serum'))).toEqual(ids)
+
+    ids.push((await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${LETTERS[10]}` }))).productId)
+
+    // Same rank for all of them (none starts with the query), so the order is by name: the 11th, "... k", is the one left out.
+    expect(idsOf(await ctx.service.search('glow serum'))).toEqual(ids.slice(0, 10))
+  })
+
+  it('puts the products whose name starts with the query first, then the others by name', async () => {
+    const ctx = setup()
+    const wash = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Ceramide Wash' }))
+    const butter = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Cera Butter' }))
+    const cleanser = await ctx.service.resolve(identity({ brand: 'CeraVe', name: 'Hydrating Cleanser' }))
+
+    // "cerave ..." starts with "cera"; "acme cera butter" and "acme ceramide wash" only contain it, and Butter sorts before Wash.
+    expect(idsOf(await ctx.service.search('cera'))).toEqual([cleanser.productId, butter.productId, wash.productId])
+  })
+
+  it('makes no model or web call, however many products it looks at', async () => {
+    const ctx = setup()
+    for (const letter of LETTERS) await ctx.service.resolve(identity({ brand: 'Acme', name: `Glow Serum ${letter}` }))
+    const before = callsToAi(ctx)
+
+    await ctx.service.search('glow')
+    await ctx.service.search('zzz')
+
+    expect(callsToAi(ctx)).toBe(before)
+  })
+})
+
+describe('ProductCatalogService.choose', () => {
+  it('says ready, with the product and formulation, for a product with a fresh formulation analysed by the current version, calling no model', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+    const calls = ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.researcher.calls.length
+
+    const result = await ctx.service.choose(productId)
+
+    expect(result).toEqual({ kind: 'ready', productId, formulationId })
+    expect(ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.researcher.calls.length).toBe(calls)
+  })
+
+  it('says needs-analysis for a product whose formulation has not been analysed', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await researched(ctx)
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  it('says needs-research for a product that has no formulation yet', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-research', productId })
+  })
+
+  it('treats a formulation exactly FRESH_FOR_DAYS old as fresh and one a millisecond older as needing research', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+
+    ctx.advance(FRESH_FOR_DAYS * DAY)
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'ready', productId, formulationId })
+
+    ctx.advance(1)
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-research', productId })
+  })
+
+  it.each(OLDER_CODE)('asks for analysis again of a formulation analysed by %s', async (_label, over) => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx)
+    await analysedByOlderCode(ctx, formulationId, over)
+
+    expect(await ctx.service.choose(productId)).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  it('answers exactly what resolve answers for the same product', async () => {
+    const ctx = setup()
+    const { productId } = await analysed(ctx)
+
+    expect(await ctx.service.choose(productId)).toEqual(await ctx.service.resolve(identity()))
+  })
+
+  it('creates nothing and records no attempt', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx)
+    const attempts = await ctx.repository.researchAttemptsSince(new Date(0))
+
+    await ctx.service.choose(productId)
+
+    expect(await ctx.repository.researchAttemptsSince(new Date(0))).toBe(attempts)
+    expect(await ctx.repository.productsByBrandFamily('cerave', 10)).toHaveLength(1)
+  })
+
+  it('throws PRODUCT_NOT_FOUND for a product id the catalog does not hold', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(ctx.service.choose('no-such-product'))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+
+  it('throws PRODUCT_NOT_FOUND for an unnamed product, which search never offers', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+
+    const error = await errorOf(ctx.service.choose(productId))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PRODUCT_NOT_FOUND')
+  })
+})
+
+describe('ProductCatalogService.fillSearchText', () => {
+  /** A named product as a Worker that did not know search text made it: the row is there and its search text is empty. */
+  const oldProduct = async (ctx: Ctx, who: { brand: string; name: string; variant?: string }, id: string, key = identityKey(who)) =>
+    ctx.repository.createProduct({
+      id,
+      identityKey: key,
+      brandKey: brandKey(who.brand),
+      kind: 'named',
+      brand: who.brand,
+      name: who.name,
+      variant: who.variant ?? null,
+      form: null,
+      category: 'skin',
+      createdAt: T0,
+    })
+  const idsOf = (found: { id: string }[]) => found.map((p) => p.id)
+
+  it.each([
+    ['Johnson & Johnson', 'Baby Oil', 'johnson & johnson'],
+    ['Dove', 'Men+Care Body Wash', 'men+care'],
+    ["Carol's Daughter", 'Black Vanilla Moisture', 'carols'],
+    ["L'Oréal", 'Revitalift Crème', 'loreal'],
+  ])('fills in the search text of %s %s the way a new product gets it, so plain typed text (%s) finds it', async (brand, name, typed) => {
+    const ctx = setup()
+    await oldProduct(ctx, { brand, name }, 'old-1')
+    expect(await ctx.service.search(typed)).toEqual([])
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect(idsOf(await ctx.service.search(typed))).toEqual(['old-1'])
+  })
+
+  it('fills in the exact same text resolve would have stored, variant included', async () => {
+    const ctx = setup()
+    const made = await ctx.service.resolve(identity({ brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }))
+    // The same product, as another key (a stored product with this key would be returned instead of created): the text must not depend on the key.
+    await oldProduct(ctx, { brand: "L'Oréal Paris", name: 'Revitalift Crème', variant: 'SPF 50+' }, 'old-1', 'old-worker-key')
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe('')
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe((await ctx.repository.findProductById(made.productId))!.searchText)
+    expect((await ctx.repository.findProductById('old-1'))!.searchText).toBe('loreal paris revitalift creme spf 50 plus')
+  })
+
+  it('returns how many products it filled, fills each once, and then has nothing left to fill', async () => {
+    const ctx = setup()
+    for (const n of [1, 2, 3]) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${n}`)
+
+    expect(await ctx.service.fillSearchText()).toBe(3)
+    expect(await ctx.service.fillSearchText()).toBe(0)
+    expect(idsOf(await ctx.service.search('acme serum'))).toEqual(['old-1', 'old-2', 'old-3'])
+  })
+
+  it('does nothing, and returns 0, for a catalog where every product has search text', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    const before = (await ctx.repository.findProductById(productId))!.searchText
+
+    expect(await ctx.service.fillSearchText()).toBe(0)
+    expect((await ctx.repository.findProductById(productId))!.searchText).toBe(before)
+  })
+
+  it('leaves an unnamed product alone: its search text stays empty, and it is not counted', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.fromLabel({ ingredients: CLEAN })
+    await oldProduct(ctx, { brand: 'Acme', name: 'Serum' }, 'old-1')
+
+    expect(await ctx.service.fillSearchText()).toBe(1)
+
+    expect((await ctx.repository.findProductById(productId))!.searchText).toBe('')
+  })
+
+  it('does not overwrite search text a product already has', async () => {
+    const ctx = setup()
+    const made = await ctx.service.resolve(identity())
+    await ctx.repository.setSearchText(made.productId, 'set by hand')
+
+    await ctx.service.fillSearchText()
+
+    expect((await ctx.repository.findProductById(made.productId))!.searchText).toBe('set by hand')
+  })
+
+  it('fills at most 500 products a call: 501 old products take two calls, 500 and then 1', async () => {
+    const ctx = setup()
+    for (let n = 0; n < 501; n++) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${String(n).padStart(3, '0')}`)
+
+    expect(await ctx.service.fillSearchText()).toBe(500)
+    expect(await ctx.service.fillSearchText()).toBe(1)
+    expect(await ctx.service.fillSearchText()).toBe(0)
+  })
+
+  it('writes what it fills through one setSearchTexts call per run, holding every filled row, and never row by row', async () => {
+    const ctx = setup()
+    for (const n of [1, 2, 3]) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${n}`)
+    const batch = vi.spyOn(ctx.repository, 'setSearchTexts')
+    const single = vi.spyOn(ctx.repository, 'setSearchText')
+
+    await ctx.service.fillSearchText()
+
+    expect(batch).toHaveBeenCalledTimes(1)
+    expect(batch.mock.calls[0]![0]).toEqual([
+      { id: 'old-1', searchText: 'acme serum 1' },
+      { id: 'old-2', searchText: 'acme serum 2' },
+      { id: 'old-3', searchText: 'acme serum 3' },
+    ])
+    expect(single).not.toHaveBeenCalled()
+  })
+
+  it('makes one setSearchTexts call of 500 rows for 501 old products, then one of 1, and none when there is nothing to fill', async () => {
+    const ctx = setup()
+    for (let n = 0; n < 501; n++) await oldProduct(ctx, { brand: 'Acme', name: `Serum ${n}` }, `old-${String(n).padStart(3, '0')}`)
+    const batch = vi.spyOn(ctx.repository, 'setSearchTexts')
+
+    await ctx.service.fillSearchText()
+    await ctx.service.fillSearchText()
+    await ctx.service.fillSearchText()
+
+    expect(batch.mock.calls.map(([rows]) => rows.length)).toEqual([500, 1])
+  })
+
+  it('makes no model or web call', async () => {
+    const ctx = setup()
+    await oldProduct(ctx, { brand: 'Acme', name: 'Serum' }, 'old-1')
+
+    await ctx.service.fillSearchText()
+
+    expect(ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length + ctx.analyst.calls.imageShowsProduct.length + ctx.researcher.calls.length).toBe(0)
   })
 })

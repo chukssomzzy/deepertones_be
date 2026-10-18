@@ -6,10 +6,16 @@ import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { signPhotoLink } from '../../src/lib/photo-link'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
+import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
-import { messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
+import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
+import { errorResponse, messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
+import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
+import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
+import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 
 // The scan HTTP routes through the Worker's real entrypoint, with the frontend's typed client, real local D1 and R2.
@@ -62,8 +68,18 @@ type ItemView = {
   position: number
   state: string
   reason: string | null
+  retakesLeft?: number
   image: { kind: string; url: string } | null
   recognised?: { brand: string; name: string; variant?: string | null; form?: string | null; category: string }
+  noLabel?: {
+    source: string
+    purpose: string
+    usedFor: string
+    description?: string
+    concerns: { kind: string; severity: string; ingredients: string[]; why: string; whoShouldTakeCare: string; traits: string[]; sources: string[] }[]
+    rulesVersion: number
+  }
+  product?: { id: string; kind: string; brand: string; name: string; variant: string | null; category: string; imageUrl: string | null }
 }
 type ScanView = { id: string; createdAt: string; items: ItemView[] }
 
@@ -109,6 +125,15 @@ const confirm = (guest: Guest, scanId: string, itemId: string, body: Record<stri
   scansApi[':scanId'].items[':itemId'].confirmation.$post({ param: { scanId, itemId }, json: body as never }, { headers: guest.headers() })
 const addBackPhoto = (guest: Guest, scanId: string, itemId: string, photo: File = fileOf(markedJpeg(9), 'back')) =>
   scansApi[':scanId'].items[':itemId']['back-photo'].$post({ param: { scanId, itemId }, form: { photo } }, { headers: guest.headers() })
+const retake = (guest: Guest, scanId: string, itemId: string, photo: File = fileOf(markedJpeg(21), 'retake'), from?: string) =>
+  scansApi[':scanId'].items[':itemId'].retake.$post({ param: { scanId, itemId }, form: { photo } }, { headers: guest.headers(from) })
+// A body the typed client would not let through (both fields, neither, a number) is cast: the route is what must refuse it.
+const identification = (guest: Guest, scanId: string, itemId: string, body: Record<string, unknown>, from?: string) =>
+  scansApi[':scanId'].items[':itemId'].identification.$post({ param: { scanId, itemId }, json: body as never }, { headers: guest.headers(from) })
+const NO_LABEL_ANSWERS = { source: 'market-vendor', purpose: 'lighten', usedFor: '6-months-2-years' }
+// A body the typed client would not let through (a missing field, an unknown word, a number) is cast: the route is what must refuse it.
+const noLabel = (guest: Guest, scanId: string, itemId: string, body: Record<string, unknown> = NO_LABEL_ANSWERS, from?: string) =>
+  scansApi[':scanId'].items[':itemId']['no-label'].$post({ param: { scanId, itemId }, json: body as never }, { headers: guest.headers(from) })
 const openPhoto = (token: string, headers: Record<string, string> = {}) => scansApi.photos[':token'].$get({ param: { token } }, { headers })
 const tokenOf = (item: ItemView) => item.image!.url.replace('/api/v1/scans/products/photos/', '')
 const bytesOf = async (res: { arrayBuffer(): Promise<ArrayBuffer> }) => new Uint8Array(await res.arrayBuffer())
@@ -119,8 +144,12 @@ const plainPost = (path: string, body: BodyInit, headers: Record<string, string>
 
 // --- driving an item to a state, by the real steps ---
 
+// A step is keyed by item, step and `at`, and a run with a key already seen is acknowledged and skipped: every run gets its own time, even
+// when two land in the same millisecond (a retake runs `recognise` on one item again and again).
+let lastAt = 0
+const nextAt = () => (lastAt = Math.max(Date.now(), lastAt + 1))
 const runStep = async (itemId: string, step: string) => {
-  const batch = createMessageBatch(SCAN_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body: { itemId, step, at: Date.now() } }])
+  const batch = createMessageBatch(SCAN_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body: { itemId, step, at: nextAt() } }])
   const ctx = createExecutionContext()
   await worker.queue!(batch, WORKER_ENV, ctx)
   const result = await getQueueResult(batch, ctx)
@@ -136,6 +165,11 @@ const recognisedAs = (brand: string, name: string, confidence: number) => () =>
   messageResponse({
     content: [textBlock(JSON.stringify({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence }))],
   })
+// What the recognizer answers for a photo it cannot use: nothing to read, or a product whose label is turned away.
+const classifiedAs = (classification: string) => () =>
+  messageResponse({ content: [textBlock(JSON.stringify({ classification, brand: '', name: '', variant: '', category: 'other', confidence: 0 }))] })
+const unreadable = classifiedAs('unreadable')
+const labelNotVisible = classifiedAs('label-not-visible')
 const researchFindsNothing = () =>
   messageResponse({ content: [textBlock(JSON.stringify({ found: false, ingredients: [], sourceUrl: null, imageUrl: null }))] })
 
@@ -152,6 +186,31 @@ const awaitingConfirmation = async (guest: Guest) => {
   return { scanId: scan.id, itemId }
 }
 
+/** A one-photo scan whose photo the recognizer could not read: the item asks for a retake. */
+const awaitingRetake = async (guest: Guest, answer: typeof unreadable = unreadable) => {
+  const scan = await createdScan(guest)
+  const itemId = scan.items[0]!.id
+  stubAnthropic(answer)
+  await runStep(itemId, 'recognise')
+  expect(await stateOf(guest, scan.id, itemId)).toBe('needs-retake')
+  vi.unstubAllGlobals()
+  return { scanId: scan.id, itemId }
+}
+const itemNow = async (guest: Guest, scanId: string, itemId: string) =>
+  (await dataOf<ScanView>(await getScan(guest, scanId))).items.find((i) => i.id === itemId)!
+
+/** What the catalog holds for a formulation (its ingredients and source): a scan's item carries the product's identity only. */
+const catalogViewOf = (formulationId: string) =>
+  new ProductCatalogService({
+    repository: new D1CatalogRepository(createDb(env.DB)),
+    researcher: new MemoryProductResearcher(),
+    analyst: new MemoryProductAnalyst(),
+    images: new MemoryCatalogImageStore(),
+    imageKeyPrefix: 'catalog/test',
+  }).productView(formulationId)
+/** The formulation the stored item points at. */
+const formulationIdOf = async (itemId: string) => (await new D1ScansRepository(createDb(env.DB)).findItem(itemId))!.formulationId!
+
 /** A one-photo scan of a product nobody has the ingredients for: recognised, matched, researched without luck, so it asks for the back of the pack. */
 const awaitingBackPhoto = async (guest: Guest) => {
   const scan = await createdScan(guest)
@@ -164,6 +223,68 @@ const awaitingBackPhoto = async (guest: Guest) => {
   vi.unstubAllGlobals()
   return { scanId: scan.id, itemId }
 }
+
+// These flows make many calls, so their answers report a small usage and no web search: the day's AI spend cap (a dollar here) is not what they test.
+const CHEAP_USAGE = { input_tokens: 100, output_tokens: 50 }
+const cheapUnreadable = () =>
+  messageResponse({
+    content: [textBlock(JSON.stringify({ classification: 'unreadable', brand: '', name: '', variant: '', category: 'other', confidence: 0 }))],
+    usage: CHEAP_USAGE,
+  })
+/** A one-photo scan whose front photo the recognizer could not read three times: the item offers identification (a back photo, a typed name, no label). */
+const awaitingIdentification = async (guest: Guest) => {
+  const { scanId, itemId } = await awaitingRetake(guest, cheapUnreadable)
+  for (const marker of [22, 23]) {
+    expect((await retake(guest, scanId, itemId, fileOf(markedJpeg(marker), 'retake'))).status).toBe(202)
+    stubAnthropic(cheapUnreadable)
+    await runStep(itemId, 'recognise')
+    vi.unstubAllGlobals()
+  }
+  expect(await stateOf(guest, scanId, itemId)).toBe('needs-identification')
+  return { scanId, itemId }
+}
+// What the label reader answers: the list, and the brand and name only when the back prints them.
+const labelRead = (answer: Record<string, unknown>) => () => messageResponse({ content: [textBlock(JSON.stringify(answer))], usage: CHEAP_USAGE })
+const analysedWithNoConcerns = labelRead({ concerns: [] })
+/** A list no other test uses: the unnamed product for a list is shared by everyone, so a reused list would meet an earlier test's product. */
+const freshList = () => ['Aqua', 'Glycerin', `Cetearyl Alcohol ${runSalt}x${next()}`]
+/** What a request to Claude is for, from the shape of the answer it asks for (or the web search it carries). */
+const jobOf = (call: { body: any }) => {
+  if ((call.body.tools ?? []).some((tool: { name: string }) => tool.name === 'web_search')) return 'research'
+  const properties = Object.keys(call.body.output_config?.format?.schema?.properties ?? {})
+  if (properties.includes('classification')) return 'recognize'
+  if (properties.includes('kind')) return 'split-name'
+  if (properties.includes('readable')) return 'read-label'
+  if (properties.includes('concerns')) return 'analysis'
+  return 'other'
+}
+
+// --- identifying by typing a name ---
+
+/** A product the catalog already holds, put there the way a scan puts it (researched, and analysed unless said otherwise), or only resolved (`researched: false`). */
+const cataloguedProduct = async (brand: string, name: string, { analysed = true, researched = true } = {}) => {
+  const researcher = new MemoryProductResearcher()
+  researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], sourceUrl: 'https://shop.example/product' }))
+  const catalog = new ProductCatalogService({
+    repository: new D1CatalogRepository(createDb(env.DB)),
+    researcher,
+    analyst: new MemoryProductAnalyst(),
+    images: new MemoryCatalogImageStore(),
+    imageKeyPrefix: 'catalog/test',
+  })
+  const resolved = await catalog.resolve({ brand, name, category: 'skin' })
+  if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
+  if (!researched) return { productId: resolved.productId, catalog }
+  const found = await catalog.research(resolved.productId)
+  if (found.kind !== 'found') throw new Error('expected found')
+  if (analysed) await catalog.analyse(found.formulationId)
+  return { productId: resolved.productId, formulationId: found.formulationId, catalog }
+}
+/** What the name splitter answers: the typed text read as a product, or as nothing a product is called. */
+const splitAs = (brand: string, name: string, variant = '') => () =>
+  messageResponse({ content: [textBlock(JSON.stringify({ kind: 'product', brand, name, variant, category: 'skin' }))], usage: CHEAP_USAGE })
+const notAProductName = () =>
+  messageResponse({ content: [textBlock(JSON.stringify({ kind: 'not-a-product', brand: '', name: '', variant: '', category: 'other' }))], usage: CHEAP_USAGE })
 
 describe('POST /api/v1/scans/products', () => {
   it('accepts one photo with 202, a scan of one recognising item, and a link to the photo that was sent', async () => {
@@ -557,6 +678,117 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () =>
     expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
   })
 
+  describe('an item offering identification', () => {
+    it('takes the back photo with 202, moves the item to reading-label and queues the read', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      queued.length = 0
+
+      const res = await addBackPhoto(guest, scanId, itemId, fileOf(webpPhoto(), 'back'))
+
+      expect(res.status).toBe(202)
+      expect(await read<ItemView>(res)).toMatchObject({ success: true, status: 202, data: { id: itemId, state: 'reading-label', reason: null } })
+      expect(queued).toEqual([{ itemId, step: 'read-label', at: expect.any(Number) }])
+      expect(await stateOf(guest, scanId, itemId)).toBe('reading-label')
+    })
+
+    it('answers 409 ITEM_NOT_AWAITING_BACK_PHOTO for an item that is only asking for a retake', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingRetake(guest)
+
+      const res = await addBackPhoto(guest, scanId, itemId)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('answers 404 SCAN_NOT_FOUND to another user, changing nothing', async () => {
+      const owner = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(owner)
+
+      const res = await addBackPhoto(await newGuest(), scanId, itemId)
+
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+      expect(await stateOf(owner, scanId, itemId)).toBe('needs-identification')
+    })
+
+    it('asks for identification again, as label-unreadable, after an unreadable back photo, and ends the item as failed after the 3rd', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+
+      for (const marker of [10, 11, 12]) {
+        expect((await addBackPhoto(guest, scanId, itemId, fileOf(markedJpeg(marker), 'back'))).status).toBe(202)
+        stubAnthropic(labelRead({ readable: false, ingredients: [] }))
+        await runStep(itemId, 'read-label')
+        vi.unstubAllGlobals()
+        if (marker < 12) expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'needs-identification', reason: 'label-unreadable' })
+      }
+
+      expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'failed', reason: 'label-unreadable' })
+      const res = await addBackPhoto(guest, scanId, itemId, fileOf(markedJpeg(13), 'back'))
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+    })
+
+    it('shows a list with no name as an unnamed product with empty brand and name, and gives a second item with the same list the same answer without a second analysis', async () => {
+      const list = freshList()
+      const first = await newGuest()
+      const a = await awaitingIdentification(first)
+      expect((await addBackPhoto(first, a.scanId, a.itemId)).status).toBe(202)
+      const firstCalls = stubAnthropic(labelRead({ readable: true, ingredients: list }), analysedWithNoConcerns)
+      await runStep(a.itemId, 'read-label')
+      expect(await itemNow(first, a.scanId, a.itemId)).toMatchObject({ state: 'analysing', reason: null })
+      await runStep(a.itemId, 'analyse')
+      vi.unstubAllGlobals()
+      const firstItem = await itemNow(first, a.scanId, a.itemId)
+      expect(firstItem).toMatchObject({
+        state: 'ready',
+        reason: null,
+        product: { kind: 'unnamed', brand: '', name: '', variant: null },
+      })
+      expect(firstItem.product).not.toHaveProperty('formulation')
+      expect((await catalogViewOf(await formulationIdOf(a.itemId))).formulation).toMatchObject({ ingredients: list, source: { kind: 'label', url: null } })
+      expect(firstItem).not.toHaveProperty('recognised')
+      expect(firstItem.image).toBeNull()
+      expect(firstCalls.map(jobOf)).toEqual(['read-label', 'analysis'])
+
+      const second = await newGuest()
+      const b = await awaitingIdentification(second)
+      expect((await addBackPhoto(second, b.scanId, b.itemId)).status).toBe(202)
+      const secondCalls = stubAnthropic(labelRead({ readable: true, ingredients: list }), analysedWithNoConcerns)
+      await runStep(b.itemId, 'read-label')
+      vi.unstubAllGlobals()
+
+      const secondItem = await itemNow(second, b.scanId, b.itemId)
+      expect(secondItem).toMatchObject({ state: 'ready', product: { kind: 'unnamed', brand: '', name: '' } })
+      expect(await formulationIdOf(b.itemId)).toBe(await formulationIdOf(a.itemId))
+      expect(secondItem.product!.id).toBe(firstItem.product!.id)
+      expect(secondCalls.map(jobOf)).toEqual(['read-label'])
+    })
+
+    it('shows a back that names a new product as that product, ready after one analysis and with no web search', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      expect((await addBackPhoto(guest, scanId, itemId)).status).toBe(202)
+      const brand = freshBrand()
+      const list = freshList()
+      const calls = stubAnthropic(labelRead({ readable: true, ingredients: list, brand, name: 'Bright Tone Serum', variant: '', category: 'skin' }), analysedWithNoConcerns)
+
+      await runStep(itemId, 'read-label')
+      expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'analysing', recognised: { brand, name: 'Bright Tone Serum', category: 'skin' } })
+      await runStep(itemId, 'analyse')
+
+      expect(await itemNow(guest, scanId, itemId)).toMatchObject({
+        state: 'ready',
+        product: { kind: 'named', brand, name: 'Bright Tone Serum', category: 'skin' },
+      })
+      expect((await catalogViewOf(await formulationIdOf(itemId))).formulation).toMatchObject({ ingredients: list, source: { kind: 'label', url: null } })
+      expect(calls.map(jobOf)).toEqual(['read-label', 'analysis'])
+    })
+  })
+
   it('answers 404 SCAN_NOT_FOUND to another user', async () => {
     const owner = await newGuest()
     const scan = await createdScan(owner)
@@ -681,6 +913,911 @@ describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', () =>
   }, RATE_TEST_TIMEOUT_MS)
 })
 
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', () => {
+  it('takes the retaken photo with 202, moves the item to recognising with no reason and queues the recognise', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest, labelNotVisible)
+    queued.length = 0
+
+    const res = await retake(guest, scanId, itemId, fileOf(webpPhoto(), 'retake'))
+
+    expect(res.status).toBe(202)
+    expect(await read<ItemView>(res)).toMatchObject({ success: true, status: 202, data: { id: itemId, state: 'recognising', reason: null, image: { kind: 'user' } } })
+    expect(queued).toEqual([{ itemId, step: 'recognise', at: expect.any(Number) }])
+    expect(await stateOf(guest, scanId, itemId)).toBe('recognising')
+  })
+
+  it('says how many retakes are left while the item asks for one, and asks for identification after the third unreadable photo', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest, unreadable)
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable', retakesLeft: 2, image: null })
+
+    expect((await retake(guest, scanId, itemId, fileOf(markedJpeg(22), 'retake'))).status).toBe(202)
+    stubAnthropic(labelNotVisible)
+    await runStep(itemId, 'recognise')
+    vi.unstubAllGlobals()
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'label-not-visible', retakesLeft: 1, image: null })
+
+    expect((await retake(guest, scanId, itemId, fileOf(markedJpeg(23), 'retake'))).status).toBe(202)
+    stubAnthropic(unreadable)
+    await runStep(itemId, 'recognise')
+    vi.unstubAllGlobals()
+    const identifying = await itemNow(guest, scanId, itemId)
+    expect(identifying).toMatchObject({ state: 'needs-identification', reason: 'unreadable', image: null })
+    expect(identifying).not.toHaveProperty('retakesLeft')
+
+    const fourth = await retake(guest, scanId, itemId, fileOf(markedJpeg(24), 'retake'))
+    expect(fourth.status).toBe(409)
+    expect(await errorCodeOf(fourth)).toBe('ITEM_NOT_AWAITING_RETAKE')
+  })
+
+  it('goes on to matching when the retaken photo reads', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest)
+    expect((await retake(guest, scanId, itemId)).status).toBe(202)
+    stubAnthropic(recognisedAs(freshBrand(), 'Hydrating Cleanser', 0.92))
+
+    await runStep(itemId, 'recognise')
+
+    expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'matching', reason: null })
+  })
+
+  it('answers 409 ITEM_NOT_AWAITING_RETAKE for an item that is not asking for one, and again for a second retake', async () => {
+    const guest = await newGuest()
+    const fresh = await createdScan(guest)
+    const waiting = await awaitingRetake(guest)
+
+    const notAsking = await retake(guest, fresh.id, fresh.items[0]!.id)
+    expect(notAsking.status).toBe(409)
+    expect(await errorCodeOf(notAsking)).toBe('ITEM_NOT_AWAITING_RETAKE')
+
+    expect((await retake(guest, waiting.scanId, waiting.itemId)).status).toBe(202)
+    const again = await retake(guest, waiting.scanId, waiting.itemId)
+    expect(again.status).toBe(409)
+    expect(await errorCodeOf(again)).toBe('ITEM_NOT_AWAITING_RETAKE')
+  })
+
+  it('answers 404 SCAN_NOT_FOUND to another user, changing nothing', async () => {
+    const owner = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(owner)
+
+    const res = await retake(await newGuest(), scanId, itemId)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    expect(await stateOf(owner, scanId, itemId)).toBe('needs-retake')
+  })
+
+  describe('what it refuses', () => {
+    const waiting = async () => {
+      const guest = await newGuest()
+      return { guest, ...(await awaitingRetake(guest)) }
+    }
+    const path = (scanId: string, itemId: string) => `/api/v1/scans/products/${scanId}/items/${itemId}/retake`
+
+    it('refuses a JSON body with 415', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await plainPost(path(scanId, itemId), JSON.stringify({ photo: 'x' }), { ...guest.headers(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(415)
+    })
+
+    it('refuses two photos, and no photo, with 400 VALIDATION_FAILED, leaving the item waiting', async () => {
+      const { guest, scanId, itemId } = await waiting()
+      const two = new FormData()
+      two.append('photo', fileOf(markedJpeg(1)))
+      two.append('photo', fileOf(markedJpeg(2)))
+
+      const tooMany = await plainPost(path(scanId, itemId), two, guest.headers())
+      const none = await plainPost(path(scanId, itemId), new FormData(), guest.headers())
+
+      for (const res of [tooMany, none]) {
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      }
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('answers 413 on a Content-Length over 3,000,000 bytes, without reading the body', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await plainPost(path(scanId, itemId), new FormData(), { ...guest.headers(), 'Content-Length': String(MAX_PHOTO_BYTES + 1_000_000 + 1) })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+
+    it('refuses a PNG with 400 UNSUPPORTED_IMAGE, leaving the item waiting', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const res = await retake(guest, scanId, itemId, fileOf(pngPhoto(), 'retake', 'image/png'))
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('UNSUPPORTED_IMAGE')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('refuses a photo with an edge of 1601 pixels as IMAGE_TOO_LARGE, and accepts one of 1600', async () => {
+      const { guest, scanId, itemId } = await waiting()
+
+      const tooBig = await retake(guest, scanId, itemId, fileOf(jpegPhoto({ width: 1601, height: 100 }), 'retake'))
+      expect(tooBig.status).toBe(400)
+      expect(await errorCodeOf(tooBig)).toBe('IMAGE_TOO_LARGE')
+
+      expect((await retake(guest, scanId, itemId, fileOf(jpegPhoto({ width: 1600, height: 100 }), 'retake'))).status).toBe(202)
+    })
+  })
+
+  describe('daily quota', () => {
+    it('counts a retake as one of the 30 photos a day: the 30th is accepted and the 31st answers 429 SCAN_DAILY_LIMIT with Retry-After', async () => {
+      const guest = await newGuest()
+      const photos = (count: number) => Array.from({ length: count }, (_, i) => fileOf(markedJpeg(i + 1), `p${i}`))
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      const last = await dataOf<ScanView>(await createScan(guest, photos(9), freshIp()))
+      const itemId = last.items[0]!.id
+      stubAnthropic(unreadable)
+      await runStep(itemId, 'recognise')
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+
+      const thirtieth = await retake(guest, last.id, itemId, fileOf(markedJpeg(31), 'retake'), freshIp())
+      expect(thirtieth.status).toBe(202)
+      await runStep(itemId, 'recognise')
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+      const refused = await retake(guest, last.id, itemId, fileOf(markedJpeg(32), 'retake'), freshIp())
+
+      expect(refused.status).toBe(429)
+      expect(await errorCodeOf(refused)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(refused)).toBeGreaterThan(0)
+      expect(retryAfterOf(refused)).toBeLessThanOrEqual(DAY_SECONDS + 1)
+      expect(await stateOf(guest, last.id, itemId)).toBe('needs-retake')
+    })
+  })
+
+  describe('rate limits', () => {
+    const unknownItem = () => ({ scanId: crypto.randomUUID(), itemId: crypto.randomUUID() })
+
+    it('answers 429 RATE_LIMITED to the 11th retake of one user in a minute, from any address', async () => {
+      const guest = await newGuest()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof retake>> | undefined
+      for (let i = 0; i < 11; i++) {
+        // Not the user's scan: the limit is counted before the route looks at which scan it is.
+        const { scanId, itemId } = unknownItem()
+        const res = await retake(guest, scanId, itemId, fileOf(markedJpeg(i)), freshIp())
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 10)).not.toContain(429)
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('answers 429 RATE_LIMITED to the 21st retake from one address in a minute, whoever sends it', async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof retake>> | undefined
+      for (let i = 0; i < 21; i++) {
+        const { scanId, itemId } = unknownItem()
+        const res = await retake(await newGuest(), scanId, itemId, fileOf(markedJpeg(i)), shared)
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 20)).not.toContain(429)
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+  })
+})
+
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/identification', () => {
+  const STATES = [
+    ['needs-retake', (guest: Guest) => awaitingRetake(guest, cheapUnreadable)],
+    ['needs-identification', (guest: Guest) => awaitingIdentification(guest)],
+  ] as const
+
+  describe.each(STATES)('for an item in %s', (state, arrange) => {
+    describe('a product picked from the catalog', () => {
+      it('takes an analysed product with 202 and makes the item ready at once: its product shown, recognised as that product, nothing queued and no model called', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const brand = freshBrand()
+        const { productId, formulationId } = await cataloguedProduct(brand, 'Hydrating Cleanser')
+        const calls = stubAnthropic(() => messageResponse({ content: [textBlock('{}')] }))
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { productId })
+
+        expect(res.status).toBe(202)
+        expect(await read<ItemView>(res)).toMatchObject({
+          success: true,
+          status: 202,
+          data: {
+            id: itemId,
+            state: 'ready',
+            reason: null,
+            recognised: { brand, name: 'Hydrating Cleanser', category: 'skin' },
+            product: { id: productId, kind: 'named', brand },
+          },
+        })
+        expect(await formulationIdOf(itemId)).toBe(formulationId)
+        expect(await stateOf(guest, scanId, itemId)).toBe('ready')
+        expect(queued).toEqual([])
+        expect(calls).toHaveLength(0)
+      })
+
+      it('moves a product whose formulation is not analysed to analysing and queues the analyse step', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const { productId } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser', { analysed: false })
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { productId })
+
+        expect(res.status).toBe(202)
+        expect(await read<ItemView>(res)).toMatchObject({ data: { id: itemId, state: 'analysing', reason: null } })
+        expect(queued).toEqual([{ itemId, step: 'analyse', at: expect.any(Number) }])
+      })
+
+      it('moves a product that has no formulation yet to researching and queues the research step', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const { productId } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser', { researched: false })
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { productId })
+
+        expect(res.status).toBe(202)
+        expect(await read<ItemView>(res)).toMatchObject({ data: { id: itemId, state: 'researching', reason: null } })
+        expect(queued).toEqual([{ itemId, step: 'research', at: expect.any(Number) }])
+      })
+
+      it('answers 404 PRODUCT_NOT_FOUND for a product id the catalog does not hold, leaving the item waiting', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+
+        const res = await identification(guest, scanId, itemId, { productId: crypto.randomUUID() })
+
+        expect(res.status).toBe(404)
+        expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      })
+
+      it('answers 404 PRODUCT_NOT_FOUND for an unnamed product, which search never offers, leaving the item waiting', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const { catalog } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser')
+        const unnamed = await catalog.fromLabel({ ingredients: freshList() })
+
+        const res = await identification(guest, scanId, itemId, { productId: unnamed.productId })
+
+        expect(res.status).toBe(404)
+        expect(await errorCodeOf(res)).toBe('PRODUCT_NOT_FOUND')
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      })
+    })
+
+    describe('typed text', () => {
+      it('takes the text with 202, pays for exactly one split-name call before anything is matched, and moves the item to matching as what the split found, queuing the match', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const brand = freshBrand()
+        const calls = stubAnthropic(splitAs(brand, 'Bright Tone Serum', 'Night'))
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { text: `  ${brand} Bright Tone Serum Night ` })
+
+        expect(res.status).toBe(202)
+        expect(await read<ItemView>(res)).toMatchObject({
+          success: true,
+          status: 202,
+          data: { id: itemId, state: 'matching', reason: null, recognised: { brand, name: 'Bright Tone Serum', variant: 'Night', category: 'skin' } },
+        })
+        expect(calls.map(jobOf)).toEqual(['split-name'])
+        expect(JSON.stringify(calls[0]!.body.messages)).toContain(`${brand} Bright Tone Serum Night`)
+        expect(queued).toEqual([{ itemId, step: 'match', at: expect.any(Number) }])
+        expect(await stateOf(guest, scanId, itemId)).toBe('matching')
+      })
+
+      it('costs nothing more when the product is already analysed in the catalog: the match step makes no call, and the item is ready', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const brand = freshBrand()
+        const { formulationId } = await cataloguedProduct(brand, 'Hydrating Cleanser')
+        const calls = stubAnthropic(splitAs(brand, 'Hydrating Cleanser'))
+        expect((await identification(guest, scanId, itemId, { text: `${brand} Hydrating Cleanser` })).status).toBe(202)
+
+        await runStep(itemId, 'match')
+
+        expect(await itemNow(guest, scanId, itemId)).toMatchObject({ state: 'ready' })
+        expect(await formulationIdOf(itemId)).toBe(formulationId)
+        expect(calls.map(jobOf)).toEqual(['split-name'])
+      })
+
+      it('looks a product the catalog does not hold up like a confirmation does: the match step moves the item to researching', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const brand = freshBrand()
+        stubAnthropic(splitAs(brand, 'Bright Tone Serum'))
+        expect((await identification(guest, scanId, itemId, { text: `${brand} Bright Tone Serum` })).status).toBe(202)
+        queued.length = 0
+
+        await runStep(itemId, 'match')
+
+        expect(await stateOf(guest, scanId, itemId)).toBe('researching')
+        expect(queued).toEqual([{ itemId, step: 'research', at: expect.any(Number) }])
+      })
+
+      it('answers 400 NOT_A_PRODUCT_NAME when the split says the text is not a product name, leaving the item waiting and queuing nothing', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const calls = stubAnthropic(notAProductName)
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { text: 'my cat is called Biscuit' })
+
+        expect(res.status).toBe(400)
+        const refused = (await res.json()) as { message: string; error: { code: string } }
+        expect(refused.error.code).toBe('NOT_A_PRODUCT_NAME')
+        expect(refused.message).not.toMatch(/not a beauty product/i)
+        expect(calls.map(jobOf)).toEqual(['split-name'])
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+        expect(queued).toEqual([])
+      })
+
+      it.each([
+        ['a link', 'buy at https://evil.example now'],
+        ['markup', 'Glow <b>Co</b> serum'],
+        ['a zero-width space', 'cerave​ cleanser'],
+        ['a newline inside it', 'cerave\ncleanser'],
+      ])('refuses text with %s with 400 INVALID_PRODUCT_TEXT, without a model call', async (_label, text) => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+
+        const res = await identification(guest, scanId, itemId, { text })
+
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('INVALID_PRODUCT_TEXT')
+        expect(calls).toHaveLength(0)
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      })
+
+      it.each([
+        ['1 character', 'a'],
+        ['1 character between spaces', '    a    '],
+        ['only spaces', '        '],
+        ['121 characters', 'a'.repeat(121)],
+      ])('refuses %s with 400, without a model call', async (_label, text) => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+
+        const res = await identification(guest, scanId, itemId, { text })
+
+        expect(res.status).toBe(400)
+        expect(['INVALID_PRODUCT_TEXT', 'VALIDATION_FAILED']).toContain(await errorCodeOf(res))
+        expect(calls).toHaveLength(0)
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      })
+
+      // The splitter only keeps words that were typed, so each text holds the brand and name the stub answers with, padded with one more word to the length.
+      const padded = (brand: string, length: number) => `${brand} Serum `.padEnd(length, 'x')
+      it.each([
+        ['2 characters', () => ({ text: 'ab', brand: 'ab', name: 'ab' })],
+        ['120 characters', () => { const brand = freshBrand(); return { text: padded(brand, 120), brand, name: 'Serum' } }],
+        ['120 characters between spaces', () => { const brand = freshBrand(); return { text: `   ${padded(brand, 120)}   `, brand, name: 'Serum' } }],
+      ])('accepts %s', async (_label, make) => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const { text, brand, name } = make()
+        const calls = stubAnthropic(splitAs(brand, name))
+
+        const res = await identification(guest, scanId, itemId, { text })
+
+        expect(res.status).toBe(202)
+        expect(calls.map(jobOf)).toEqual(['split-name'])
+      })
+
+      it('answers 400 NOT_A_PRODUCT_NAME when the model refuses the split, leaving the item waiting and queuing nothing', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        stubAnthropic(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal', usage: CHEAP_USAGE }))
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' })
+
+        expect(res.status).toBe(400)
+        const refused = (await res.json()) as { message: string; error: { code: string } }
+        expect(refused.error.code).toBe('NOT_A_PRODUCT_NAME')
+        expect(refused.message).not.toMatch(/not a beauty product/i)
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+        expect(queued).toEqual([])
+      })
+
+      it('answers 503 AI_UNAVAILABLE, with a message that blames no daily limit, when Claude is unavailable, leaving the item waiting and queuing nothing', async () => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        stubAnthropic(() => errorResponse(529, 'overloaded_error'))
+        queued.length = 0
+
+        const res = await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' })
+
+        expect(res.status).toBe(503)
+        const body = (await res.json()) as { message: string; error: { code: string } }
+        expect(body.error.code).toBe('AI_UNAVAILABLE')
+        expect(body.message).not.toMatch(/limit/i)
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+        expect(queued).toEqual([])
+      })
+    })
+
+    describe('what the body must be', () => {
+      it.each([
+        ['neither field', {}],
+        ['both fields', { productId: 'p', text: 'CeraVe Hydrating Facial Cleanser' }],
+        ['a productId that is not a string', { productId: 7 }],
+        ['a text that is not a string', { text: 7 }],
+        ['a null text', { text: null }],
+      ])('refuses %s with 400 VALIDATION_FAILED, leaving the item waiting and calling nothing', async (_label, body) => {
+        const guest = await newGuest()
+        const { scanId, itemId } = await arrange(guest)
+        const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+
+        const res = await identification(guest, scanId, itemId, body)
+
+        expect(res.status).toBe(400)
+        expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+        expect(calls).toHaveLength(0)
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      })
+    })
+  })
+
+  describe('an item that is not waiting for a name', () => {
+    it('answers 409 ITEM_NOT_AWAITING_IDENTIFICATION to a picked product (even an unknown one) and to text, calling no model', async () => {
+      const guest = await newGuest()
+      const fresh = await createdScan(guest)
+      const itemId = fresh.items[0]!.id
+      const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+
+      for (const body of [{ productId: crypto.randomUUID() }, { text: 'CeraVe Hydrating Facial Cleanser' }]) {
+        const res = await identification(guest, fresh.id, itemId, body)
+        expect(res.status).toBe(409)
+        expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+
+      expect(calls).toHaveLength(0)
+      expect(await stateOf(guest, fresh.id, itemId)).toBe('recognising')
+    })
+
+    it('answers 409 ITEM_NOT_AWAITING_IDENTIFICATION to an item waiting to be confirmed or to have its back photographed', async () => {
+      const guest = await newGuest()
+      const confirming = await awaitingConfirmation(guest)
+      const photographing = await awaitingBackPhoto(guest)
+
+      for (const { scanId, itemId } of [confirming, photographing]) {
+        const res = await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' })
+        expect(res.status).toBe(409)
+        expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+    })
+
+    it('answers 409 ITEM_NOT_AWAITING_IDENTIFICATION to a second identification of the same item, and pays for only one split', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingRetake(guest)
+      const brand = freshBrand()
+      const calls = stubAnthropic(splitAs(brand, 'Serum'))
+      expect((await identification(guest, scanId, itemId, { text: `${brand} Serum` })).status).toBe(202)
+
+      const again = await identification(guest, scanId, itemId, { text: `${brand} Serum` })
+
+      expect(again.status).toBe(409)
+      expect(await errorCodeOf(again)).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      expect(calls.map(jobOf)).toEqual(['split-name'])
+    })
+  })
+
+  it('answers 404 SCAN_NOT_FOUND to another user, for a picked product and for text, calling no model and changing nothing', async () => {
+    const owner = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(owner)
+    const { productId } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser')
+    const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+    const intruder = await newGuest()
+
+    for (const body of [{ productId }, { text: 'CeraVe Hydrating Facial Cleanser' }]) {
+      const res = await identification(intruder, scanId, itemId, body)
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    }
+
+    expect(calls).toHaveLength(0)
+    expect(await stateOf(owner, scanId, itemId)).toBe('needs-retake')
+  })
+
+  it('leaves the retake and quota record as they are: choosing a name sends no photo', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await awaitingRetake(guest)
+    const { productId } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser')
+    expect((await identification(guest, scanId, itemId, { productId })).status).toBe(202)
+
+    const photos = (n: number) => Array.from({ length: n }, (_, i) => fileOf(markedJpeg(i + 1), `p${i}`))
+    expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+    expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+    // 1 front photo + 20 + 9 is exactly the 30 a day: had the identification counted as a photo, the last scan would be refused.
+    expect((await createScan(guest, photos(9), freshIp())).status).toBe(202)
+  })
+
+  describe('signing in', () => {
+    const path = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/identification`
+
+    it('answers 401 AUTH_REQUIRED, not 400, to a body that does not validate, without a token', async () => {
+      const res = await plainPost(path(), JSON.stringify({}), { 'cf-connecting-ip': freshIp(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+
+    it('answers 401 AUTH_REQUIRED, not 415, to a body that is not JSON, without a token', async () => {
+      const res = await plainPost(path(), 'text=CeraVe', { 'cf-connecting-ip': freshIp(), 'Content-Type': 'text/plain' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+  })
+
+  describe('rate limits', () => {
+    const unknownItem = () => ({ scanId: crypto.randomUUID(), itemId: crypto.randomUUID() })
+
+    it('answers 429 RATE_LIMITED to the 11th identification of one user in a minute, from any address', async () => {
+      const guest = await newGuest()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof identification>> | undefined
+      for (let i = 0; i < 11; i++) {
+        // Not the user's scan: the limit is counted before the route looks at which scan it is.
+        const { scanId, itemId } = unknownItem()
+        const res = await identification(guest, scanId, itemId, { productId: crypto.randomUUID() }, freshIp())
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 10)).not.toContain(429)
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('answers 429 RATE_LIMITED to the 21st identification from one address in a minute, whoever sends it', async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof identification>> | undefined
+      for (let i = 0; i < 21; i++) {
+        const { scanId, itemId } = unknownItem()
+        const res = await identification(await newGuest(), scanId, itemId, { productId: crypto.randomUUID() }, shared)
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 20)).not.toContain(429)
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('counts the limit before any model is called: the 11th request makes no split', async () => {
+      const guest = await newGuest()
+      const calls = stubAnthropic(splitAs(freshBrand(), 'Serum'))
+      for (let i = 0; i < 10; i++) {
+        const { scanId, itemId } = unknownItem()
+        await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' }, freshIp())
+      }
+
+      const { scanId, itemId } = unknownItem()
+      const res = await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' }, freshIp())
+
+      expect(res.status).toBe(429)
+      expect(calls).toHaveLength(0)
+    })
+  })
+})
+
+describe('POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label', () => {
+  describe('an item offering identification', () => {
+    it('answers 202 with the item unidentified: the answers, the cautions for them, no product and no photo, nothing queued and no model called', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      const calls = stubAnthropic(() => messageResponse({ content: [textBlock('{}')] }))
+      queued.length = 0
+
+      const res = await noLabel(guest, scanId, itemId)
+
+      expect(res.status).toBe(202)
+      const item = await dataOf<ItemView>(res)
+      expect(item).toMatchObject({
+        id: itemId,
+        position: 0,
+        state: 'unidentified',
+        reason: null,
+        image: null,
+        noLabel: { source: 'market-vendor', purpose: 'lighten', usedFor: '6-months-2-years', rulesVersion: 1 },
+      })
+      expect(item).not.toHaveProperty('product')
+      expect(item).not.toHaveProperty('retakesLeft')
+      expect(item.noLabel).not.toHaveProperty('description')
+      // Lightener, used for over 6 months: the substances, long use, and the general caution that every item with no label gets.
+      expect(item.noLabel!.concerns.map((c) => [c.kind, c.severity])).toEqual([
+        ['banned-substance', 'high'],
+        ['hyperpigmentation-risk', 'medium'],
+        ['irritation', 'medium'],
+      ])
+      for (const concern of item.noLabel!.concerns) {
+        expect(Object.keys(concern).sort()).toEqual(['ingredients', 'kind', 'severity', 'sources', 'traits', 'whoShouldTakeCare', 'why'])
+      }
+      expect(calls).toHaveLength(0)
+      expect(queued).toEqual([])
+    })
+
+    it('shows the same item, noLabel and all, when the scan is read afterwards', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      const item = await dataOf<ItemView>(await noLabel(guest, scanId, itemId, { source: 'pharmacy', purpose: 'moisturise', usedFor: 'under-1-month', description: '  A pink tub  ' }))
+
+      const shown = await itemNow(guest, scanId, itemId)
+
+      expect(shown).toEqual(item)
+      expect(shown.noLabel).toMatchObject({ source: 'pharmacy', purpose: 'moisturise', usedFor: 'under-1-month', description: 'A pink tub' })
+      expect(shown.noLabel!.concerns.map((c) => c.kind)).toEqual(['irritation'])
+    })
+
+    it('treats a blank description as none', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+
+      const res = await noLabel(guest, scanId, itemId, { ...NO_LABEL_ANSWERS, description: '    ' })
+
+      expect(res.status).toBe(202)
+      expect((await dataOf<ItemView>(res)).noLabel).not.toHaveProperty('description')
+    })
+
+    it('accepts a description of exactly 200 characters', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+
+      const res = await noLabel(guest, scanId, itemId, { ...NO_LABEL_ANSWERS, description: 'a'.repeat(200) })
+
+      expect(res.status).toBe(202)
+      expect((await dataOf<ItemView>(res)).noLabel!.description).toBe('a'.repeat(200))
+    })
+
+    it('uses no photo quota and no retake: a day of 30 photos still has room for exactly the 27 it had left', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      expect((await noLabel(guest, scanId, itemId)).status).toBe(202)
+
+      const photos = (n: number) => Array.from({ length: n }, (_, i) => fileOf(markedJpeg(i + 1), `p${i}`))
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      expect((await createScan(guest, photos(10), freshIp())).status).toBe(202)
+      // The item's 3 front photos + 20 + 7 are exactly the 30 a day: had the no-label answer counted as a photo, this scan would be refused.
+      expect((await createScan(guest, photos(7), freshIp())).status).toBe(202)
+      expect((await createScan(guest, photos(1), freshIp())).status).toBe(429)
+    })
+  })
+
+  describe('what the body must be', () => {
+    it.each([
+      ['an empty body', {}],
+      ['no source', { purpose: 'lighten', usedFor: 'over-2-years' }],
+      ['no purpose', { source: 'gift', usedFor: 'over-2-years' }],
+      ['no time used', { source: 'gift', purpose: 'lighten' }],
+      ['a source that is not one of the five', { ...NO_LABEL_ANSWERS, source: 'a friend' }],
+      ['a purpose that is not one of the four', { ...NO_LABEL_ANSWERS, purpose: 'bleach' }],
+      ['a time used that is not one of the four', { ...NO_LABEL_ANSWERS, usedFor: 'a while' }],
+      ['a source in the wrong case', { ...NO_LABEL_ANSWERS, source: 'Pharmacy' }],
+      ['a source that is not a string', { ...NO_LABEL_ANSWERS, source: 7 }],
+      ['a null purpose', { ...NO_LABEL_ANSWERS, purpose: null }],
+      ['a description that is not a string', { ...NO_LABEL_ANSWERS, description: 7 }],
+    ])('refuses %s with 400 VALIDATION_FAILED, leaving the item waiting', async (_label, body) => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      queued.length = 0
+
+      const res = await noLabel(guest, scanId, itemId, body)
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-identification')
+      expect(queued).toEqual([])
+    })
+
+    it.each([
+      ['201 characters', 'a'.repeat(201)],
+      ['a link', 'bought at https://evil.example'],
+      ['markup', 'a <b>pink</b> tub'],
+      ['a hidden character', 'pink​ tub'],
+    ])('refuses a description of %s with 400 INVALID_PRODUCT_TEXT, leaving the item waiting and storing nothing', async (_label, description) => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+
+      const res = await noLabel(guest, scanId, itemId, { ...NO_LABEL_ANSWERS, description })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('INVALID_PRODUCT_TEXT')
+      const item = await itemNow(guest, scanId, itemId)
+      expect(item.state).toBe('needs-identification')
+      expect(item).not.toHaveProperty('noLabel')
+    })
+  })
+
+  describe('an item that is not waiting to say it has no label', () => {
+    it('answers 409 ITEM_NOT_AWAITING_NO_LABEL to an item still recognising, one waiting to be confirmed and one waiting for its back photo, changing nothing', async () => {
+      const guest = await newGuest()
+      const recognising = await createdScan(guest)
+      const confirming = await awaitingConfirmation(guest)
+      const photographing = await awaitingBackPhoto(guest)
+
+      for (const { scanId, itemId, state } of [
+        { scanId: recognising.id, itemId: recognising.items[0]!.id, state: 'recognising' },
+        { ...confirming, state: 'needs-confirmation' },
+        { ...photographing, state: 'needs-back-photo' },
+      ]) {
+        const res = await noLabel(guest, scanId, itemId)
+        expect(res.status).toBe(409)
+        expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+        expect(await stateOf(guest, scanId, itemId)).toBe(state)
+      }
+    })
+
+    it('answers 409 ITEM_NOT_AWAITING_NO_LABEL to an item still in needs-retake: it has tries left, so the label can wait', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingRetake(guest, cheapUnreadable)
+
+      const res = await noLabel(guest, scanId, itemId)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect(await stateOf(guest, scanId, itemId)).toBe('needs-retake')
+    })
+
+    it('answers 409 ITEM_NOT_AWAITING_NO_LABEL to a second call on the same item, whatever it says, and shows the first answers still', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      const first = await dataOf<ItemView>(await noLabel(guest, scanId, itemId, { ...NO_LABEL_ANSWERS, description: 'first' }))
+
+      const again = await noLabel(guest, scanId, itemId, { source: 'pharmacy', purpose: 'moisturise', usedFor: 'under-1-month', description: 'second' })
+
+      expect(again.status).toBe(409)
+      expect(await errorCodeOf(again)).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect(await itemNow(guest, scanId, itemId)).toEqual(first)
+    })
+
+    it('leaves an unidentified item final: naming it afterwards is refused too', async () => {
+      const guest = await newGuest()
+      const { scanId, itemId } = await awaitingIdentification(guest)
+      await noLabel(guest, scanId, itemId)
+
+      const res = await identification(guest, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' })
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      expect(await stateOf(guest, scanId, itemId)).toBe('unidentified')
+    })
+  })
+
+  it('answers 404 SCAN_NOT_FOUND to another user, changing nothing', async () => {
+    const owner = await newGuest()
+    const { scanId, itemId } = await awaitingIdentification(owner)
+    const intruder = await newGuest()
+
+    const res = await noLabel(intruder, scanId, itemId)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    expect(await stateOf(owner, scanId, itemId)).toBe('needs-identification')
+  })
+
+  it('answers 404 SCAN_NOT_FOUND, not 409, to another user asking about an item in the wrong state', async () => {
+    const owner = await newGuest()
+    const scan = await createdScan(owner)
+    const intruder = await newGuest()
+
+    const res = await noLabel(intruder, scan.id, scan.items[0]!.id)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+  })
+
+  it('answers 404 SCAN_NOT_FOUND for a scan or an item that does not exist', async () => {
+    const guest = await newGuest()
+    const scan = await createdScan(guest)
+
+    for (const [scanId, itemId] of [
+      [crypto.randomUUID(), scan.items[0]!.id],
+      [scan.id, crypto.randomUUID()],
+    ] as const) {
+      const res = await noLabel(guest, scanId, itemId)
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    }
+  })
+
+  describe('signing in', () => {
+    const path = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/no-label`
+
+    it('answers 401 AUTH_REQUIRED, not 400, to a body that does not validate, without a token', async () => {
+      const res = await plainPost(path(), JSON.stringify({}), { 'cf-connecting-ip': freshIp(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+
+    it('answers 401 AUTH_REQUIRED, not 415, to a body that is not JSON, without a token', async () => {
+      const res = await plainPost(path(), 'source=gift', { 'cf-connecting-ip': freshIp(), 'Content-Type': 'text/plain' })
+
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    })
+  })
+
+  describe('rate limits', () => {
+    const unknownItem = () => ({ scanId: crypto.randomUUID(), itemId: crypto.randomUUID() })
+
+    it('answers 429 RATE_LIMITED to the 11th call of one user in a minute, from any address', async () => {
+      const guest = await newGuest()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof noLabel>> | undefined
+      for (let i = 0; i < 11; i++) {
+        // Not the user's scan: the limit is counted before the route looks at which scan it is.
+        const { scanId, itemId } = unknownItem()
+        const res = await noLabel(guest, scanId, itemId, NO_LABEL_ANSWERS, freshIp())
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 10)).not.toContain(429)
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('answers 429 RATE_LIMITED to the 21st call from one address in a minute, whoever sends it', async () => {
+      const shared = freshIp()
+      const statuses: number[] = []
+      let limited: Awaited<ReturnType<typeof noLabel>> | undefined
+      for (let i = 0; i < 21; i++) {
+        const { scanId, itemId } = unknownItem()
+        const res = await noLabel(await newGuest(), scanId, itemId, NO_LABEL_ANSWERS, shared)
+        statuses.push(res.status)
+        if (res.status === 429) limited = res
+      }
+
+      expect(statuses.slice(0, 20)).not.toContain(429)
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    })
+
+    it('keeps the identification route\'s limit apart from this one\'s: ten identifications do not use up the no-label calls', async () => {
+      const guest = await newGuest()
+      for (let i = 0; i < 10; i++) {
+        const { scanId, itemId } = unknownItem()
+        await identification(guest, scanId, itemId, { productId: crypto.randomUUID() }, freshIp())
+      }
+      const { scanId, itemId } = unknownItem()
+
+      const res = await noLabel(guest, scanId, itemId, NO_LABEL_ANSWERS, freshIp())
+
+      // Not 429: it got as far as looking for the scan.
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('SCAN_NOT_FOUND')
+    })
+  })
+})
+
 describe('GET /api/v1/scans/products/photos/{token}', () => {
   it.each([
     ['JPEG', () => markedJpeg(5), 'image/jpeg'],
@@ -753,6 +1890,10 @@ describe('signing in', () => {
       scansApi[':scanId'].items[':itemId'].confirmation.$post({ ...ids(), json: { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as never }, { headers })],
     ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', (headers) =>
       scansApi[':scanId'].items[':itemId']['back-photo'].$post({ ...ids(), form: { photo: fileOf(markedJpeg(9)) } }, { headers })],
+    ['POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', (headers) =>
+      scansApi[':scanId'].items[':itemId'].retake.$post({ ...ids(), form: { photo: fileOf(markedJpeg(9)) } }, { headers })],
+    ['POST /api/v1/scans/products/{scanId}/items/{itemId}/identification', (headers) =>
+      scansApi[':scanId'].items[':itemId'].identification.$post({ ...ids(), json: { text: 'CeraVe Hydrating Facial Cleanser' } as never }, { headers })],
   ]
 
   it.each(bearerRoutes)('%s answers 401 AUTH_REQUIRED without a token', async (_route, call) => {
@@ -776,9 +1917,11 @@ describe('signing in', () => {
   // so what would otherwise be 413, 415 or 400 is 401.
   describe('on the upload routes, before the body is looked at', () => {
     const itemPath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/back-photo`
+    const retakePath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/retake`
     const uploads: [string, () => string, number][] = [
       ['POST /api/v1/scans/products', () => '/api/v1/scans/products', OVER_SCAN_BODY_BYTES],
       ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
+      ['POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', retakePath, MAX_PHOTO_BYTES + 1_000_000 + 1],
     ]
     const textPart = () => { const form = new FormData(); form.append('photos', 'not a file'); form.append('photo', 'not a file'); return form }
 
@@ -852,7 +1995,7 @@ describe('OpenAPI', () => {
   const documentOf = async () => {
     const res = await fetchWorker('http://deepertones.test/openapi.json')
     expect(res.status).toBe(200)
-    return (await res.json()) as { paths: Record<string, Record<string, Operation>>; components?: { schemas?: Record<string, { properties?: Record<string, unknown> }> } }
+    return (await res.json()) as { paths: Record<string, Record<string, Operation>>; components?: { schemas?: Record<string, { properties?: Record<string, { enum?: string[] }> }> } }
   }
   const usesBearer = (operation?: Operation) => (operation?.security ?? []).some((requirement) => 'bearerAuth' in requirement)
 
@@ -863,6 +2006,8 @@ describe('OpenAPI', () => {
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}']?.get)).toBe(true)
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post)).toBe(true)
     expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/retake']?.post)).toBe(true)
+    expect(usesBearer(paths['/api/v1/scans/products/{scanId}/items/{itemId}/identification']?.post)).toBe(true)
     expect(paths['/api/v1/scans/products/photos/{token}']?.get).toBeDefined()
     expect(usesBearer(paths['/api/v1/scans/products/photos/{token}']?.get)).toBe(false)
   })
@@ -872,7 +2017,9 @@ describe('OpenAPI', () => {
 
     expect(paths['/api/v1/scans/products']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/back-photo']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
+    expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/retake']?.post?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
     expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/confirmation']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
+    expect(paths['/api/v1/scans/products/{scanId}/items/{itemId}/identification']?.post?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
     expect(Object.keys(paths['/api/v1/scans/products/photos/{token}']!.get!.responses['200']!.content!).sort()).toEqual(['image/jpeg', 'image/webp'])
   })
 
@@ -880,7 +2027,8 @@ describe('OpenAPI', () => {
     const { components } = await documentOf()
 
     expect(components?.schemas?.ProductResult).toBeUndefined()
-    expect(Object.keys(components!.schemas!.ProductSummary!.properties!).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(Object.keys(components!.schemas!.ProductSummary!.properties!).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
+    expect(components!.schemas!.ProductSummary!.properties!.kind!.enum).toEqual(['named', 'unnamed'])
   })
 
   it('lists the statuses the scan routes can answer with', async () => {
@@ -891,7 +2039,67 @@ describe('OpenAPI', () => {
     expect(statuses('/api/v1/scans/products/{scanId}', 'get')).toEqual(expect.arrayContaining(['200', '401', '404']))
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/confirmation', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409']))
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/back-photo', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
+    expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/retake', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
+    expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/identification', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '429', '503']))
     expect(statuses('/api/v1/scans/products/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
+  })
+
+  describe('the no-label route', () => {
+    const PATH = '/api/v1/scans/products/{scanId}/items/{itemId}/no-label'
+    const SOURCES = ['gift', 'market-vendor', 'not-sure', 'online', 'pharmacy']
+    const PURPOSES = ['lighten', 'moisturise', 'not-sure', 'treat-spots']
+    const USED_FOR = ['1-6-months', '6-months-2-years', 'over-2-years', 'under-1-month']
+    type Doc = { paths: Record<string, Record<string, Operation>>; components: { schemas: Record<string, any> } }
+    const fullDocument = async () => {
+      const res = await fetchWorker('http://deepertones.test/openapi.json')
+      expect(res.status).toBe(200)
+      return (await res.json()) as Doc
+    }
+    /** Follows a $ref (the generator may name a schema or inline it). */
+    const deref = (doc: Doc, node: any): any => (node?.$ref ? deref(doc, doc.components.schemas[String(node.$ref).split('/').pop()!]) : node)
+    const enumOf = (doc: Doc, node: any) => [...(deref(doc, node)?.enum ?? [])].sort()
+
+    it('is a POST that needs the bearer token and takes JSON, with the statuses it can answer with', async () => {
+      const { paths } = await fullDocument()
+
+      const operation = paths[PATH]?.post
+      expect(operation).toBeDefined()
+      expect(usesBearer(operation)).toBe(true)
+      expect(operation?.requestBody).toMatchObject({ required: true, content: { 'application/json': expect.anything() } })
+      expect(Object.keys(operation!.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '429']))
+    })
+
+    it('documents the request\'s source, purpose and time used as exactly their fixed words, all required, with the description optional', async () => {
+      const doc = await fullDocument()
+
+      const body = deref(doc, (doc.paths[PATH]?.post?.requestBody?.content['application/json'] as { schema?: unknown } | undefined)?.schema as any)
+
+      expect(enumOf(doc, body.properties.source)).toEqual(SOURCES)
+      expect(enumOf(doc, body.properties.purpose)).toEqual(PURPOSES)
+      expect(enumOf(doc, body.properties.usedFor)).toEqual(USED_FOR)
+      expect(deref(doc, body.properties.description)?.type).toBe('string')
+      expect([...body.required].sort()).toEqual(['purpose', 'source', 'usedFor'])
+    })
+
+    it('documents unidentified as an item state', async () => {
+      const doc = await fullDocument()
+
+      expect(enumOf(doc, doc.components.schemas.ScanItem.properties.state)).toContain('unidentified')
+    })
+
+    it('documents an item\'s noLabel block: the same fixed words, the cautions and the rules version, with the description optional', async () => {
+      const doc = await fullDocument()
+
+      const block = deref(doc, doc.components.schemas.ScanItem.properties.noLabel)
+
+      expect(enumOf(doc, block.properties.source)).toEqual(SOURCES)
+      expect(enumOf(doc, block.properties.purpose)).toEqual(PURPOSES)
+      expect(enumOf(doc, block.properties.usedFor)).toEqual(USED_FOR)
+      expect(deref(doc, block.properties.concerns).type).toBe('array')
+      expect(deref(doc, block.properties.rulesVersion).type).toMatch(/integer|number/)
+      expect([...block.required].sort()).toEqual(['concerns', 'purpose', 'rulesVersion', 'source', 'usedFor'])
+      expect(doc.components.schemas.ScanItem.required ?? []).not.toContain('noLabel')
+    })
   })
 })
 
@@ -972,6 +2180,52 @@ describe('profiles', () => {
     await expectNotFound(await addBackPhoto(second, scanId, itemId))
     expect(await stateOf(first, scanId, itemId)).toBe('needs-back-photo')
     expect((await addBackPhoto(first, scanId, itemId)).status).toBe(202)
+  })
+
+  it('refuses another profile\'s retake with 404 SCAN_NOT_FOUND and changes nothing; the maker\'s retake is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingRetake(first)
+
+    await expectNotFound(await retake(second, scanId, itemId))
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-retake')
+    expect((await retake(first, scanId, itemId)).status).toBe(202)
+  })
+
+  it('refuses another profile\'s identification with 404 SCAN_NOT_FOUND, spending nothing and changing nothing; the maker\'s is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingRetake(first)
+    const { productId } = await cataloguedProduct(freshBrand(), 'Hydrating Cleanser')
+    const calls = stubAnthropic(splitAs(freshBrand(), 'Hydrating Cleanser'))
+
+    await expectNotFound(await identification(second, scanId, itemId, { productId }))
+    await expectNotFound(await identification(second, scanId, itemId, { text: 'CeraVe Hydrating Facial Cleanser' }))
+
+    expect(calls).toHaveLength(0)
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-retake')
+    expect((await identification(first, scanId, itemId, { productId })).status).toBe(202)
+  })
+
+  it('refuses another profile\'s no-label answer with 404 SCAN_NOT_FOUND and changes nothing; the maker\'s is accepted', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingIdentification(first)
+
+    await expectNotFound(await noLabel(second, scanId, itemId))
+
+    expect(await stateOf(first, scanId, itemId)).toBe('needs-identification')
+    expect((await noLabel(first, scanId, itemId)).status).toBe(202)
+  })
+
+  it('shows an unidentified item only to the profile that made the scan', async () => {
+    const first = await newGuest()
+    const second = await asSecondProfile(first)
+    const { scanId, itemId } = await awaitingIdentification(first)
+    await noLabel(first, scanId, itemId)
+
+    await expectNotFound(await getScan(second, scanId))
+    expect((await itemNow(first, scanId, itemId)).noLabel).toMatchObject({ source: 'market-vendor' })
   })
 
   describe('the daily quota', () => {

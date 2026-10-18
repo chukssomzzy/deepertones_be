@@ -82,7 +82,10 @@ const runQueue = async (body: unknown) => {
   await worker.queue!(batch, testEnv, ctx)
   return (await getQueueResult(batch, ctx)).explicitAcks
 }
-const step = (itemId: string, name: 'recognise' | 'match') => runQueue({ itemId, step: name, at: Date.now() })
+// Each run needs a time of its own: a step is keyed by item, step and `at`, and a repeat of a key is acknowledged and skipped.
+let lastAt = 0
+const nextAt = () => (lastAt = Math.max(Date.now(), lastAt + 1))
+const step = (itemId: string, name: 'recognise' | 'match') => runQueue({ itemId, step: name, at: nextAt() })
 
 /** A product the catalog already holds, researched and analysed, so a scan of it needs no research or analysis call. */
 const catalogued = async (brand: string, name: string) => {
@@ -113,6 +116,45 @@ const recognised = (answer: Record<string, unknown>) => () => messageResponse({ 
 const beautyProduct = (brand: string, name: string) =>
   recognised({ classification: 'beauty-product', brand, name, variant: '', form: 'unknown', category: 'skin', confidence: 0.92 })
 const face = recognised({ classification: 'face-or-person', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
+const unreadable = recognised({ classification: 'unreadable', brand: '', name: '', variant: '', form: 'unknown', category: 'other', confidence: 0 })
+
+/** POST .../retake through the Worker's own entrypoint, with its queue replaced by the quiet one (the real queue would deliver the recognise into another test). */
+const postRetake = async (guest: Guest, scanId: string, itemId: string) => {
+  const form = new FormData()
+  form.append('photo', new File([markedJpeg(21).bytes], 'retake.jpg', { type: 'image/jpeg' }))
+  return worker.fetch!(
+    new Request(`${ORIGIN}/api/v1/scans/products/${scanId}/items/${itemId}/retake`, { method: 'POST', body: form, headers: { Authorization: `Bearer ${guest.token}`, 'cf-connecting-ip': freshIp() } }) as never,
+    testEnv,
+    createExecutionContext(),
+  )
+}
+
+/** POST .../no-label through the Worker's own entrypoint, with its queue replaced by the quiet one. */
+const postNoLabel = async (guest: Guest, scanId: string, itemId: string, body: Record<string, unknown>) =>
+  worker.fetch!(
+    new Request(`${ORIGIN}/api/v1/scans/products/${scanId}/items/${itemId}/no-label`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${guest.token}`, 'cf-connecting-ip': freshIp(), 'Content-Type': 'application/json' },
+    }) as never,
+    testEnv,
+    createExecutionContext(),
+  )
+
+/** A one-photo scan whose front photo could not be read three times, so its item offers identification. */
+const startOfferingIdentification = async (guest: Guest) => {
+  const { scanId, itemIds } = await startScan(guest)
+  const itemId = itemIds[0]!
+  stubAnthropic(unreadable)
+  await step(itemId, 'recognise')
+  for (let i = 0; i < 2; i++) {
+    expect((await postRetake(guest, scanId, itemId)).status).toBe(202)
+    await step(itemId, 'recognise')
+  }
+  vi.unstubAllGlobals()
+  expect((await getScan(scanId, guest.token)).items[0]!.state).toBe('needs-identification')
+  return { scanId, itemId }
+}
 
 afterEach(async () => {
   vi.unstubAllGlobals()
@@ -223,7 +265,7 @@ describe('GET /api/v1/scans/products/{scanId}/events: live updates from the back
     expect(await stream.read(1)).toEqual({ frames: [], ended: true })
     // A scan carries who the product is and nothing of its ingredients, concerns or reference data.
     const ready = parsed[2]!.data as { product: Record<string, unknown> }
-    expect(Object.keys(ready.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(Object.keys(ready.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
     expect(ready.product).toMatchObject({ brand })
   })
 
@@ -279,7 +321,7 @@ describe('GET /api/v1/scans/products/{scanId}/events: live updates from the back
     const snapshot = parseFrame((await stream.read(1)).frames[0]!)
 
     const item = (snapshot.data as { items: { product: Record<string, unknown> }[] }).items[0]!
-    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
     expect(item.product).toMatchObject({ brand })
   })
 
@@ -313,6 +355,88 @@ describe('GET /api/v1/scans/products/{scanId}/events: live updates from the back
     await step(busy.itemIds[0]!, 'recognise')
 
     expect(await stream.read(1, 300)).toEqual({ frames: [], ended: false })
+  })
+})
+
+describe('GET /api/v1/scans/products/{scanId}/events: a photo that has to be taken again', () => {
+  it('sends the item as needs-retake, exactly as GET shows it, then as recognising when it is retaken, and no done in between', async () => {
+    const guest = await newGuest()
+    const { scanId, itemIds } = await startScan(guest)
+    const itemId = itemIds[0]!
+    const { stream } = await watch(scanId, guest.token)
+    expect(parseFrame((await stream.read(1)).frames[0]!).event).toBe('snapshot')
+    stubAnthropic(unreadable)
+
+    await step(itemId, 'recognise')
+
+    const asking = parseFrame((await stream.read(1)).frames[0]!)
+    expect(asking.event).toBe('item')
+    expect(asking.data).toMatchObject({ id: itemId, state: 'needs-retake', reason: 'unreadable', retakesLeft: 2 })
+    expect(asking.data).toEqual((await getScan(scanId, guest.token)).items[0])
+
+    const res = await postRetake(guest, scanId, itemId)
+
+    expect(res.status).toBe(202)
+    const again = parseFrame((await stream.read(1)).frames[0]!)
+    expect(again.event).toBe('item')
+    expect(again.data).toMatchObject({ id: itemId, state: 'recognising', reason: null })
+    expect(again.data).not.toHaveProperty('retakesLeft')
+    expect(await stream.read(1, 300)).toEqual({ frames: [], ended: false })
+  })
+
+  it('shows a client that connects while the item asks for a retake the item as needs-retake in the snapshot, and no done', async () => {
+    const guest = await newGuest()
+    const { scanId, itemIds } = await startScan(guest)
+    stubAnthropic(unreadable)
+    await step(itemIds[0]!, 'recognise')
+
+    const { stream } = await watch(scanId, guest.token)
+
+    const first = parseFrame((await stream.read(1)).frames[0]!)
+    expect(first.event).toBe('snapshot')
+    expect(first.data).toMatchObject({ id: scanId, items: [{ id: itemIds[0], state: 'needs-retake', reason: 'unreadable', retakesLeft: 2 }] })
+    expect(await stream.read(1, 300)).toEqual({ frames: [], ended: false })
+  })
+})
+
+describe('GET /api/v1/scans/products/{scanId}/events: an item with no label', () => {
+  it('sends the item as unidentified with its noLabel block, exactly as GET shows it, then done, then ends the stream', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await startOfferingIdentification(guest)
+    const { stream } = await watch(scanId, guest.token)
+    const snapshot = parseFrame((await stream.read(1)).frames[0]!)
+    expect(snapshot.event).toBe('snapshot')
+    expect(snapshot.data).toMatchObject({ items: [{ id: itemId, state: 'needs-identification' }] })
+
+    const res = await postNoLabel(guest, scanId, itemId, { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years', description: 'A pink tub' })
+
+    expect(res.status).toBe(202)
+    const { frames } = await stream.read(2)
+    const parsed = frames.map(parseFrame)
+    expect(parsed.map((frame) => frame.event)).toEqual(['item', 'done'])
+    expect(parsed[0]!.data).toMatchObject({
+      id: itemId,
+      state: 'unidentified',
+      reason: null,
+      image: null,
+      noLabel: { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years', description: 'A pink tub', rulesVersion: 1 },
+    })
+    expect(parsed[0]!.data).toEqual((await getScan(scanId, guest.token)).items[0])
+    expect(await stream.read(1)).toEqual({ frames: [], ended: true })
+  })
+
+  it('shows a client that connects after it the item as unidentified in the snapshot, then done, and ends the stream at once', async () => {
+    const guest = await newGuest()
+    const { scanId, itemId } = await startOfferingIdentification(guest)
+    expect((await postNoLabel(guest, scanId, itemId, { source: 'gift', purpose: 'moisturise', usedFor: 'under-1-month' })).status).toBe(202)
+
+    const { stream } = await watch(scanId, guest.token)
+
+    const { frames, ended } = await stream.read(3)
+    const parsed = frames.map(parseFrame)
+    expect(parsed.map((frame) => frame.event)).toEqual(['snapshot', 'done'])
+    expect(parsed[0]!.data).toMatchObject({ id: scanId, items: [{ id: itemId, state: 'unidentified', noLabel: { source: 'gift', purpose: 'moisturise', usedFor: 'under-1-month' } }] })
+    expect(ended).toBe(true)
   })
 })
 

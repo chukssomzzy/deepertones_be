@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { PermanentJobError } from '../../jobs/job'
-import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, ValidationError } from '../../lib/errors'
+import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { runAs } from '../../lib/context'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
@@ -8,9 +8,11 @@ import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError
 import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.catalog-image-store'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryLabelReader } from '../../providers/label-reading/memory.label-reader'
+import { MemoryNameSplitter } from '../../providers/name-splitting/memory.name-splitter'
 import { MemoryPhotoStore } from '../../providers/photo-store/memory.photo-store'
 import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.product-analyst'
-import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
+import type { LabelReading } from '../../providers/label-reading/label-reader.provider'
+import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductRecognizer } from '../../providers/product-recognition/memory.product-recognizer'
 import type { Recognition } from '../../providers/product-recognition/product-recognizer.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
@@ -19,8 +21,9 @@ import type { ProductIdentity } from '../../providers/product-research/product-r
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
-import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
-import { FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
+import { AnalysisInProgressError, CatalogBusyError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
+import { REFERENCE_VERSION } from '../catalog/catalog.reference'
+import { ANALYSIS_VERSION, FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -28,6 +31,7 @@ import { FakePushTokensRepository } from '../notifications/push-tokens.repositor
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-specs'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
+import { CAUTION_RULES_VERSION, cautionFor } from './scans.cautions'
 import { toScanResponse } from './scans.presenter'
 import { FakeScansRepository } from './scans.repository.fake'
 import { SCAN_POLICY, ScanService } from './scans.service'
@@ -97,6 +101,7 @@ const setup = (options: SetupOptions = {}) => {
   const recognizer = new MemoryProductRecognizer()
   recognizer.respondWith(() => seen())
   const labelReader = new MemoryLabelReader()
+  const nameSplitter = new MemoryNameSplitter()
   const photos = options.photos ?? new MemoryPhotoStore({ environment: 'test' })
   const jobs = new MemoryJobQueue()
   // The push jobs go to a queue of their own: `queued`, `queuedWithTime` and `drain` read every message on `jobs` as a scan step.
@@ -115,6 +120,7 @@ const setup = (options: SetupOptions = {}) => {
     catalog,
     recognizer,
     labelReader,
+    nameSplitter,
     photos,
     jobs,
     events,
@@ -136,6 +142,7 @@ const setup = (options: SetupOptions = {}) => {
     images,
     recognizer,
     labelReader,
+    nameSplitter,
     photos,
     jobs,
     pushJobs,
@@ -167,6 +174,10 @@ const create = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?:
   asUser(() => ctx.service.create({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
 const getScan = (ctx: Ctx, scanId: string, userId = USER, profileId = PROFILE): Promise<any> => asUser(() => ctx.service.getScan(scanId), userId, profileId)
 const run = (ctx: Ctx, itemId: string, step: Step) => asJob(() => ctx.service.advance(itemId, step))
+/** The formulation the stored item points at (a scan's view carries the product's identity only, not its formulation). */
+const formulationIdOf = async (ctx: Ctx, itemId: string) => (await ctx.repository.findItem(itemId))!.formulationId!
+/** What the catalog holds for the item's formulation: its ingredients, source and concerns. */
+const formulationViewOf = async (ctx: Ctx, itemId: string) => ctx.catalog.productView(await formulationIdOf(ctx, itemId))
 const itemOf = async (ctx: Ctx, scanId: string, itemId: string): Promise<any> => (await getScan(ctx, scanId)).items.find((i: { id: string }) => i.id === itemId)!
 const stateOf = async (ctx: Ctx, scanId: string, itemId: string) => {
   const item = await itemOf(ctx, scanId, itemId)
@@ -240,12 +251,38 @@ const analysingItem = async (ctx: Ctx, ingredients: string[] = CLEAN) => {
   return taken
 }
 
+const BLURRY: Recognition = { classification: 'unreadable' }
+const TURNED_AWAY: Recognition = { classification: 'label-not-visible' }
+
+const retake = (ctx: Ctx, scanId: string, itemId: string, photo: ProductImage = markedJpeg(20), over: { ip?: string; userId?: string; profileId?: string } = {}) =>
+  asUser(() => ctx.service.retake(scanId, itemId, photo, over.ip ?? IP), over.userId ?? USER, over.profileId ?? PROFILE)
+
+/**
+ * A one-photo scan whose front photo (and then each retaken photo, markers 21, 22, ...) the recognizer answered with `reads`, in turn,
+ * through the real steps: after the first unreadable read the item asks for a retake, and after the third it asks for identification.
+ */
+const failedFront = async (ctx: Ctx, reads: Recognition[]) => {
+  const { scanId, itemId } = await scanOne(ctx)
+  for (const [i, read] of reads.entries()) {
+    ctx.recognizer.respondWith(() => read)
+    if (i > 0) {
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, markedJpeg(20 + i))
+    }
+    await run(ctx, itemId, 'recognise')
+  }
+  // The steps above were run by hand, so the queue's messages for them are spent: a later `drain` must not run them again.
+  ctx.cursor.next = ctx.jobs.enqueued.length
+  return { scanId, itemId }
+}
+
 describe('SCAN_POLICY', () => {
-  it('sets the photo, size, dimension, back photo, daily quota and confirmation limits', () => {
+  it('sets the photo, size, dimension, front photo, back photo, daily quota and confirmation limits', () => {
     expect(SCAN_POLICY).toEqual({
       maxPhotosPerScan: 10,
       maxPhotoBytes: 2_000_000,
       maxPhotoEdge: 1600,
+      maxFrontPhotos: 3,
       maxBackPhotos: 3,
       dailyPhotosPerUser: 30,
       dailyPhotosPerIp: 100,
@@ -660,7 +697,6 @@ describe('ScanService.advance: recognise', () => {
   it.each([
     ['a face or person', { classification: 'face-or-person' }, 'face-or-person'],
     ['a product that is not beauty or personal care', { classification: 'other-product' }, 'not-a-beauty-product'],
-    ['a photo nothing can be read from', { classification: 'unreadable' }, 'unreadable'],
   ] as const)('rejects %s as %s and deletes the photo at once', async (_label, recognition, reason) => {
     const ctx = setup()
     ctx.recognizer.respondWith(() => recognition)
@@ -701,6 +737,8 @@ describe('ScanService.advance: recognise', () => {
   it.each([
     ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
     ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, BLURRY, BLURRY])],
   ])('does nothing for an item that is already %s: no recognizer call, no new job, no event', async (state, arrange) => {
     const ctx = setup()
     const { scanId, itemId } = await arrange(ctx)
@@ -722,6 +760,128 @@ describe('ScanService.advance: recognise', () => {
     await expect(run(ctx, 'no-such-item', 'recognise')).resolves.toBeUndefined()
 
     expect(ctx.recognizer.calls).toEqual([])
+  })
+})
+
+describe('ScanService.advance: recognise, a front photo that cannot be read', () => {
+  const states = itemOf
+
+  it.each([
+    ['a photo that is blurry, dark or empty', 'unreadable', BLURRY],
+    ['a beauty product whose label is turned away or covered', 'label-not-visible', TURNED_AWAY],
+  ] as const)('asks for a retake of %s, with the reason %s, and deletes the photo at once', async (_label, reason, recognition) => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => recognition)
+    const { scanId, itemId } = await scanOne(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const item = await states(ctx, scanId, itemId)
+    expect(item).toMatchObject({ state: 'needs-retake', reason, retakesLeft: 2, image: null })
+    expect(ctx.photos.stored.size).toBe(0)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
+    expect(queued(ctx)).toEqual([advanceMessage(itemId, 'recognise')])
+  })
+
+  it('counts the retaken photos too: the second unreadable photo asks again, and the third sends the item to identification', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, TURNED_AWAY])
+
+    expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'label-not-visible', retakesLeft: 1, image: null })
+    expect(ctx.photos.stored.size).toBe(0)
+
+    ctx.advance(SECOND)
+    await retake(ctx, scanId, itemId, markedJpeg(30))
+    ctx.recognizer.respondWith(() => BLURRY)
+    await run(ctx, itemId, 'recognise')
+
+    expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'needs-identification', reason: 'unreadable', image: null })
+    expect(ctx.photos.stored.size).toBe(0)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
+  })
+
+  it.each([
+    ['unreadable, then label-not-visible, then unreadable', 'unreadable', [BLURRY, TURNED_AWAY, BLURRY]],
+    ['label-not-visible, then unreadable, then label-not-visible', 'label-not-visible', [TURNED_AWAY, BLURRY, TURNED_AWAY]],
+    ['label-not-visible three times', 'label-not-visible', [TURNED_AWAY, TURNED_AWAY, TURNED_AWAY]],
+  ] as const)('sends the item to identification on the third unreadable photo (%s), keeping the third photo\'s reason %s', async (_label, reason, reads) => {
+    const ctx = setup()
+
+    const { scanId, itemId } = await failedFront(ctx, [...reads])
+
+    const item = await states(ctx, scanId, itemId)
+    expect(item).toMatchObject({ state: 'needs-identification', reason, image: null })
+    expect(ctx.photos.stored.size).toBe(0)
+    // Nothing is queued for it: it waits for the user. Only the scan's own recognise, and one per retake, were ever sent.
+    expect(queued(ctx).map((m) => m.step)).toEqual(['recognise', 'recognise', 'recognise'])
+  })
+
+  it('does not tell the app about retakes once there are none left: retakesLeft is left out of a needs-identification item', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY, BLURRY])
+
+    const item = await states(ctx, scanId, itemId)
+
+    expect(item.state).toBe('needs-identification')
+    expect(item).not.toHaveProperty('retakesLeft')
+  })
+
+  it('counts the tries per item: another item of the same scan with two unreadable photos does not use up this one\'s retakes', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => BLURRY)
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+    const [a, b] = scan.items
+    await run(ctx, a.id, 'recognise')
+    ctx.advance(SECOND)
+    await retake(ctx, scan.id, a.id, markedJpeg(21))
+    await run(ctx, a.id, 'recognise')
+
+    await run(ctx, b.id, 'recognise')
+
+    expect(await states(ctx, scan.id, a.id)).toMatchObject({ state: 'needs-retake', retakesLeft: 1 })
+    expect(await states(ctx, scan.id, b.id)).toMatchObject({ state: 'needs-retake', retakesLeft: 2 })
+  })
+
+  it.each([
+    ['a face or person', 'face-or-person', { classification: 'face-or-person' }],
+    ['a product that is not beauty or personal care', 'not-a-beauty-product', { classification: 'other-product' }],
+  ] as const)('still rejects %s at once on a retaken photo, as %s, deleting it, however many tries the item has had', async (_label, reason, recognition) => {
+    const ctx = setup()
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, TURNED_AWAY])
+    ctx.advance(SECOND)
+    await retake(ctx, scanId, itemId, markedJpeg(40))
+    ctx.recognizer.respondWith(() => recognition)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'rejected', reason, image: null })
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('recognises a retaken photo that reads: the recognizer is asked about the new photo, and the item goes on to matching', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+    const better = markedJpeg(50)
+    ctx.advance(SECOND)
+    await retake(ctx, scanId, itemId, better)
+    ctx.recognizer.respondWith(() => seen())
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.calls.at(-1)).toEqual(better)
+    expect(ctx.recognizer.calls).toHaveLength(2)
+    expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser' } })
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+  })
+
+  it('shows retakesLeft on no item that is not asking for a retake', async () => {
+    const ctx = setup()
+    const recognising = await scanOne(ctx)
+    const confirming = await reach(ctx, 'needs-confirmation')
+    const matching = await reach(ctx, 'matching')
+
+    for (const { scanId, itemId } of [recognising, confirming, matching]) expect(await states(ctx, scanId, itemId)).not.toHaveProperty('retakesLeft')
   })
 })
 
@@ -822,7 +982,7 @@ describe('ScanService.advance: match', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'ready', reason: null })
-    expect(item.product).toEqual(await ctx.catalog.productSummary(productId))
+    expect(item.product).toEqual(await ctx.catalog.productSummary(formulationId))
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
     expect(ctx.researcher.calls).toHaveLength(1)
     expect(ctx.analyst.calls.analyse).toHaveLength(1)
@@ -1284,13 +1444,13 @@ describe('ScanService: what a ready item shows of its product', () => {
     await run(ctx, itemId, 'match')
 
     const item = await itemOf(ctx, scanId, itemId)
-    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
     expect(item.product).toMatchObject({ id: productId, brand: CERAVE.brand, name: CERAVE.name })
     expect(item.product).not.toHaveProperty('product')
     const published = ctx.events.published.map((p) => p.event).filter((event) => event.type === 'item' && event.item.id === itemId && event.item.state === 'ready')
     expect(published).toHaveLength(1)
     const sent = (published[0] as { item: typeof item }).item
-    expect(Object.keys(sent.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'name', 'variant'])
+    expect(Object.keys(sent.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
   })
 })
 
@@ -1303,7 +1463,7 @@ describe('ScanService.advance: analyse', () => {
     const item = await itemOf(ctx, scanId, itemId)
     expect(item.state).toBe('ready')
     const stored = await ctx.repository.findItem(itemId)
-    expect(item.product).toEqual(await ctx.catalog.productSummary(stored!.productId!))
+    expect(item.product).toEqual(await ctx.catalog.productSummary(stored!.formulationId!))
   })
 
   it('fails the item as research-busy, without throwing, when the catalog cannot analyse today', async () => {
@@ -1420,7 +1580,7 @@ describe('ScanService.advance: events', () => {
 
   it('counts a rejected item as final for the done event', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx, [markedJpeg(1)])
 
     await run(ctx, scan.items[0].id, 'recognise')
@@ -1430,7 +1590,7 @@ describe('ScanService.advance: events', () => {
 
   it('does not publish done while another item is still waiting, even if it is waiting for the user', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
     const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
 
     await run(ctx, scan.items[0].id, 'recognise')
@@ -1581,6 +1741,8 @@ describe('ScanService.markItemFailed', () => {
   it.each([
     ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
     ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])],
   ])('leaves an item waiting for the user (%s) exactly as it was, and publishes nothing: no message of ours is owed', async (state, arrange) => {
     const ctx = setup()
     const { scanId, itemId } = await arrange(ctx)
@@ -1902,6 +2064,368 @@ describe('ScanService.addBackPhoto', () => {
   })
 })
 
+describe('ScanService.retake', () => {
+  /** A one-photo scan whose photo could not be read, so the item asks for a retake. */
+  const awaitingRetake = (ctx: Ctx, read: Recognition = BLURRY) => failedFront(ctx, [read])
+
+  it('keeps the new photo as the item\'s front photo, moves the item to recognising with no reason and enqueues the recognise', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx, TURNED_AWAY)
+    const photo = webpPhoto()
+    ctx.advance(5 * MINUTE)
+
+    const view = await retake(ctx, scanId, itemId, photo)
+
+    expect(view).toMatchObject({ id: itemId, state: 'recognising', reason: null, image: { kind: 'user' } })
+    expect(view).not.toHaveProperty('retakesLeft')
+    expect(view).not.toHaveProperty('recognised')
+    expect(ctx.photos.stored.get(photoKey(scanId, itemId, 'webp'))).toEqual(photo)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBe(photoKey(scanId, itemId, 'webp'))
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'recognise'))
+    // The message carries the time of the retake: the key of this run, apart from the first photo's.
+    expect(queuedWithTime(ctx).at(-1)).toMatchObject({ itemId, step: 'recognise', at: T0.getTime() + 5 * MINUTE })
+  })
+
+  it('answers the same item that getScan gives', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+
+    const view = await retake(ctx, scanId, itemId)
+
+    expect(view).toEqual(await itemOf(ctx, scanId, itemId))
+  })
+
+  it('publishes the item as recognising, after needs-retake, so a client watching the scan sees both', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+
+    await retake(ctx, scanId, itemId)
+
+    expect(ctx.events.eventsFor(scanId)).toMatchObject([
+      { type: 'item', item: { id: itemId, state: 'needs-retake' } },
+      { type: 'item', item: { id: itemId, state: 'recognising', reason: null } },
+    ])
+  })
+
+  it('does not send done, or mark the scan done, while the item waits for a retake or for identification', async () => {
+    const ctx = setup()
+    const asking = await awaitingRetake(ctx)
+    const identifying = await failedFront(ctx, [BLURRY, BLURRY, BLURRY])
+
+    for (const { scanId } of [asking, identifying]) {
+      expect(ctx.events.eventsFor(scanId).length).toBeGreaterThan(0)
+      expect(ctx.events.eventsFor(scanId).map((e) => e.type)).not.toContain('done')
+    }
+    expect((await ctx.repository.findScan(asking.scanId))!.doneAt).toBeNull()
+    expect((await ctx.repository.findScan(identifying.scanId))!.doneAt).toBeNull()
+  })
+
+  it('goes on to ready when the retaken photo reads, through the same steps as a first photo', async () => {
+    const ctx = setup()
+    await catalogued(ctx)
+    const { scanId, itemId } = await awaitingRetake(ctx)
+    await retake(ctx, scanId, itemId)
+    ctx.recognizer.respondWith(() => seen())
+
+    await drain(ctx)
+
+    expect((await itemOf(ctx, scanId, itemId)).state).toBe('ready')
+  })
+
+  it.each([
+    ['recognising', (ctx: Ctx) => scanOne(ctx)],
+    ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
+    ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+    // The boundary: after the third unreadable photo the item no longer takes a retake, it asks for identification.
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, BLURRY, BLURRY])],
+  ])('refuses an item that is %s with ITEM_NOT_AWAITING_RETAKE, storing and queueing nothing and recording no photo', async (state, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await arrange(ctx)
+    const stored = ctx.photos.stored.size
+    const jobs = ctx.jobs.enqueued.length
+    const counted = await ctx.repository.photosSince(USER, new Date(T0.getTime() - DAY))
+
+    const error = await errorOf(retake(ctx, scanId, itemId, markedJpeg(77)))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.code).toBe('ITEM_NOT_AWAITING_RETAKE')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+    expect(ctx.photos.stored.size).toBe(stored)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(await ctx.repository.photosSince(USER, new Date(T0.getTime() - DAY))).toEqual(counted)
+  })
+
+  it('refuses a rejected item with ITEM_NOT_AWAITING_RETAKE: a face is not given another try', async () => {
+    const ctx = setup()
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+    const { scanId, itemId } = await scanOne(ctx)
+    await run(ctx, itemId, 'recognise')
+
+    const error = await errorOf(retake(ctx, scanId, itemId))
+
+    expect(error.code).toBe('ITEM_NOT_AWAITING_RETAKE')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('rejected')
+  })
+
+  it('refuses a second retake of the same item with ITEM_NOT_AWAITING_RETAKE, and enqueues the recognise only once', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+    await retake(ctx, scanId, itemId)
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(retake(ctx, scanId, itemId, markedJpeg(21)))
+
+    expect(error.code).toBe('ITEM_NOT_AWAITING_RETAKE')
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it.each([
+    ['another user\'s scan', (s: string, i: string) => [s, i, OTHER_USER] as const],
+    ['an unknown scan', (_s: string, i: string) => ['no-such-scan', i, USER] as const],
+    ['an unknown item', (s: string) => [s, 'no-such-item', USER] as const],
+  ])('answers SCAN_NOT_FOUND for %s, storing and queueing nothing', async (_label, aim) => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+    const stored = ctx.photos.stored.size
+    const jobs = ctx.jobs.enqueued.length
+    const [s, i, u] = aim(scanId, itemId)
+
+    const error = await errorOf(retake(ctx, s, i, markedJpeg(21), { userId: u }))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect(ctx.photos.stored.size).toBe(stored)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('answers SCAN_NOT_FOUND to another profile of the same user, changing nothing', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+    const stored = ctx.photos.stored.size
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(retake(ctx, scanId, itemId, markedJpeg(21), { profileId: OTHER_PROFILE }))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('SCAN_NOT_FOUND')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+    expect(ctx.photos.stored.size).toBe(stored)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('answers AUTH_REQUIRED to a public caller', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.retake(scanId, itemId, markedJpeg(21), IP)))
+
+    expect(error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it.each([
+    ['a PNG', 'UNSUPPORTED_IMAGE', () => pngPhoto()],
+    ['bytes that are not an image', 'UNSUPPORTED_IMAGE', () => garbagePhoto()],
+    ['a photo with an edge of 1601 pixels', 'IMAGE_TOO_LARGE', () => jpegPhoto({ width: 1601, height: 100 })],
+    ['a photo of 2,000,001 bytes', 'IMAGE_TOO_LARGE', () => jpegPhoto({ size: 2_000_001 })],
+  ])('refuses %s as %s under the same rules as a front photo, leaving the item waiting and the retake uncounted', async (_label, code, make) => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(retake(ctx, scanId, itemId, make()))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe(code)
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'needs-retake', retakesLeft: 2 })
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('accepts a retaken photo of exactly 1600 pixels and 2,000,000 bytes', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await awaitingRetake(ctx)
+
+    await retake(ctx, scanId, itemId, jpegPhoto({ width: 1600, height: 1600, size: 2_000_000 }))
+
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('recognising')
+  })
+
+  describe('daily quotas', () => {
+    /** A user with `taken` (29 or 30) photos today, the last scan's first item (photo 1) unreadable and asking for a retake. Three addresses keep the per-address quota out of it. */
+    const withPhotosTaken = async (ctx: Ctx, taken: 29 | 30) => {
+      const photos = (count: number) => Array.from({ length: count }, (_, i) => markedJpeg(i + 1))
+      await create(ctx, photos(10), { ip: '192.0.2.1' })
+      await create(ctx, photos(10), { ip: '192.0.2.2' })
+      const scan = await create(ctx, photos(taken - 20), { ip: '192.0.2.3' })
+      const itemId = scan.items[0].id as string
+      ctx.recognizer.respondWith(() => BLURRY)
+      await run(ctx, itemId, 'recognise')
+      expect((await stateOf(ctx, scan.id, itemId)).state).toBe('needs-retake')
+      return { scanId: scan.id as string, itemId }
+    }
+
+    it('counts a retake as one photo: with 29 taken it fits as the 30th', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await withPhotosTaken(ctx, 29)
+
+      await retake(ctx, scanId, itemId)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('recognising')
+    })
+
+    it('refuses a retake as SCAN_DAILY_LIMIT when 30 photos were already taken, storing nothing and leaving the item waiting', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await withPhotosTaken(ctx, 30)
+      const stored = ctx.photos.stored.size
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(retake(ctx, scanId, itemId))
+
+      expect(error).toBeInstanceOf(RateLimitedError)
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+      expect(error.details!.retryAfterSeconds).toBeGreaterThan(0)
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(ctx.photos.stored.size).toBe(stored)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('counts the retake it just took towards the next one', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await withPhotosTaken(ctx, 29)
+      await retake(ctx, scanId, itemId)
+      await run(ctx, itemId, 'recognise')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+
+      const error = await errorOf(retake(ctx, scanId, itemId))
+
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('counts a retake for the address it came from, not for the address the scan was made from', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 2 } })
+      const { scanId, itemId } = await awaitingRetake(ctx)
+
+      await retake(ctx, scanId, itemId, markedJpeg(21), { ip: OTHER_IP })
+
+      // IP has the front photo only, and OTHER_IP has the retake only: each can take one more, and no more.
+      await expect(create(ctx, [markedJpeg(31)], { ip: IP })).resolves.toMatchObject({ items: expect.any(Array) })
+      await expect(create(ctx, [markedJpeg(32)], { ip: OTHER_IP })).resolves.toMatchObject({ items: expect.any(Array) })
+      expect((await errorOf(create(ctx, [markedJpeg(33)], { ip: OTHER_IP }))).code).toBe('SCAN_DAILY_LIMIT')
+      expect((await errorOf(create(ctx, [markedJpeg(34)], { ip: IP }))).code).toBe('SCAN_DAILY_LIMIT')
+    })
+
+    it('counts the daily photos across the account\'s profiles, so a retake by one profile uses the other\'s allowance too', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 2 } })
+      const { scanId, itemId } = await awaitingRetake(ctx)
+
+      await retake(ctx, scanId, itemId)
+
+      expect((await errorOf(create(ctx, [markedJpeg(31)], { profileId: OTHER_PROFILE }))).code).toBe('SCAN_DAILY_LIMIT')
+    })
+  })
+
+  describe('a queue that fails', () => {
+    const outage = () => new Error('queue is down')
+
+    it('moves the item back to needs-retake with the reason it had, removes the new photo, and rethrows so the caller can try again', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx, TURNED_AWAY)
+      const failure = outage()
+      ctx.jobs.failNextWith(failure)
+
+      await expect(retake(ctx, scanId, itemId)).rejects.toBe(failure)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-retake', reason: 'label-not-visible' })
+      expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
+      expect(ctx.photos.stored.size).toBe(0)
+    })
+
+    it('still counts the photo that was sent against the daily quota, as a back photo is', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx)
+      ctx.jobs.failNextWith(outage())
+
+      await retake(ctx, scanId, itemId).catch(() => undefined)
+
+      // The front photo, and the retake the failed queueing did not take back.
+      expect((await ctx.repository.photosSince(USER, new Date(T0.getTime() - DAY))).count).toBe(2)
+    })
+
+    it('never shows a negative retakesLeft: each failed queueing keeps its retake row, so the count bottoms out at 0', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx)
+      const left: (number | undefined)[] = []
+      for (const marker of [21, 22, 23]) {
+        ctx.jobs.failNextWith(outage())
+        await retake(ctx, scanId, itemId, markedJpeg(marker)).catch(() => undefined)
+        ctx.advance(SECOND)
+        left.push((await itemOf(ctx, scanId, itemId)).retakesLeft)
+      }
+
+      expect(left).toEqual([1, 0, 0])
+    })
+
+    it('lets the user retake again after a failed queueing, and queues that recognise', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx)
+      ctx.jobs.failNextWith(outage())
+      await retake(ctx, scanId, itemId).catch(() => undefined)
+      ctx.advance(SECOND)
+
+      await retake(ctx, scanId, itemId, markedJpeg(22))
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('recognising')
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'recognise'))
+    })
+
+    it('queues the retry under a key of its own, so the job runner does not drop it as a repeat of the one that never got queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx)
+      const attempts: AdvanceScanItemMessage[] = []
+      const enqueue = ctx.jobs.enqueue.bind(ctx.jobs)
+      vi.spyOn(ctx.jobs, 'enqueue').mockImplementation((job, body, options) => {
+        attempts.push(body as AdvanceScanItemMessage)
+        return enqueue(job, body, options)
+      })
+      ctx.jobs.failNextWith(outage())
+      await retake(ctx, scanId, itemId).catch(() => undefined)
+      ctx.advance(SECOND)
+
+      await retake(ctx, scanId, itemId, markedJpeg(22))
+
+      const [failed, retried] = attempts
+      expect(failed).toMatchObject({ itemId, step: 'recognise' })
+      expect(retried).toMatchObject({ itemId, step: 'recognise' })
+      expect(advanceScanItemSpec.key(retried!)).not.toBe(advanceScanItemSpec.key(failed!))
+    })
+  })
+
+  describe('two retakes at once', () => {
+    it.each([
+      ['two JPEGs, which share one key', () => [markedJpeg(21), markedJpeg(22)]],
+      ['a JPEG and a WebP, which have keys of their own', () => [markedJpeg(21), webpPhoto()]],
+    ])('lets one win and answers ITEM_NOT_AWAITING_RETAKE to the other, leaving the winner\'s photo in the bucket and one recognise queued (%s)', async (_label, photos) => {
+      const ctx = setup()
+      const { scanId, itemId } = await awaitingRetake(ctx)
+      const jobs = ctx.jobs.enqueued.length
+      const [a, b] = photos()
+
+      const results = await Promise.allSettled([retake(ctx, scanId, itemId, a), retake(ctx, scanId, itemId, b)])
+
+      const lost = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1)
+      expect(lost).toHaveLength(1)
+      expect((lost[0]!.reason as { code: string }).code).toBe('ITEM_NOT_AWAITING_RETAKE')
+      const stored = await ctx.repository.findItem(itemId)
+      expect(stored!.state).toBe('recognising')
+      expect(ctx.photos.stored.has(stored!.photoKey!)).toBe(true)
+      expect(ctx.photos.stored.size).toBe(1)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs + 1)
+    })
+  })
+})
+
 describe('ScanService.getScan', () => {
   it('shows the scan\'s id, when it was made and its items in photo order', async () => {
     const ctx = setup()
@@ -2179,14 +2703,14 @@ describe('ScanService.advance: what the model cannot or will not do', () => {
   const capped = () => new AiBudgetExceededError('cap')
 
   describe('recognise', () => {
-    it('rejects a photo the model refused to look at as unreadable, deletes it, and does not throw', async () => {
+    it('asks for a retake of a photo the model refused to look at, as unreadable, deletes it, and does not throw', async () => {
       const ctx = setup()
       const { scanId, itemId } = await scanOne(ctx)
       ctx.recognizer.failNextWith(refused())
 
       await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
 
-      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'rejected', reason: 'unreadable', image: null })
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'needs-retake', reason: 'unreadable', retakesLeft: 2, image: null })
       expect(ctx.photos.stored.size).toBe(0)
       expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
       expect(queued(ctx)).toEqual([advanceMessage(itemId, 'recognise')])
@@ -2344,7 +2868,6 @@ describe('ScanService.advance: waiting for work another call is doing', () => {
 describe('ScanService.advance: an item that lacks what its step needs', () => {
   it.each([
     ['research', 'researching', (ctx: Ctx) => reach(ctx, 'researching'), { productId: null }],
-    ['read-label', 'reading-label', (ctx: Ctx) => reach(ctx, 'reading-label'), { productId: null }],
     ['analyse', 'analysing', (ctx: Ctx) => analysingItem(ctx), { formulationId: null }],
   ] as const)('fails an item in %s with no product or formulation as unavailable, as match does, instead of leaving it for ever', async (step, state, arrange, missing) => {
     const ctx = setup()
@@ -2487,7 +3010,7 @@ describe('ScanService.advance: exactly one done', () => {
 
   it('does not publish done again for a scan already marked done', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx, [markedJpeg(1)])
     await run(ctx, scan.items[0].id, 'recognise')
     const events = ctx.events.published.length
@@ -2584,6 +3107,25 @@ describe('ScanService.reap', () => {
     expect(await states()).toEqual(expected)
     expect(expected).toEqual(['needs-confirmation', 'needs-back-photo', 'rejected'])
     expect(ctx.jobs.enqueued).toHaveLength(before)
+    expect(result).toEqual({ requeued: 0, failed: 0 })
+  })
+
+  it.each([
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])],
+  ])('leaves an item waiting in %s alone however old: it queues nothing for it, does not fail it and publishes nothing', async (state, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await arrange(ctx)
+    const before = await itemOf(ctx, scanId, itemId)
+    const jobs = ctx.jobs.enqueued.length
+    const events = ctx.events.published.length
+    ctx.advance(3 * HOUR)
+
+    const result = await reap(ctx)
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state, reason: before.reason })
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(ctx.events.published).toHaveLength(events)
     expect(result).toEqual({ requeued: 0, failed: 0 })
   })
 
@@ -2705,7 +3247,7 @@ describe('ScanService.watch', () => {
 
   it('sends nothing more while any item is still being worked on or waiting for the user', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
     const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
     await run(ctx, scan.items[0].id, 'recognise')
     await run(ctx, scan.items[1].id, 'recognise')
@@ -2716,9 +3258,22 @@ describe('ScanService.watch', () => {
     expect(ctx.events.published).toHaveLength(before)
   })
 
+  it('sends nothing more to a client that connects while an item waits for a retake or for identification: those are not final', async () => {
+    const ctx = setup()
+    const asking = await failedFront(ctx, [BLURRY])
+    const identifying = await failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+    const before = ctx.events.published.length
+
+    await watch(ctx, asking.scanId)
+    await watch(ctx, identifying.scanId)
+
+    expect(ctx.events.published).toHaveLength(before)
+    expect(ctx.events.subscribed).toHaveLength(2)
+  })
+
   it('follows the snapshot with done when every item is already final, whether ready, rejected or failed', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen()))
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen()))
     const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
     await run(ctx, scan.items[0].id, 'recognise')
     await run(ctx, scan.items[1].id, 'recognise')
@@ -2743,7 +3298,7 @@ describe('ScanService.watch', () => {
     let events!: DoneFails
     const ctx = setup({ events: () => (events = new DoneFails()) })
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx)
     await run(ctx, scan.items[0].id, 'recognise')
     events.failing = true
@@ -2783,7 +3338,7 @@ describe('ScanService.watch', () => {
     const racy = (photos = [markedJpeg(1)]) => {
       let events!: RacyEvents
       const ctx = setup({ events: () => (events = new RacyEvents()) })
-      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
       return { ctx, events, scan: create(ctx, photos) }
     }
     const finishDirectly = (ctx: Ctx, itemId: string) =>
@@ -2797,7 +3352,7 @@ describe('ScanService.watch', () => {
       await watch(ctx, scan.id)
 
       expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
-      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[0].id, state: 'rejected', reason: 'unreadable' } }, { type: 'done' }])
+      expect(ctx.events.eventsFor(scan.id)).toMatchObject([{ type: 'item', item: { id: scan.items[0].id, state: 'rejected', reason: 'face-or-person' } }, { type: 'done' }])
     })
 
     it('sends the changed item, and no done, while another item is still being worked on', async () => {
@@ -2929,7 +3484,7 @@ describe('ScanService.reap: a done that was lost', () => {
     let events!: FlakyEvents
     const ctx = setup({ events: () => (events = new FlakyEvents()) })
     const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx, over.photos ?? [markedJpeg(1)])
     events.failing = true
     for (const item of scan.items) await run(ctx, item.id, 'recognise')
@@ -2972,7 +3527,7 @@ describe('ScanService.reap: a done that was lost', () => {
 
   it('does nothing for a scan that already had its done, or that still has an item to wait for', async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+    ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
     const finished = await create(ctx, [markedJpeg(1)])
     await run(ctx, finished.items[0].id, 'recognise')
     const waiting = await create(ctx, [markedJpeg(1), markedJpeg(2)])
@@ -3016,7 +3571,7 @@ describe('ScanService: a done that cannot be published stays repairable', () => 
   const arrange = async () => {
     let events!: DoneFlaky
     const ctx = setup({ events: () => (events = new DoneFlaky()) })
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx)
     return { ctx, events, scan }
   }
@@ -3081,7 +3636,7 @@ describe('ScanService.reap: how far back it repairs a done', () => {
 
   const lostDone = async () => {
     const ctx = setup()
-    ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+    ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
     const scan = await create(ctx)
     await run(ctx, scan.items[0].id, 'recognise')
     // The step's done is taken back, as if it had been lost.
@@ -3272,6 +3827,1683 @@ describe('ScanService: a scan belongs to the profile that made it', () => {
 
     await expect(create(ctx, photosOf(1), { profileId: OTHER_PROFILE })).resolves.toMatchObject({ items: expect.any(Array) })
     expect((await errorOf(create(ctx, photosOf(1), { profileId: PROFILE }))).code).toBe('SCAN_DAILY_LIMIT')
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------------
+// A back photo that identifies the product (an item that had no product at all)
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** The regulation URL the seed reference data attaches to a banned substance: the one source an analysis of WITH_MERCURY may cite. */
+const EUR_LEX = 'https://eur-lex.europa.eu/eli/reg/2009/1223/oj'
+const MERCURY_CONCERN: DraftConcern = {
+  kind: 'banned-substance',
+  severity: 'high',
+  ingredients: ['Mercury'],
+  why: 'Mercury is prohibited in cosmetics and is a known poisoning risk.',
+  whoShouldTakeCare: 'Everyone, and especially anyone pregnant.',
+  traits: ['sensitive'],
+  sources: [EUR_LEX],
+}
+/** The identity key of the product that holds a list nobody named. */
+const CLEAN_UNNAMED_KEY = 'unnamed:aqua\nglycerin\ncetearyl alcohol'
+const MERCURY_UNNAMED_KEY = 'unnamed:aqua\nmercury\nglycerin'
+
+const GLOW = { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as const
+/** A back label that prints a brand and a name beside its list. */
+const readNamed = (ingredients: string[] = CLEAN, over: Partial<Extract<LabelReading, { readable: true }>> = {}): LabelReading => ({
+  readable: true,
+  ingredients,
+  ...GLOW,
+  ...over,
+})
+/** A back label that prints only the list. */
+const readList = (ingredients: string[] = CLEAN): LabelReading => ({ readable: true, ingredients })
+
+/** An item with no product, after three unreadable front photos: it offers identification. */
+const identifying = (ctx: Ctx) => failedFront(ctx, [BLURRY, BLURRY, BLURRY])
+const sendBack = (ctx: Ctx, scanId: string, itemId: string, marker = 9) => asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(marker), IP))
+/** An item with no product whose back photo has just been uploaded, waiting for its label to be read. */
+const readingUnidentified = async (ctx: Ctx, marker = 9) => {
+  const taken = await identifying(ctx)
+  ctx.advance(SECOND)
+  await sendBack(ctx, taken.scanId, taken.itemId, marker)
+  return taken
+}
+const sendBackOf = (ctx: Ctx, scanId: string, itemId: string, photo: ProductImage) => asUser(() => ctx.service.addBackPhoto(scanId, itemId, photo, IP))
+const analyseSteps = (ctx: Ctx, itemId: string) => queued(ctx).filter((m) => m.itemId === itemId && m.step === 'analyse')
+
+describe('ScanService.addBackPhoto: an item offering identification', () => {
+  it('takes a back photo from needs-identification: keeps it privately next to the front one, moves the item to reading-label and enqueues the read', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+    const photo = webpPhoto()
+
+    const view = await sendBackOf(ctx, scanId, itemId, photo)
+
+    expect(view).toMatchObject({ id: itemId, state: 'reading-label', reason: null })
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('reading-label')
+    expect(ctx.photos.stored.get(backKey(scanId, itemId, 'webp'))).toEqual(photo)
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'read-label'))
+    expect(await ctx.repository.countBackPhotos(itemId)).toBe(1)
+  })
+
+  it.each([
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
+  ])('still refuses an item that is %s with ITEM_NOT_AWAITING_BACK_PHOTO, storing nothing new', async (state, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await arrange(ctx)
+    const stored = ctx.photos.stored.size
+    const jobs = ctx.jobs.enqueued.length
+
+    const error = await errorOf(sendBack(ctx, scanId, itemId, 77))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+    expect(ctx.photos.stored.size).toBe(stored)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('refuses a second back photo while the first is being read, as ITEM_NOT_AWAITING_BACK_PHOTO', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+
+    const error = await errorOf(sendBack(ctx, scanId, itemId, 78))
+
+    expect(error.code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+    expect(await ctx.repository.countBackPhotos(itemId)).toBe(1)
+  })
+
+  it('refuses a back photo of a PNG under the same rules as any photo, leaving the item offering identification', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+
+    const error = await errorOf(sendBackOf(ctx, scanId, itemId, pngPhoto()))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('UNSUPPORTED_IMAGE')
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-identification')
+  })
+})
+
+describe('ScanService.advance: read-label, an item with no product, whose back names the product', () => {
+  it('creates the product the label names, with no research, and takes the item to analysing with the analysis queued', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed(CLEAN, { variant: 'Night' }))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+    expect(ctx.researcher.calls).toEqual([])
+    const stored = (await ctx.repository.findItem(itemId))!
+    expect(await ctx.catalogRepository.findProductByKey('glow co|bright tone serum|night|')).toMatchObject({ id: stored.productId, kind: 'named', brand: 'Glow Co', category: 'skin' })
+    expect(await ctx.catalogRepository.findFormulation(stored.formulationId!)).toMatchObject({ productId: stored.productId, ingredients: CLEAN, sourceKind: 'label' })
+  })
+
+  it('shows the label\'s brand, name, variant and category as what the item was recognised as', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed(CLEAN, { variant: 'Night', category: 'hair' }))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ recognised: { brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'hair' } })
+  })
+
+  it('shows a null variant, not a missing one, when the label printed none', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed())
+
+    await run(ctx, itemId, 'read-label')
+
+    expect((await itemOf(ctx, scanId, itemId)).recognised).toEqual({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: null, form: null, category: 'skin' })
+  })
+
+  it('gives the label reader the back photo that was uploaded, and deletes it once its label is read', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx, 31)
+    ctx.labelReader.respondWith(() => readNamed())
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(ctx.labelReader.calls).toEqual([markedJpeg(31)])
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
+  })
+
+  it('makes the item ready, once analysed, with the new product named and its list from the label', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed())
+    await run(ctx, itemId, 'read-label')
+
+    await run(ctx, itemId, 'analyse')
+
+    const item = await itemOf(ctx, scanId, itemId)
+    expect(item.state).toBe('ready')
+    expect(item.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+    expect(item.product).not.toHaveProperty('formulation')
+    expect((await formulationViewOf(ctx, itemId)).formulation).toMatchObject({ ingredients: CLEAN, source: { kind: 'label', url: null } })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('goes straight to ready, queueing no analysis, when the product the label names is already analysed with that list', async () => {
+    const ctx = setup()
+    const known = await catalogued(ctx, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    const researches = ctx.researcher.calls.length
+    const analyses = ctx.analyst.calls.analyse.length
+    ctx.labelReader.respondWith(() => readNamed(CLEAN))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'ready', reason: null })
+    expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: known.productId, formulationId: known.formulationId })
+    expect(analyseSteps(ctx, itemId)).toEqual([])
+    expect(ctx.researcher.calls).toHaveLength(researches)
+    expect(ctx.analyst.calls.analyse).toHaveLength(analyses)
+  })
+
+  it('analyses a materially different list for a known product: a new label formulation, with the analysis queued', async () => {
+    const ctx = setup()
+    const known = await catalogued(ctx, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed([...CLEAN, 'Phenoxyethanol']))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    const stored = (await ctx.repository.findItem(itemId))!
+    expect(stored.productId).toBe(known.productId)
+    expect(stored.formulationId).not.toBe(known.formulationId)
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+  })
+
+  it.each([
+    ['an older analysis version', { analysisVersion: ANALYSIS_VERSION - 1, referenceVersion: REFERENCE_VERSION }],
+    ['an older reference version', { analysisVersion: ANALYSIS_VERSION, referenceVersion: 'seed-old' }],
+  ])('analyses again, rather than showing it as ready, when the product the label names was analysed by %s', async (_label, versions) => {
+    const ctx = setup()
+    const known = await catalogued(ctx, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' }, { analysed: false })
+    await ctx.catalogRepository.saveAnalysis(known.formulationId, { concerns: [], ...versions, analysedAt: ctx.now() })
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed(CLEAN))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: known.productId, formulationId: known.formulationId })
+    expect(analyseSteps(ctx, itemId)).toHaveLength(1)
+  })
+
+  it('does nothing the second time: a redelivered read-label neither reads the photo nor queues anything again', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readNamed())
+    await run(ctx, itemId, 'read-label')
+    const jobs = ctx.jobs.enqueued.length
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(ctx.labelReader.calls).toHaveLength(1)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('analysing')
+  })
+})
+
+describe('ScanService.advance: read-label, an item with no product, whose back gives only a list', () => {
+  it.each([
+    ['no brand or name', readList()],
+    ['a brand but no name', { ...readList(), brand: 'Glow Co' } as LabelReading],
+    ['a name but no brand', { ...readList(), name: 'Bright Tone Serum' } as LabelReading],
+  ])('keeps the list as an unnamed product when the label has %s, with no research, and queues the analysis', async (_label, reading) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => reading)
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+    const stored = (await ctx.repository.findItem(itemId))!
+    expect(await ctx.catalogRepository.findProductByKey(CLEAN_UNNAMED_KEY)).toMatchObject({ id: stored.productId, kind: 'unnamed' })
+    expect(await ctx.catalogRepository.findFormulation(stored.formulationId!)).toMatchObject({ productId: stored.productId, sourceKind: 'label' })
+    expect(ctx.researcher.calls).toEqual([])
+    expect(ctx.analyst.calls.sameProduct).toEqual([])
+  })
+
+  it('shows nothing as recognised, because the label named nothing', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList())
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await itemOf(ctx, scanId, itemId)).not.toHaveProperty('recognised')
+  })
+
+  it('makes the item ready, once analysed, as an unnamed product with empty brand and name, and the concerns of its list', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList(WITH_MERCURY))
+    ctx.analyst.analyseWith(() => [MERCURY_CONCERN])
+    await run(ctx, itemId, 'read-label')
+
+    await run(ctx, itemId, 'analyse')
+
+    const item = await itemOf(ctx, scanId, itemId)
+    expect(item.state).toBe('ready')
+    expect(item.product).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null, category: 'other' })
+    expect(item.product).not.toHaveProperty('concerns')
+    const view = await formulationViewOf(ctx, itemId)
+    expect(view.formulation).toMatchObject({ ingredients: WITH_MERCURY, source: { kind: 'label', url: null } })
+    expect(view.concerns).toHaveLength(1)
+    expect(view.concerns[0]).toMatchObject({ kind: 'banned-substance', severity: 'high', ingredients: ['Mercury'] })
+    // The front photo went at needs-identification and the back photo once read, and an unnamed product has no stock image.
+    expect(item.image).toBeNull()
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('analyses a list once: a second item photographing the same list goes straight to ready with the first one\'s formulation, and the analyst is called once', async () => {
+    const ctx = setup()
+    const first = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList(WITH_MERCURY))
+    ctx.analyst.analyseWith(() => [MERCURY_CONCERN])
+    await run(ctx, first.itemId, 'read-label')
+    await run(ctx, first.itemId, 'analyse')
+    const second = await readingUnidentified(ctx, 10)
+    const jobs = ctx.jobs.enqueued.length
+
+    await run(ctx, second.itemId, 'read-label')
+
+    expect(await stateOf(ctx, second.scanId, second.itemId)).toEqual({ state: 'ready', reason: null })
+    expect(analyseSteps(ctx, second.itemId)).toEqual([])
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+    const [a, b] = [await itemOf(ctx, first.scanId, first.itemId), await itemOf(ctx, second.scanId, second.itemId)]
+    const [formulationA, formulationB] = [await formulationIdOf(ctx, first.itemId), await formulationIdOf(ctx, second.itemId)]
+    expect(formulationB).toBe(formulationA)
+    expect((await ctx.catalog.productView(formulationB)).concerns).toHaveLength(1)
+    expect(b.product).toMatchObject({ kind: 'unnamed', id: a.product.id })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('shares the analysis with a second item whose scan was made by someone else', async () => {
+    const ctx = setup()
+    const first = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList())
+    await run(ctx, first.itemId, 'read-label')
+    await run(ctx, first.itemId, 'analyse')
+    const otherScan = await create(ctx, [markedJpeg(1)], { ip: OTHER_IP, userId: OTHER_USER, profileId: OTHER_PROFILE })
+    const other = { scanId: otherScan.id as string, itemId: otherScan.items[0].id as string }
+    ctx.recognizer.respondWith(() => BLURRY)
+    await run(ctx, other.itemId, 'recognise')
+    for (const marker of [41, 42]) {
+      ctx.advance(SECOND)
+      await asUser(() => ctx.service.retake(other.scanId, other.itemId, markedJpeg(marker), OTHER_IP), OTHER_USER, OTHER_PROFILE)
+      await run(ctx, other.itemId, 'recognise')
+    }
+    ctx.advance(SECOND)
+    await asUser(() => ctx.service.addBackPhoto(other.scanId, other.itemId, markedJpeg(43), OTHER_IP), OTHER_USER, OTHER_PROFILE)
+
+    await run(ctx, other.itemId, 'read-label')
+
+    expect(await ctx.repository.findItem(other.itemId)).toMatchObject({ state: 'ready', formulationId: (await ctx.repository.findItem(first.itemId))!.formulationId })
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+  })
+
+  it('moves an item already shown as unnamed to the named product when a later item\'s label names that list', async () => {
+    const ctx = setup()
+    const first = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => readList(WITH_MERCURY))
+    ctx.analyst.analyseWith(() => [MERCURY_CONCERN])
+    await run(ctx, first.itemId, 'read-label')
+    await run(ctx, first.itemId, 'analyse')
+    expect((await itemOf(ctx, first.scanId, first.itemId)).product).toMatchObject({ kind: 'unnamed' })
+    const second = await readingUnidentified(ctx, 10)
+    ctx.labelReader.respondWith(() => readNamed(WITH_MERCURY))
+
+    await run(ctx, second.itemId, 'read-label')
+
+    expect(await stateOf(ctx, second.scanId, second.itemId)).toEqual({ state: 'ready', reason: null })
+    const [a, b] = [await itemOf(ctx, first.scanId, first.itemId), await itemOf(ctx, second.scanId, second.itemId)]
+    expect(b.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum' })
+    expect(a.state).toBe('ready')
+    expect(a.product).toMatchObject({ kind: 'named', id: b.product.id, brand: 'Glow Co' })
+    expect(a.product).not.toHaveProperty('concerns')
+    const formulationId = await formulationIdOf(ctx, second.itemId)
+    expect(await formulationIdOf(ctx, first.itemId)).toBe(formulationId)
+    expect((await ctx.catalog.productView(formulationId)).concerns).toHaveLength(1)
+    expect(await ctx.catalogRepository.findProductByKey(MERCURY_UNNAMED_KEY)).toBeNull()
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+    expect(ctx.researcher.calls).toEqual([])
+  })
+})
+
+describe('ScanService.advance: read-label, an item with no product, whose back cannot be read', () => {
+  const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
+  const refused = () => new AnthropicRefusalError('Claude refused to answer')
+  const unusable = () => new AnthropicRequestError('Claude returned text that is not valid JSON')
+  /** An item that has had `n` back photos uploaded (the first `n - 1` read as unreadable), the last waiting to be read. */
+  const readingBackPhoto = async (ctx: Ctx, n: number) => {
+    const taken = await readingUnidentified(ctx)
+    for (let i = 1; i < n; i++) {
+      unreadable(ctx)
+      await run(ctx, taken.itemId, 'read-label')
+      ctx.advance(SECOND)
+      await sendBack(ctx, taken.scanId, taken.itemId, 10 + i)
+    }
+    return taken
+  }
+
+  it.each([
+    [1, '1st'],
+    [2, '2nd'],
+  ])('offers identification again, as label-unreadable, when the unreadable back photo is the %i (%s)', async (n) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, n)
+    unreadable(ctx)
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-identification', reason: 'label-unreadable' })
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
+    expect(ctx.jobs.enqueued.filter((m) => (m.body as { step: string }).step === 'analyse')).toEqual([])
+  })
+
+  it('ends the item as failed with label-unreadable when the 3rd back photo is unreadable, deleting it and queueing nothing more', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    unreadable(ctx)
+    const jobs = ctx.jobs.enqueued.length
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+  })
+
+  it('takes a further back photo after an unreadable one, and reads it', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 1)
+    unreadable(ctx)
+    await run(ctx, itemId, 'read-label')
+    ctx.advance(SECOND)
+
+    await sendBack(ctx, scanId, itemId, 55)
+    ctx.labelReader.respondWith(() => readList())
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+    expect(ctx.labelReader.calls.at(-1)).toEqual(markedJpeg(55))
+  })
+
+  it('still analyses the item when the 3rd back photo is readable: the cap applies only to a failure', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    ctx.labelReader.respondWith(() => readList())
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'analysing', reason: null })
+  })
+
+  it('refuses a 4th back photo for an item it has ended, with ITEM_NOT_AWAITING_BACK_PHOTO', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    unreadable(ctx)
+    await run(ctx, itemId, 'read-label')
+
+    const error = await errorOf(sendBack(ctx, scanId, itemId, 13))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+  })
+
+  it.each([
+    ['the reader cannot read the label', (ctx: Ctx) => unreadable(ctx)],
+    ['the list it read is refused by the catalog (it carries a link)', (ctx: Ctx) => ctx.labelReader.respondWith(() => readNamed(['Aqua', 'see https://evil.example']))],
+    ['the list it read is empty', (ctx: Ctx) => ctx.labelReader.respondWith(() => readNamed([]))],
+    ['the model refuses', (ctx: Ctx) => ctx.labelReader.failNextWith(refused())],
+    ['the model sends an unusable answer', (ctx: Ctx) => ctx.labelReader.failNextWith(unusable())],
+    ['the back photo is gone from the store', (ctx: Ctx, scanId: string, itemId: string) => void ctx.photos.stored.delete(backKey(scanId, itemId))],
+  ])('offers identification again, as label-unreadable, creating no product, on the 1st back photo when %s', async (_label, arrange) => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 1)
+    arrange(ctx, scanId, itemId)
+
+    await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-identification', reason: 'label-unreadable' })
+    expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: null, formulationId: null, backPhotoKey: null })
+    expect(await ctx.catalogRepository.findProductByKey(CLEAN_UNNAMED_KEY)).toBeNull()
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+  })
+
+  it('ends the item as failed with label-unreadable on the 3rd back photo when the catalog refuses its list', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+    ctx.labelReader.respondWith(() => readNamed(['Aqua', 'see https://evil.example']))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+  })
+
+  it('fails the item as research-busy, keeps the back photo and does not throw, when the AI spend cap is spent', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.failNextWith(new AiBudgetExceededError('cap'))
+
+    await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+  })
+})
+
+describe('ScanService: an item identified by its back photo, through the queue', () => {
+  it('takes three unreadable photos and a named back photo to ready, with one vision call, one label read and one analysis, and no research', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+    ctx.advance(SECOND)
+    await sendBack(ctx, scanId, itemId)
+    ctx.labelReader.respondWith(() => readNamed())
+
+    const ran = await drain(ctx)
+
+    expect(ran.slice(-2)).toEqual(['read-label', 'analyse'])
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'ready', reason: null })
+    expect(ctx.labelReader.calls).toHaveLength(1)
+    expect(ctx.analyst.calls.analyse).toHaveLength(1)
+    expect(ctx.researcher.calls).toEqual([])
+  })
+
+  it('takes an ingredients-only back photo to ready as an unnamed product', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await identifying(ctx)
+    ctx.advance(SECOND)
+    await sendBack(ctx, scanId, itemId)
+    ctx.labelReader.respondWith(() => readList())
+
+    await drain(ctx)
+
+    const item = await itemOf(ctx, scanId, itemId)
+    expect(item).toMatchObject({ state: 'ready', reason: null })
+    expect(item.product).toMatchObject({ kind: 'unnamed', brand: '', name: '' })
+    expect(ctx.researcher.calls).toEqual([])
+  })
+})
+
+describe('ScanService.advance: read-label, an item with no product, when the AI spend cap stops the catalog\'s question', () => {
+  const KNOWN = { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' } as const
+  // Its name nearly matches KNOWN's, so the catalog asks the judge whether they are the same product.
+  const NEAR_MISS = readNamed(CLEAN, { brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster', category: 'skin' })
+
+  it('fails the item as research-busy without throwing, keeping the back photo, creating no product or alias and queueing nothing', async () => {
+    const ctx = setup()
+    await catalogued(ctx, KNOWN)
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => NEAR_MISS)
+    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+    const jobs = ctx.jobs.enqueued.length
+
+    await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
+    expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: null, formulationId: null })
+    expect(await ctx.catalogRepository.findProductByKey(identityKey({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))).toBeNull()
+    expect(await ctx.catalogRepository.productsByBrandFamily('acme', 10)).toHaveLength(1)
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+  })
+
+  it('shows nothing as recognised for the failed item, because nothing was identified', async () => {
+    const ctx = setup()
+    await catalogued(ctx, KNOWN)
+    const { scanId, itemId } = await readingUnidentified(ctx)
+    ctx.labelReader.respondWith(() => NEAR_MISS)
+    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+
+    await run(ctx, itemId, 'read-label')
+
+    expect(await itemOf(ctx, scanId, itemId)).not.toHaveProperty('recognised')
+  })
+})
+
+
+// --- identifying an item by typing its name: a product picked from the catalog, or free text split into a product ---
+
+// (ScanService already has a private `identify(reading)` for a back label's reading; this public one is `identifyByName`.)
+describe('ScanService.identifyByName', () => {
+  const SPLIT_CERAVE = { kind: 'product', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' } as const
+  type Input = { productId: string } | { text: string }
+  const identify = (ctx: Ctx, scanId: string, itemId: string, input: Input, userId = USER, profileId = PROFILE): Promise<any> =>
+    asUser(() => ctx.service.identifyByName(scanId, itemId, input), userId, profileId)
+
+  /** The two states a name may be typed in: while retakes are left, and once the 3rd front photo could not be read. */
+  const AWAITING = [
+    ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['needs-identification', (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])],
+  ] as const
+  /** Every call that could cost: the recognizer, the label reader, the splitter, the web researcher and the analyst. */
+  const aiCalls = (ctx: Ctx) =>
+    ctx.recognizer.calls.length + ctx.labelReader.calls.length + ctx.nameSplitter.calls.length + ctx.researcher.calls.length + ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length
+
+  describe.each(AWAITING)('a product picked from the catalog, for an item in %s', (state, arrange) => {
+    it('moves an item whose product is analysed straight to ready with its product, showing the chosen product as what it was recognised as, and queues nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, { ...CERAVE, variant: 'Night' })
+      const queuedBefore = queued(ctx)
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({
+        id: itemId,
+        state: 'ready',
+        reason: null,
+        recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin' },
+        product: { id: productId, kind: 'named', brand: 'CeraVe' },
+      })
+      expect(view).not.toHaveProperty('retakesLeft')
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { variant: 'Night' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(queued(ctx)).toEqual(queuedBefore)
+    })
+
+    it('makes no AI call of any kind for an analysed product: no recognizer, splitter, researcher or analyst', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+      const before = aiCalls(ctx)
+
+      await identify(ctx, scanId, itemId, { productId })
+
+      expect(aiCalls(ctx)).toBe(before)
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('moves an item whose product has a formulation nobody analysed to analysing and queues the analyse step', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, CERAVE, { analysed: false })
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({ state: 'analysing', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, category: 'skin' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'analyse'))
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('moves an item whose product has no formulation yet to researching and queues the research step', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const resolved = await ctx.catalog.resolve(CERAVE)
+
+      const view = await identify(ctx, scanId, itemId, { productId: resolved.productId })
+
+      expect(view).toMatchObject({ state: 'researching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser' } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: resolved.productId, formulationId: null })
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'research'))
+    })
+
+    it('moves an item whose product\'s formulation is older than FRESH_FOR_DAYS to researching, and keeps one that is exactly that old ready', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+      ctx.advance(FRESH_FOR_DAYS * DAY)
+
+      expect((await identify(ctx, scanId, itemId, { productId })).state).toBe('ready')
+
+      const second = await arrange(ctx)
+      ctx.advance(1)
+      expect((await identify(ctx, second.scanId, second.itemId, { productId })).state).toBe('researching')
+    })
+
+    it('carries on through the queue: an item that was moved to analysing becomes ready once the analyse step runs', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      await identify(ctx, scanId, itemId, { productId })
+
+      const ran = await drain(ctx)
+
+      expect(ran.at(-1)).toBe('analyse')
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'ready', reason: null })
+    })
+
+    it('leaves the retake record as it is: the photos already sent still count, and none is added', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const retakes = await ctx.repository.countRetakes(itemId)
+      const { productId } = await catalogued(ctx)
+
+      await identify(ctx, scanId, itemId, { productId })
+
+      expect(await ctx.repository.countRetakes(itemId)).toBe(retakes)
+    })
+
+    it('answers PRODUCT_NOT_FOUND for a product the catalog does not hold, leaving the item where it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: 'no-such-product' }))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('answers PRODUCT_NOT_FOUND for an unnamed product, which search never offers, leaving the item where it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const unnamed = await ctx.catalog.fromLabel({ ingredients: CLEAN })
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: unnamed.productId }))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('PRODUCT_NOT_FOUND')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('puts the item back and rethrows when the next step cannot be queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      ctx.jobs.failNextWith(new Error('queue down'))
+
+      await expect(identify(ctx, scanId, itemId, { productId })).rejects.toThrow('queue down')
+
+      expect((await itemOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('fails the item as analysis-failed, exactly as the match step does, when the product\'s analysis has been rejected the maximum number of times', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx, CERAVE, { ingredients: WITH_MERCURY, analysed: false })
+      // The analyst answers with nothing, which the catalog rejects (mercury must be explained): three rejections and it gives up.
+      for (let i = 0; i < 3; i++) await ctx.catalog.analyse(formulationId).catch(() => undefined)
+      const jobs = ctx.jobs.enqueued.length
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view).toMatchObject({ id: itemId, state: 'failed', reason: 'analysis-failed' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'analysis-failed' })
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+  })
+
+  describe.each(AWAITING)('typed text, for an item in %s', (state, arrange) => {
+    it('splits the text with exactly one call, then moves the item to matching as what the split found, and queues the match', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ ...SPLIT_CERAVE, variant: 'Night' }))
+
+      const view = await identify(ctx, scanId, itemId, { text: 'cerave hydrating facial cleanser night' })
+
+      expect(ctx.nameSplitter.calls).toEqual(['cerave hydrating facial cleanser night'])
+      expect(view).toMatchObject({ id: itemId, state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin' } })
+      expect(view).not.toHaveProperty('product')
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
+    })
+
+    it('does the matching in the queue, not in the request: nothing is looked up in the catalog until the match step runs', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      expect(await ctx.catalogRepository.findProductByKey(identityKey(CERAVE))).toBeNull()
+      expect(ctx.researcher.calls).toHaveLength(0)
+    })
+
+    it('trims the text before it is split', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: '  cerave cleanser \n' })
+
+      expect(ctx.nameSplitter.calls).toEqual(['cerave cleanser'])
+    })
+
+    it('answers a product the catalog already holds, once the match step runs, with no further model call: ready, and the one split call is all it cost', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId, formulationId } = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const before = aiCalls(ctx)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      const ran = await drain(ctx)
+
+      expect(ran).toEqual(['match'])
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', product: { id: productId } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
+      expect(aiCalls(ctx)).toBe(before + 1)
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+    })
+
+    it('researches a product the catalog does not hold, as a confirmation does, and creates it under the split\'s brand, name and variant', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ kind: 'product', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' }))
+      ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
+      await identify(ctx, scanId, itemId, { text: 'glow co bright tone serum night' })
+
+      const ran = await drain(ctx)
+
+      expect(ran).toEqual(['match', 'research', 'analyse'])
+      expect(ctx.researcher.calls).toHaveLength(1)
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({
+        state: 'ready',
+        product: { kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' },
+      })
+      expect(await ctx.catalogRepository.findProductByKey(identityKey({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night' }))).not.toBeNull()
+    })
+
+    it('asks the user for the back of the pack, as a confirmation does, when the product is new and research finds nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      await drain(ctx)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: null })
+    })
+
+    it('leaves the retake record as it is', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const retakes = await ctx.repository.countRetakes(itemId)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      expect(await ctx.repository.countRetakes(itemId)).toBe(retakes)
+    })
+
+    it('answers NOT_A_PRODUCT_NAME, queues nothing and leaves the item where it was, when the split says the text is not a product name', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => ({ kind: 'not-a-product' }))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'my cat is called Biscuit' }))
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('NOT_A_PRODUCT_NAME')
+      // A name is not always a beauty product's: the message says only that it could not be read as a name.
+      expect(error.message).not.toMatch(/not a beauty product/i)
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state, reason: expect.any(String) })
+      expect(await itemOf(ctx, scanId, itemId)).not.toHaveProperty('recognised')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('lets the user try again after NOT_A_PRODUCT_NAME', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith((text) => (text === 'cerave cleanser' ? SPLIT_CERAVE : { kind: 'not-a-product' }))
+      expect((await errorOf(identify(ctx, scanId, itemId, { text: 'hello' }))).code).toBe('NOT_A_PRODUCT_NAME')
+
+      expect((await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })).state).toBe('matching')
+    })
+
+    it('answers CatalogBusyError (CATALOG_BUSY), queues nothing and leaves the item where it was, when the AI spend cap stops the split', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(new AiBudgetExceededError('cap'))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(CatalogBusyError)
+      expect(error.code).toBe('CATALOG_BUSY')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('puts the item back and rethrows when the match cannot be queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      ctx.jobs.failNextWith(new Error('queue down'))
+
+      await expect(identify(ctx, scanId, itemId, { text: 'cerave cleanser' })).rejects.toThrow('queue down')
+
+      expect((await itemOf(ctx, scanId, itemId)).state).toBe(state)
+    })
+
+    it('answers NOT_A_PRODUCT_NAME, as for any text that is not a product name, when the model refuses the split; the item stays and nothing is queued', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(new AnthropicRefusalError('refused'))
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('NOT_A_PRODUCT_NAME')
+      // A name is not always a beauty product's: the message says only that it could not be read as a name.
+      expect(error.message).not.toMatch(/not a beauty product/i)
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    // A provider outage is not the daily limit: the user is told to try again, and the message must not blame a limit. The budget error above stays CATALOG_BUSY.
+    it.each([
+      ['unavailable', () => new AnthropicUnavailableError('overloaded')],
+      ['rejects the request', () => new AnthropicRequestError('unusable answer')],
+    ])('answers AI_UNAVAILABLE (503), not CATALOG_BUSY, when the provider %s; the item stays and nothing is queued', async (_label, failure) => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      ctx.nameSplitter.failNextWith(failure())
+      const jobs = ctx.jobs.enqueued.length
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error).not.toBeInstanceOf(CatalogBusyError)
+      expect(error.code).toBe('AI_UNAVAILABLE')
+      expect(error.message).not.toMatch(/limit/i)
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+  })
+
+  describe('the typed text', () => {
+    const typed = async (text: string) => {
+      const ctx = setup()
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      const jobs = ctx.jobs.enqueued.length
+      return { ctx, scanId, itemId, jobs, run: () => identify(ctx, scanId, itemId, { text }) }
+    }
+
+    it.each([
+      ['2 characters', 'ab'],
+      ['120 characters', 'a'.repeat(120)],
+      ['2 characters between spaces', '   ab   '],
+      ['120 characters between spaces', `  ${'a'.repeat(120)}  `],
+    ])('accepts %s', async (_label, text) => {
+      const { ctx, run } = await typed(text)
+
+      await run()
+
+      expect(ctx.nameSplitter.calls).toEqual([text.trim()])
+    })
+
+    it.each([
+      ['1 character', 'a'],
+      ['1 character between spaces', '   a   '],
+      ['nothing', ''],
+      ['only spaces', '     '],
+      ['121 characters', 'a'.repeat(121)],
+      ['121 characters between spaces', `  ${'a'.repeat(121)}  `],
+      ['a link', 'buy at https://evil.example now'],
+      ['a www link', 'see www.evil.example'],
+      ['markup', 'Glow <b>Co</b> serum'],
+      ['a script', '<script>evil()</script>'],
+      ['a closing tag', 'serum </i>'],
+      ['a zero-width space', 'cerave​ cleanser'],
+      ['a right-to-left override', 'cerave‮ cleanser'],
+      ['a newline inside it', 'cerave\ncleanser'],
+      ['a tab inside it', 'cerave\tcleanser'],
+      ['a NUL', 'cerave\u0000cleanser'],
+    ])('refuses %s with INVALID_PRODUCT_TEXT, without calling the splitter, leaving the item waiting', async (_label, text) => {
+      const { ctx, scanId, itemId, jobs, run } = await typed(text)
+
+      const error = await errorOf(run())
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('INVALID_PRODUCT_TEXT')
+      expect(ctx.nameSplitter.calls).toEqual([])
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('accepts ordinary punctuation and accents in a name', async () => {
+      const { ctx, run } = await typed("L'Oréal Paris Revitalift Crème SPF 50+ (night)")
+
+      await run()
+
+      expect(ctx.nameSplitter.calls).toEqual(["L'Oréal Paris Revitalift Crème SPF 50+ (night)"])
+    })
+  })
+
+  describe('an item that is not waiting for a name', () => {
+    const NOT_AWAITING = [
+      ['recognising', (ctx: Ctx) => scanOne(ctx)],
+      ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+      ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
+      ['researching', (ctx: Ctx) => reach(ctx, 'researching')],
+      ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+      ['reading-label', (ctx: Ctx) => reach(ctx, 'reading-label')],
+    ] as const
+
+    it.each(NOT_AWAITING)('refuses an item that is %s with ITEM_NOT_AWAITING_IDENTIFICATION, for a picked product and for text, calling nothing', async (state, arrange) => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      // Not the product the item was read as (some of these states have researched it already, and a researched product cannot be researched again for a week).
+      const { productId } = await catalogued(ctx, { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const jobs = ctx.jobs.enqueued.length
+      const before = aiCalls(ctx)
+
+      for (const input of [{ productId }, { text: 'cerave cleanser' }]) {
+        const error = await errorOf(identify(ctx, scanId, itemId, input))
+        expect(error).toBeInstanceOf(ConflictError)
+        expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(aiCalls(ctx)).toBe(before)
+    })
+
+    it('refuses an item that is already ready or failed', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const ready = await scanOne(ctx)
+      await run(ctx, ready.itemId, 'recognise')
+      await drain(ctx)
+      expect((await stateOf(ctx, ready.scanId, ready.itemId)).state).toBe('ready')
+      const failed = await scanOne(ctx, markedJpeg(2))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+      await run(ctx, failed.itemId, 'recognise')
+      expect((await stateOf(ctx, failed.scanId, failed.itemId)).state).toBe('rejected')
+
+      for (const { scanId, itemId } of [ready, failed]) {
+        const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+        expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      }
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('checks the state before the product: a wrong-state item with an unknown product is 409, not PRODUCT_NOT_FOUND', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { productId: 'no-such-product' }))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+    })
+
+    it('refuses a second identification of the same item: the first moved it on, and only one split is paid for', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+
+      const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
+
+      expect(error.code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      expect(ctx.nameSplitter.calls).toHaveLength(1)
+      expect(queued(ctx).filter((m) => m.step === 'match')).toHaveLength(1)
+    })
+  })
+
+  describe('ownership', () => {
+    const inputs = (productId: string): [string, Input][] => [
+      ['a picked product', { productId }],
+      ['typed text', { text: 'cerave cleanser' }],
+    ]
+
+    it.each([
+      ['another user\'s scan', (s: string, i: string) => [s, i, OTHER_USER, PROFILE] as const],
+      ['another profile of the same account\'s scan', (s: string, i: string) => [s, i, USER, OTHER_PROFILE] as const],
+      ['an unknown scan', (_s: string, i: string) => ['no-such-scan', i, USER, PROFILE] as const],
+      ['an unknown item', (s: string) => [s, 'no-such-item', USER, PROFILE] as const],
+    ])('answers SCAN_NOT_FOUND for %s, for a picked product and for text, changing and calling nothing', async (_label, aim) => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      const { productId } = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const [s, i, u, p] = aim(scanId, itemId)
+      const jobs = ctx.jobs.enqueued.length
+      const before = aiCalls(ctx)
+
+      for (const [, input] of inputs(productId)) {
+        const error = await errorOf(identify(ctx, s, i, input, u, p))
+        expect(error).toBeInstanceOf(NotFoundError)
+        expect(error.code).toBe('SCAN_NOT_FOUND')
+      }
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(aiCalls(ctx)).toBe(before)
+    })
+
+    it('answers SCAN_NOT_FOUND for an item that belongs to a different scan, even the caller\'s own', async () => {
+      const ctx = setup()
+      const mine = await failedFront(ctx, [BLURRY])
+      const other = await scanOne(ctx, markedJpeg(5))
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+
+      const error = await errorOf(identify(ctx, other.scanId, mine.itemId, { text: 'cerave cleanser' }))
+
+      expect(error.code).toBe('SCAN_NOT_FOUND')
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+
+    it('answers AUTH_REQUIRED to a public caller', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+
+      const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.identifyByName(scanId, itemId, { text: 'cerave cleanser' })))
+
+      expect(error).toBeInstanceOf(UnauthorizedError)
+      expect(error.code).toBe('AUTH_REQUIRED')
+      expect(ctx.nameSplitter.calls).toEqual([])
+    })
+  })
+})
+
+describe('ScanService.noLabel', () => {
+  type Answers = { source: string; purpose: string; usedFor: string; description?: string }
+  const ANSWERS = { source: 'market-vendor', purpose: 'lighten', usedFor: '6-months-2-years' } as const
+  const noLabel = (ctx: Ctx, scanId: string, itemId: string, input: Answers = ANSWERS, userId = USER, profileId = PROFILE): Promise<any> =>
+    asUser(() => ctx.service.noLabel(scanId, itemId, input as never), userId, profileId)
+  /** An item whose 3rd front photo could not be read, so it offers identification (a back photo, a typed name, or no label). */
+  const identifying = (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+  /** Every call that could cost: the recognizer, the label reader, the splitter, the web researcher and the analyst. */
+  const aiCalls = (ctx: Ctx) =>
+    ctx.recognizer.calls.length + ctx.labelReader.calls.length + ctx.nameSplitter.calls.length + ctx.researcher.calls.length + ctx.analyst.calls.analyse.length + ctx.analyst.calls.sameProduct.length
+  const itemEvents = (ctx: Ctx, scanId: string) => ctx.events.eventsFor(scanId).filter((e) => e.type === 'item')
+
+  describe('an item offering identification', () => {
+    it('moves it to unidentified and shows what was answered with the cautions for those answers, no product and no photo', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+
+      const view = await noLabel(ctx, scanId, itemId)
+
+      expect(view).toMatchObject({
+        id: itemId,
+        position: 0,
+        state: 'unidentified',
+        reason: null,
+        image: null,
+        noLabel: { source: 'market-vendor', purpose: 'lighten', usedFor: '6-months-2-years', rulesVersion: CAUTION_RULES_VERSION },
+      })
+      expect(view.noLabel.concerns).toEqual(cautionFor(ANSWERS))
+      // Literal, so the wiring above is not the only thing pinning what a caution is: lightener + long use + the general one, substances first.
+      expect(view.noLabel.concerns.map((c: { kind: string }) => c.kind)).toEqual(['banned-substance', 'hyperpigmentation-risk', 'irritation'])
+      expect(view).not.toHaveProperty('product')
+      expect(view).not.toHaveProperty('retakesLeft')
+      expect(view.noLabel).not.toHaveProperty('description')
+    })
+
+    it('shows the same item when the scan is read afterwards, and stores the answers on the item', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const view = await noLabel(ctx, scanId, itemId, { ...ANSWERS, description: 'A pink tub' })
+
+      expect(await itemOf(ctx, scanId, itemId)).toEqual(view)
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({
+        state: 'unidentified',
+        reason: null,
+        noLabelSource: 'market-vendor',
+        noLabelPurpose: 'lighten',
+        noLabelUsedFor: '6-months-2-years',
+        noLabelDescription: 'A pink tub',
+      })
+      expect(view.noLabel.description).toBe('A pink tub')
+    })
+
+    it('forgets why the photo could not be read: the reason is cleared, whichever it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY, TURNED_AWAY])
+      expect((await itemOf(ctx, scanId, itemId)).reason).toBe('label-not-visible')
+
+      const view = await noLabel(ctx, scanId, itemId)
+
+      expect(view.reason).toBeNull()
+    })
+
+    it.each(['market-vendor', 'pharmacy', 'online', 'gift', 'not-sure'])('accepts the source %s', async (source) => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+
+      expect((await noLabel(ctx, scanId, itemId, { ...ANSWERS, source })).noLabel.source).toBe(source)
+    })
+
+    it.each(['lighten', 'moisturise', 'treat-spots', 'not-sure'])('accepts the purpose %s', async (purpose) => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+
+      expect((await noLabel(ctx, scanId, itemId, { ...ANSWERS, purpose })).noLabel.purpose).toBe(purpose)
+    })
+
+    it.each(['under-1-month', '1-6-months', '6-months-2-years', 'over-2-years'])('accepts the time used %s', async (usedFor) => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+
+      expect((await noLabel(ctx, scanId, itemId, { ...ANSWERS, usedFor })).noLabel.usedFor).toBe(usedFor)
+    })
+
+    it('costs nothing: no model call, no queued job, no photo in the daily quota and no retake counted', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const day = new Date(ctx.now().getTime() - DAY)
+      const photos = await ctx.repository.photosSince(USER, day)
+      const retakes = await ctx.repository.countRetakes(itemId)
+      const jobs = ctx.jobs.enqueued.length
+      const calls = aiCalls(ctx)
+
+      await noLabel(ctx, scanId, itemId)
+
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(aiCalls(ctx)).toBe(calls)
+      expect(await ctx.repository.photosSince(USER, day)).toEqual(photos)
+      expect(await ctx.repository.countRetakes(itemId)).toBe(retakes)
+    })
+
+    it('is final: no other route takes the item on, and a late queue message for it does nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      await noLabel(ctx, scanId, itemId)
+      const before = await ctx.repository.findItem(itemId)
+      const events = ctx.events.published.length
+      ctx.nameSplitter.respondWith(() => ({ kind: 'product', brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' }))
+
+      expect((await errorOf(asUser(() => ctx.service.identifyByName(scanId, itemId, { text: 'cerave cleanser' })))).code).toBe('ITEM_NOT_AWAITING_IDENTIFICATION')
+      expect((await errorOf(asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(9), IP)))).code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+      expect((await errorOf(retake(ctx, scanId, itemId))).code).toBe('ITEM_NOT_AWAITING_RETAKE')
+      expect((await errorOf(asUser(() => ctx.service.confirm(scanId, itemId, { brand: 'Glow Co', name: 'Serum', category: 'skin' })))).code).toBe('ITEM_NOT_AWAITING_CONFIRMATION')
+      for (const step of ['recognise', 'match', 'research', 'read-label', 'analyse'] as const) await run(ctx, itemId, step)
+
+      expect(await ctx.repository.findItem(itemId)).toEqual(before)
+      expect(ctx.events.published).toHaveLength(events)
+    })
+  })
+
+  describe('the description', () => {
+    const described = async (description: string | undefined) => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const jobs = ctx.jobs.enqueued.length
+      const events = ctx.events.published.length
+      return { ctx, scanId, itemId, jobs, events, run: () => noLabel(ctx, scanId, itemId, { ...ANSWERS, ...(description === undefined ? {} : { description }) }) }
+    }
+
+    it.each([
+      ['1 character', 'a'],
+      ['200 characters', 'a'.repeat(200)],
+      ['200 characters between spaces', `   ${'a'.repeat(200)}  `],
+    ])('accepts %s, stored trimmed', async (_label, description) => {
+      const { ctx, itemId, run } = await described(description)
+
+      const view = await run()
+
+      expect(view.noLabel.description).toBe(description.trim())
+      expect((await ctx.repository.findItem(itemId))!.noLabelDescription).toBe(description.trim())
+    })
+
+    it.each([
+      ['201 characters', 'a'.repeat(201)],
+      ['201 characters between spaces', `  ${'a'.repeat(201)}  `],
+      ['a link', 'bought at https://evil.example'],
+      ['a www link', 'see www.evil.example'],
+      ['markup', 'a <b>pink</b> tub'],
+      ['a script', '<script>evil()</script>'],
+      ['a zero-width space', 'pink​ tub'],
+      ['a right-to-left override', 'pink‮ tub'],
+      ['a newline inside it', 'pink\ntub'],
+      ['a tab inside it', 'pink\ttub'],
+      ['a NUL', 'pink\u0000tub'],
+    ])('refuses %s with INVALID_PRODUCT_TEXT naming the description, leaving the item waiting and storing nothing', async (_label, description) => {
+      const { ctx, scanId, itemId, jobs, events, run } = await described(description)
+
+      const error = await errorOf(run())
+
+      expect(error).toBeInstanceOf(ValidationError)
+      expect(error.code).toBe('INVALID_PRODUCT_TEXT')
+      expect(error.details).toMatchObject({ field: 'description' })
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-identification')
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ noLabelSource: null, noLabelPurpose: null, noLabelUsedFor: null, noLabelDescription: null })
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(ctx.events.published).toHaveLength(events)
+    })
+
+    it.each([
+      ['left out', undefined],
+      ['empty', ''],
+      ['only spaces', '     '],
+      ['only a tab and a newline between spaces', '  '],
+    ])('treats a description that is %s as absent: nothing stored, nothing shown', async (_label, description) => {
+      const { ctx, itemId, run } = await described(description)
+
+      const view = await run()
+
+      expect(view.state).toBe('unidentified')
+      expect(view.noLabel).not.toHaveProperty('description')
+      expect((await ctx.repository.findItem(itemId))!.noLabelDescription).toBeNull()
+    })
+
+    it('keeps ordinary punctuation and accents', async () => {
+      const { run } = await described("Pot from Mama Ngozi's stall (Balogun) — ~₦3,000, <1 month old")
+
+      expect((await run()).noLabel.description).toBe("Pot from Mama Ngozi's stall (Balogun) — ~₦3,000, <1 month old")
+    })
+
+    it('never puts the description into the cautions', async () => {
+      const { run } = await described('SecretWordingFromTheUser')
+
+      const view = await run()
+
+      expect(JSON.stringify(view.noLabel.concerns)).not.toContain('SecretWordingFromTheUser')
+    })
+  })
+
+  describe('an item that is not waiting to say it has no label', () => {
+    const NOT_AWAITING = [
+      ['recognising', (ctx: Ctx) => scanOne(ctx)],
+      ['needs-confirmation', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+      ['matching', (ctx: Ctx) => reach(ctx, 'matching')],
+      ['researching', (ctx: Ctx) => reach(ctx, 'researching')],
+      ['needs-back-photo', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+      ['reading-label', (ctx: Ctx) => reach(ctx, 'reading-label')],
+      // Still has retakes left: the label can wait for the next photo, the user has not run out of tries.
+      ['needs-retake', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ] as const
+
+    it.each(NOT_AWAITING)('refuses an item that is %s with ITEM_NOT_AWAITING_NO_LABEL, changing and calling nothing', async (state, arrange) => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const before = await ctx.repository.findItem(itemId)
+      const jobs = ctx.jobs.enqueued.length
+      const events = ctx.events.published.length
+      const calls = aiCalls(ctx)
+
+      const error = await errorOf(noLabel(ctx, scanId, itemId))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(await ctx.repository.findItem(itemId)).toEqual(before)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(ctx.events.published).toHaveLength(events)
+      expect(aiCalls(ctx)).toBe(calls)
+    })
+
+    it('refuses an item that is already ready, rejected or failed', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const ready = await scanOne(ctx)
+      await run(ctx, ready.itemId, 'recognise')
+      await drain(ctx)
+      const rejected = await scanOne(ctx, markedJpeg(2))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+      await run(ctx, rejected.itemId, 'recognise')
+      const failed = await scanOne(ctx, markedJpeg(3))
+      ctx.photos.stored.delete(photoKey(failed.scanId, failed.itemId))
+      await run(ctx, failed.itemId, 'recognise')
+      expect(await Promise.all([ready, rejected, failed].map(async (x) => (await stateOf(ctx, x.scanId, x.itemId)).state))).toEqual(['ready', 'rejected', 'failed'])
+
+      for (const { scanId, itemId } of [ready, rejected, failed]) {
+        expect((await errorOf(noLabel(ctx, scanId, itemId))).code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      }
+    })
+
+    it('checks the state before the description: a wrong-state item with a bad description is 409, not INVALID_PRODUCT_TEXT', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      const error = await errorOf(noLabel(ctx, scanId, itemId, { ...ANSWERS, description: 'see https://evil.example' }))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+    })
+
+    it('refuses a second call on the same item with 409, even with different answers, and changes nothing: no new time, no new event', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const first = await noLabel(ctx, scanId, itemId, { ...ANSWERS, description: 'first' })
+      const stored = await ctx.repository.findItem(itemId)
+      const events = ctx.events.published.length
+      ctx.advance(MINUTE)
+
+      const error = await errorOf(noLabel(ctx, scanId, itemId, { source: 'pharmacy', purpose: 'moisturise', usedFor: 'under-1-month', description: 'second' }))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect(await ctx.repository.findItem(itemId)).toEqual(stored)
+      expect(await itemOf(ctx, scanId, itemId)).toEqual(first)
+      expect(ctx.events.published).toHaveLength(events)
+    })
+
+    it('lets exactly one of two simultaneous calls win, and publishes the item once', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const events = itemEvents(ctx, scanId).length
+
+      const results = await Promise.allSettled([
+        noLabel(ctx, scanId, itemId, { ...ANSWERS, source: 'pharmacy' }),
+        noLabel(ctx, scanId, itemId, { ...ANSWERS, source: 'gift' }),
+      ])
+
+      const won = results.filter((r) => r.status === 'fulfilled')
+      const lost = results.filter((r) => r.status === 'rejected')
+      expect(won).toHaveLength(1)
+      expect(lost).toHaveLength(1)
+      expect((lost[0] as PromiseRejectedResult).reason.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect((await ctx.repository.findItem(itemId))!.noLabelSource).toBe((won[0] as PromiseFulfilledResult<any>).value.noLabel.source)
+      expect(itemEvents(ctx, scanId)).toHaveLength(events + 1)
+    })
+  })
+
+  describe('a back photo and a no-label answer racing for the same item', () => {
+    const noLabelInput = { source: 'gift', purpose: 'moisturise', usedFor: '1-6-months' } as const
+    const backPhoto = (ctx: Ctx, scanId: string, itemId: string): Promise<any> => asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(9), IP))
+
+    it('lets the no-label answer win when it lands between the back photo\'s read and its write: the back photo answers 409, its file is deleted and nothing is counted', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const day = new Date(ctx.now().getTime() - DAY)
+      const quota = await ctx.repository.photosSince(USER, day)
+      const jobs = ctx.jobs.enqueued.length
+      // The photo is stored after addBackPhoto has read the item as needs-identification and before it moves it: the answer lands exactly then.
+      const put = ctx.photos.put.bind(ctx.photos)
+      ctx.photos.put = async (key, image) => {
+        await put(key, image)
+        await noLabel(ctx, scanId, itemId, noLabelInput)
+      }
+
+      const error = await errorOf(backPhoto(ctx, scanId, itemId))
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error.code).toBe('ITEM_NOT_AWAITING_BACK_PHOTO')
+      expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+      expect(await ctx.repository.photosSince(USER, day)).toEqual(quota)
+      expect(await ctx.repository.countBackPhotos(itemId)).toBe(0)
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'unidentified', backPhotoKey: null, noLabelSource: 'gift' })
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    })
+
+    it('lets the back photo win when it lands first: the no-label answer answers 409 and stores nothing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      await backPhoto(ctx, scanId, itemId)
+
+      const error = await errorOf(noLabel(ctx, scanId, itemId, noLabelInput))
+
+      expect(error.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'reading-label', noLabelSource: null, noLabelPurpose: null, noLabelUsedFor: null })
+      expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+    })
+
+    it('lets exactly one of two simultaneous calls win, and leaves the item in the winner\'s state alone', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const day = new Date(ctx.now().getTime() - DAY)
+      const before = await ctx.repository.photosSince(USER, day)
+
+      const [photo, answer] = await Promise.allSettled([backPhoto(ctx, scanId, itemId), noLabel(ctx, scanId, itemId, noLabelInput)])
+
+      expect([photo!.status, answer!.status].filter((s) => s === 'fulfilled')).toHaveLength(1)
+      const stored = (await ctx.repository.findItem(itemId))!
+      if (answer!.status === 'fulfilled') {
+        expect(stored).toMatchObject({ state: 'unidentified', backPhotoKey: null, noLabelSource: 'gift' })
+        expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
+        expect(await ctx.repository.photosSince(USER, day)).toEqual(before)
+        expect(await ctx.repository.countBackPhotos(itemId)).toBe(0)
+      } else {
+        expect(stored).toMatchObject({ state: 'reading-label', noLabelSource: null })
+        expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+        expect(await ctx.repository.countBackPhotos(itemId)).toBe(1)
+        expect((answer as PromiseRejectedResult).reason.code).toBe('ITEM_NOT_AWAITING_NO_LABEL')
+      }
+    })
+  })
+
+  describe('the item is final', () => {
+    it('publishes the item as unidentified, exactly as it is shown, then done, and marks a one-item scan done', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const before = ctx.events.published.length
+
+      await noLabel(ctx, scanId, itemId)
+
+      const published = ctx.events.published.slice(before).map((p) => p.event)
+      expect(published.map((e) => e.type)).toEqual(['item', 'done'])
+      expect(published[0]).toEqual({ type: 'item', item: await itemOf(ctx, scanId, itemId) })
+      expect((published[0] as { item: { state: string } }).item.state).toBe('unidentified')
+      expect((await ctx.repository.findScan(scanId))!.doneAt).toEqual(ctx.now())
+    })
+
+    it('sends no done while another item of the scan is still being worked on', async () => {
+      const ctx = setup()
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [first, second] = scan.items
+      ctx.recognizer.respondWith(() => BLURRY)
+      await run(ctx, first.id, 'recognise')
+      for (const marker of [21, 22]) {
+        ctx.advance(SECOND)
+        await retake(ctx, scan.id, first.id, markedJpeg(marker))
+        await run(ctx, first.id, 'recognise')
+      }
+      expect((await stateOf(ctx, scan.id, first.id)).state).toBe('needs-identification')
+      const before = ctx.events.published.length
+
+      await noLabel(ctx, scan.id, first.id)
+
+      expect(ctx.events.published.slice(before).map((p) => p.event.type)).toEqual(['item'])
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).toBeNull()
+      expect((await stateOf(ctx, scan.id, second.id)).state).toBe('recognising')
+    })
+
+    it('sends done once the scan\'s last working item finishes after an item went unidentified', async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 2 ? { classification: 'face-or-person' } : BLURRY))
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [first, second] = scan.items
+      await run(ctx, first.id, 'recognise')
+      for (const marker of [21, 22]) {
+        ctx.advance(SECOND)
+        await retake(ctx, scan.id, first.id, markedJpeg(marker))
+        ctx.recognizer.respondWith(() => BLURRY)
+        await run(ctx, first.id, 'recognise')
+      }
+      await noLabel(ctx, scan.id, first.id)
+      expect(ctx.events.eventsFor(scan.id).map((e) => e.type)).not.toContain('done')
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
+
+      await run(ctx, second.id, 'recognise')
+
+      expect(ctx.events.eventsFor(scan.id).map((e) => e.type).at(-1)).toBe('done')
+      expect((await ctx.repository.findScan(scan.id))!.doneAt).not.toBeNull()
+    })
+
+    it('shows an unidentified item in watch\'s snapshot with its noLabel block, exactly as getScan does', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      await noLabel(ctx, scanId, itemId, { ...ANSWERS, description: 'A pink tub' })
+
+      await asUser(() => ctx.service.watch(scanId))
+
+      const snapshot = JSON.parse(JSON.stringify(ctx.events.subscribed[0]!.snapshot))
+      expect(snapshot.items[0]).toMatchObject({ id: itemId, state: 'unidentified', noLabel: { source: 'market-vendor', description: 'A pink tub' } })
+      expect(snapshot).toEqual(JSON.parse(JSON.stringify(toScanResponse(await getScan(ctx, scanId)))))
+    })
+  })
+
+  describe('the cautions are worked out when the item is read, not stored', () => {
+    it('shows the cautions for the answers on the row of an item that was moved by the repository alone', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      // The same write the service makes, without the service: nothing but the four answers is on the row, and the view still has the cautions.
+      await ctx.repository.updateItem(itemId, 'needs-identification', {
+        state: 'unidentified',
+        reason: null,
+        noLabelSource: 'pharmacy',
+        noLabelPurpose: 'treat-spots',
+        noLabelUsedFor: 'over-2-years',
+        noLabelDescription: null,
+        updatedAt: ctx.now(),
+      })
+
+      const item = await itemOf(ctx, scanId, itemId)
+
+      expect(item.noLabel).toMatchObject({ source: 'pharmacy', purpose: 'treat-spots', usedFor: 'over-2-years', rulesVersion: CAUTION_RULES_VERSION })
+      expect(item.noLabel.concerns.map((c: { kind: string }) => c.kind)).toEqual(['hyperpigmentation-risk', 'irritation'])
+      expect(item.noLabel.concerns).toEqual(cautionFor({ source: 'pharmacy', purpose: 'treat-spots', usedFor: 'over-2-years' }))
+    })
+
+    it('leaves noLabel out of every item that is not unidentified', async () => {
+      const ctx = setup()
+      const identifyingItem = await identifying(ctx)
+      const recognising = await scanOne(ctx, markedJpeg(7))
+
+      for (const { scanId, itemId } of [identifyingItem, recognising]) {
+        expect(await itemOf(ctx, scanId, itemId)).not.toHaveProperty('noLabel')
+      }
+    })
+  })
+
+  describe('ownership', () => {
+    it.each([
+      ['another user\'s scan', (s: string, i: string) => [s, i, OTHER_USER, PROFILE] as const],
+      ['another profile of the same account\'s scan', (s: string, i: string) => [s, i, USER, OTHER_PROFILE] as const],
+      ['an unknown scan', (_s: string, i: string) => ['no-such-scan', i, USER, PROFILE] as const],
+      ['an unknown item', (s: string) => [s, 'no-such-item', USER, PROFILE] as const],
+    ])('answers SCAN_NOT_FOUND for %s, changing nothing', async (_label, aim) => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      const [s, i, u, p] = aim(scanId, itemId)
+      const before = await ctx.repository.findItem(itemId)
+      const jobs = ctx.jobs.enqueued.length
+      const events = ctx.events.published.length
+
+      const error = await errorOf(noLabel(ctx, s, i, ANSWERS, u, p))
+
+      expect(error).toBeInstanceOf(NotFoundError)
+      expect(error.code).toBe('SCAN_NOT_FOUND')
+      expect(await ctx.repository.findItem(itemId)).toEqual(before)
+      expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(ctx.events.published).toHaveLength(events)
+    })
+
+    it('answers SCAN_NOT_FOUND, not ITEM_NOT_AWAITING_NO_LABEL, to another profile asking about an item in the wrong state', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      const error = await errorOf(noLabel(ctx, scanId, itemId, ANSWERS, USER, OTHER_PROFILE))
+
+      expect(error.code).toBe('SCAN_NOT_FOUND')
+    })
+
+    it('answers SCAN_NOT_FOUND for an item that belongs to a different scan, even the caller\'s own', async () => {
+      const ctx = setup()
+      const mine = await identifying(ctx)
+      const other = await scanOne(ctx, markedJpeg(5))
+
+      const error = await errorOf(noLabel(ctx, other.scanId, mine.itemId))
+
+      expect(error.code).toBe('SCAN_NOT_FOUND')
+    })
+
+    it('lets the profile that made the scan do it, after the account\'s other profile was refused', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+      await errorOf(noLabel(ctx, scanId, itemId, ANSWERS, USER, OTHER_PROFILE))
+
+      expect((await noLabel(ctx, scanId, itemId, ANSWERS, USER, PROFILE)).state).toBe('unidentified')
+    })
+
+    it('answers AUTH_REQUIRED to a public caller', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await identifying(ctx)
+
+      const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.noLabel(scanId, itemId, ANSWERS)))
+
+      expect(error).toBeInstanceOf(UnauthorizedError)
+      expect(error.code).toBe('AUTH_REQUIRED')
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-identification')
+    })
+  })
+})
+
+describe('ScanService: an unidentified item and the background jobs', () => {
+  /** An item the user has said has no label, with the clock moved on 3 hours. */
+  const unidentified = async (ctx: Ctx) => {
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+    await asUser(() => ctx.service.noLabel(scanId, itemId, { source: 'market-vendor', purpose: 'lighten', usedFor: 'over-2-years' } as never))
+    return { scanId, itemId }
+  }
+
+  it('is left alone by the reaper however old: nothing queued, not failed, nothing published', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await unidentified(ctx)
+    const before = await ctx.repository.findItem(itemId)
+    const jobs = ctx.jobs.enqueued.length
+    const events = ctx.events.published.length
+    ctx.advance(3 * HOUR)
+
+    const result = await asJob(() => ctx.service.reap(ctx.now()))
+
+    expect(result).toEqual({ requeued: 0, failed: 0 })
+    expect(await ctx.repository.findItem(itemId)).toEqual(before)
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('unidentified')
+    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(ctx.events.published).toHaveLength(events)
+  })
+
+  it('is left exactly as it was by the dead-letter hook, and nothing is published', async () => {
+    const ctx = setup()
+    const { itemId, scanId } = await unidentified(ctx)
+    const before = await itemOf(ctx, scanId, itemId)
+    const events = ctx.events.published.length
+
+    await asJob(() => ctx.service.markItemFailed(itemId))
+
+    expect(await itemOf(ctx, scanId, itemId)).toEqual(before)
+    expect(before).toMatchObject({ state: 'unidentified' })
+    expect(ctx.events.published).toHaveLength(events)
+  })
+
+  it('counts as final for the reaper\'s repair of a lost done: a scan whose only item is unidentified gets its done once it has settled', async () => {
+    class FlakyEvents extends MemoryScanEvents {
+      failing = false
+      override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+        if (this.failing) throw new Error('stream is down')
+        return super.publish(scanId, event)
+      }
+    }
+    let events!: FlakyEvents
+    const ctx = setup({ events: () => (events = new FlakyEvents()) })
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    events.failing = true
+    await asUser(() => ctx.service.noLabel(scanId, itemId, { source: 'gift', purpose: 'moisturise', usedFor: '1-6-months' } as never))
+    events.failing = false
+    logged.mockRestore()
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toBeNull()
+    ctx.advance(5 * MINUTE + 1)
+    const published = ctx.events.eventsFor(scanId).length
+
+    await asJob(() => ctx.service.reap(ctx.now()))
+
+    expect(ctx.events.eventsFor(scanId).slice(published).map((e) => e.type)).toEqual(['done'])
+    expect((await ctx.repository.findScan(scanId))!.doneAt).toEqual(ctx.now())
   })
 })
 
@@ -3475,7 +5707,7 @@ describe('ScanService: push notifications', () => {
 
     it('tells the profile that made the scan, once, with readyCount 0 when nothing came out ready', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3488,14 +5720,14 @@ describe('ScanService: push notifications', () => {
       const ctx = setup()
       await catalogued(ctx)
       recogniseAs(ctx, (marker) => {
-        if (marker === 3) return { classification: 'unreadable' }
+        if (marker === 3) return { classification: 'face-or-person' }
         if (marker === 4) throw new AiBudgetExceededError('cap')
         return seen()
       })
       const scan = await create(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3), markedJpeg(4)])
       const [a, b, c, d] = scan.items.map((i: { id: string }) => i.id) as [string, string, string, string]
       for (const id of [a, b, c, d]) await run(ctx, id, 'recognise')
-      expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'unreadable' })
+      expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'face-or-person' })
       expect(await stateOf(ctx, scan.id, d)).toEqual({ state: 'failed', reason: 'research-busy' })
       await run(ctx, a, 'match')
       expect(pushes(ctx)).toEqual([])
@@ -3510,7 +5742,7 @@ describe('ScanService: push notifications', () => {
       const ctx = setup({ events: () => (events = new ProbeEvents()) })
       let queuedWhenDoneWent = -1
       events.onDone = () => void (queuedWhenDoneWent = ctx.pushJobs.enqueued.length)
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3523,7 +5755,7 @@ describe('ScanService: push notifications', () => {
       let events!: DoneFlaky
       const ctx = setup({ events: () => (events = new DoneFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
 
@@ -3537,7 +5769,7 @@ describe('ScanService: push notifications', () => {
       let events!: DoneFlaky
       const ctx = setup({ events: () => (events = new DoneFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3559,7 +5791,7 @@ describe('ScanService: push notifications', () => {
       let events!: AllFlaky
       const ctx = setup({ events: () => (events = new AllFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3577,7 +5809,7 @@ describe('ScanService: push notifications', () => {
       let events!: AllFlaky
       const ctx = setup({ events: () => (events = new AllFlaky()) })
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       events.failing = true
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3592,7 +5824,7 @@ describe('ScanService: push notifications', () => {
 
     it('does not push again when watch re-sends done to a client of a scan that was already marked done', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       await run(ctx, scan.items[0].id, 'recognise')
       expect(pushes(ctx)).toHaveLength(1)
@@ -3605,7 +5837,7 @@ describe('ScanService: push notifications', () => {
 
     it('sends the needs-you push but no finished one while an item still waits for the person', async () => {
       const ctx = setup()
-      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'unreadable' } : seen({ confidence: 0.2 })))
+      ctx.recognizer.respondWith((image) => (image.bytes.at(-1) === 1 ? { classification: 'face-or-person' } : seen({ confidence: 0.2 })))
       const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
 
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3617,7 +5849,7 @@ describe('ScanService: push notifications', () => {
     it('finishes the scan, publishing done, though the push cannot be queued', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       ctx.pushJobs.failNextWith(new Error('queue is down'))
 
@@ -3637,7 +5869,7 @@ describe('ScanService: push notifications', () => {
     it('still publishes done and resolves when the finished push\'s scan read throws, logging push-failed and clearing the done time', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       readFails(ctx)
 
@@ -3654,7 +5886,7 @@ describe('ScanService: push notifications', () => {
     it('has the reaper re-claim that done and queue the finished push under the same key', async () => {
       const ctx = setup()
       const logged = quiet()
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
       const scan = await create(ctx)
       readFails(ctx)
       await run(ctx, scan.items[0].id, 'recognise')
@@ -3701,7 +5933,7 @@ describe('ScanService: push notifications', () => {
     it('skips the finished push, logging push-skipped-no-profile, and still publishes done', async () => {
       const { ctx, scanId, itemId } = await withOrphan()
       const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
-      ctx.recognizer.respondWith(() => ({ classification: 'unreadable' }))
+      ctx.recognizer.respondWith(() => ({ classification: 'face-or-person' }))
 
       await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
 

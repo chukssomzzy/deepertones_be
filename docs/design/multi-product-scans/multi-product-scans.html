@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Design: multi-product scans (#74)</title>
+<style>
+  @page { size: A4; margin: 16mm 14mm; }
+  :root { --built: #1f6f43; --built-bg: #eef7f1; --designed: #8a4b00; --designed-bg: #fff6ea; --ink: #1b1b1b; --muted: #5d5d5d; --rule: #d9d9d9; --warn: #a3171b; --warn-bg: #fdeeee; }
+  * { box-sizing: border-box; }
+  body { font: 10pt/1.45 -apple-system, "Helvetica Neue", Arial, sans-serif; color: var(--ink); margin: 0; }
+  h1 { font-size: 19pt; margin: 0 0 2mm; }
+  h2 { font-size: 13.5pt; margin: 7mm 0 2mm; border-bottom: 1px solid var(--rule); padding-bottom: 1mm; page-break-after: avoid; }
+  h3 { font-size: 11pt; margin: 5mm 0 1.5mm; page-break-after: avoid; }
+  h4 { font-size: 10pt; margin: 3mm 0 1mm; page-break-after: avoid; }
+  p, li { margin: 0 0 1.6mm; }
+  ul, ol { margin: 0 0 2mm; padding-left: 5mm; }
+  code { font: 8.6pt/1.3 "SF Mono", Menlo, Consolas, monospace; background: #f3f3f3; padding: 0 1px; border-radius: 2px; }
+  .meta { color: var(--muted); font-size: 9pt; margin-bottom: 4mm; }
+  .lede { font-size: 11pt; border-left: 3px solid var(--ink); padding: 1mm 0 1mm 3mm; margin: 3mm 0 4mm; }
+  .legend { display: flex; gap: 4mm; margin: 2mm 0 4mm; font-size: 9pt; }
+  .legend span { padding: 1mm 2.5mm; border-radius: 2px; }
+  .tag { display: inline-block; font: 600 7.5pt/1 -apple-system, Arial, sans-serif; letter-spacing: .04em; text-transform: uppercase; padding: 1mm 1.6mm; border-radius: 2px; margin-right: 1.5mm; vertical-align: 1px; }
+  .tag.built, .legend .built { background: var(--built-bg); color: var(--built); border: 1px solid var(--built); }
+  .tag.designed, .legend .designed { background: var(--designed-bg); color: var(--designed); border: 1px dashed var(--designed); }
+  .tag.flight, .legend .flight { background: #eef1fb; color: #2b3f8f; border: 1px solid #2b3f8f; }
+  .half { border-radius: 3px; padding: 2.5mm 3mm 1.5mm; margin: 2mm 0 3mm; page-break-inside: avoid; }
+  .half.built { background: var(--built-bg); border-left: 3px solid var(--built); }
+  .half.designed { background: var(--designed-bg); border-left: 3px dashed var(--designed); }
+  .half.flight { background: #eef1fb; border-left: 3px solid #2b3f8f; }
+  .half > .tag { margin-bottom: 1.5mm; }
+  .new { color: var(--designed); font-weight: 600; }
+  pre.tree { font: 7.7pt/1.36 "SF Mono", Menlo, Consolas, monospace; background: #fff; border: 1px solid var(--rule); border-radius: 3px; padding: 2mm 2.5mm; margin: 1.5mm 0 2mm; white-space: pre; overflow: hidden; page-break-inside: avoid; }
+  pre.tree .a { color: var(--muted); }
+  pre.tree .n { color: var(--designed); font-weight: 600; }
+  .src { font-size: 8pt; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; font-size: 8.8pt; margin: 2mm 0 3mm; page-break-inside: auto; }
+  th, td { border: 1px solid var(--rule); padding: 1.2mm 1.6mm; vertical-align: top; text-align: left; }
+  th { background: #f4f4f4; }
+  tr { page-break-inside: avoid; }
+  .disc { background: var(--warn-bg); border-left: 3px solid var(--warn); padding: 2mm 3mm; margin: 2mm 0; page-break-inside: avoid; }
+  .disc b.k { color: var(--warn); }
+  figure { margin: 2mm 0 3mm; page-break-inside: avoid; text-align: center; }
+  figcaption { font-size: 8.6pt; color: var(--muted); margin-bottom: 1.5mm; text-align: left; }
+  .map .mermaid svg { max-height: 100mm !important; }
+  h2.newpage { page-break-before: always; }
+  .mermaid svg { max-width: 100% !important; max-height: 198mm !important; width: auto !important; height: auto !important; }
+  .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 3mm; }
+  .cols > div { min-width: 0; }
+</style>
+</head>
+<body>
+
+<h1>Design: multi-product scans</h1>
+<div class="meta">
+  Issue <b>chukssomzzy/deepertones_be#74</b> · written 2026-10-18 · as-built traced on <code>origin/staging</code> at <code>d7c6615</code> ·
+  #55 read from its four open PRs (#61, #64, #72, #73), not merged code
+</div>
+
+<div class="legend">
+  <span class="built">AS-BUILT: on staging, every claim traced to a file and line</span>
+  <span class="flight">IN FLIGHT: #55, open PRs, not on staging</span>
+  <span class="designed">AS-DESIGNED: proposal, nothing here exists yet</span>
+</div>
+
+<p class="lede">
+  <b>The change in one sentence:</b> a product-scan photo becomes its own record, a <span class="new">scan photo</span> (proposed). Recognising it can turn its one placeholder item into up to five items, one per readable product. Each item then runs the existing per-item pipeline unchanged. The photo is deleted once none of its items still shows it.
+</p>
+
+<h2>1. Where the issue and the code disagree</h2>
+<p>The issue was written from a sketch. Where it disagrees with the code, the code is what's true today. Items 1 to 4 change what the feature can promise. Items 5 to 10 are gaps the issue doesn't cover.</p>
+
+<div class="disc"><b class="k">1. No stock photo exists at confirmation time.</b> The issue says people confirm each product "by its catalog stock photo". But an item reaches <code>needs-confirmation</code> in <code>recognise</code>, before <code>match</code> gives it a product (<span class="src">scans.service.ts:561–575, 602–643</span>). Stock images are imported only after research finds and stores ingredients (<span class="src">catalog.service.ts:278–280, 508–528</span>). And <code>itemView</code> looks up a stock image only for a <code>ready</code> item with a formulation (<span class="src">scans.service.ts:853–854</span>). So at confirmation the only image is the user's own photo, through a signed link (<span class="src">:858–861</span>). For a product the catalog has never seen, brand and name are the normal case, not the fallback. Showing "stock image when matched" also needs a new lookup by product id, because today the lookup is by formulation and for ready items only.</div>
+
+<div class="disc"><b class="k">2. Today, front photos are deleted only on rejection.</b> The only place a front photo is deleted is in <code>recognise</code>, for a photo that is rejected (<span class="src">scans.service.ts:580</span>). Items that end <code>ready</code> or <code>failed</code> keep <code>photo_key</code> until the guest cleanup runs. <code>labelUnreadable</code> even says so: "keeping its front photo like the other failures" (<span class="src">:724–725</span>). <code>itemView</code> then shows that photo for any item with a key and no stock image (<span class="src">:858</span>). The new rule ("delete once no item needs it") therefore <b>removes the image a ready product with no stock photo shows today</b>, single-photo scans included. That is a change in behaviour, not just the old rule widened.</div>
+
+<div class="disc"><b class="k">3. The daily-limit check moves from the request into a queue job.</b> <code>assertWithinQuota</code> runs only inside <code>create</code> and <code>addBackPhoto</code>. It takes the user from the request context and the IP from the request header (<span class="src">scans.service.ts:174, 181–182, 306–308, 920–934</span>). Skipping extra products as <code>daily-limit</code> has to happen inside <code>recognise</code>, which runs as a system actor with no request. So the user comes from the item, and the IP hash comes from the <code>scans</code> row (<span class="src">scans.table.ts</span>, <code>ip_hash</code>). The issue mentions only the user allowance, but the per-IP limit applies to each product too.</div>
+
+<div class="disc"><b class="k">4. Retrying recognition loses or duplicates products once a photo can yield several.</b> When the move out of <code>recognising</code> is undone, <code>earlierRead</code> rebuilds the earlier answer from the item's own columns, so the retry doesn't pay the model twice (<span class="src">scans.service.ts:533, 585–600, 807–809</span>). Those columns hold one product. With several products, a retried <code>recognise</code> would either drop the extra products or create them twice. The issue doesn't cover this. §4.2 proposes keeping the whole answer on the scan photo, and inserting the extra items in the same D1 batch as the placeholder's guarded move.</div>
+
+<div class="disc"><b class="k">5. Item positions can collide.</b> <code>(scan_id, position)</code> is unique (<span class="src">scans.table.ts:72</span>). The <code>recognise</code> jobs for different photos of one scan run at the same time, so "next position = max + 1" would collide. §4.2 proposes a deterministic slot instead.</div>
+
+<div class="disc"><b class="k">6. Retakes (#61) assume each item owns its front photo.</b> #61's <code>retake()</code> writes the new photo to the item's own <code>photo_key</code>. The issue says items reference a shared photo, and also that "a retake gives the item its own single-product photo". So an item needs <b>both</b> a nullable <code>photo_id</code> and its own nullable <code>photo_key</code>. Separately, story 15 ("retake one product when its read was wrong") had no route: #61 allows a retake only from <code>needs-retake</code>, the state for an unreadable photo. <b>Settled (B):</b> story 15 is dropped, and a wrong read is fixed through confirm or #72's typed name.</div>
+
+<div class="disc"><b class="k">7. "Rejected exactly as today" won't match once #55 lands.</b> The issue says a photo with no readable product rejects its placeholder as <code>unreadable</code>. After #61, an unreadable photo goes to <code>needs-retake</code>, or to <code>needs-identification</code> on the last try, not to <code>rejected</code>. For a photo of several products, a retake would swap a shelf photo for a single-product one. <b>Settled (A):</b> the server can't tell a shelf photo from a single-product one, so the rule goes by what was seen. No readable product and exactly one unreadable product → #55's <code>needs-retake</code>. Anything else → <code>rejected</code>, with the photo's counts.</div>
+
+<div class="disc"><b class="k">8. The guest cleanup reads only item keys.</b> <code>photoKeysForUsers</code> collects <code>scan_items.photo_key</code> and <code>back_photo_key</code> (<span class="src">scans.repository.ts:163–176</span>), and <code>ScanDataCleaner</code> deletes those (<span class="src">scans.cleaner.ts:21–25</span>). Keys stored in the new table would be left behind. Story 34 covers photos missed by the reaper, but not this path.</div>
+
+<div class="disc"><b class="k">9. The stream can't carry a third event type.</b> <code>ScanEvent</code> is <code>item | done</code> and <code>ScanSnapshot.items</code> is flat (<span class="src">scan-events.provider.ts:7–14</span>). <code>ScanStream.publish</code> handles <code>done</code> and frames <b>everything else</b> as an item (<span class="src">scan-stream.ts:61–68</span>). So a <code>photo</code> event needs its own branch in the Durable Object, and <code>catchUp</code> has to compare photos as well as items (<span class="src">scans.service.ts:245–269</span>).</div>
+
+<div class="disc"><b class="k">10. A face has no skip reason.</b> The issue has the recognizer count "faces and people", but its list of skip reasons (<code>not-a-beauty-product</code>, <code>unreadable</code>, <code>over-limit</code>, <code>daily-limit</code>) has no slot for them. <b>Settled (E):</b> faces aren't counted, and the recognizer doesn't report them. A photo with only a face still gets today's top-level <code>face-or-person</code> classification.</div>
+
+<h2 class="newpage">2. Module map</h2>
+<p>Only the scans module and two providers change shape. The catalog gains one read. Every other module is untouched.</p>
+
+<figure class="map">
+<figcaption><span class="tag built">as-built</span>Where an upload goes today: one photo = one R2 object = one <code>scan_items</code> row.</figcaption>
+<pre class="mermaid">
+flowchart TB
+  R["scans.routes.ts<br/>POST /api/v1/scans/products"] --> S["ScanService.create"]
+  S -->|"put, one per photo"| P[("R2 private photos<br/>photos/env/user/scan/ITEM.jpg")]
+  S -->|"createScan batch"| D[("D1 scans + scan_items<br/>photo_key on each item")]
+  S -->|"enqueue recognise per item"| Q["scan-items queue"]
+  Q --> A["ScanService.advance"]
+  A --> REC["ProductRecognizer<br/>one Recognition"]
+  A --> CAT["ProductCatalogService<br/>resolve / research / analyse"]
+  A --> EV["ScanEvents<br/>item | done"]
+  EV --> DO["ScanStream DO"]
+</pre>
+</figure>
+
+<figure class="map">
+<figcaption><span class="tag designed">as-designed</span>Changed parts in amber. One photo becomes one <span class="new">scan_photos</span> row (proposed), which recognition turns into 1 to 5 items.</figcaption>
+<pre class="mermaid">
+flowchart TB
+  R["scans.routes.ts<br/>POST (unchanged shape)"] --> S["ScanService.create"]
+  S -->|"put, one per photo"| P[("R2 private photos<br/>photos/env/user/scan/PHOTO.jpg")]
+  S -->|"createScan batch"| D[("D1 scans + scan_photos<br/>+ scan_items.photo_id")]
+  S -->|"enqueue recognise<br/>placeholder"| Q["scan-items queue"]
+  Q --> A["ScanService.advance"]
+  A["ScanService.advance<br/>recognise: fan-out batch to D1<br/>any move: release photo in R2"]
+  A --> REC["ProductRecognizer<br/>ShelfRecognition: products[0..5]"]
+  A --> CAT["ProductCatalogService<br/>+ stockImagesOf(productIds)"]
+  A --> EV["ScanEvents<br/>item | photo | done"]
+  EV --> DO["ScanStream DO<br/>+ photo frame"]
+  classDef new fill:#fff6ea,stroke:#8a4b00,stroke-dasharray:4 3,color:#8a4b00
+  class D,REC,CAT,EV,DO,P,A new
+</pre>
+</figure>
+
+<h2>3. Data</h2>
+<div class="cols">
+<figure>
+<figcaption><span class="tag built">as-built</span><span class="src">scans.table.ts:11–101</span></figcaption>
+<pre class="mermaid">
+erDiagram
+  scans ||--o{ scan_items : has
+  scan_items ||--o{ scan_back_photos : counts
+  scans {
+    text id PK
+    text user_id
+    text profile_id
+    text ip_hash
+    int done_at
+  }
+  scan_items {
+    text id PK
+    text scan_id FK
+    int position "unique per scan"
+    text state
+    text reason
+    text photo_key "own front photo"
+    text back_photo_key
+    text recognised_fields "brand..confidence"
+    text product_id
+    text formulation_id
+  }
+  scan_back_photos {
+    text id PK
+    text item_id FK
+    text ip_hash
+    int uploaded_at
+  }
+</pre>
+</figure>
+<figure>
+<figcaption><span class="tag designed">as-designed</span><span class="new">scan_photos</span> (proposed) and two new item columns.</figcaption>
+<pre class="mermaid">
+erDiagram
+  scans ||--o{ scan_photos : has
+  scan_photos ||--o{ scan_items : "read into"
+  scan_items ||--o{ scan_back_photos : counts
+  scan_photos {
+    text id PK
+    text scan_id FK
+    int position "upload order"
+    text state "recognising|recognised|rejected"
+    text photo_key "null once released"
+    text recognition "model answer JSON"
+    int skipped_not_beauty
+    int skipped_unreadable
+    int skipped_over_limit
+    int skipped_daily_limit
+  }
+  scan_items {
+    text id PK
+    text photo_id FK "null for none"
+    int position "slot, see 4.2"
+    text photo_key "own photo, retakes only"
+    text state
+  }
+</pre>
+</figure>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<ul>
+  <li><b><code>scan_items.photo_key</code> stays, but only for an item's own photo, which means a #61 retake.</b> A new <code>photo_id</code> points at the shared photo. The item's image is its own key if it has one, else the photo's key, else nothing.</li>
+  <li><b><code>scan_photos.recognition</code></b> stores the model's whole answer, written in the fan-out batch. A retried <code>recognise</code> reads it instead of paying again. It replaces <code>earlierRead</code> for photos, and <code>earlierRead</code> stays for retakes.</li>
+  <li><b>The migration is mechanical (pre-production).</b> It creates <code>scan_photos</code>, adds <code>photo_id</code>, and inserts one photo per existing item, copying its key. The number is whatever comes after #55's migrations once they're renumbered (see §7).</li>
+</ul>
+</div>
+
+<h2>4. Flows, before and after</h2>
+
+<h3>4.1 Upload: <code>POST /api/v1/scans/products</code></h3>
+<div class="half built"><span class="tag built">as-built</span>
+<pre class="tree">scans.routes.ts:116  createScan          <span class="a">IP limiter → signedIn → user limiter → bodyLimit (:28–33)</span>
+└─ ScanService.create(photos, clientIp)   <span class="a">scans.service.ts:173</span>
+   ├─ 1..10 photos, checkPhoto each      <span class="a">:175–179  JPEG/WebP, ≤2 MB, ≤1600 px</span>
+   ├─ assertWithinQuota(user, ip, N)     <span class="a">:182  N = photos; 30/user, 100/IP per 24 h</span>
+   ├─ per photo: item id + photoKey      <span class="a">:185–189  photos/env/user/scan/&lt;itemId&gt;.ext</span>
+   ├─ photos.put × N                     <span class="a">:191  R2 first, so no row points at nothing</span>
+   ├─ repository.createScan(scan, items) <span class="a">:192  one D1 batch</span>
+   └─ enqueue recognise per item         <span class="a">:198–208  failure → item failed/unavailable</span>
+→ 202 { id, createdAt, items[] }         <span class="a">schemas: "One per photo, in photo order" (:118)</span></pre>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<pre class="tree">createScan  <span class="a">route, limits and body: unchanged</span>
+└─ ScanService.create
+   ├─ checkPhoto, assertWithinQuota(N)   <span class="a">unchanged: one per photo, its placeholder</span>
+   ├─ per photo: <span class="n">photo id</span> + placeholder item id
+   │    <span class="n">photoKey = photos/env/user/scan/&lt;photoId&gt;.ext</span>
+   ├─ photos.put × N
+   ├─ repository.createScan(scan, <span class="n">photos</span>, items)  <span class="a">one batch: scan, N photos, N items (photo_id set)</span>
+   └─ enqueue recognise per placeholder  <span class="a">unchanged</span>
+→ 202 { id, createdAt, <span class="n">photos[]: { id, position, state, skipped, items[] }</span> }</pre>
+</div>
+
+<h3>4.2 Recognise: the fan-out</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<pre class="tree">advanceScanItem job (scans.jobs.ts:5) → ScanService.advance(itemId,'recognise')  <span class="a">:352</span>
+└─ recognise(item)                                   <span class="a">:531</span>
+   ├─ earlierRead(item) ?? recognizer.recognize(photo) <span class="a">:533–541  reused after an undo</span>
+   │   ├─ AiBudgetExceededError   → failed/research-busy        <span class="a">:543–546</span>
+   │   ├─ AnthropicRequestError   → failed/unavailable, Permanent <span class="a">:549–552</span>
+   │   └─ AnthropicRefusalError   → treated as unreadable        <span class="a">:556</span>
+   ├─ beauty-product:
+   │   └─ transition → matching (+ enqueue match) | needs-confirmation (+ push)  <span class="a">:560–576</span>
+   └─ otherwise: photos.delete(photoKey), then → rejected(reason), photo_key NULL  <span class="a">:579–582</span>
+transition(): guarded UPDATE → enqueue next → publish item (+ done if all final)  <span class="a">:789–832</span></pre>
+<p class="src">Recognizer: <code>Recognition</code> is one product or one of three classifications (<span class="src">product-recognizer.provider.ts:4–12</span>). The Anthropic adapter's schema is a single object, and anything out of bounds becomes <code>unreadable</code> (<span class="src">anthropic.product-recognizer.ts:35–44, 85–101</span>).</p>
+</div>
+
+<div class="half designed"><span class="tag designed">as-designed</span>
+<p><b>Recognizer contract (proposed):</b> <code>recognizeShelf(image) → ShelfRecognition</code>. It keeps today's top-level <code>classification</code>, so a photo with no readable product is classified exactly as now. It adds <code>products[]</code>: at most 5, most confident first, each with brand, name, variant, form, category and confidence, checked by the same text rules. It also adds <code>excluded: { otherProducts, unreadable }</code>. Faces aren't counted (decision E). Anything past 5 is cut in the adapter, and every count is clamped.</p>
+<pre class="tree">recognise(placeholder)
+├─ <span class="n">photo = repository.findPhoto(item.photoId)</span>
+├─ <span class="n">seen = photo.recognition ?? recognizer.recognizeShelf(image)</span>   <span class="a">stored answer wins on retry</span>
+│   └─ errors: as today, on the placeholder only; no siblings are made
+├─ products empty, exactly 1 unreadable → needs-retake (#55)   <span class="a">decision A</span>
+├─ products empty, otherwise → rejected + counts; photo deleted <span class="a">decision A</span>
+└─ products ≥ 1:
+   ├─ <span class="n">collapse identical (brand|name|variant|form)</span>
+   ├─ <span class="n">room = min(5, 20 − itemsInScan + 1)</span>          <span class="a">over → skipped_over_limit</span>
+   ├─ <span class="n">allowance = remaining(user) ∧ remaining(scan.ip_hash)</span>  <span class="a">rest → skipped_daily_limit</span>
+   ├─ <span class="n">repository.fanOut(photo, placeholderMove, siblings, counts)</span>  <span class="a">ONE D1 batch:</span>
+   │     <span class="a">1. UPDATE scan_photos SET recognition, counts, state='recognised'</span>
+   │     <span class="a">   WHERE state='recognising'</span>
+   │     <span class="a">2. INSERT sibling … ON CONFLICT(scan_id, position) DO NOTHING, guarded by count(*) &lt; 20</span>
+   │     <span class="a">3. guarded UPDATE placeholder FROM 'recognising' (today's transition write)</span>
+   ├─ enqueue next: placeholder + siblings in matching  <span class="a">fails → undo placeholder;</span>
+   │                                                   <span class="a">siblings left to the reaper</span>
+   ├─ push needs-you once if any needs-confirmation  <span class="a">key is per scan, so no extra pushes</span>
+   └─ <span class="n">publish photo</span>, then publish each item (with photoId)</pre>
+<ul>
+  <li><b>Slot positions (proposed):</b> <code>position = photo.position × 5 + rank</code>. The placeholder is rank 0. A slot is the same on every retry, so <code>ON CONFLICT DO NOTHING</code> makes the fan-out idempotent and two photos' jobs can never collide (§1 item 5). Order is by photo, then rank. This departs from the issue's "position = creation order".</li>
+  <li><b>No early <code>done</code>.</b> The siblings exist in the same batch that moves the placeholder, so <code>publish</code>'s check that every item is final (<span class="src">:828</span>) always sees them.</li>
+  <li><b>A retake skips the fan-out.</b> An item with its own <code>photo_key</code> takes only <code>products[0]</code>.</li>
+</ul>
+</div>
+
+<figure>
+<figcaption><span class="tag designed">as-designed</span>One shelf photo with three products, one of them doubtful.</figcaption>
+<pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant Q as scan-items queue
+  participant S as ScanService.recognise
+  participant R as ProductRecognizer
+  participant D as D1 (scans repo)
+  participant E as ScanEvents / DO
+  Q->>S: advance(placeholder, recognise)
+  S->>D: findPhoto(photoId)
+  alt photo.recognition stored
+    D-->>S: answer (retry, no model call)
+  else first run
+    S->>R: recognizeShelf(image)
+    R-->>S: 3 products, excluded {other: 2}
+  end
+  S->>D: quota counts (user, scan.ip_hash)
+  S->>D: fanOut batch (photo + 2 sibling INSERTs + placeholder UPDATE)
+  S->>Q: enqueue match (placeholder, sibling 1)
+  Note over S: sibling 2 is needs-confirmation: push once, no job
+  S->>E: photo {state: recognised, skipped: {not-a-beauty-product: 2}}
+  S->>E: item x3 (each with photoId)
+</pre>
+</figure>
+
+<h3>4.3 Confirm and the image an item shows</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<pre class="tree">POST …/items/{itemId}/confirmation → ScanService.confirm   <span class="a">scans.service.ts:275</span>
+└─ transition needs-confirmation → matching (+ enqueue match)  <span class="a">:279–291</span>
+
+itemView(item)                                               <span class="a">:852</span>
+├─ product = ready ∧ formulationId ? catalog.productView(f) : — <span class="a">:853</span>
+├─ image = stock (product.imageUrl)                           <span class="a">:854–857  ready only</span>
+│        | user photo via 5-min signed link (photo_key)       <span class="a">:858–861  any state with a key</span>
+│        | null</pre>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<pre class="tree">confirm: unchanged per item; siblings are untouched   <span class="a">guarded by its own state</span>
+         + <span class="n">releasePhotoIfUnneeded(item.photoId)</span>   <span class="a">see 4.6</span>
+
+itemView(item, <span class="n">stock</span>)
+├─ image = stock  <span class="n">from catalog.stockImagesOf(productIds)</span>  <span class="a">(proposed)</span>
+│          <span class="a">one batched read per view, any state with a product_id</span>
+│        | own photo_key (retake) | <span class="n">shared photo's key while held</span>  <span class="a">signed link</span>
+│        | null → client shows brand + name   <span class="a">the normal case at confirmation (§1 item 1)</span></pre>
+<p>A <code>needs-confirmation</code> item shows the <b>whole shelf photo</b>, which is what story 21 asks for, with its own brand and name. The stock image appears from <code>match</code> on, and only if the catalog already holds one.</p>
+</div>
+
+<h3>4.4 Back photo, match, research, analyse</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<p><code>addBackPhoto</code> (<span class="src">:301–331</span>), <code>match</code> (<span class="src">:602</span>), <code>research</code> (<span class="src">:646</span>; not-found → <code>needs-back-photo</code> at <span class="src">:666</span>), <code>readLabel</code> (<span class="src">:672</span>), <code>labelUnreadable</code> with <code>maxBackPhotos = 3</code> (<span class="src">:727–736</span>) and <code>analyse</code> (<span class="src">:738</span>) all work on one item. The only shared data they read is the catalog's.</p>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<p><b>No change per item.</b> The one addition is that every <code>transition</code> of an item with a <code>photo_id</code> ends with <code>releasePhotoIfUnneeded</code>. Research and analysis are already shared through the catalog, so two items of the same product in different photos pay for research once (<span class="src">catalog.service.ts:179–212</span>, <code>ResearchInProgressError</code> wait at <span class="src">scans.service.ts:656–658</span>).</p>
+</div>
+
+<h3>4.5 Retake (#55 part 1, in flight)</h3>
+<div class="half flight"><span class="tag flight">in flight · PR #61</span>
+<pre class="tree">recognise → unreadable | label-not-visible
+└─ photos.delete(photoKey); tries &lt; 3 ? needs-retake : needs-identification
+POST …/items/{itemId}/retake → ScanService.retake
+└─ put under the item's own key; needs-retake → recognising
+   records a scan_retakes row for the quota</pre>
+<p class="src">#61 is based on a staging that predates #53: it drops <code>form</code> from <code>recognised</code>, and its migration 0013 clashes with the 0013–0015 already merged.</p>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<ul>
+  <li>An item that has products from a shared photo never enters <code>needs-retake</code>: its read was fine. Only a placeholder can, when its photo produced no products and exactly one unreadable product (decision A).</li>
+  <li>A retake sets the item's own <code>photo_key</code> and leaves <code>photo_id</code> as it was, for grouping. Recognising a retake is <b>single-product</b>: it takes <code>products[0]</code> and doesn't fan out.</li>
+  <li>Story 15 ("retake one product when its read was wrong") is dropped (decision B). A wrong read is fixed by confirm or the #72 typed name.</li>
+</ul>
+</div>
+
+<h3>4.6 When a photo is deleted</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<table>
+  <tr><th>Photo</th><th>Deleted when</th><th>Where</th></tr>
+  <tr><td>Front, rejected at recognise</td><td>Before the row says <code>rejected</code></td><td><span class="src">scans.service.ts:579–582</span></td></tr>
+  <tr><td>Front, any other outcome</td><td><b>Never</b>, until the guest cleanup or account deletion</td><td><span class="src">:724–725; scans.cleaner.ts:21–25</span></td></tr>
+  <tr><td>Back photo</td><td>After it's read, or when unreadable</td><td><span class="src">:707–720</span></td></tr>
+  <tr><td>Upload whose save failed</td><td>Immediately</td><td><span class="src">:193–195</span></td></tr>
+</table>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<p><b><code>releasePhotoIfUnneeded(photoId)</code></b> (proposed). A photo is <i>held</i> while any of its items is in <code>recognising</code> or <code>needs-confirmation</code>, plus #55's <code>needs-retake</code> and <code>needs-identification</code> if they show the photo. Once no item is in a holding state, no item can return to one, so release is one-way and safe to repeat:</p>
+<ol>
+  <li>Read the photo and check that none of its items holds it.</li>
+  <li><code>photos.delete(photo_key)</code>, deleting from R2 first, as the rejection path does today.</li>
+  <li><code>UPDATE scan_photos SET photo_key = NULL WHERE id = ? AND photo_key IS NOT NULL</code>, then publish <code>photo</code>.</li>
+</ol>
+<p>The reaper adds a sweep for photos still holding a key with no holding item (story 34). This applies to single-photo scans as well, which is the behaviour change in §1 item 2.</p>
+</div>
+<figure>
+<figcaption><span class="tag designed">as-designed</span>Lifecycle of a <span class="new">scan_photos</span> row (proposed).</figcaption>
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> recognising: create (R2 put, row in batch)
+  recognising --> recognised: fanOut batch, at least 1 product
+  recognising --> rejected: no readable product
+  rejected --> released: deleted at once, as today
+  recognised --> released: last item leaves a holding state
+  recognised --> released: reaper sweep (missed release)
+  released --> [*]: guest cleanup deletes the row
+  note right of recognised
+    held while any item is
+    recognising or needs-confirmation
+  end note
+</pre>
+</figure>
+
+<h3>4.7 Live updates: <code>GET …/{scanId}/events</code></h3>
+<div class="half built"><span class="tag built">as-built</span>
+<pre class="tree">ScanService.watch(scanId)                                <span class="a">scans.service.ts:229</span>
+├─ ownedScan → scanView(scan, items)  → events.subscribe  <span class="a">:230–231</span>
+│   └─ DurableObjectScanEvents.subscribe → ScanStream.fetch
+│      <span class="a">durable-object.scan-events.ts:16; scan-stream.ts:40</span>
+└─ catchUp(scanId, items)  <span class="a">:245–269</span>
+   re-read; send each item whose state/updatedAt changed; done if all final
+ScanStream.publish(event): done → end all; else frame('item', event.item)  <span class="a">scan-stream.ts:61–68</span></pre>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<pre class="tree">ScanEvent = item <span class="n">{ item & photoId }</span> | <span class="n">photo { id, position, state, skipped }</span> | done
+ScanSnapshot = <span class="n">{ id, createdAt, photos[] }</span>     <span class="a">same nested shape as the GET response</span>
+ScanStream.publish: done → end; <span class="n">photo → frame('photo', …)</span>; item → frame('item', …)
+catchUp: compares <span class="n">photos (state, skipped, key held)</span> as well as items</pre>
+</div>
+
+<h3>4.8 Daily allowance</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<p>The count is <b>item rows created</b> in the last 24 h, plus back-photo uploads, per user and per IP hash (<span class="src">scans.repository.ts:140–155, 215–227</span>). It's checked at <code>create</code> (N photos) and at <code>addBackPhoto</code> (1) (<span class="src">scans.service.ts:182, 308</span>). The route text says "30 photos per user and 100 per address" (<span class="src">scans.routes.ts:24</span>).</p>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<p><b>No change to the query.</b> Siblings are item rows, so they're counted automatically, which makes the allowance "products" without changing the count. What's new is the check inside <code>recognise</code>: <code>remaining = min(30 − user count, 100 − IP count)</code>, using the scan's <code>ip_hash</code>, and only the extra products are cut. Two photos recognised at the same moment can overshoot by a few. That's the same race <code>create</code> already documents (<span class="src">:170–171</span>). The route text changes to "products".</p>
+</div>
+
+<h3>4.9 Reaper and guest cleanup</h3>
+<div class="half built"><span class="tag built">as-built</span>
+<p><code>reap</code> re-queues working items older than 15 min and fails them after 2 h. It repairs a lost <code>done</code> (<span class="src">scans.service.ts:393–414</span>, cron every 10 min, <span class="src">scheduled.ts:8</span>). The cleanup deletes the item and back-photo keys, then the rows (<span class="src">scans.cleaner.ts:21–25; scans.repository.ts:163–213</span>).</p>
+</div>
+<div class="half designed"><span class="tag designed">as-designed</span>
+<p><code>reap</code> also covers siblings whose enqueue failed after the fan-out batch: they're in <code>matching</code>, a working state, so the existing sweep re-queues them after 15 min. It also adds the missed-release sweep. <code>photoKeysForUsers</code> adds <code>scan_photos.photo_key</code>, and <code>deleteForUsers</code> deletes <code>scan_photos</code> rows before <code>scans</code>.</p>
+</div>
+
+<h2>5. Failure modes</h2>
+<table>
+  <tr><th style="width:28%">Condition</th><th style="width:33%"><span class="tag built">today</span></th><th><span class="tag designed">after</span></th></tr>
+  <tr><td>Recognizer returns more than 5 products</td><td>n/a (one product)</td><td>Adapter keeps the 5 most confident; the rest go to <code>skipped_over_limit</code></td></tr>
+  <tr><td>Scan already has 20 items</td><td>n/a (≤10 items)</td><td>Sibling INSERT guard skips them; counted as over-limit</td></tr>
+  <tr><td>Daily allowance runs out mid-photo</td><td>Whole upload refused with 429 at <code>create</code></td><td>Placeholder kept (already counted); extras skipped as <code>daily-limit</code>, most confident kept first</td></tr>
+  <tr><td>No readable beauty product</td><td>Placeholder <code>rejected</code>, photo deleted (<span class="src">:579–582</span>)</td><td>Rejected with the photo's counts, unless exactly one unreadable product was seen: then <code>needs-retake</code> (#55)</td></tr>
+  <tr><td><code>AiBudgetExceededError</code> at recognise</td><td>Item <code>failed/research-busy</code></td><td>Placeholder fails the same way; no siblings created; photo released</td></tr>
+  <tr><td><code>AnthropicRequestError</code></td><td><code>failed/unavailable</code>, permanent (no retry)</td><td>Same, on the placeholder</td></tr>
+  <tr><td>Retry after the fan-out batch applied</td><td>n/a; <code>earlierRead</code> restores one product</td><td>Stored <code>recognition</code> reused; slot conflicts mean no duplicates</td></tr>
+  <tr><td>Next-step enqueue fails after the batch</td><td>Move undone, error rethrown, queue retries (<span class="src">:803–811</span>)</td><td>Placeholder undone and retried; siblings already in <code>matching</code> are re-queued by the reaper after 15 min</td></tr>
+  <tr><td>Two products in one photo are the same</td><td>n/a</td><td>Collapsed before insert (story 9)</td></tr>
+  <tr><td>Same new product in two photos of one scan</td><td>n/a</td><td>Two items; research paid once (catalog wait); out of scope to merge</td></tr>
+  <tr><td>Photo release: R2 delete fails</td><td>n/a</td><td>Row keeps its key; next transition or reaper sweep retries</td></tr>
+  <tr><td>Ready product with no stock image</td><td>Shows the user's photo (kept for ever)</td><td><code>image: null</code>; app shows brand and name (§1 item 2)</td></tr>
+  <tr><td>Client on the old flat shape</td><td>n/a</td><td>Breaks; accepted pre-production</td></tr>
+</table>
+
+<h2>6. What stays the same</h2>
+<ul>
+  <li>The upload route, its limits, multipart body and the per-photo checks (<span class="src">scans.routes.ts:16–36; scans.service.ts:884–897</span>).</li>
+  <li>The per-item state machine and every step after <code>recognise</code>: match, research, back photo, read label, analyse, the 0.6 confirmation threshold and <code>maxBackPhotos = 3</code>.</li>
+  <li>The guarded-update pattern, job keys <code>itemId:step:at</code> (<span class="src">scans.job-specs.ts:19</span>) and how <code>done</code> is decided.</li>
+  <li>Catalog identity, matching, research and analysis, apart from the one batched stock-image read.</li>
+  <li>Push keys: "needs you" stays one per scan per need, so five doubtful products still send one push.</li>
+  <li>No crops, no bounding boxes, no image transforms. The recognize model stays the configured Haiku until the eval says otherwise.</li>
+</ul>
+
+<h2>7. Delivery sequence</h2>
+<p>This starts only after #55's four PRs merge. They need rebasing first: #61 to #73 carry migrations 0013 to 0016, which clash with the merged 0013 to 0015, and #61 predates <code>form</code>. Each step below is a stacked PR that is green on its own.</p>
+<ol>
+  <li><b>Schema and repository.</b> <code>scan_photos</code>, <code>photo_id</code>, the migration, contract tests (fake and D1), and upload writes photos. Behaviour is unchanged: items read their image through the photo.</li>
+  <li><b>Recognizer.</b> <code>recognizeShelf</code>, the prompt and schema, the memory fake, and the report-only shelf eval (photos from the owner, never committed). The service still takes product 0.</li>
+  <li><b>Fan-out.</b> Collapsing duplicates, slots, the 5 and 20 caps, the daily-limit cut, skipped counts, the idempotent batch, and the service tests listed in #74.</li>
+  <li><b>Photo lifecycle.</b> <code>releasePhotoIfUnneeded</code>, the reaper sweep, the cleaner, and the image fallback change.</li>
+  <li><b>API and live updates.</b> The nested response, <code>stockImagesOf</code>, the <code>photo</code> event, the DO branch, the snapshot and <code>catchUp</code>, and <code>npm run openapi</code>.</li>
+</ol>
+
+<h2>8. Decisions (settled 2026-10-18)</h2>
+<table>
+  <tr><th style="width:6%"></th><th style="width:44%">Question</th><th>Decision</th></tr>
+  <tr><td>A</td><td>With #55, does a shelf photo with no readable product go to <code>needs-retake</code>, or is it rejected?</td><td>Rejected with counts, <b>unless</b> no product was readable and exactly one unreadable product was seen. Then it's <code>needs-retake</code>, so #61's retake still serves a blurry single product.</td></tr>
+  <tr><td>B</td><td>Story 15: is retaking a wrong read in scope?</td><td>Dropped. Confirm and the #72 typed name fix a wrong read without another photo.</td></tr>
+  <tr><td>C</td><td>Is it fine that a ready product with no stock image loses the user's photo?</td><td>Yes. <code>image: null</code>, and the app shows brand and name.</td></tr>
+  <tr><td>D</td><td>Slot positions instead of creation order?</td><td>Yes. <code>position = photo.position × 5 + rank</code>.</td></tr>
+  <tr><td>E</td><td>Count faces as a skip reason?</td><td>No. Faces aren't counted or reported.</td></tr>
+</table>
+
+<script src="mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true, theme: 'neutral', securityLevel: 'loose',
+    flowchart: { useMaxWidth: false, htmlLabels: true },
+    sequence: { useMaxWidth: false },
+    er: { useMaxWidth: false },
+    state: { useMaxWidth: false },
+    themeVariables: { fontSize: '13px' }
+  });
+</script>
+</body>
+</html>

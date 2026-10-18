@@ -25,6 +25,7 @@ import { R2CatalogImageStore } from './providers/catalog-images/r2.catalog-image
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-reader'
+import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
 import type { PhotoEnvironment } from './providers/photo-store/photo-store.provider'
 import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
@@ -78,22 +79,28 @@ export const buildContainer = (env: CloudflareBindings) => {
     return new AiUsageService({ repository: new D1AiUsageRepository(db()), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
   })
 
-  // One client for the researcher and the analyst, so they share the key, the models and the spend ledger.
-  const anthropic = once(
-    () =>
-      new AnthropicClient({
-        apiKey: env.ANTHROPIC_API_KEY,
-        ledger: aiUsage(),
-        models: {
-          research: env.ANTHROPIC_MODEL_RESEARCH,
-          analysis: env.ANTHROPIC_MODEL_ANALYSIS,
-          'same-product': env.ANTHROPIC_MODEL_JUDGE,
-          'image-check': env.ANTHROPIC_MODEL_VISION,
-          recognize: env.ANTHROPIC_MODEL_VISION,
-          'read-label': env.ANTHROPIC_MODEL_VISION,
-        },
-      }),
-  )
+  // The clients share the key, the models and the spend ledger. `timeoutMs` is the client's alone, so a caller that must answer within a
+  // request gets its own.
+  const newAnthropic = (timeoutMs?: number) =>
+    new AnthropicClient({
+      apiKey: env.ANTHROPIC_API_KEY,
+      ledger: aiUsage(),
+      models: {
+        research: env.ANTHROPIC_MODEL_RESEARCH,
+        analysis: env.ANTHROPIC_MODEL_ANALYSIS,
+        'same-product': env.ANTHROPIC_MODEL_JUDGE,
+        'image-check': env.ANTHROPIC_MODEL_VISION,
+        recognize: env.ANTHROPIC_MODEL_VISION,
+        'read-label': env.ANTHROPIC_MODEL_VISION,
+        'split-name': env.ANTHROPIC_MODEL_JUDGE,
+      },
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    })
+  // The client for the queue's model calls, which can take a minute (a web search turn).
+  const anthropic = once(() => newAnthropic())
+  // The split runs inside the user's request (identification), so it gives up after 15 s, not 60: the user is told to try again.
+  const SPLIT_NAME_TIMEOUT_MS = 15_000
+  const nameSplitterAnthropic = once(() => newAnthropic(SPLIT_NAME_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -152,6 +159,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         catalog: catalog(),
         recognizer: new AnthropicProductRecognizer(anthropic()),
         labelReader: new AnthropicLabelReader(anthropic()),
+        nameSplitter: new AnthropicNameSplitter(nameSplitterAnthropic()),
         photos: privatePhotos(),
         jobs: jobQueue(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),

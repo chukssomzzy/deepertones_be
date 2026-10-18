@@ -45,7 +45,8 @@ jobs:
   integration:
     name: Integration
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    # Two 5-minute tries plus setup. A normal run takes about 2 minutes.
+    timeout-minutes: 13
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -55,8 +56,18 @@ jobs:
       - run: npm ci
       # The whole Worker through its default export, in workerd, with local
       # bindings simulated by Miniflare. No network, no credentials.
+      # workerd occasionally freezes the whole run (no test fails, nothing more is
+      # printed), so a run still going after 5 minutes is killed and tried once
+      # more. Only a hang (timeout's exit 124) is retried: a failing test fails the job.
       - name: Integration tests
-        run: npm run test:integration
+        run: |
+          for attempt in 1 2; do
+            status=0
+            timeout --kill-after=15s 5m npx vitest run --project integration || status=$?
+            [ "$status" -ne 124 ] && exit "$status"
+            echo "::warning::Integration tests hung for 5 minutes (attempt $attempt of 2)"
+          done
+          exit 124
 
   scripts:
     name: Scripts

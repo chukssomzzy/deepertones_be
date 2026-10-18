@@ -19,6 +19,7 @@ const newProduct = (over: Partial<NewProduct> = {}): NewProduct => {
     id: freshId(),
     identityKey: `${brandKey}|${fresh('name')}|`,
     brandKey,
+    kind: 'named',
     brand: 'CeraVe',
     name: 'Hydrating Facial Cleanser',
     variant: null,
@@ -28,6 +29,21 @@ const newProduct = (over: Partial<NewProduct> = {}): NewProduct => {
     ...over,
   }
 }
+
+/** A product no label named: the catalog keys it by its ingredient list, and it has no brand or name. */
+const newUnnamedProduct = (over: Partial<NewProduct> = {}): NewProduct => ({
+  id: freshId(),
+  identityKey: `unnamed:${fresh('aqua')}\nglycerin`,
+  brandKey: '',
+  kind: 'unnamed',
+  brand: '',
+  name: '',
+  variant: null,
+  form: null,
+  category: 'other',
+  createdAt: BASE,
+  ...over,
+})
 
 const newFormulation = (productId: string, over: Partial<NewFormulation> = {}): NewFormulation => {
   const ingredients = over.ingredients ?? ['Aqua', 'Glycerin', fresh('Parfum')]
@@ -138,6 +154,39 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         const repo = await make()
 
         expect(await repo.findProductById(freshId())).toBeNull()
+      })
+
+      it('createProduct keeps the kind it is given, named or unnamed, and reads it back by id and by key', async () => {
+        const repo = await make()
+        const named = newProduct()
+        const unnamed = newUnnamedProduct()
+
+        expect(await repo.createProduct(named)).toMatchObject({ kind: 'named' })
+        expect(await repo.createProduct(unnamed)).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null, category: 'other', brandKey: '' })
+
+        expect(await repo.findProductById(named.id)).toMatchObject({ kind: 'named' })
+        expect(await repo.findProductById(unnamed.id)).toMatchObject({ kind: 'unnamed' })
+        expect(await repo.findProductByKey(unnamed.identityKey)).toMatchObject({ id: unnamed.id, kind: 'unnamed' })
+      })
+
+      it('finds an unnamed product by its identity key, "unnamed:" and the list\'s ingredients key, as written', async () => {
+        const repo = await make()
+        const listKey = fresh('aqua\nglycerin\ncetearyl alcohol')
+        const unnamed = newUnnamedProduct({ identityKey: `unnamed:${listKey}` })
+        await repo.createProduct(unnamed)
+
+        expect(await repo.findProductByKey(`unnamed:${listKey}`)).toMatchObject({ id: unnamed.id })
+        expect(await repo.findProductByKey(listKey)).toBeNull()
+      })
+
+      it('createProduct for an unnamed identity key that is already stored creates nothing and returns the existing product', async () => {
+        const repo = await make()
+        const first = newUnnamedProduct()
+        await repo.createProduct(first)
+
+        const second = await repo.createProduct(newUnnamedProduct({ identityKey: first.identityKey }))
+
+        expect(second).toMatchObject({ id: first.id, kind: 'unnamed' })
       })
     })
 
@@ -863,6 +912,633 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
         const formulation = await withFormulation(repo)
 
         expect(await repo.rejectedAnalyses(formulation.id, 1, 'ref-a')).toBe(0)
+      })
+    })
+
+    describe('adoptUnnamedFormulation', () => {
+      /** An unnamed product with its one analysed formulation (one concern), the way a list with no name is stored. */
+      const unnamedWithAnalysis = async (repo: CatalogRepository, over: Partial<NewFormulation> = {}) => {
+        const unnamed = newUnnamedProduct()
+        await repo.createProduct(unnamed)
+        const formulation = newFormulation(unnamed.id, { sourceKind: 'label', sourceUrl: null, foundAt: at(HOUR), ...over })
+        await repo.createFormulation(formulation)
+        await repo.saveAnalysis(formulation.id, {
+          concerns: [concern({ kind: 'banned-substance', severity: 'high', traits: ['sensitive'] })],
+          analysisVersion: 3,
+          referenceVersion: 'seed-9',
+          analysedAt: at(2 * HOUR),
+        })
+        return { unnamed, formulation }
+      }
+      const namedProduct = async (repo: CatalogRepository) => {
+        const named = newProduct()
+        await repo.createProduct(named)
+        return named
+      }
+
+      it('moves the formulation to the named product, keeping its id, its list and source, and its analysis with its concerns', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const concernsBefore = await repo.concernsFor(formulation.id)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        const moved = (await repo.findFormulation(formulation.id))!
+        expect(moved).toMatchObject({
+          id: formulation.id,
+          productId: named.id,
+          ingredients: formulation.ingredients,
+          ingredientsKey: formulation.ingredientsKey,
+          sourceKind: 'label',
+          sourceUrl: null,
+          analysisVersion: 3,
+          referenceVersion: 'seed-9',
+        })
+        expect(moved.foundAt.getTime()).toBe(at(HOUR).getTime())
+        expect(moved.analysedAt!.getTime()).toBe(at(2 * HOUR).getTime())
+        expect(await repo.concernsFor(formulation.id)).toEqual(concernsBefore)
+        expect(concernsBefore).toHaveLength(1)
+      })
+
+      it('makes the moved formulation the named product\'s own: found by its latest and by its ingredients key', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.latestFormulation(named.id)).toMatchObject({ id: formulation.id })
+        expect(await repo.findFormulationByIngredientsKey(named.id, formulation.ingredientsKey)).toMatchObject({ id: formulation.id })
+      })
+
+      it('removes the unnamed product, by id and by its identity key', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.findProductById(unnamed.id)).toBeNull()
+        expect(await repo.findProductByKey(unnamed.identityKey)).toBeNull()
+        expect(await repo.latestFormulation(unnamed.id)).toBeNull()
+      })
+
+      it('keeps the formulation\'s analysis attempts, so a rejection already counted still counts', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        await repo.recordAnalysisAttempt({ id: freshId(), formulationId: formulation.id, attemptedAt: BASE, outcome: 'rejected', analysisVersion: 3, referenceVersion: 'seed-9' })
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.rejectedAnalyses(formulation.id, 3, 'seed-9')).toBe(1)
+      })
+
+      it('leaves the named product\'s other formulations, with their analyses, as they were', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const web = newFormulation(named.id, { foundAt: at(30 * MINUTE) })
+        await repo.createFormulation(web)
+        await repo.saveAnalysis(web.id, { concerns: [concern()], analysisVersion: 3, referenceVersion: 'seed-9', analysedAt: at(45 * MINUTE) })
+
+        await repo.adoptUnnamedFormulation(formulation.id, named.id)
+
+        expect(await repo.findFormulation(web.id)).toMatchObject({ productId: named.id, analysisVersion: 3 })
+        expect(await repo.concernsFor(web.id)).toHaveLength(1)
+        // Found after the web one, so the moved list is now the product's latest.
+        expect(await repo.latestFormulation(named.id)).toMatchObject({ id: formulation.id })
+      })
+
+      it('throws, and changes nothing, when the named product already has a formulation with that ingredients key', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+        const named = await namedProduct(repo)
+        const theirs = await repo.createFormulation(newFormulation(named.id, { ingredients: formulation.ingredients, ingredientsKey: formulation.ingredientsKey }))
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, named.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: unnamed.id, analysisVersion: 3 })
+        expect(await repo.concernsFor(formulation.id)).toHaveLength(1)
+        expect(await repo.findProductById(unnamed.id)).toMatchObject({ id: unnamed.id })
+        expect(await repo.findFormulationByIngredientsKey(named.id, formulation.ingredientsKey)).toMatchObject({ id: theirs.id })
+      })
+
+      it('throws, and changes nothing, for a product that does not exist', async () => {
+        const repo = await make()
+        const { unnamed, formulation } = await unnamedWithAnalysis(repo)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, freshId())).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: unnamed.id })
+        expect(await repo.findProductById(unnamed.id)).not.toBeNull()
+      })
+
+      it('throws for a formulation that does not exist, leaving the named product as it was', async () => {
+        const repo = await make()
+        const named = await namedProduct(repo)
+
+        await expect(repo.adoptUnnamedFormulation(freshId(), named.id)).rejects.toThrow()
+
+        expect(await repo.findProductById(named.id)).toMatchObject({ id: named.id })
+      })
+
+      it('lets one of two adopters of the same formulation win: the second, for a different product, throws and the formulation stays with the first', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const first = await namedProduct(repo)
+        const second = await namedProduct(repo)
+        await repo.adoptUnnamedFormulation(formulation.id, first.id)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, second.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: first.id })
+        expect(await repo.findFormulationByIngredientsKey(second.id, formulation.ingredientsKey)).toBeNull()
+      })
+
+      it('lets exactly one of two adopters running at once win, whichever it is: the other throws instead of reporting a move that did not happen', async () => {
+        const repo = await make()
+        const { formulation } = await unnamedWithAnalysis(repo)
+        const a = await namedProduct(repo)
+        const b = await namedProduct(repo)
+
+        const results = await Promise.allSettled([repo.adoptUnnamedFormulation(formulation.id, a.id), repo.adoptUnnamedFormulation(formulation.id, b.id)])
+
+        expect(results.map((r) => r.status).sort()).toEqual(['fulfilled', 'rejected'])
+        const [winner, loser] = results[0]!.status === 'fulfilled' ? [a, b] : [b, a]
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: winner.id, analysisVersion: 3 })
+        expect(await repo.findFormulationByIngredientsKey(loser.id, formulation.ingredientsKey)).toBeNull()
+        expect(await repo.concernsFor(formulation.id)).toHaveLength(1)
+      })
+
+      it('throws, and removes nothing, for a formulation that belongs to a named product: only an unnamed product is ever given up', async () => {
+        const repo = await make()
+        const owner = await namedProduct(repo)
+        const formulation = await repo.createFormulation(newFormulation(owner.id))
+        const target = await namedProduct(repo)
+
+        await expect(repo.adoptUnnamedFormulation(formulation.id, target.id)).rejects.toThrow()
+
+        expect(await repo.findFormulation(formulation.id)).toMatchObject({ productId: owner.id })
+        expect(await repo.findProductById(owner.id)).not.toBeNull()
+        expect(await repo.findProductById(target.id)).not.toBeNull()
+      })
+    })
+
+    describe('search text', () => {
+      it('createProduct keeps the search text it is given, and findProductById reads it back', async () => {
+        const repo = await make()
+        const input = newProduct({ searchText: 'cerave hydrating facial cleanser' })
+
+        expect(await repo.createProduct(input)).toMatchObject({ searchText: 'cerave hydrating facial cleanser' })
+        expect(await repo.findProductById(input.id)).toMatchObject({ searchText: 'cerave hydrating facial cleanser' })
+      })
+
+      it('createProduct stores an empty search text for a product given none', async () => {
+        const repo = await make()
+        const input = newProduct()
+
+        expect(await repo.createProduct(input)).toMatchObject({ searchText: '' })
+        expect(await repo.findProductById(input.id)).toMatchObject({ searchText: '' })
+      })
+    })
+
+    describe('filling in search text', () => {
+      // The finder sees every product in a shared D1 whose search text is empty, and the fixtures of other tests leave it empty. So a test makes its own
+      // products with ids that start with "!<its own word>" and reads only those back; it never writes to a row it did not make.
+      const word = () => `w${runSalt}n${counter++}z`
+      const mine = (w: string, suffix: string, over: Partial<NewProduct> = {}) => newProduct({ id: `!${w}-${suffix}`, brand: 'Acme', name: `${w} ${suffix}`, ...over })
+      const ownIds = (found: { id: string }[], w: string) => found.map((p) => p.id).filter((id) => id.startsWith(`!${w}-`))
+
+      it('finds a named product whose search text is empty, and not one that has search text', async () => {
+        const repo = await make()
+        const w = word()
+        const [empty, filled] = [mine(w, 'a'), mine(w, 'b', { searchText: 'acme something' })]
+        for (const p of [empty, filled]) await repo.createProduct(p)
+
+        const found = await repo.namedWithoutSearchText(500)
+
+        expect(ownIds(found, w)).toEqual([empty.id])
+        expect(found.find((p) => p.id === empty.id)).toMatchObject({ brand: 'Acme', kind: 'named', searchText: '' })
+        expect(found.every((p) => p.kind === 'named' && p.searchText === '')).toBe(true)
+      })
+
+      it('never returns an unnamed product, though its search text is empty', async () => {
+        const repo = await make()
+        const w = word()
+        const [unnamed, named] = [newUnnamedProduct({ id: `!${w}-u` }), mine(w, 'a')]
+        for (const p of [unnamed, named]) await repo.createProduct(p)
+
+        const found = await repo.namedWithoutSearchText(500)
+
+        expect(ownIds(found, w)).toEqual([named.id])
+        expect(found.map((p) => p.id)).not.toContain(unnamed.id)
+      })
+
+      it('returns its products in id order', async () => {
+        const repo = await make()
+        const w = word()
+        for (const suffix of ['c', 'a', 'b']) await repo.createProduct(mine(w, suffix))
+
+        expect(ownIds(await repo.namedWithoutSearchText(500), w)).toEqual([`!${w}-a`, `!${w}-b`, `!${w}-c`])
+      })
+
+      it('returns at most `limit` products, the first ones in id order', async () => {
+        const repo = await make()
+        const w = word()
+        for (const suffix of ['c', 'a', 'b']) await repo.createProduct(mine(w, suffix))
+
+        // Other tests may have left rows with empty text, so the limited answers are compared with the unlimited one, not with a fixed list.
+        const all = (await repo.namedWithoutSearchText(500)).map((p) => p.id)
+        expect(all.length).toBeGreaterThanOrEqual(3)
+        expect((await repo.namedWithoutSearchText(2)).map((p) => p.id)).toEqual(all.slice(0, 2))
+        expect((await repo.namedWithoutSearchText(3)).map((p) => p.id)).toEqual(all.slice(0, 3))
+        expect((await repo.namedWithoutSearchText(1)).map((p) => p.id)).toEqual(all.slice(0, 1))
+        expect(await repo.namedWithoutSearchText(0)).toEqual([])
+      })
+
+      it('setSearchText sets one product\'s search text, which search then finds, and stops it being returned by the finder', async () => {
+        const repo = await make()
+        const w = word()
+        const [one, other] = [mine(w, 'a'), mine(w, 'b')]
+        for (const p of [one, other]) await repo.createProduct(p)
+
+        await repo.setSearchText(one.id, `acme ${w} filled`)
+
+        expect(await repo.findProductById(one.id)).toMatchObject({ searchText: `acme ${w} filled` })
+        expect((await repo.search(`${w} filled`, 10)).map((p) => p.id)).toEqual([one.id])
+        expect(ownIds(await repo.namedWithoutSearchText(500), w)).toEqual([other.id])
+        expect(await repo.findProductById(other.id)).toMatchObject({ searchText: '' })
+      })
+
+      it('setSearchText changes nothing but the search text', async () => {
+        const repo = await make()
+        const w = word()
+        const input = mine(w, 'a', { variant: 'Night', category: 'hair' })
+        await repo.createProduct(input)
+
+        await repo.setSearchText(input.id, 'something')
+
+        expect(await repo.findProductById(input.id)).toMatchObject({
+          id: input.id,
+          identityKey: input.identityKey,
+          brandKey: input.brandKey,
+          kind: 'named',
+          brand: 'Acme',
+          name: `${w} a`,
+          variant: 'Night',
+          category: 'hair',
+          imageKey: null,
+        })
+      })
+
+      describe('setSearchTexts', () => {
+        it('sets the search text of several products in one call, which search then finds', async () => {
+          const repo = await make()
+          const w = word()
+          const made = [mine(w, 'a'), mine(w, 'b'), mine(w, 'c')]
+          for (const p of made) await repo.createProduct(p)
+
+          await repo.setSearchTexts(made.map((p, i) => ({ id: p.id, searchText: `acme ${w} text${i}` })))
+
+          for (const [i, p] of made.entries()) expect(await repo.findProductById(p.id)).toMatchObject({ searchText: `acme ${w} text${i}` })
+          expect(ownIds(await repo.namedWithoutSearchText(500), w)).toEqual([])
+          expect((await repo.search(w, 10)).map((p) => p.id)).toEqual(made.map((p) => p.id))
+        })
+
+        it('ignores an id that is not a product, and still applies the others', async () => {
+          const repo = await make()
+          const w = word()
+          const [one, two] = [mine(w, 'a'), mine(w, 'b')]
+          for (const p of [one, two]) await repo.createProduct(p)
+
+          await expect(
+            repo.setSearchTexts([
+              { id: one.id, searchText: 'first' },
+              { id: `!${w}-nobody`, searchText: 'nobody' },
+              { id: two.id, searchText: 'second' },
+            ]),
+          ).resolves.toBeUndefined()
+
+          expect(await repo.findProductById(one.id)).toMatchObject({ searchText: 'first' })
+          expect(await repo.findProductById(two.id)).toMatchObject({ searchText: 'second' })
+          expect(await repo.findProductById(`!${w}-nobody`)).toBeNull()
+        })
+
+        it('does nothing for an empty list', async () => {
+          const repo = await make()
+          const w = word()
+          const input = mine(w, 'a')
+          await repo.createProduct(input)
+
+          await expect(repo.setSearchTexts([])).resolves.toBeUndefined()
+
+          expect(await repo.findProductById(input.id)).toMatchObject({ searchText: '' })
+        })
+
+        it('changes nothing but the search text', async () => {
+          const repo = await make()
+          const w = word()
+          const input = mine(w, 'a', { variant: 'Night', category: 'hair' })
+          await repo.createProduct(input)
+
+          await repo.setSearchTexts([{ id: input.id, searchText: 'something' }])
+
+          expect(await repo.findProductById(input.id)).toMatchObject({
+            id: input.id,
+            identityKey: input.identityKey,
+            brandKey: input.brandKey,
+            kind: 'named',
+            brand: 'Acme',
+            name: `${w} a`,
+            variant: 'Night',
+            category: 'hair',
+            imageKey: null,
+            searchText: 'something',
+          })
+        })
+
+        it('takes 500 rows in one call', async () => {
+          const repo = await make()
+          const w = word()
+          const made = Array.from({ length: 500 }, (_, i) => mine(w, String(i).padStart(3, '0')))
+          for (const p of made) await repo.createProduct(p)
+
+          await repo.setSearchTexts(made.map((p, i) => ({ id: p.id, searchText: `acme ${w} n${i}z` })))
+
+          expect(ownIds(await repo.namedWithoutSearchText(1000), w)).toEqual([])
+          expect(await repo.findProductById(made[0]!.id)).toMatchObject({ searchText: `acme ${w} n0z` })
+          expect(await repo.findProductById(made[499]!.id)).toMatchObject({ searchText: `acme ${w} n499z` })
+          expect((await repo.search(`${w} n250z`, 10)).map((p) => p.id)).toEqual([made[250]!.id])
+        })
+      })
+
+      it('setSearchText for an unknown id does nothing and does not throw', async () => {
+        const repo = await make()
+
+        await expect(repo.setSearchText(`!${word()}-nobody`, 'x')).resolves.toBeUndefined()
+      })
+    })
+
+    describe('search', () => {
+      // Each call yields a word no other test (or earlier run against a shared D1) uses, and none is inside another: the "z" ends it.
+      const word = () => `w${runSalt}n${counter++}z`
+      /** A named product whose search text is written out by hand, as the service would build it: lower case, normalised. */
+      const searchable = (searchText: string, over: Partial<NewProduct> = {}): NewProduct => {
+        const [brand = '', ...rest] = searchText.split(' ')
+        return newProduct({ brand, name: rest.join(' '), brandKey: fresh('brand'), searchText, ...over })
+      }
+      const idsOf = (products: { id: string }[]) => products.map((p) => p.id)
+
+      it('finds a named product by a fragment in the middle of its search text, and returns the stored product', async () => {
+        const repo = await make()
+        const w = word()
+        const product = await repo.createProduct(searchable(`acme ${w} glow serum`, { variant: 'Night', category: 'skin' }))
+
+        const found = await repo.search(`${w} glow`, 10)
+
+        expect(found).toHaveLength(1)
+        expect(found[0]).toMatchObject({ id: product.id, kind: 'named', brand: 'acme', variant: 'Night', category: 'skin', imageKey: null })
+      })
+
+      it('finds a product by a fragment at the very start and at the very end of its search text', async () => {
+        const repo = await make()
+        const w = word()
+        const product = await repo.createProduct(searchable(`acme glow ${w}`))
+
+        expect(idsOf(await repo.search('acme', 10))).toContain(product.id)
+        expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+      })
+
+      it('finds nothing for text that no search text or alias contains', async () => {
+        const repo = await make()
+        await repo.createProduct(searchable(`acme ${word()} glow`))
+
+        expect(await repo.search(word(), 10)).toEqual([])
+      })
+
+      it('finds nothing, rather than every product, for an empty query', async () => {
+        const repo = await make()
+        await repo.createProduct(searchable(`acme ${word()} glow`))
+
+        expect(await repo.search('', 10)).toEqual([])
+      })
+
+      it('never returns an unnamed product, even for a word in its identity key', async () => {
+        const repo = await make()
+        const w = word()
+        await repo.createProduct(newUnnamedProduct({ identityKey: `unnamed:aqua\n${w}\nglycerin`, searchText: '' }))
+
+        expect(await repo.search(w, 10)).toEqual([])
+        expect(await repo.search('aqua', 10)).not.toContainEqual(expect.objectContaining({ kind: 'unnamed' }))
+      })
+
+      describe('through an alias', () => {
+        it('finds a product by text in one of its aliases, when its own search text does not contain it', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          await repo.addAlias(`acme|${w} wash|`, product.id)
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+        })
+
+        it('does not return a product for another product\'s alias', async () => {
+          const repo = await make()
+          const w = word()
+          const owner = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          const other = await repo.createProduct(searchable(`beta ${word()} cleanser`))
+          await repo.addAlias(`acme|${w} wash|`, owner.id)
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([owner.id])
+          expect(idsOf(await repo.search(w, 10))).not.toContain(other.id)
+        })
+
+        it('returns a product reachable through its search text and an alias once, and through two aliases once', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} cleanser`))
+          await repo.addAlias(`acme|${w} wash|`, product.id)
+          await repo.addAlias(`acme|${w} foam|night`, product.id)
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([product.id])
+        })
+      })
+
+      describe('with several words', () => {
+        it('finds a product by words in a different order, and by words that leave some of its own out', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} glow serum`))
+
+          expect(idsOf(await repo.search(`serum ${w}`, 10))).toEqual([product.id])
+          expect(idsOf(await repo.search(`${w} serum`, 10))).toEqual([product.id])
+          expect(idsOf(await repo.search(`serum ${w} acme`, 10))).toEqual([product.id])
+        })
+
+        it('finds nothing when one of the words is in neither the search text nor an alias', async () => {
+          const repo = await make()
+          const w = word()
+          await repo.createProduct(searchable(`acme ${w} glow serum`))
+
+          expect(await repo.search(`${w} serum ${word()}`, 10)).toEqual([])
+        })
+
+        it('matches each word as a fragment, not as a whole word', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} glowing serums`))
+
+          expect(idsOf(await repo.search(`${w} glow serum`, 10))).toEqual([product.id])
+        })
+
+        it('ignores empty words, so extra spaces change nothing, and finds nothing for a query of only spaces', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} glow serum`))
+
+          expect(idsOf(await repo.search(`  ${w}   glow  `, 10))).toEqual([product.id])
+          expect(await repo.search('   ', 10)).toEqual([])
+        })
+
+        it('looks at the first 8 words only: a 9th that nothing contains is ignored, while an 8th that nothing contains is not', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`${w} a b c d e f g`))
+
+          expect(idsOf(await repo.search(`${w} a b c d e f g ${word()}`, 10))).toEqual([product.id])
+          expect(await repo.search(`${w} a b c d e f ${word()} g`, 10)).toEqual([])
+        })
+
+        it('takes a query of up to 80 characters: one that is exactly the search text finds it, and a long one that matches nothing finds nothing', async () => {
+          const repo = await make()
+          const w = word()
+          const words = [w, ...Array.from({ length: 7 }, (_, i) => `abcdefg${i}`)]
+          const base = words.join(' ')
+          const text = `${base}${'x'.repeat(80 - base.length)}`
+          expect(text).toHaveLength(80)
+          const product = await repo.createProduct(searchable(text))
+
+          expect(idsOf(await repo.search(text, 10))).toEqual([product.id])
+          expect(await repo.search(`${w}${'y'.repeat(80 - w.length)}`, 10)).toEqual([])
+          expect(await repo.search('y'.repeat(80), 10)).toEqual([])
+        })
+
+        it('finds a product when every word is in one of its aliases, even words that are not in its search text, and across the "|" between brand and name', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          await repo.addAlias(`acme|${w} foaming wash|night`, product.id)
+
+          expect(idsOf(await repo.search(`wash ${w}`, 10))).toEqual([product.id])
+          expect(idsOf(await repo.search(`acme ${w} night`, 10))).toEqual([product.id])
+        })
+
+        it('does not combine the search text and an alias: words split between them find nothing', async () => {
+          const repo = await make()
+          const [inText, inAlias] = [word(), word()]
+          const product = await repo.createProduct(searchable(`acme ${inText} cleanser`))
+          await repo.addAlias(`acme|${inAlias} wash|`, product.id)
+
+          expect(await repo.search(`${inText} ${inAlias}`, 10)).toEqual([])
+        })
+
+        it('does not combine two aliases either', async () => {
+          const repo = await make()
+          const [one, two] = [word(), word()]
+          const product = await repo.createProduct(searchable(`acme ${word()} cleanser`))
+          await repo.addAlias(`acme|${one} wash|`, product.id)
+          await repo.addAlias(`acme|${two} foam|`, product.id)
+
+          expect(await repo.search(`${one} ${two}`, 10)).toEqual([])
+        })
+
+        it('returns a product once though its search text and two of its aliases all match', async () => {
+          const repo = await make()
+          const w = word()
+          const product = await repo.createProduct(searchable(`acme ${w} cleanser`))
+          await repo.addAlias(`acme|${w} wash|`, product.id)
+          await repo.addAlias(`acme|${w} foam|night`, product.id)
+
+          expect(idsOf(await repo.search(`cleanser ${w}`, 10))).toEqual([product.id])
+          expect(idsOf(await repo.search(`acme ${w}`, 10))).toEqual([product.id])
+        })
+
+        it('ranks a search text that starts with the whole query before one that only holds all its words, though the other sorts first', async () => {
+          const repo = await make()
+          const w = word()
+          const holds = await repo.createProduct(searchable(`${w} aloe butter`))
+          const starts = await repo.createProduct(searchable(`${w} butter cream`))
+
+          expect(idsOf(await repo.search(`${w} butter`, 10))).toEqual([starts.id, holds.id])
+        })
+      })
+
+      describe('the limit', () => {
+        it('returns at most `limit` products: the first ones in the order below, not any ten', async () => {
+          const repo = await make()
+          const w = word()
+          for (const suffix of ['d', 'b', 'e', 'a', 'c']) await repo.createProduct(searchable(`${w} ${suffix}`))
+
+          const found = await repo.search(w, 3)
+
+          expect(found.map((p) => p.searchText)).toEqual([`${w} a`, `${w} b`, `${w} c`])
+        })
+
+        it('returns everything when fewer products match than the limit, and exactly `limit` at the boundary', async () => {
+          const repo = await make()
+          const w = word()
+          for (const suffix of ['a', 'b', 'c']) await repo.createProduct(searchable(`${w} ${suffix}`))
+
+          expect(await repo.search(w, 4)).toHaveLength(3)
+          expect(await repo.search(w, 3)).toHaveLength(3)
+          expect(await repo.search(w, 2)).toHaveLength(2)
+        })
+      })
+
+      describe('the order', () => {
+        it('puts a product whose search text starts with the query before one that only contains it, though the other sorts first alphabetically', async () => {
+          const repo = await make()
+          const w = word()
+          const contains = await repo.createProduct(searchable(`acme ${w} glow`))
+          const prefix = await repo.createProduct(searchable(`${w} body butter`))
+
+          // "acme ..." sorts before "w..." on its own, so only the prefix rule can put the other first.
+          expect(idsOf(await repo.search(w, 10))).toEqual([prefix.id, contains.id])
+        })
+
+        it('orders products of the same rank by search text', async () => {
+          const repo = await make()
+          const w = word()
+          const prefixes = [`${w} c`, `${w} a`, `${w} b`]
+          const containing = [`acme ${w} z`, `acme ${w} y`]
+          for (const text of [...prefixes, ...containing]) await repo.createProduct(searchable(text))
+
+          const found = await repo.search(w, 10)
+
+          expect(found.map((p) => p.searchText)).toEqual([`${w} a`, `${w} b`, `${w} c`, `acme ${w} y`, `acme ${w} z`])
+        })
+
+        it('orders products with the same search text by id', async () => {
+          const repo = await make()
+          const w = word()
+          // Created in the reverse of the expected order, with ids that do not come from the clock.
+          for (const suffix of ['c', 'a', 'b']) await repo.createProduct(searchable(`acme ${w} glow`, { id: `${w}-${suffix}` }))
+
+          expect(idsOf(await repo.search(w, 10))).toEqual([`${w}-a`, `${w}-b`, `${w}-c`])
+        })
+
+        it('gives the same order every time it is asked', async () => {
+          const repo = await make()
+          const w = word()
+          for (const text of [`acme ${w} b`, `${w} z`, `acme ${w} a`, `${w} y`]) await repo.createProduct(searchable(text))
+
+          const first = idsOf(await repo.search(w, 10))
+
+          expect(idsOf(await repo.search(w, 10))).toEqual(first)
+          expect(first).toHaveLength(4)
+        })
       })
     })
   })

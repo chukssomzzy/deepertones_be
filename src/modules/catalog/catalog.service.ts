@@ -92,9 +92,16 @@ export type ResearchResult =
   | { kind: 'not-found'; fallbackFormulationId?: string }
   | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
-/** A product's identity and stock image, nothing about its formulation. */
+/** The product and formulation a label's list belongs to; `analysed` says whether that formulation is already analysed by the current versions. */
+export type LabelResult = { productId: string; formulationId: string; analysed: boolean }
+
+/**
+ * A product's identity and stock image, nothing about its formulation: what a search shows, what an identification reads back,
+ * and all a scan item carries. Each presenter names the fields it publishes.
+ */
 export type ProductSummary = {
   id: string
+  kind: Product['kind']
   brand: string
   name: string
   variant: string | null
@@ -127,6 +134,14 @@ export type ProductView = {
 
 export class ProductCatalogService {
   private static readonly DAY = 24 * 60 * 60 * 1000
+  /** What the identity key of a product no label named starts with; the rest is the list's ingredients key. */
+  private static readonly UNNAMED_PREFIX = 'unnamed:'
+  /** The most products a search returns: a list to pick from, not to page through. */
+  private static readonly MAX_SEARCH_RESULTS = 10
+  /** A query shorter than this, once normalised, would match most of the catalog; the route already refuses it, so it is the service's rule too. */
+  private static readonly MIN_SEARCH_LENGTH = 2
+  /** How many products without search text one `fillSearchText` call fills. */
+  private static readonly FILL_BATCH = 500
   private static readonly MAX_LABEL_INGREDIENTS = 150
   private static readonly MAX_LABEL_INGREDIENT_LENGTH = 120
   private static readonly CONTROL_CHARACTER = /\p{Cc}/u
@@ -149,6 +164,10 @@ export class ProductCatalogService {
     ...(product.variant === null ? {} : { variant: product.variant }),
     ...(product.form === null ? {} : { form: product.form }),
   })
+
+  /** Normalised like a user's query (accents folded), but with pack sizes kept: "50 ml" is a thing a person may type. */
+  private static searchTextOf = (product: { brand: string; name: string; variant?: string | null }): string =>
+    normaliseText(`${product.brand} ${product.name} ${product.variant ?? ''}`)
 
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
     const [x, y] = [normaliseText(a ?? ''), normaliseText(b ?? '')]
@@ -176,43 +195,96 @@ export class ProductCatalogService {
   }
 
   /**
+   * The named products whose brand, name and variant, or any alias, contain what was typed (the query is normalised like the product's
+   * search text, so case, accents and punctuation do not matter), best first, at most 10. Makes no model or web call. A query under
+   * 2 characters once normalised ("a!") finds nothing and is not run, never every product.
+   */
+  async search(q: string): Promise<ProductSummary[]> {
+    const query = normaliseText(q)
+    if (query.length < ProductCatalogService.MIN_SEARCH_LENGTH) return []
+    const found = await this.repository.search(query, ProductCatalogService.MAX_SEARCH_RESULTS)
+    return found.map((product) => this.summaryOf(product))
+  }
+
+  /**
+   * A named product by id, for a caller that was offered it by `search`. An id the catalog does not hold, and an unnamed product (which
+   * search never offers), are both PRODUCT_NOT_FOUND.
+   */
+  async namedProduct(productId: string): Promise<ProductSummary> {
+    return this.summaryOf(await this.requireNamedProduct(productId))
+  }
+
+  /**
+   * What a scan of a product the user picked from search needs next: the answer `resolve` gives for the same product, with no lookup
+   * by name, no model call and nothing written. PRODUCT_NOT_FOUND for an id the catalog does not hold or an unnamed product.
+   */
+  async choose(productId: string): Promise<ResolveResult> {
+    return this.nextStep(await this.requireNamedProduct(productId))
+  }
+
+  /**
+   * Gives the named products that have no search text (made before the column existed, or by a Worker that did not know it) the
+   * text a new product gets, at most 500 a call. Never touches a product that has text, and makes no model or web call. Returns
+   * how many it filled; the scheduled reaper calls it until none are left.
+   */
+  async fillSearchText(): Promise<number> {
+    const missing = await this.repository.namedWithoutSearchText(ProductCatalogService.FILL_BATCH)
+    // One write for all of them: a Worker invocation may make only so many subrequests, and one per product would spend them.
+    if (missing.length > 0) await this.repository.setSearchTexts(missing.map((product) => ({ id: product.id, searchText: ProductCatalogService.searchTextOf(product) })))
+    return missing.length
+  }
+
+  /**
    * Finds the product this label names, or creates it, and says what it needs next. A spelling no key matches
    * is put to the model against the brand's most similar products; a "same product" answer is remembered as an alias.
    */
   async resolve(identity: ProductIdentity): Promise<ResolveResult> {
+    return this.nextStep(await this.findOrCreateProduct(identity))
+  }
+
+  /**
+   * The product this label names: found by its key, else by a near miss the model says is the same, else created.
+   * A label that prints no category (`category` absent) is compared with the brand's products of every category, and
+   * a product made from it is filed under other.
+   */
+  private async findOrCreateProduct(identity: Omit<ProductIdentity, 'category'> & { category?: ProductIdentity['category'] }): Promise<Product> {
     const key = identityKey(identity)
     const known = await this.repository.findProductByKey(key)
-    if (known) return this.nextStep(known)
+    if (known) return known
 
     const brandProducts = await this.repository.productsByBrandFamily(brandFirstWord(identity.brand), this.policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
-      (p) => p.category === identity.category && sameForm(p, identity) && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
+      (p) =>
+        (identity.category === undefined || p.category === identity.category) &&
+        sameForm(p, identity) &&
+        !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
       threshold: this.policy.nearMissThreshold,
       limit: this.policy.nearMissLimit,
     })
     for (const candidate of candidates) {
-      if (await this.isSameProduct(identity, candidate)) {
+      if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         await this.repository.addAlias(key, candidate.id)
-        return this.nextStep(candidate)
+        return candidate
       }
     }
 
     // Returns the stored row, so a concurrent scan of the same new product carries on with the winner.
-    const created = await this.repository.createProduct({
+    return this.repository.createProduct({
       id: this.newId(),
       identityKey: key,
       brandKey: brandKey(identity.brand),
+      kind: 'named',
       brand: identity.brand,
       name: identity.name,
       variant: identity.variant ?? null,
       form: identity.form ?? null,
-      category: identity.category,
+      category: identity.category ?? 'other',
+      searchText: ProductCatalogService.searchTextOf(identity),
       createdAt: this.now(),
     })
-    return this.nextStep(created)
   }
 
   /**
@@ -287,6 +359,80 @@ export class ProductCatalogService {
   /** Stores the ingredient list read from a back-label photo; an identical list the product already has is reused. */
   async addLabelIngredients(productId: string, ingredients: string[]): Promise<string> {
     await this.requireProduct(productId)
+    return this.storeFormulation(productId, ProductCatalogService.readableList(ingredients), 'label', null, this.now())
+  }
+
+  /**
+   * Files a list read from the back of a product that has no product yet, and says which formulation it is. Researches nothing.
+   *
+   * With both a brand and a name the list belongs to the product they name (found as `resolve` finds it, so a near-miss
+   * spelling is put to the model; created if new). Otherwise it belongs to the unnamed product for that list, keyed by the list
+   * itself, so the same list from anyone's scan is one formulation, analysed once. When a named product is later given a list an
+   * unnamed product holds, that formulation moves to it (same id, so the analysis is kept and items already pointing at it
+   * now show the named product), unless the named product already has the list: then its own is used and the unnamed one is left
+   * for the items still pointing at it.
+   *
+   * The list is checked before anything is written (LABEL_UNREADABLE).
+   */
+  async fromLabel(label: { ingredients: string[]; brand?: string; name?: string; variant?: string; category?: Product['category'] }): Promise<LabelResult> {
+    const ingredients = ProductCatalogService.readableList(label.ingredients)
+    const listKey = ingredientsKey(ingredients)
+    const unnamedKey = `${ProductCatalogService.UNNAMED_PREFIX}${listKey}`
+    const brand = label.brand?.trim()
+    const name = label.name?.trim()
+    const variant = label.variant?.trim()
+
+    if (!brand || !name) {
+      const product = await this.repository.createProduct({
+        id: this.newId(),
+        identityKey: unnamedKey,
+        brandKey: '',
+        kind: 'unnamed',
+        brand: '',
+        name: '',
+        variant: null,
+        form: null,
+        category: label.category ?? 'other',
+        searchText: '',
+        createdAt: this.now(),
+      })
+      return this.labelResult(product.id, await this.formulationFor(product.id, ingredients, listKey))
+    }
+
+    const product = await this.findOrCreateProduct({ brand, name, ...(label.category ? { category: label.category } : {}), ...(variant ? { variant } : {}) })
+    const own = await this.repository.findFormulationByIngredientsKey(product.id, listKey)
+    if (own) return this.labelResult(product.id, own)
+
+    const unnamed = await this.repository.findProductByKey(unnamedKey)
+    const held = unnamed?.kind === 'unnamed' ? await this.repository.findFormulationByIngredientsKey(unnamed.id, listKey) : null
+    if (held) {
+      try {
+        await this.repository.adoptUnnamedFormulation(held.id, product.id)
+        return this.labelResult(product.id, held)
+      } catch {
+        // Whatever stopped the move (a concurrent adopter took the formulation, for this product or another; or a failed write), the
+        // formulation is not ours now: use this product's own formulation for the list, or store one. A real outage fails there too.
+      }
+    }
+    return this.labelResult(product.id, await this.formulationFor(product.id, ingredients, listKey))
+  }
+
+  /** The product's formulation for this list, as it is; stored as a new label formulation when it has none. */
+  private async formulationFor(productId: string, ingredients: string[], listKey: string): Promise<Formulation> {
+    const known = await this.repository.findFormulationByIngredientsKey(productId, listKey)
+    if (known) return known
+    const stored = await this.storeFormulation(productId, ingredients, 'label', null, this.now())
+    const formulation = await this.repository.findFormulation(stored)
+    if (!formulation) throw new Error(`formulation ${stored} was not stored`)
+    return formulation
+  }
+
+  private labelResult(productId: string, formulation: Formulation): LabelResult {
+    return { productId, formulationId: formulation.id, analysed: this.isAnalysed(formulation) }
+  }
+
+  /** The list trimmed, or LABEL_UNREADABLE when it is empty, over its bounds, or carries a link, markup or a control character. */
+  private static readableList(ingredients: string[]): string[] {
     const trimmed = ingredients.map((name) => name.trim())
     const readable =
       trimmed.length > 0 &&
@@ -299,7 +445,7 @@ export class ProductCatalogService {
           !hasLinkOrMarkup(name),
       )
     if (!readable) throw new ValidationError('LABEL_UNREADABLE', 'The ingredient list on the label could not be read')
-    return this.storeFormulation(productId, trimmed, 'label', null, this.now())
+    return trimmed
   }
 
   /**
@@ -408,9 +554,15 @@ export class ProductCatalogService {
     }
   }
 
-  /** Who a product is, for a screen that must not carry its ingredients or concerns (a scan item). Reads only the product row. */
-  async productSummary(productId: string): Promise<ProductSummary> {
-    return this.summaryOf(await this.requireProduct(productId))
+  /**
+   * Who the product behind a formulation is, for a screen that must not carry its ingredients or concerns (a scan item). Read
+   * through the formulation, not a product id the caller kept: a named label that adopts an unnamed product's list moves the
+   * formulation and deletes the unnamed product, and an item already showing it must follow. Reads no concerns.
+   */
+  async productSummary(formulationId: string): Promise<ProductSummary> {
+    const formulation = await this.repository.findFormulation(formulationId)
+    if (!formulation) throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    return this.summaryOf(await this.requireProduct(formulation.productId))
   }
 
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
@@ -426,6 +578,7 @@ export class ProductCatalogService {
   private summaryOf(product: Product): ProductSummary {
     return {
       id: product.id,
+      kind: product.kind,
       brand: product.brand,
       name: product.name,
       variant: product.variant,
@@ -433,6 +586,12 @@ export class ProductCatalogService {
       category: product.category,
       imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
     }
+  }
+
+  private async requireNamedProduct(productId: string): Promise<Product> {
+    const product = await this.requireProduct(productId)
+    if (product.kind !== 'named') throw new NotFoundError('PRODUCT_NOT_FOUND', 'Product not found')
+    return product
   }
 
   private async requireProduct(productId: string): Promise<Product> {

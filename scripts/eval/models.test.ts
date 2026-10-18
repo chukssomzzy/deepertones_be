@@ -7,7 +7,7 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product.
+// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product and split-name.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
@@ -15,11 +15,17 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'image-check': 'ANTHROPIC_MODEL_VISION',
   recognize: 'ANTHROPIC_MODEL_VISION',
   'read-label': 'ANTHROPIC_MODEL_VISION',
+  'split-name': 'ANTHROPIC_MODEL_JUDGE',
 }
 
 describe('the eval default models', () => {
   it.each(AI_JOBS)('match wrangler.jsonc for the %s job', (job) => {
     expect(DEFAULT_MODELS[job]).toBe(config.vars[VAR_OF_JOB[job]])
+  })
+
+  it('run the typed-name split on the cheap judge model', () => {
+    expect(AI_JOBS).toContain('split-name')
+    expect(DEFAULT_MODELS['split-name']).toBe('claude-haiku-5-5')
   })
 
   it('cover exactly the jobs there are', () => {

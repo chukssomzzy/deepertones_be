@@ -4,9 +4,22 @@ import type { ProductSummary } from '../catalog/catalog.service'
 import type { ScanItemResponse, ScanResponse } from './scans.schemas'
 import type { ScanItemView, ScanView } from './scans.service'
 
+type ConcernResponse = NonNullable<z.infer<typeof ScanItemResponse>['noLabel']>['concerns'][number]
+
+const toConcernResponse = (concern: ConcernResponse): ConcernResponse => ({
+  kind: concern.kind,
+  severity: concern.severity,
+  ingredients: concern.ingredients,
+  why: concern.why,
+  whoShouldTakeCare: concern.whoShouldTakeCare,
+  traits: concern.traits,
+  sources: concern.sources,
+})
+
 // Every field is named, so a field added to the catalog's summary is not published by accident.
 const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof ScanItemResponse>['product']> => ({
   id: product.id,
+  kind: product.kind,
   brand: product.brand,
   name: product.name,
   variant: product.variant,
@@ -15,11 +28,21 @@ const toProductResponse = (product: ProductSummary): NonNullable<z.infer<typeof 
   imageUrl: product.imageUrl,
 })
 
+const toNoLabelResponse = ({ source, purpose, usedFor, description, concerns, rulesVersion }: NonNullable<ScanItemView['noLabel']>): NonNullable<z.infer<typeof ScanItemResponse>['noLabel']> => ({
+  source,
+  purpose,
+  usedFor,
+  ...(description === undefined ? {} : { description }),
+  concerns: concerns.map(toConcernResponse),
+  rulesVersion,
+})
+
 export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemResponse> => ({
   id: item.id,
   position: item.position,
   state: item.state,
   reason: item.reason,
+  ...(item.retakesLeft === undefined ? {} : { retakesLeft: item.retakesLeft }),
   ...(item.recognised
     ? {
         recognised: {
@@ -32,6 +55,7 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
       }
     : {}),
   ...(item.product ? { product: toProductResponse(item.product) } : {}),
+  ...(item.noLabel ? { noLabel: toNoLabelResponse(item.noLabel) } : {}),
   image: item.image ? { kind: item.image.kind, url: item.image.url } : null,
 })
 
