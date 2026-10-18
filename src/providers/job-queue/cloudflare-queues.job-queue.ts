@@ -10,7 +10,9 @@ export class CloudflareQueuesJobQueue implements JobQueue {
     const queue = this.queues[job.queue]
     if (!queue) throw new Error(`No Queue binding for job queue "${job.queue}"`)
     // Parsed, not passed through: unknown fields never reach the queue.
-    const message = job.schema.parse(body)
+    const parsed = job.schema.parse(body)
+    // A shared queue carries several jobs, so the message says which one it is for.
+    const message = job.shared ? { job: job.name, body: parsed } : parsed
     if (options.delaySeconds === undefined) await queue.send(message)
     else await queue.send(message, { delaySeconds: options.delaySeconds })
   }
