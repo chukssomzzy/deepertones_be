@@ -23,7 +23,7 @@ export const UnregisterPushTokenBody = z.object({ deviceId: DeviceId }).openapi(
 export const UpdateNotificationSettingsBody = z
   .object({
     scanFinished: z.boolean().optional().openapi({ description: 'Tell me when a scan is ready.' }),
-    scanNeedsYou: z.boolean().optional().openapi({ description: 'Tell me when a scan needs a photo or a confirmation from me.' }),
+    scanNeedsYou: z.boolean().optional().openapi({ description: 'Tell me when a scan needs something from me: a photo, a confirmation, or the name of a product it could not read.' }),
   })
   .refine((body) => body.scanFinished !== undefined || body.scanNeedsYou !== undefined, { message: 'Name at least one setting' })
   .openapi('UpdateNotificationSettingsBody')
