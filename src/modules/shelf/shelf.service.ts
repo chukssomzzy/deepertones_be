@@ -3,7 +3,7 @@ import { NotFoundError } from '../../lib/errors'
 import type { ProductCatalogService, ProductSummary } from '../catalog/catalog.service'
 import type { NoLabelView, ScanService } from '../scans/scans.service'
 import type { ShelfRepository } from './shelf.repository'
-import type { ShelfRemovedReason } from './shelf.types'
+import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
 
 export type ShelfPolicy = {
   /** The most entries a read returns, the most recently scanned. */
@@ -25,11 +25,14 @@ export type ShelfEntryView = {
 
 export type ShelfView = { entries: ShelfEntryView[] }
 
+/** What adding a product came to: it was already on the shelf (this is its entry), or a typed scan was started and the entry follows when its item is ready. */
+export type ShelfAddResult = { status: 'exists'; entry: ShelfEntryView } | { status: 'started'; scanId: string; itemId: string }
+
 export type ShelfServiceDeps = {
   repository: ShelfRepository
   /** Asked through its service, never through its repository. */
   catalog: Pick<ProductCatalogService, 'productSummaries'>
-  scans: Pick<ScanService, 'noLabelViews'>
+  scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
   now?: () => Date
 }
 
@@ -40,7 +43,7 @@ export type ShelfServiceDeps = {
 export class ShelfService {
   private readonly repository: ShelfRepository
   private readonly catalog: Pick<ProductCatalogService, 'productSummaries'>
-  private readonly scans: Pick<ScanService, 'noLabelViews'>
+  private readonly scans: Pick<ScanService, 'noLabelViews' | 'createTyped'>
   private readonly now: () => Date
 
   constructor(deps: ShelfServiceDeps) {
@@ -57,7 +60,31 @@ export class ShelfService {
    */
   async list(): Promise<ShelfView> {
     const { profileId } = requireUser()
-    const rows = await this.repository.activeFor(profileId, SHELF_POLICY.maxEntries)
+    return { entries: await this.viewsOf(await this.repository.activeFor(profileId, SHELF_POLICY.maxEntries)) }
+  }
+
+  /**
+   * Adds a named catalog product, picked from search, to the caller's shelf. One already on it is answered with its entry, as `list`
+   * shows it, and nothing else happens: no scan, no allowance used, no model, no push. Otherwise a typed scan is started (see
+   * `ScanService.createTyped`, which looks the product up first, so an unknown one is PRODUCT_NOT_FOUND, and takes the daily allowance
+   * only when a model is needed) and its ids are returned: the entry appears on the shelf when the scan's item is ready. A product the
+   * caller removed earlier is not "on the shelf": it goes through a scan, which puts it back as the same entry.
+   *
+   * A row whose product no longer resolves is not shown by `list` and so is not "on the shelf" here either: it falls through to a new typed
+   * scan (harmless: the latest scan wins).
+   *
+   * The check and the scan are not one write, so two simultaneous adds can each start a scan; both end on the one entry (latest wins).
+   */
+  async add(productId: string, clientIp: string): Promise<ShelfAddResult> {
+    const { profileId } = requireUser()
+    const row = await this.repository.activeForProduct(profileId, productId)
+    const [entry] = row ? await this.viewsOf([row]) : []
+    if (entry) return { status: 'exists', entry }
+    return { status: 'started', ...(await this.scans.createTyped({ productId, clientIp })) }
+  }
+
+  /** Rows as views; see `list` for how a row that no longer resolves is treated. */
+  private async viewsOf(rows: ShelfEntryRow[]): Promise<ShelfEntryView[]> {
     const formulationIds = rows.flatMap((row) => (row.kind === 'product' && row.formulationId !== null ? [row.formulationId] : []))
     const noLabelItemIds = rows.filter((row) => row.kind === 'no-label').map((row) => row.itemId)
     const [products, noLabels] = await Promise.all([this.catalog.productSummaries(formulationIds), this.scans.noLabelViews(noLabelItemIds)])
@@ -75,7 +102,7 @@ export class ShelfService {
         else console.error({ outcome: 'shelf-entry-unresolved', entryId: row.id })
       }
     }
-    return { entries }
+    return entries
   }
 
   /** Takes the caller's entry off the shelf, with the reason if they gave one. Removing it again succeeds and changes nothing; another profile's entry is as unknown as one that never existed. */

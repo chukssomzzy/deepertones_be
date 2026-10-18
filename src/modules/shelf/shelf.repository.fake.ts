@@ -15,6 +15,11 @@ export class FakeShelfRepository implements ShelfRepository {
       .map((row) => ({ ...row }))
   }
 
+  async activeForProduct(profileId: string, productId: string): Promise<ShelfEntryRow | null> {
+    const row = this.store.rows.find((candidate) => candidate.profileId === profileId && candidate.kind === 'product' && candidate.productId === productId && candidate.removedAt === null)
+    return row ? { ...row } : null
+  }
+
   async remove(profileId: string, entryId: string, reason: ShelfRemovedReason | null, at: Date): Promise<ShelfRemoveResult> {
     const row = this.store.rows.find((candidate) => candidate.id === entryId && candidate.profileId === profileId)
     if (!row) return 'not-found'

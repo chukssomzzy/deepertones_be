@@ -34,7 +34,7 @@ export class FakeScansRepository implements ScansRepository {
 
   /**
    * Stores the scan, its photos and all its items, or nothing. Every photo starts `recognising` with no recognition and nothing
-   * skipped, with `updatedAt` equal to `createdAt`. Every item starts `recognising` with no reason, no recognised
+   * skipped, with `updatedAt` equal to `createdAt`. Every item starts `recognising` (or `needs-identification` when it says so) and counted (unless it says not), with no reason, no recognised
    * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken, or two photos or two items of the
    * scan share a position, as D1's unique indexes do.
    */
@@ -68,7 +68,8 @@ export class FakeScansRepository implements ScansRepository {
     for (const item of items) {
       this.items.set(item.id, {
         ...item,
-        state: 'recognising',
+        state: item.state ?? 'recognising',
+        counted: item.counted ?? true,
         reason: null,
         backPhotoKey: null,
         recognisedBrand: null,
@@ -184,6 +185,7 @@ export class FakeScansRepository implements ScansRepository {
       if (this.items.has(sibling.id) || added.has(sibling.id)) throw new Error('duplicate id')
       const stored: ScanItem = {
         ...sibling,
+        counted: true,
         reason: null,
         backPhotoKey: null,
         productId: null,
@@ -394,7 +396,7 @@ export class FakeScansRepository implements ScansRepository {
   private photoTimes(ownsItem: (item: ScanItem) => boolean, ownsUpload: (upload: NewBackPhoto) => boolean, since: Date) {
     const times: number[] = []
     for (const item of this.items.values()) {
-      if (ownsItem(item) && item.createdAt.getTime() >= since.getTime()) times.push(item.createdAt.getTime())
+      if (item.counted && ownsItem(item) && item.createdAt.getTime() >= since.getTime()) times.push(item.createdAt.getTime())
     }
     for (const upload of [...this.backPhotos.values(), ...this.retakes.values()]) {
       if (ownsUpload(upload) && upload.uploadedAt.getTime() >= since.getTime()) times.push(upload.uploadedAt.getTime())

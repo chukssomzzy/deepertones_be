@@ -87,6 +87,10 @@ beforeEach(() => {
         noLabelCalls.push(ids)
         return new Map(ids.map((id): [string, NoLabelView] => [id, { source: 'market-vendor', purpose: 'lighten', usedFor: 'under-1-month', concerns: [], rulesVersion: 1 }]))
       },
+      // Adding from search is pinned by the route tests; these cases never add.
+      createTyped: async () => {
+        throw new Error('not used here')
+      },
     },
     now: () => at(100 * MINUTE),
   })

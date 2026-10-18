@@ -1,6 +1,6 @@
 import { bodyLimit } from 'hono/body-limit'
 import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
-import { rateLimit } from '../../middleware/rate-limit'
+import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage, toScanItemResponse, toScanResponse } from './scans.presenter'
 import { BackPhotoBody, ConfirmProductBody, CreateScanBody, CreateShelfScanBody, IdentifyProductBody, ItemParams, NoLabelBody, PhotoLinkParams, ScanItemResponse, RetakeBody, ScanParams, ScanResponse } from './scans.schemas'
@@ -193,7 +193,6 @@ const getPhoto = defineRoute({
 })
 
 // The client address is Cloudflare's own header, as in rateLimit. The service hashes it for the daily per-address quota.
-const FALLBACK_IP = 'unknown'
 
 export const scanRoutes = openapiApp()
   .openapi(createScan, async (c) => {

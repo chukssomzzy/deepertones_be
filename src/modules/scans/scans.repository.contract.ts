@@ -103,7 +103,7 @@ const newPhoto = (scan: NewScan, position: number, over: Partial<NewScanPhoto> =
 const createWithPhotos = (repository: ScansRepository, scan: NewScan, items: NewScanItem[]) =>
   repository.createScan(
     scan,
-    items.map((item) => newPhoto(scan, item.position, { id: item.photoId })),
+    items.map((item) => newPhoto(scan, item.position, { id: item.photoId! })),
     items,
   )
 
@@ -185,6 +185,27 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         })
         expect(item!.createdAt.getTime()).toBe(at(3 * MINUTE).getTime())
         expect(item!.updatedAt.getTime()).toBe(at(3 * MINUTE).getTime())
+      })
+
+      it('counts an item toward the daily quotas unless it was created uncounted', async () => {
+        const { repository, items } = await seeded(1)
+
+        expect((await repository.findItem(items[0]!.id))!.counted).toBe(true)
+      })
+
+      it.each([true, false])('stores a typed scan with no photos and one item waiting for identification with no photo, counted %s', async (counted) => {
+        const { repository, newUser } = await make()
+        const scan = newScan(await newUser(), { kind: 'typed' })
+        const item = newItem(scan, 0, { photoId: null, photoKey: null, state: 'needs-identification', counted })
+
+        await repository.createScan(scan, [], [item])
+
+        expect((await repository.findScan(scan.id))!.kind).toBe('typed')
+        expect(await repository.photosOf(scan.id)).toEqual([])
+        const stored = await repository.itemsOf(scan.id)
+        expect(stored).toHaveLength(1)
+        expect(stored[0]).toMatchObject({ id: item.id, position: 0, state: 'needs-identification', reason: null, photoId: null, photoKey: null, counted })
+        expect(await repository.findItem(item.id)).toMatchObject({ state: 'needs-identification', photoId: null, counted })
       })
 
       it('itemsOf returns the scan\'s items in position order, whatever order they were given in', async () => {
@@ -307,7 +328,7 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         const { repository, newUser } = await make()
         const scan = newScan(await newUser())
         const item = newItem(scan, 0)
-        const [good, clash] = [newPhoto(scan, 0, { id: item.photoId }), newPhoto(scan, 0)]
+        const [good, clash] = [newPhoto(scan, 0, { id: item.photoId! }), newPhoto(scan, 0)]
 
         await expect(repository.createScan(scan, [good, clash], [item])).rejects.toThrow()
 
@@ -320,7 +341,7 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         const { repository, newUser } = await make()
         const scan = newScan(await newUser())
         const [first, clash] = [newItem(scan, 0), newItem(scan, 0)]
-        const photos = [newPhoto(scan, 0, { id: first.photoId }), newPhoto(scan, 1, { id: clash.photoId })]
+        const photos = [newPhoto(scan, 0, { id: first.photoId! }), newPhoto(scan, 1, { id: clash.photoId! })]
 
         await expect(repository.createScan(scan, photos, [first, clash])).rejects.toThrow()
 
@@ -1136,6 +1157,44 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
 
         expect(counted.count).toBe(3)
         expect(counted.oldest!.getTime()).toBe(since.getTime())
+      })
+
+      it('leaves out an item created uncounted, and still counts the counted ones beside it', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const uncounted = newScan(userId, { kind: 'typed', createdAt: at(2 * HOUR) })
+        const counted = newScan(userId, { createdAt: at(3 * HOUR) })
+        await repository.createScan(uncounted, [], [newItem(uncounted, 0, { photoId: null, photoKey: null, state: 'needs-identification', counted: false })])
+        await createWithPhotos(repository, counted, [newItem(counted, 0), newItem(counted, 1, { counted: true })])
+
+        const taken = await repository.photosSince(userId, since)
+
+        expect(taken.count).toBe(2)
+        expect(taken.oldest!.getTime()).toBe(at(3 * HOUR).getTime())
+      })
+
+      it('says none for a user whose only items are uncounted', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const scan = newScan(userId, { kind: 'typed', createdAt: at(2 * HOUR) })
+        await repository.createScan(scan, [], [newItem(scan, 0, { photoId: null, photoKey: null, state: 'needs-identification', counted: false })])
+
+        expect(await repository.photosSince(userId, since)).toEqual({ count: 0, oldest: null })
+      })
+
+      it('leaves out uncounted items from the address count too, across users, and still counts the counted ones', async () => {
+        const { repository, newUser } = await make()
+        const ipHash = fresh('typed-ip')
+        const [alice, bob] = [await newUser(), await newUser()]
+        const uncounted = newScan(alice, { kind: 'typed', ipHash, createdAt: at(2 * HOUR) })
+        const counted = newScan(bob, { ipHash, createdAt: at(3 * HOUR) })
+        await repository.createScan(uncounted, [], [newItem(uncounted, 0, { photoId: null, photoKey: null, state: 'needs-identification', counted: false })])
+        await createWithPhotos(repository, counted, [newItem(counted, 0)])
+
+        const taken = await repository.photosSinceIp(ipHash, since)
+
+        expect(taken.count).toBe(1)
+        expect(taken.oldest!.getTime()).toBe(at(3 * HOUR).getTime())
       })
 
       it('says none, with no oldest time, for a user with no photos in the window', async () => {

@@ -1,0 +1,1 @@
+ALTER TABLE `scan_items` ADD `counted` integer DEFAULT true NOT NULL;

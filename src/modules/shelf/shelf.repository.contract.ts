@@ -144,6 +144,53 @@ export const shelfRepositoryContract = (name: string, make: () => ShelfContractS
       })
     })
 
+    describe('activeForProduct', () => {
+      it('finds the profile\'s active entry for a product, as it was stored', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const wanted = productRow(profileId, { addedAt: at(MINUTE), lastScannedAt: at(2 * MINUTE) })
+        await put(wanted)
+        await put(productRow(profileId))
+
+        expect(await repository.activeForProduct(profileId, wanted.productId!)).toMatchObject({ ...wanted, removedAt: null, removedReason: null })
+      })
+
+      it('finds nothing for a product the profile has not shelved', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        await put(productRow(profileId))
+
+        expect(await repository.activeForProduct(profileId, `product-${crypto.randomUUID()}`)).toBeNull()
+      })
+
+      it('finds nothing for an entry that was removed, whatever the reason', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const removed = productRow(profileId, { removedAt: at(MINUTE), removedReason: 'finished' })
+        await put(removed)
+
+        expect(await repository.activeForProduct(profileId, removed.productId!)).toBeNull()
+      })
+
+      it('finds nothing in a profile that did not shelve the product, though another profile did', async () => {
+        const { repository, newProfile, put } = await make()
+        const [amara, tolu] = [await newProfile(), await newProfile()]
+        const hers = productRow(amara)
+        await put(hers)
+
+        expect(await repository.activeForProduct(tolu, hers.productId!)).toBeNull()
+        expect((await repository.activeForProduct(amara, hers.productId!))!.id).toBe(hers.id)
+      })
+
+      it('does not take a no-label entry for a product', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        await put(noLabelRow(profileId))
+
+        expect(await repository.activeForProduct(profileId, `product-${crypto.randomUUID()}`)).toBeNull()
+      })
+    })
+
     describe('remove', () => {
       it('removes the profile\'s own entry with its reason and the time, and says it did', async () => {
         const { repository, newProfile, put, stored } = await make()

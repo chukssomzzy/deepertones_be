@@ -29,3 +29,14 @@ export const ShelfResponse = z
     entries: z.array(ShelfEntryResponse).openapi({ description: 'The products the profile uses, most recently scanned first, at most 200.' }),
   })
   .openapi('Shelf')
+
+export const AddShelfProductBody = z
+  .strictObject({ productId: z.string().min(1).openapi({ description: 'A product id from `GET /api/v1/products/search`.' }) })
+  .openapi('AddShelfProductBody')
+
+export const AddShelfProductResponse = z
+  .object({
+    scanId: z.string().openapi({ description: 'The typed scan made for the add. Follow it with `GET /api/v1/scans/products/{scanId}` or its `/events`.' }),
+    itemId: z.string().openapi({ description: 'Its one item. When the item is `ready` the product is on the shelf.' }),
+  })
+  .openapi('AddShelfProductResult')

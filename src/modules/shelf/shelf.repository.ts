@@ -23,6 +23,15 @@ export class D1ShelfRepository {
       .limit(limit)
   }
 
+  /** The profile's entry for this product if it is on the shelf (not removed); a no-label entry is never one. */
+  async activeForProduct(profileId: string, productId: string): Promise<ShelfEntryRow | null> {
+    const [row] = await this.db
+      .select()
+      .from(profileProducts)
+      .where(and(eq(profileProducts.profileId, profileId), eq(profileProducts.kind, 'product'), eq(profileProducts.productId, productId), isNull(profileProducts.removedAt)))
+    return row ?? null
+  }
+
   /** Soft-removes the profile's own entry. Another profile's entry is reported as not found and left alone; an entry already removed keeps its first time and reason. */
   async remove(profileId: string, entryId: string, reason: ShelfRemovedReason | null, at: Date): Promise<ShelfRemoveResult> {
     // One conditional update decides, so two removals racing cannot both overwrite the first one's time and reason.
