@@ -20,7 +20,7 @@ const freshId = () => crypto.randomUUID()
  */
 const windowStart = () => at(1000 * HOUR + runSalt * HOUR + counter++ * HOUR)
 
-/** More than any test spends: a reservation that must not be refused by the cap. */
+/** More than any test spends: a reservation that is nowhere near the cap. */
 const NO_CAP = Number.MAX_SAFE_INTEGER
 
 const usage = (over: Partial<AiUsage> = {}): AiUsage => ({
@@ -37,10 +37,9 @@ type Reservation = Parameters<AiUsageRepository['insertReservation']>[0]
 /**
  * Behaviour every AiUsageRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier).
  *
- * insertReservation takes the cap and the window ITSELF and decides in one place: the repository inserts the row only if
- * the spend already committed since `since` plus the new estimate fits under `capMicros`. On D1 that is ONE conditional
- * INSERT ... SELECT statement, so two requests racing for the last of the budget cannot both get it. (Check-then-act in
- * the service, a read followed by a write, would let both through.) The concurrency test below is what pins that.
+ * insertReservation takes the cap and the window ITSELF, but the cap is only a measure: the row is ALWAYS stored (an environment-wide
+ * limit never refuses a call), and the answer says whether the spend committed since `since` plus this estimate passed `capMicros`,
+ * so the caller can raise an alert. On D1 the sum and the insert are ONE statement, so the answer is not made stale by a race.
  */
 export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepository | Promise<AiUsageRepository>) => {
   describe(`AiUsageRepository contract: ${name}`, () => {
@@ -58,43 +57,43 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
     /** Reserves with no cap in the way and returns the id. */
     const reserve = async (repo: AiUsageRepository, since: Date, over: Partial<Reservation> = {}) => {
       const input = reservation(since, over)
-      expect(await repo.insertReservation(input)).toBe(true)
+      expect(await repo.insertReservation(input)).toEqual({ overCap: false })
       return input.id
     }
 
     describe('insertReservation', () => {
-      it('inserts a reservation that exactly fills what the cap has left, and says so', async () => {
+      it('says the cap is not passed when the reservation exactly fills what the cap has left, and stores it', async () => {
         const repo = await make()
         const since = windowStart()
         const before = await repo.committedMicrosSince(since)
 
-        const inserted = await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 100 }))
+        const result = await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 100 }))
 
-        expect(inserted).toBe(true)
+        expect(result).toEqual({ overCap: false })
         expect(await repo.committedMicrosSince(since)).toBe(before + 100)
       })
 
-      it('refuses a reservation one micro over the cap, and stores nothing', async () => {
+      it('says the cap is passed when the reservation is one micro over it, and still stores it', async () => {
         const repo = await make()
         const since = windowStart()
         const before = await repo.committedMicrosSince(since)
 
-        const inserted = await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 99 }))
+        const result = await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 99 }))
 
-        expect(inserted).toBe(false)
-        expect(await repo.committedMicrosSince(since)).toBe(before)
+        expect(result).toEqual({ overCap: true })
+        expect(await repo.committedMicrosSince(since)).toBe(before + 100)
       })
 
-      it('does not use up the id of a reservation it refused', async () => {
+      it('keeps storing reservations, and keeps saying the cap is passed, once it is well past', async () => {
         const repo = await make()
         const since = windowStart()
         const before = await repo.committedMicrosSince(since)
-        const id = freshId()
-        await repo.insertReservation(reservation(since, { id, estimateMicros: 100, capMicros: before + 99 }))
 
-        const inserted = await repo.insertReservation(reservation(since, { id, estimateMicros: 100, capMicros: before + 100 }))
+        const first = await repo.insertReservation(reservation(since, { estimateMicros: 500, capMicros: before + 100 }))
+        const second = await repo.insertReservation(reservation(since, { estimateMicros: 500, capMicros: before + 100 }))
 
-        expect(inserted).toBe(true)
+        expect([first, second]).toEqual([{ overCap: true }, { overCap: true }])
+        expect(await repo.committedMicrosSince(since)).toBe(before + 1000)
       })
 
       it('counts an open reservation at its estimate, to the micro', async () => {
@@ -103,9 +102,16 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
         const before = await repo.committedMicrosSince(since)
         await reserve(repo, since, { estimateMicros: 60 })
 
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 41, capMicros: before + 100 }))).toBe(false)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 40, capMicros: before + 100 }))).toBe(true)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 1, capMicros: before + 100 }))).toBe(false)
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 41, capMicros: before + 100 }))).toEqual({ overCap: true })
+      })
+
+      it('says the cap is not passed for a reservation that fits beside an open one, to the micro', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        await reserve(repo, since, { estimateMicros: 60 })
+
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 40, capMicros: before + 100 }))).toEqual({ overCap: false })
       })
 
       it('counts a settled reservation at what it cost, not at its estimate', async () => {
@@ -117,8 +123,9 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
         await repo.settle(id, { usage: usage(), costMicros: 30, settledAt: since })
 
         expect(await repo.committedMicrosSince(since)).toBe(before + 30)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 70, capMicros: before + 100 }))).toBe(true)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 1, capMicros: before + 100 }))).toBe(false)
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 70, capMicros: before + 100 }))).toEqual({ overCap: false })
+        // 30 + 70 are now committed, so one more micro passes the cap.
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 1, capMicros: before + 100 }))).toEqual({ overCap: true })
       })
 
       it('counts a call that cost more than its estimate at what it cost', async () => {
@@ -141,7 +148,7 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
         await repo.release(id)
 
         expect(await repo.committedMicrosSince(since)).toBe(before)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 100 }))).toBe(true)
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 100, capMicros: before + 100 }))).toEqual({ overCap: false })
       })
 
       it('does not count spend from before `since`, and counts spend made exactly at it', async () => {
@@ -151,22 +158,23 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
         await reserve(repo, since, { estimateMicros: 1000, createdAt: new Date(since.getTime() - 1) })
         await reserve(repo, since, { estimateMicros: 50, createdAt: since })
 
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 51, capMicros: before + 100 }))).toBe(false)
-        expect(await repo.insertReservation(reservation(since, { estimateMicros: 50, capMicros: before + 100 }))).toBe(true)
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 50, capMicros: before + 100 }))).toEqual({ overCap: false })
+        // 100 are now committed since `since`; the 1000 from a millisecond earlier is not among them.
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 1, capMicros: before + 100 }))).toEqual({ overCap: true })
       })
 
-      it('lets exactly as many of a burst of simultaneous reservations in as the cap has room for', async () => {
+      it('stores every one of a burst of simultaneous reservations, and flags at least those that pass the cap', async () => {
         const repo = await make()
         const since = windowStart()
         const before = await repo.committedMicrosSince(since)
 
-        // Room for two reservations of 40 under a cap of 100; eight race for it.
+        // Room for two reservations of 40 under a cap of 100; eight race for it. Nobody is refused; six pass the cap.
         const results = await Promise.all(
           Array.from({ length: 8 }, () => repo.insertReservation(reservation(since, { estimateMicros: 40, capMicros: before + 100 }))),
         )
 
-        expect(results.filter(Boolean)).toHaveLength(2)
-        expect(await repo.committedMicrosSince(since)).toBe(before + 80)
+        expect(await repo.committedMicrosSince(since)).toBe(before + 320)
+        expect(results.filter((r) => r.overCap).length).toBeGreaterThanOrEqual(6)
       })
     })
 

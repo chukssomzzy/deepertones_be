@@ -10,6 +10,14 @@ import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memo
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import type { ProductForm } from '../../src/providers/product-research/product-researcher.provider'
+import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
+import { MemoryEmailSender } from '../../src/providers/email/memory.email'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
+
+/** An alerting service that goes nowhere: these tests are not about ops alerts. */
+const quietOpsAlerts = () =>
+  new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 
 // GET /api/v1/products/search through the Worker's real entrypoint, with the frontend's typed client and real local D1. Products are put
 // into the catalog the way a scan puts them there (the catalog service over the real repository), so what search finds is what the product made.
@@ -72,6 +80,7 @@ const catalog = new ProductCatalogService({
   analyst,
   images: new MemoryCatalogImageStore(),
   imageKeyPrefix: 'catalog/test',
+  opsAlerts: quietOpsAlerts(),
 })
 const resolved = async (brand: string, name: string, over: { variant?: string; form?: ProductForm; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' } = {}) =>
   (await catalog.resolve({ brand, name, category: over.category ?? 'skin', ...(over.variant ? { variant: over.variant } : {}), ...(over.form ? { form: over.form } : {}) })).productId

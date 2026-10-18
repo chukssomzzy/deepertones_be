@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "276a339b-e188-4965-a548-cd817593e28b",
-  "prevId": "c1bc5d36-4bbf-499e-a3b3-c335753fbc6a",
+  "id": "1d42b03b-955b-4762-b901-3fd1e3616e5d",
+  "prevId": "e8d25a90-2cba-4b53-8cbd-70e02c61a363",
   "tables": {
     "job_runs": {
       "name": "job_runs",
@@ -917,6 +917,30 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "ops_alert_claims": {
+      "name": "ops_alert_claims",
+      "columns": {
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "window_start": {
+          "name": "window_start",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "otp_challenges": {
       "name": "otp_challenges",
       "columns": {
@@ -1364,14 +1388,6 @@
             "updated_at"
           ],
           "isUnique": false
-        },
-        "scan_items_held_updated_at_idx": {
-          "name": "scan_items_held_updated_at_idx",
-          "columns": [
-            "updated_at"
-          ],
-          "isUnique": false,
-          "where": "\"scan_items\".\"photo_key\" IS NOT NULL"
         }
       },
       "foreignKeys": {
@@ -1508,14 +1524,6 @@
             "user_id"
           ],
           "isUnique": false
-        },
-        "scan_photos_held_updated_at_idx": {
-          "name": "scan_photos_held_updated_at_idx",
-          "columns": [
-            "updated_at"
-          ],
-          "isUnique": false,
-          "where": "\"scan_photos\".\"photo_key\" IS NOT NULL"
         }
       },
       "foreignKeys": {
