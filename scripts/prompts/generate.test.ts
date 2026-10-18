@@ -112,6 +112,7 @@ describe('parsePromptFiles metadata', () => {
   it.each([
     ['label-reader.read-label.md', 'labelReaderReadLabelPrompt'],
     ['product-recognizer.recognize.md', 'productRecognizerRecognizePrompt'],
+    ['product-recognizer.recognize-shelf.md', 'productRecognizerRecognizeShelfPrompt'],
     ['product-researcher.research.md', 'productResearcherResearchPrompt'],
     ['product-analyst.analyse.md', 'productAnalystAnalysePrompt'],
     ['product-analyst.same-product.md', 'productAnalystSameProductPrompt'],

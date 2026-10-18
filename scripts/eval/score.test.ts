@@ -475,7 +475,7 @@ describe('parseArgs', () => {
     expect(parseArgs(argv as string[]).maxUsd).toBe(expected)
   })
 
-  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'read-label', 'split-name', 'read-goal', 'read-mentions'])('reads --model %s=<model> as an override for that job', (job) => {
+  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'recognize-shelf', 'read-label', 'split-name', 'read-goal', 'read-mentions'])('reads --model %s=<model> as an override for that job', (job) => {
     expect(parseArgs(['--model', `${job}=claude-haiku-5-5`]).models).toEqual({ [job]: 'claude-haiku-5-5' })
   })
 

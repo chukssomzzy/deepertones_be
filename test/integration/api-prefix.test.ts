@@ -128,6 +128,7 @@ describe('the OpenAPI document', () => {
         'PUT /api/v1/me/safety',
         'GET /api/v1/me/safety',
         'POST /api/v1/scans/products',
+        'POST /api/v1/scans/products/shelf',
         'GET /api/v1/scans/products/{scanId}',
         'GET /api/v1/scans/products/{scanId}/events',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation',

@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "4c9b346e-c031-469c-b644-73d3233f245c",
-  "prevId": "0c37bf1d-feaf-49a7-b680-9c7f2b1b5000",
+  "id": "9fd732b4-c2c3-4264-ae25-15afbf88da76",
+  "prevId": "d8b57663-70b6-4f68-b466-77e0f73986a3",
   "tables": {
     "job_runs": {
       "name": "job_runs",
@@ -1197,213 +1197,6 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
-    "profile_safety": {
-      "name": "profile_safety",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "profile_id": {
-          "name": "profile_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "choices": {
-          "name": "choices",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "reaction_text": {
-          "name": "reaction_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "prescription_text": {
-          "name": "prescription_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "parse_state": {
-          "name": "parse_state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'none'"
-        },
-        "parse_due_at": {
-          "name": "parse_due_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "profile_safety_profile_id_created_at_idx": {
-          "name": "profile_safety_profile_id_created_at_idx",
-          "columns": [
-            "profile_id",
-            "created_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "profile_safety_profile_id_profiles_id_fk": {
-          "name": "profile_safety_profile_id_profiles_id_fk",
-          "tableFrom": "profile_safety",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "safety_mentions": {
-      "name": "safety_mentions",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "safety_id": {
-          "name": "safety_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "source": {
-          "name": "source",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "brand": {
-          "name": "brand",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "name": {
-          "name": "name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "variant": {
-          "name": "variant",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "category": {
-          "name": "category",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "product_id": {
-          "name": "product_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "resolution": {
-          "name": "resolution",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "position": {
-          "name": "position",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "safety_mentions_safety_id_position_idx": {
-          "name": "safety_mentions_safety_id_position_idx",
-          "columns": [
-            "safety_id",
-            "position"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "safety_mentions_safety_id_profile_safety_id_fk": {
-          "name": "safety_mentions_safety_id_profile_safety_id_fk",
-          "tableFrom": "safety_mentions",
-          "tableTo": "profile_safety",
-          "columnsFrom": [
-            "safety_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
     "scan_back_photos": {
       "name": "scan_back_photos",
       "columns": {
@@ -1516,6 +1309,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "photo_id": {
+          "name": "photo_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         },
         "state": {
@@ -1670,12 +1470,164 @@
             "updated_at"
           ],
           "isUnique": false
+        },
+        "scan_items_held_updated_at_idx": {
+          "name": "scan_items_held_updated_at_idx",
+          "columns": [
+            "updated_at"
+          ],
+          "isUnique": false,
+          "where": "\"scan_items\".\"photo_key\" IS NOT NULL"
         }
       },
       "foreignKeys": {
         "scan_items_scan_id_scans_id_fk": {
           "name": "scan_items_scan_id_scans_id_fk",
           "tableFrom": "scan_items",
+          "tableTo": "scans",
+          "columnsFrom": [
+            "scan_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
+    "scan_photos": {
+      "name": "scan_photos",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "scan_id": {
+          "name": "scan_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "user_id": {
+          "name": "user_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "position": {
+          "name": "position",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "state": {
+          "name": "state",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "'recognising'"
+        },
+        "photo_key": {
+          "name": "photo_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "recognition": {
+          "name": "recognition",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "skipped_not_beauty": {
+          "name": "skipped_not_beauty",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "skipped_unreadable": {
+          "name": "skipped_unreadable",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "skipped_over_limit": {
+          "name": "skipped_over_limit",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "skipped_daily_limit": {
+          "name": "skipped_daily_limit",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "scan_photos_scan_id_position_idx": {
+          "name": "scan_photos_scan_id_position_idx",
+          "columns": [
+            "scan_id",
+            "position"
+          ],
+          "isUnique": true
+        },
+        "scan_photos_user_id_idx": {
+          "name": "scan_photos_user_id_idx",
+          "columns": [
+            "user_id"
+          ],
+          "isUnique": false
+        },
+        "scan_photos_held_updated_at_idx": {
+          "name": "scan_photos_held_updated_at_idx",
+          "columns": [
+            "updated_at"
+          ],
+          "isUnique": false,
+          "where": "\"scan_photos\".\"photo_key\" IS NOT NULL"
+        }
+      },
+      "foreignKeys": {
+        "scan_photos_scan_id_scans_id_fk": {
+          "name": "scan_photos_scan_id_scans_id_fk",
+          "tableFrom": "scan_photos",
           "tableTo": "scans",
           "columnsFrom": [
             "scan_id"
@@ -1786,6 +1738,13 @@
         },
         "profile_id": {
           "name": "profile_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

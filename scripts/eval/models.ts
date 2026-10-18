@@ -9,6 +9,7 @@ export const DEFAULT_MODELS: Record<AiJob, string> = {
   'same-product': 'claude-haiku-5-5',
   'image-check': 'claude-haiku-5-5',
   recognize: 'claude-haiku-5-5',
+  'recognize-shelf': 'claude-haiku-5-5',
   'read-label': 'claude-haiku-5-5',
   'split-name': 'claude-haiku-5-5',
   'read-goal': 'claude-haiku-5-5',

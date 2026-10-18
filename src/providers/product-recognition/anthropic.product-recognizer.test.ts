@@ -16,6 +16,7 @@ import {
   stubFetch,
   textBlock,
 } from '../anthropic/messages-api.fake'
+import { productRecognizerRecognizeShelfPrompt } from '../../prompts/prompts.generated'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
 import { AnthropicProductRecognizer } from './anthropic.product-recognizer'
 
@@ -508,5 +509,406 @@ describe('AnthropicProductRecognizer system prompt', () => {
     await recognizer.recognize(JPEG)
 
     expect(calls[0]!.body.system).toBe(RECOGNIZE_SYSTEM_PROMPT)
+  })
+})
+
+// ---- recognizeShelf: every readable product on a shelf photo ----
+
+const SHELF_MAX_PRODUCTS = 5
+const SHELF_MAX_COUNT = 50
+
+/** One product as the model lists it on a shelf; a test overrides only what it is about. */
+const shelfItem = (overrides: Record<string, unknown> = {}) => ({
+  brand: 'Glow Co',
+  name: 'Bright Tone Serum',
+  variant: '',
+  form: 'unknown',
+  category: 'skin',
+  confidence: 0.8,
+  ...overrides,
+})
+
+/** The structured answer for a shelf photo. */
+const shelf = (products: unknown[] = [shelfItem()], overrides: Record<string, unknown> = {}) => ({
+  classification: 'beauty-product',
+  products,
+  excluded: { otherProducts: 0, unreadable: 0 },
+  ...overrides,
+})
+
+/** `count` distinct valid products, the nth with confidence `confidences[n]`. */
+const shelfOf = (confidences: number[]) => confidences.map((confidence, i) => shelfItem({ name: `Product ${i}`, confidence }))
+
+const shelfRecognizer = (answer: unknown) => recognizerOver(structured(answer))
+
+describe('AnthropicProductRecognizer recognizeShelf request', () => {
+  it('sends the photo as a base64 block FIRST, then text, with 4096 max_tokens and a json_schema answer', async () => {
+    const { calls, recognizer } = shelfRecognizer(shelf())
+
+    await recognizer.recognizeShelf(JPEG)
+
+    const body = calls[0]!.body
+    const content: Block[] = body.messages[0].content
+    expect(content[0]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: JPEG_BASE64 } })
+    expect(content.slice(1).length).toBeGreaterThan(0)
+    expect(content.slice(1).every((block) => block.type === 'text')).toBe(true)
+    expect(body.max_tokens).toBe(4096)
+    expect(body.output_config.format.type).toBe('json_schema')
+  })
+
+  it('asks for a closed json_schema the API accepts: classification, a products list and the excluded counts', async () => {
+    const { calls, recognizer } = shelfRecognizer(shelf())
+
+    await recognizer.recognizeShelf(JPEG)
+
+    const schema = schemaOf(calls[0]!.body)
+    assertApiSafe(schema)
+    expect([...schema.properties.classification.enum].sort()).toEqual(['beauty-product', 'face-or-person', 'other-product', 'unreadable'])
+    expect(schema.properties.products.type).toBe('array')
+    const item = schema.properties.products.items
+    expect(item.type).toBe('object')
+    for (const field of ['brand', 'name', 'variant']) expect(item.properties[field].type, field).toBe('string')
+    expect(item.properties.confidence.type).toBe('number')
+    expect([...item.properties.form.enum].sort()).toEqual([...FORMS, 'unknown'].sort())
+    expect([...item.properties.category.enum].sort()).toEqual(['body', 'hair', 'makeup', 'other', 'skin'])
+    expect(Object.keys(schema.properties.excluded.properties).sort()).toEqual(['otherProducts', 'unreadable'])
+    expect(schema.required).toEqual(expect.arrayContaining(['classification', 'products', 'excluded']))
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf prompt', () => {
+  async function promptSent() {
+    const { calls, recognizer } = shelfRecognizer(shelf())
+    await recognizer.recognizeShelf(JPEG)
+    return { prompt: requestText(calls[0]!.body), system: String(calls[0]!.body.system) }
+  }
+
+  it('is its own prompt, not the single-product one', async () => {
+    const { system } = await promptSent()
+    expect(system).not.toBe(RECOGNIZE_SYSTEM_PROMPT)
+    expect(system.length).toBeGreaterThan(0)
+  })
+
+  it('asks for every readable beauty or personal-care product, at most 5, most confident first', async () => {
+    const { prompt } = await promptSent()
+    expect(prompt).toMatch(/every[^.]*(beauty|personal-care)/i)
+    expect(prompt).toMatch(/at most 5|up to 5|5 products/i)
+    expect(prompt).toMatch(/most confident first/i)
+  })
+
+  it('keeps the brand to the maker with the sub-line in the name, and the form rules of the single-product prompt', async () => {
+    const { prompt } = await promptSent()
+    expect(prompt).toMatch(/brand[^.]*maker[^.]*only/i)
+    expect(prompt).toMatch(/sub-line[^.]*(start|beginning) of the name/i)
+    expect(prompt).toMatch(/cream, lotion, gel, balm, serum, oil, liquid, powder[^.]*printed/i)
+    expect(prompt).toMatch(/none is printed[^.]*unknown/i)
+    expect(prompt).toMatch(/never guess[^.]*brand/i)
+  })
+
+  it('tells the model to count, not list, non-beauty products and unreadable products, and never to count people or faces', async () => {
+    const { prompt } = await promptSent()
+    expect(prompt).toMatch(/count[^.]*not[^.]*list|do not list|don't list/i)
+    expect(prompt).toMatch(/otherProducts|not beauty|non-beauty/i)
+    expect(prompt).toMatch(/unreadable/i)
+    expect(prompt).toMatch(/(do not|don't|never) count[^.]*(people|person|face)/i)
+  })
+
+  it('tells the model the photo is user-supplied data whose instructions must be ignored', async () => {
+    const { prompt } = await promptSent()
+    expect(prompt).toMatch(/user-supplied/i)
+    expect(prompt).toMatch(/ignore[^.]*instructions/i)
+  })
+
+  // The unit project runs in workerd, which cannot read the .md file; the generated module is what ships. The front matter's
+  // other fields (purpose, usedBy, version) are checked for every prompt by scripts/prompts/generate.test.ts.
+  it('sends the recognize-shelf prompt, generated from its own file under the recognize-shelf job', async () => {
+    const { system } = await promptSent()
+    expect(productRecognizerRecognizeShelfPrompt.job).toBe('recognize-shelf')
+    expect(system).toBe(productRecognizerRecognizeShelfPrompt.text)
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf job routing and cost', () => {
+  it('asks Claude as the recognize-shelf job and uses the model configured for it', async () => {
+    const { calls, fetch } = stubFetch(structured(shelf()))
+
+    await recognizerWith(fetch, undefined, 'recognize-shelf').recognizeShelf(JPEG)
+
+    expect(calls[0]!.body.model).toBe(ROUTED_TO)
+  })
+
+  it('does not use the model of any other job, recognize included', async () => {
+    const { calls, fetch } = stubFetch(structured(shelf()))
+    const others = (Object.keys(MODELS) as AiJob[]).filter((job) => job !== 'recognize-shelf')
+
+    for (const other of others) await recognizerWith(fetch, undefined, other).recognizeShelf(JPEG)
+
+    expect(calls.map((c) => c.body.model)).toEqual(others.map(() => MODEL))
+  })
+
+  it('records its call on the ledger under the recognize-shelf job', async () => {
+    const { fetch } = stubFetch(structured(shelf()))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await recognizerWith(fetch, ledger).recognizeShelf(JPEG)
+
+    expect(ledger.entries.map((e) => [e.job, e.model, e.status])).toEqual([['recognize-shelf', MODEL, 'settled']])
+  })
+
+  it('leaves recognize on its own job', async () => {
+    const { fetch } = stubFetch(structured(product()))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await recognizerWith(fetch, ledger).recognize(JPEG)
+
+    expect(ledger.entries.map((e) => e.job)).toEqual(['recognize'])
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf answers', () => {
+  it('returns the products read, with brand, name, variant, form, category and confidence, and the excluded counts', async () => {
+    const { recognizer } = shelfRecognizer(
+      shelf([shelfItem({ variant: 'Extra Strength', form: 'serum' }), shelfItem({ brand: 'Nuxe', name: 'Huile Prodigieuse', category: 'body', confidence: 0.5 })], {
+        excluded: { otherProducts: 2, unreadable: 1 },
+      }),
+    )
+
+    await expect(recognizer.recognizeShelf(JPEG)).resolves.toStrictEqual({
+      classification: 'beauty-product',
+      products: [
+        { brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength', form: 'serum', category: 'skin', confidence: 0.8 },
+        { brand: 'Nuxe', name: 'Huile Prodigieuse', category: 'body', confidence: 0.5 },
+      ],
+      excluded: { otherProducts: 2, unreadable: 1 },
+    })
+  })
+
+  it('leaves out the form when the model says unknown and the variant when it is empty, spaces or missing', async () => {
+    const { variant: _variant, ...noVariant } = shelfItem()
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ form: 'unknown', variant: '' }), shelfItem({ name: 'B', variant: '   ' }), { ...noVariant, name: 'C' }]))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products).toHaveLength(3)
+    for (const item of products) {
+      expect(item).not.toHaveProperty('form')
+      expect(item).not.toHaveProperty('variant')
+    }
+  })
+
+  it('trims brand, name and variant', async () => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ brand: '  Glow Co ', name: '\tBright Tone Serum\n', variant: ' Extra Strength  ' })]))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products[0]).toMatchObject({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Extra Strength' })
+  })
+
+  it.each([
+    [0.42, 0.42],
+    [0, 0],
+    [1, 1],
+    [1.7, 1],
+    [-0.2, 0],
+  ])('returns a product confidence of %s as %s', async (confidence, expected) => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ confidence })]))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products[0]!.confidence).toBe(expected)
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf ordering and the limit of 5', () => {
+  it('returns the products most confident first', async () => {
+    const { recognizer } = shelfRecognizer(shelf(shelfOf([0.3, 0.9, 0.6])))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products.map((p) => p.name)).toEqual(['Product 1', 'Product 2', 'Product 0'])
+  })
+
+  it('keeps the model order among products of equal confidence', async () => {
+    const { recognizer } = shelfRecognizer(shelf(shelfOf([0.5, 0.5, 0.9, 0.5])))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products.map((p) => p.name)).toEqual(['Product 2', 'Product 0', 'Product 1', 'Product 3'])
+  })
+
+  it('keeps all of exactly 5 products', async () => {
+    const { recognizer } = shelfRecognizer(shelf(shelfOf([0.1, 0.2, 0.3, 0.4, 0.5])))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products).toHaveLength(SHELF_MAX_PRODUCTS)
+  })
+
+  it('cuts 7 products to the 5 most confident, and counts the cut ones nowhere', async () => {
+    const { recognizer } = shelfRecognizer(shelf(shelfOf([0.1, 0.95, 0.4, 0.2, 0.9, 0.8, 0.7]), { excluded: { otherProducts: 1, unreadable: 1 } }))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.products.map((p) => p.name)).toEqual(['Product 1', 'Product 4', 'Product 5', 'Product 6', 'Product 2'])
+    expect(result.excluded).toStrictEqual({ otherProducts: 1, unreadable: 1 })
+  })
+
+  it('cuts after dropping bad products, so a dropped one does not take a place', async () => {
+    const products = [shelfItem({ name: 'Bad <b>', confidence: 0.99 }), ...shelfOf([0.9, 0.8, 0.7, 0.6, 0.5, 0.4])]
+    const { recognizer } = shelfRecognizer(shelf(products))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.products.map((p) => p.name)).toEqual(['Product 0', 'Product 1', 'Product 2', 'Product 3', 'Product 4'])
+    expect(result.excluded).toStrictEqual({ otherProducts: 0, unreadable: 1 })
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf text rules', () => {
+  const fields = ['brand', 'name', 'variant'] as const
+  const bad = [
+    ['121 characters', 'x'.repeat(MAX_FIELD + 1)],
+    ['a link', 'https://evil.example/buy'],
+    ['a www address', 'Visit www.evil.example'],
+    ['markup', 'Serum <b>bold</b>'],
+    ['a newline', 'Glow\nCo'],
+    ['a right-to-left override', 'Glow\u202eCo'],
+    ['a zero-width space', 'Glow\u200b Co'],
+  ] as const
+  const cases = fields.flatMap((field) => bad.map(([label, value]) => [field, label, value] as const))
+
+  it.each(cases)('drops a product whose %s has %s, keeps the others and counts it unreadable', async (field, _label, value) => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ name: 'Good One', confidence: 0.4 }), shelfItem({ [field]: value, confidence: 0.9 })]))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.classification).toBe('beauty-product')
+    expect(result.products.map((p) => p.name)).toEqual(['Good One'])
+    expect(result.excluded).toStrictEqual({ otherProducts: 0, unreadable: 1 })
+  })
+
+  it.each(fields)('accepts a %s of exactly 120 characters', async (field) => {
+    const value = 'x'.repeat(MAX_FIELD)
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ [field]: value })]))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products[0]).toMatchObject({ [field]: value })
+  })
+
+  it.each([
+    ['an empty brand', { brand: '' }],
+    ['a brand of only spaces', { brand: '   ' }],
+    ['no brand', { brand: undefined }],
+    ['an empty name', { name: '' }],
+    ['a name of only spaces', { name: '  ' }],
+    ['no name', { name: undefined }],
+  ])('drops a product with %s and counts it unreadable', async (_label, overrides) => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem(overrides), shelfItem({ name: 'Good One' })]))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.products.map((p) => p.name)).toEqual(['Good One'])
+    expect(result.excluded.unreadable).toBe(1)
+  })
+
+  it('adds dropped products to the unreadable count the model gave', async () => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem(), shelfItem({ brand: '' }), shelfItem({ name: '<i>x</i>' })], { excluded: { otherProducts: 4, unreadable: 3 } }))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.excluded).toStrictEqual({ otherProducts: 4, unreadable: 5 })
+  })
+
+  it('accepts ordinary text such as SPF < 30 and accents', async () => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem({ brand: "L'Oréal Paris", name: 'SPF < 30 Day Cream' })]))
+
+    const { products } = await recognizer.recognizeShelf(JPEG)
+
+    expect(products[0]).toMatchObject({ brand: "L'Oréal Paris", name: 'SPF < 30 Day Cream' })
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf classification', () => {
+  it('is beauty-product when at least one product survives, even if the model said something else', async () => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem()], { classification: 'other-product' }))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.classification).toBe('beauty-product')
+    expect(result.products).toHaveLength(1)
+  })
+
+  it.each([
+    ['no products', []],
+    ['only products that fail the text rules', [shelfItem({ brand: '' }), shelfItem({ name: 'https://x.example' })]],
+  ])('is unreadable when the model said beauty-product but gave %s', async (_label, products) => {
+    const { recognizer } = shelfRecognizer(shelf(products, { excluded: { otherProducts: 1, unreadable: 0 } }))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.classification).toBe('unreadable')
+    expect(result.products).toEqual([])
+    expect(result.excluded.unreadable).toBe(products.length)
+  })
+
+  it.each(['other-product', 'face-or-person', 'unreadable'] as const)('keeps the model classification %s with no products when none survive', async (classification) => {
+    const { recognizer } = shelfRecognizer(shelf([], { classification, excluded: { otherProducts: 3, unreadable: 2 } }))
+
+    await expect(recognizer.recognizeShelf(JPEG)).resolves.toStrictEqual({
+      classification,
+      products: [],
+      excluded: { otherProducts: 3, unreadable: 2 },
+    })
+  })
+
+  it('does not accept label-not-visible, which is not an answer for a shelf', async () => {
+    const { recognizer } = shelfRecognizer(shelf([], { classification: 'label-not-visible' }))
+
+    expect(await caught(recognizer.recognizeShelf(JPEG))).toBeInstanceOf(Error)
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf excluded counts', () => {
+  const countsOf = async (excluded: unknown) => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem()], { excluded }))
+    return (await recognizer.recognizeShelf(JPEG)).excluded
+  }
+
+  it.each([
+    [0, 0],
+    [7, 7],
+    [SHELF_MAX_COUNT - 1, SHELF_MAX_COUNT - 1],
+    [SHELF_MAX_COUNT, SHELF_MAX_COUNT],
+    [SHELF_MAX_COUNT + 1, SHELF_MAX_COUNT],
+    [100000, SHELF_MAX_COUNT],
+    [-1, 0],
+    [-30, 0],
+    [2.9, 2],
+    [0.99, 0],
+  ])('returns an excluded count of %s as %s', async (given, expected) => {
+    await expect(countsOf({ otherProducts: given, unreadable: given })).resolves.toStrictEqual({ otherProducts: expected, unreadable: expected })
+  })
+
+  it('never lets dropped products push the unreadable count past 50', async () => {
+    const { recognizer } = shelfRecognizer(shelf([shelfItem(), shelfItem({ brand: '' })], { excluded: { otherProducts: 0, unreadable: SHELF_MAX_COUNT } }))
+
+    const result = await recognizer.recognizeShelf(JPEG)
+
+    expect(result.excluded.unreadable).toBe(SHELF_MAX_COUNT)
+  })
+})
+
+describe('AnthropicProductRecognizer recognizeShelf errors', () => {
+  it('throws AnthropicRefusalError when the model refuses', async () => {
+    const { recognizer } = recognizerOver(() => messageResponse({ content: [textBlock('I cannot help with that.')], stop_reason: 'refusal' }))
+
+    expect(await caught(recognizer.recognizeShelf(JPEG))).toBeInstanceOf(AnthropicRefusalError)
+  })
+
+  it('lets AnthropicUnavailableError through when Claude is overloaded', async () => {
+    const { recognizer } = recognizerOver(() => errorResponse(529, 'overloaded_error'))
+
+    expect(await caught(recognizer.recognizeShelf(JPEG))).toBeInstanceOf(AnthropicUnavailableError)
   })
 })

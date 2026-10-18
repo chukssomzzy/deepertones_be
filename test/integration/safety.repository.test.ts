@@ -63,7 +63,7 @@ describe('profile_safety in D1', () => {
     await expect(repository.append(row(crypto.randomUUID()))).rejects.toThrow()
   })
 
-  // Rows that existed before the parse (migration 0022) were saved with nothing to parse, so the new columns must default to that.
+  // Rows that existed before the parse (migration 0025) were saved with nothing to parse, so the new columns must default to that.
   it('gives a row written without a parse state (as every row was before the parse existed) the state none and no due time', async () => {
     const repository = new D1SafetyRepository(db)
     const guest = await newGuest()
