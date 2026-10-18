@@ -7,9 +7,10 @@ import { ingredientParts, normaliseIngredient } from '../../src/modules/catalog/
 import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
 import { AI_JOBS, type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
 import { SEVERITIES } from '../../src/modules/catalog/catalog.vocabulary'
+import type { GoalReading } from '../../src/providers/goal-reading/goal-reader.provider'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
 import { parseEnvFile } from '../secrets/plan'
-import type { AnalysisCase, ResearchCase } from './cases'
+import type { AnalysisCase, GoalCase, ResearchCase } from './cases'
 
 /** A concern as checkAnalysis stores it. */
 export type StoredDraft = DraftConcernRow
@@ -74,6 +75,18 @@ export const scoreResearch = (c: ResearchCase, outcome: ResearchOutcome): CaseRe
   return { ...scored, detail: { ...(sourceHost !== undefined && { sourceHost }), ingredients: outcome.ingredients } }
 }
 
+export type GoalOutcome = GoalReading | { error: string }
+
+/** Problems are fixed codes: `goal:<expected>-got-<actual>` (null shown as `none`), `wantsLighter:<expected>-got-<actual>` and `error:<name>`. */
+export const scoreGoalReading = (c: GoalCase, outcome: GoalOutcome): CaseResult => {
+  if ('error' in outcome) return result(c.id, [`error:${outcome.error}`])
+
+  const problems: string[] = []
+  if (outcome.goal !== c.expect.goal) problems.push(`goal:${c.expect.goal ?? 'none'}-got-${outcome.goal ?? 'none'}`)
+  if (outcome.wantsLighter !== c.expect.wantsLighter) problems.push(`wantsLighter:${c.expect.wantsLighter}-got-${outcome.wantsLighter}`)
+  return result(c.id, problems)
+}
+
 const hostOf = (url: string): string | undefined => {
   try {
     return new URL(url).hostname
@@ -90,14 +103,14 @@ export const summarise = (results: CaseResult[]): { total: number; passed: numbe
   return { total, passed, failed: total - passed, passRate: total === 0 ? 0 : passed / total, costMicros }
 }
 
-export type Mode = 'analysis' | 'research' | 'all'
+export type Mode = 'analysis' | 'research' | 'goals' | 'all'
 export type Args = { mode: Mode; limit: number | undefined; maxUsd: number; models: Partial<Record<AiJob, string>> }
 
-const MODES: readonly Mode[] = ['analysis', 'research', 'all']
+const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'all']
 export const JOBS: readonly AiJob[] = AI_JOBS
 const DEFAULT_MAX_USD = 2
 export const USAGE =
-  'Usage: npm run eval:catalog -- [--mode analysis|research|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
+  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
   `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */

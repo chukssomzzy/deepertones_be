@@ -13,8 +13,10 @@ import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
 import { authRoutes, meRoutes } from './modules/auth/auth.routes'
 import { productRoutes } from './modules/catalog/catalog.routes'
+import { goalsRoutes } from './modules/goals/goals.routes'
 import { healthRoutes } from './modules/health/health.routes'
 import { notificationsRoutes } from './modules/notifications/notifications.routes'
+import { safetyRoutes } from './modules/safety/safety.routes'
 import { PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
 import { scanRoutes } from './modules/scans/scans.routes'
 
@@ -34,6 +36,8 @@ const v1 = openapiApp()
   .route('/auth', authRoutes)
   .route('/me', meRoutes)
   .route('/me', notificationsRoutes)
+  .route('/me', goalsRoutes)
+  .route('/me', safetyRoutes)
   .route('/products', productRoutes)
   .route(PRODUCT_SCANS_PATH, scanRoutes)
 const routes = app.route('/health', healthRoutes).route(API_V1_PREFIX, v1)

@@ -7,6 +7,8 @@ import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
+import { D1GoalsRepository } from './modules/goals/goals.repository'
+import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
@@ -17,6 +19,8 @@ import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
+import { D1SafetyRepository } from './modules/safety/safety.repository'
+import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
 import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
@@ -25,6 +29,7 @@ import { UsersService } from './modules/users/users.service'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
 import { R2CatalogImageStore } from './providers/catalog-images/r2.catalog-image-store'
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
+import { AnthropicGoalReader } from './providers/goal-reading/anthropic.goal-reader'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-reader'
 import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
@@ -96,6 +101,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'recognize-shelf': env.ANTHROPIC_MODEL_RECOGNIZE_SHELF,
         'read-label': env.ANTHROPIC_MODEL_VISION,
         'split-name': env.ANTHROPIC_MODEL_JUDGE,
+        'read-goal': env.ANTHROPIC_MODEL_JUDGE,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })
@@ -104,6 +110,9 @@ export const buildContainer = (env: CloudflareBindings) => {
   // The split runs inside the user's request (identification), so it gives up after 15 s, not 60: the user is told to try again.
   const SPLIT_NAME_TIMEOUT_MS = 15_000
   const nameSplitterAnthropic = once(() => newAnthropic(SPLIT_NAME_TIMEOUT_MS))
+  // A typed goal is on the first screen and a failure only means the app shows the chips, so the read gives up sooner than the split does.
+  const GOAL_READ_TIMEOUT_MS = 8_000
+  const goalReaderAnthropic = once(() => newAnthropic(GOAL_READ_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -194,7 +203,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
-  // (push_tokens and notification_settings are not listed: their foreign keys cascade from users.)
+  // (push_tokens, notification_settings, profile_goals and profile_safety are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
@@ -216,6 +225,26 @@ export const buildContainer = (env: CloudflareBindings) => {
         push: new ExpoPushSender({ accessToken: env.EXPO_ACCESS_TOKEN }),
         jobs: jobQueue(),
         deviceIdKey: env.DEVICE_ID_KEY,
+      }),
+  )
+
+  const safety = once(
+    () =>
+      new SafetyService({
+        repository: new D1SafetyRepository(db()),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
+      }),
+  )
+
+  const goals = once(
+    () =>
+      new GoalsService({
+        repository: new D1GoalsRepository(db()),
+        reader: new AnthropicGoalReader(goalReaderAnthropic()),
+        safety: safety(),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
       }),
   )
 
@@ -241,6 +270,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     get catalog() {
       return catalog()
     },
+    get goals() {
+      return goals()
+    },
     get health() {
       return health()
     },
@@ -255,6 +287,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get profiles() {
       return profiles()
+    },
+    get safety() {
+      return safety()
     },
     get scans() {
       return scans()

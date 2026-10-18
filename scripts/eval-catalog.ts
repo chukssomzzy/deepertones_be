@@ -1,7 +1,7 @@
 // Runs the catalog's model-backed steps against fixed cases and reports how many held: `npm run eval:catalog`.
 // Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real, billed calls. It is report-only, is never part
 // of `npm test`, and never prints the key, a prompt or raw model output: only case ids, fixed problem codes and timings.
-//   --mode analysis|research|all   (default all)    --limit N   cases per mode
+//   --mode analysis|research|goals|all   (default all; goals is about 40 Haiku calls, a few cents)    --limit N   cases per mode
 //   --max-usd N   stop spending at N dollars (default 2)    --model JOB=MODEL   run a job on another model (repeatable)
 // Each job runs on the model wrangler.jsonc gives it (Haiku for research, vision and judging, Sonnet for the analysis)
 // unless --model says otherwise. Spend is counted by a MemoryAiSpendLedger capped at --max-usd, so a runaway run cannot
@@ -15,11 +15,23 @@ import type { AiJob } from '../src/providers/anthropic/ai-spend.provider'
 import { AnthropicClient } from '../src/providers/anthropic/anthropic.client'
 import { AnthropicConfigError } from '../src/providers/anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../src/providers/anthropic/memory.ai-spend-ledger'
+import { AnthropicGoalReader } from '../src/providers/goal-reading/anthropic.goal-reader'
 import { AnthropicProductAnalyst } from '../src/providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductResearcher } from '../src/providers/product-research/anthropic.product-researcher'
-import { ANALYSIS_CASES, RESEARCH_CASES } from './eval/cases'
+import { ANALYSIS_CASES, GOAL_CASES, RESEARCH_CASES } from './eval/cases'
 import { DEFAULT_MODELS } from './eval/models'
-import { type AnalysisOutcome, type CaseResult, loadEnv, parseArgs, type ResearchOutcome, scoreAnalysis, scoreResearch, summarise } from './eval/score'
+import {
+  type AnalysisOutcome,
+  type CaseResult,
+  type GoalOutcome,
+  loadEnv,
+  parseArgs,
+  type ResearchOutcome,
+  scoreAnalysis,
+  scoreGoalReading,
+  scoreResearch,
+  summarise,
+} from './eval/score'
 
 const usd = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
 
@@ -77,6 +89,7 @@ const main = async (): Promise<number> => {
   const client = new AnthropicClient({ apiKey: env.apiKey, models, ledger })
   const analyst = new AnthropicProductAnalyst(client)
   const researcher = new AnthropicProductResearcher(client)
+  const goalReader = new AnthropicGoalReader(client)
 
   const startedAt = new Date()
   console.log(
@@ -84,7 +97,7 @@ const main = async (): Promise<number> => {
   )
   console.log(`Models: analysis ${models.analysis}, research ${models.research}, same-product ${models['same-product']}, image-check ${models['image-check']}`)
 
-  const report: { startedAt: string; models: Record<AiJob, string>; maxUsd: number; mode: string; analysis?: Timed[]; research?: Timed[] } = {
+  const report: { startedAt: string; models: Record<AiJob, string>; maxUsd: number; mode: string; analysis?: Timed[]; research?: Timed[]; goals?: Timed[] } = {
     startedAt: startedAt.toISOString(),
     models,
     maxUsd: args.maxUsd,
@@ -92,7 +105,7 @@ const main = async (): Promise<number> => {
   }
 
   try {
-    if (args.mode !== 'research') {
+    if (args.mode === 'all' || args.mode === 'analysis') {
       report.analysis = await runEach(ANALYSIS_CASES.slice(0, args.limit), ledger, async (c) => {
         const flaggedFacts = flagFacts(c.ingredients)
         const outcome = await attempt<AnalysisOutcome>(async () => {
@@ -111,11 +124,17 @@ const main = async (): Promise<number> => {
       })
       printTable('Analysis', report.analysis)
     }
-    if (args.mode !== 'analysis') {
+    if (args.mode === 'all' || args.mode === 'research') {
       report.research = await runEach(RESEARCH_CASES.slice(0, args.limit), ledger, async (c) =>
         scoreResearch(c, await attempt<ResearchOutcome>(() => researcher.research(c.product))),
       )
       printTable('Research', report.research)
+    }
+    if (args.mode === 'all' || args.mode === 'goals') {
+      report.goals = await runEach(GOAL_CASES.slice(0, args.limit), ledger, async (c) =>
+        scoreGoalReading(c, await attempt<GoalOutcome>(() => goalReader.read(c.text))),
+      )
+      printTable('Goals', report.goals)
     }
   } catch (error) {
     if (!(error instanceof SetupError)) throw error
@@ -123,7 +142,7 @@ const main = async (): Promise<number> => {
     return 2
   }
 
-  const all = [...(report.analysis ?? []), ...(report.research ?? [])]
+  const all = [...(report.analysis ?? []), ...(report.research ?? []), ...(report.goals ?? [])]
   const summary = summarise(all)
   console.log(`\nOverall: ${summary.passed}/${summary.total} passed, ${usd(summary.costMicros)} spent`)
 

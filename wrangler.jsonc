@@ -142,6 +142,8 @@
     { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "1017", "simple": { "limit": 10, "period": 60 } },
     { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "1018", "simple": { "limit": 20, "period": 60 } },
     { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "1019", "simple": { "limit": 10, "period": 60 } },
+    { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "1020", "simple": { "limit": 20, "period": 60 } },
+    { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "1021", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -335,6 +337,8 @@
         { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "2017", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "2018", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "2019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "2020", "simple": { "limit": 20, "period": 60 } },
+        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "2021", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -494,6 +498,8 @@
         { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "3017", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "3018", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "3019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "3020", "simple": { "limit": 20, "period": 60 } },
+        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "3021", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],

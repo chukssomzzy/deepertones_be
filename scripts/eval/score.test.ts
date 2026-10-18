@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
-import type { AnalysisCase, ResearchCase } from './cases'
-import { loadEnv, parseArgs, scoreAnalysis, scoreResearch, summarise } from './score'
+import type { AnalysisCase, GoalCase, ResearchCase } from './cases'
+import { loadEnv, parseArgs, scoreAnalysis, scoreGoalReading, scoreResearch, summarise } from './score'
 
 const PRODUCT = { brand: 'Test Brand', name: 'Test Cream', category: 'skin' } as const
 
@@ -209,6 +209,48 @@ describe('scoreResearch', () => {
   })
 })
 
+describe('scoreGoalReading', () => {
+  const expected = (goal: GoalCase['expect']['goal'], wantsLighter: boolean): GoalCase => ({ id: 'goal-1', text: 'make my face clear', expect: { goal, wantsLighter } })
+
+  it('passes when the goal and wantsLighter are both what the case expects', () => {
+    expect(scoreGoalReading(expected('clear-skin', false), { goal: 'clear-skin', wantsLighter: false })).toEqual({ id: 'goal-1', pass: true, problems: [] })
+  })
+
+  it('passes a case that expects no goal when the reader found none', () => {
+    expect(scoreGoalReading(expected(null, false), { goal: null, wantsLighter: false })).toEqual({ id: 'goal-1', pass: true, problems: [] })
+  })
+
+  it('passes a request to be lighter that came back as brighter with wantsLighter', () => {
+    expect(scoreGoalReading(expected('brighter', true), { goal: 'brighter', wantsLighter: true }).pass).toBe(true)
+  })
+
+  it('fails with the expected and the actual goal when the goal differs, and nothing else', () => {
+    expect(scoreGoalReading(expected('clear-skin', false), { goal: 'glow', wantsLighter: false })).toEqual({ id: 'goal-1', pass: false, problems: ['goal:clear-skin-got-glow'] })
+  })
+
+  it('names "none" for a goal that was expected and not found, and for one that was found and not expected', () => {
+    expect(scoreGoalReading(expected('glow', false), { goal: null, wantsLighter: false }).problems).toEqual(['goal:glow-got-none'])
+    expect(scoreGoalReading(expected(null, false), { goal: 'glow', wantsLighter: false }).problems).toEqual(['goal:none-got-glow'])
+  })
+
+  it('fails with the expected and the actual wantsLighter when only that differs', () => {
+    expect(scoreGoalReading(expected('brighter', true), { goal: 'brighter', wantsLighter: false }).problems).toEqual(['wantsLighter:true-got-false'])
+    expect(scoreGoalReading(expected('clear-skin', false), { goal: 'clear-skin', wantsLighter: true }).problems).toEqual(['wantsLighter:false-got-true'])
+  })
+
+  it('reports both problems, the goal first, when both differ', () => {
+    expect(scoreGoalReading(expected('fade-dark-marks', false), { goal: 'brighter', wantsLighter: true })).toEqual({
+      id: 'goal-1',
+      pass: false,
+      problems: ['goal:fade-dark-marks-got-brighter', 'wantsLighter:false-got-true'],
+    })
+  })
+
+  it('fails with the error name when the adapter threw', () => {
+    expect(scoreGoalReading(expected('glow', false), { error: 'AnthropicUnavailableError' })).toEqual({ id: 'goal-1', pass: false, problems: ['error:AnthropicUnavailableError'] })
+  })
+})
+
 describe('summarise', () => {
   const result = (pass: boolean) => ({ id: 'x', pass, problems: pass ? [] : ['p'] })
 
@@ -249,7 +291,7 @@ describe('parseArgs', () => {
     expect(args.models).toEqual({})
   })
 
-  it.each(['analysis', 'research', 'all'] as const)('accepts --mode %s', (mode) => {
+  it.each(['analysis', 'research', 'goals', 'all'] as const)('accepts --mode %s', (mode) => {
     expect(parseArgs(['--mode', mode]).mode).toBe(mode)
   })
 
@@ -269,7 +311,7 @@ describe('parseArgs', () => {
     expect(parseArgs(argv as string[]).maxUsd).toBe(expected)
   })
 
-  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'recognize-shelf', 'read-label', 'split-name'])('reads --model %s=<model> as an override for that job', (job) => {
+  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'recognize-shelf', 'read-label', 'split-name', 'read-goal'])('reads --model %s=<model> as an override for that job', (job) => {
     expect(parseArgs(['--model', `${job}=claude-haiku-5-5`]).models).toEqual({ [job]: 'claude-haiku-5-5' })
   })
 

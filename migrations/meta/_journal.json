@@ -162,6 +162,20 @@
       "when": 1792347350490,
       "tag": "0022_curvy_gorilla_man",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1792347811083,
+      "tag": "0023_lying_alex_wilder",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1792349461343,
+      "tag": "0024_good_gauntlet",
+      "breakpoints": true
     }
   ]
 }

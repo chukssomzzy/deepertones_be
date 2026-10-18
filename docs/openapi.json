@@ -400,6 +400,266 @@
           }
         }
       },
+      "Goal": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair",
+              null
+            ],
+            "description": "Null while the user has typed words but not picked a goal.",
+            "example": "fade-dark-marks"
+          },
+          "wantsLighter": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own words, when they typed any."
+          },
+          "answer": {
+            "$ref": "#/components/schemas/GoalAnswer"
+          },
+          "answersVersion": {
+            "type": "integer",
+            "description": "Which version of the answer copy `answer` is from."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the goal was last set."
+          }
+        },
+        "required": [
+          "goal",
+          "wantsLighter",
+          "text",
+          "answer",
+          "answersVersion",
+          "updatedAt"
+        ]
+      },
+      "GoalAnswer": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "howLong": {
+            "type": "string",
+            "description": "How long it usually takes, honestly."
+          },
+          "helps": {
+            "type": "string"
+          },
+          "inTheWay": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A line about natural colour, only for someone who asked to be lighter."
+          }
+        },
+        "required": [
+          "title",
+          "howLong",
+          "helps",
+          "inTheWay",
+          "note"
+        ],
+        "description": "Null while there is no goal."
+      },
+      "SetGoalBody": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "goal": {
+                "type": "string",
+                "enum": [
+                  "clear-skin",
+                  "even-tone",
+                  "fade-dark-marks",
+                  "brighter",
+                  "glow",
+                  "calm-repair"
+                ],
+                "description": "One of the six goals the app offers.",
+                "example": "fade-dark-marks"
+              }
+            },
+            "required": [
+              "goal"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "The goal in the user's own words, 1 to 200 characters once trimmed. Links, markup and control or invisible characters are refused with 400 `INVALID_GOAL_TEXT`.",
+                "example": "make my face clear"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Onboarding": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Goal"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The current goal, or null when none was set."
+              }
+            ]
+          },
+          "safety": {
+            "$ref": "#/components/schemas/Safety"
+          },
+          "next": {
+            "type": "string",
+            "enum": [
+              "goal",
+              "safety",
+              "shelf"
+            ],
+            "description": "The first-run step to show next."
+          }
+        },
+        "required": [
+          "goal",
+          "safety",
+          "next"
+        ]
+      },
+      "Safety": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "pregnant",
+                "breastfeeding",
+                "reaction",
+                "prescription",
+                "none"
+              ],
+              "description": "One thing that changes what is safe for the user, or `none`.",
+              "example": "pregnant"
+            },
+            "description": "The ticked choices, once each, in the order of the choice list."
+          },
+          "reactionText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own words about a reaction, when they typed any."
+          },
+          "prescriptionText": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own words about a prescription, when they typed any."
+          },
+          "excludesPregnancyCaution": {
+            "type": "boolean",
+            "description": "True when `pregnant` or `breastfeeding` is ticked."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the answers were last saved."
+          }
+        },
+        "required": [
+          "choices",
+          "reactionText",
+          "prescriptionText",
+          "excludesPregnancyCaution",
+          "updatedAt"
+        ],
+        "description": "The current safety answers, or null until the profile answers. Shown even when the goal is not set yet."
+      },
+      "SetSafetyBody": {
+        "type": "object",
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "pregnant",
+                "breastfeeding",
+                "reaction",
+                "prescription",
+                "none"
+              ],
+              "description": "One thing that changes what is safe for the user, or `none`.",
+              "example": "pregnant"
+            },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "What applies, one to 20 entries from the five choices. Repeats are collapsed, so the answer has each choice once. `none` cannot be combined with another choice: 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`."
+          },
+          "reactionText": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The products or ingredients that gave a reaction, up to 300 characters once trimmed (counted as typed). Line breaks and tabs are fine: every run of whitespace is saved as one space. Optional even when `reaction` is ticked; blank counts as left out. Words without `reaction` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText`.",
+            "example": "Caro White and fragrance"
+          },
+          "prescriptionText": {
+            "type": "string",
+            "maxLength": 300,
+            "description": "The prescription cream or tablets, up to 300 characters once trimmed (counted as typed). Line breaks and tabs are fine: every run of whitespace is saved as one space. Optional even when `prescription` is ticked; blank counts as left out. Words without `prescription` ticked are 400 `INVALID_SAFETY_ANSWER` with `details.field` `prescriptionText`.",
+            "example": "clobetasol"
+          }
+        },
+        "required": [
+          "choices"
+        ],
+        "additionalProperties": false
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -2132,6 +2392,457 @@
           },
           "415": {
             "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/goal": {
+      "put": {
+        "operationId": "setGoal",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Say what you want your skin to look like",
+        "description": "Guests included. Send `{ goal }` (a chip) or `{ text }` (the user's own words), not both. A chip answers with the honest answer for that goal. Typed words are read by a small model and sorted into one of the six goals, and the answer for that goal comes back. Words that ask to be lighter, fairer or whiter are sorted as `brighter` with `wantsLighter` true, and the answer adds a plain note on what a routine cannot change. Words the model finds no goal in, or that it cannot read right now, are saved with no goal and no answer (still 200), so the app shows the chips; a chip picked next keeps those words. Every change is kept with its date, and the newest is the current goal. Words with a link, markup or an invisible character are 400 `INVALID_GOAL_TEXT`, and no model is called for them. Each change counts against a per-address and a per-user limit, chips included: 429 `RATE_LIMITED` with `Retry-After`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGoalBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The goal as it is now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Goal"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getGoal",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "The goal this profile set",
+        "description": "The same view PUT answers. 404 `GOAL_NOT_SET` until the profile has saved a goal or some words.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current goal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Goal"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/onboarding": {
+      "get": {
+        "operationId": "getOnboarding",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Which first-run step comes next",
+        "description": "`next` is `goal` until a goal is picked (typed words alone do not count), then `safety` until the safety question is answered (\"none of these\" is an answer), then `shelf`. `safety` is the current answers whatever the step, or null.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the profile is in the first run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Onboarding"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/safety": {
+      "put": {
+        "operationId": "setSafety",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Say what changes what is safe for you",
+        "description": "Guests included. Send `choices` (up to 20 entries from `pregnant`, `breastfeeding`, `reaction`, `prescription`, `none`) and, optionally, `reactionText` and `prescriptionText` (up to 300 characters each once trimmed; every run of whitespace, line breaks and tabs included, is saved as one space). `none` stands alone: with another choice it is 400 `INVALID_SAFETY_ANSWER` (`details.field` `choices`). Words need their own choice ticked, `none` included: otherwise 400 `INVALID_SAFETY_ANSWER` with `details.field` `reactionText` or `prescriptionText`. A blank text counts as left out, and a ticked choice with no words is kept as it is. Words with a link, markup or an invisible character are 400 `INVALID_SAFETY_TEXT` with `details.field`. Every change is kept with its date and the newest is the current answer; nothing carries over from the one before. `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetSafetyBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The safety answers as they are now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Safety"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getSafety",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "The safety answers this profile gave",
+        "description": "The same view PUT answers. 404 `SAFETY_NOT_SET` until the profile has answered, \"none of these\" included.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current safety answers",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Safety"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {

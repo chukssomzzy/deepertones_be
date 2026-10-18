@@ -473,6 +473,8 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `POST /api/v1/auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
 | `GET /api/v1/me` | bearer | none |
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
+| `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
+| `PUT`/`GET /api/v1/me/safety` | bearer (guests included); see "Safety facts (onboarding)" | none |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
   profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
@@ -746,6 +748,88 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   backoff 5 s x3 up to 135 s). `push-receipts` is not urgent, so it lets a batch fill (25, up to 30 seconds), 5 attempts, backoff 30 s x3
   up to 600 s.
 
+### Goals (onboarding)
+`modules/goals` holds `profile_goals` (migration 0023), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `requireGoal`, `onboarding`).
+It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
+is built in four pull requests; the goal is the first two (the six chips, and typed words read by the goal reader), and the safety answers are the third (see "Safety facts (onboarding)").
+
+- **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
+  `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the six goals or null, `text` is the user's own
+  words or null, `wants_lighter` and `answers_version` are always written. Rows go with their profile, so guest cleanup needs no cleaner of its own,
+  and a guest who signs up keeps the goal (promotion keeps the profile).
+- **The six goals are the catalog's.** `GOALS` (`goals.vocabulary.ts`) is the catalog's `goal:` traits without the prefix, in the same order, so a
+  user can pick no goal a product cannot be tagged with. A test pins that the two lists match. `calm-repair` is last, added after the first five: it is for skin made thin, red or reactive by a lightening,
+  toning or steroid cream, the product's primary user (CONTEXT.md). Its answer says up front that a flare is expected, and plans a dated step-down on
+  anything harmful rather than telling the user to stop it. `ANALYSIS_VERSION` was not bumped for the new trait (an owner decision), so analyses made
+  before it lack `goal:calm-repair` until they are next re-analysed.
+- **The answer is not stored.** `answerFor(goal, wantsLighter)` (`goals.answers.ts`) is a fixed copy table: a title, `howLong`, `helps`, `inTheWay` per
+  goal, plus one colour `note` that only a row with `wants_lighter` gets (the same note whichever goal it was sorted into; the plan itself does not
+  change). The view is built when a row is read, so a new version of the copy reaches goals saved earlier. `GOAL_ANSWERS_VERSION` is bumped whenever
+  the meaning of any text changes; the view always carries the current one, and each row records the version it was saved under. The copy is a DRAFT that
+  needs owner and qualified review before launch.
+- **Typed words are read by the goal reader.** `{ text }` is trimmed (1 to 200 characters, by the schema) and checked, then `GoalReader.read` (see
+  "Claude (Anthropic) providers") sorts it into one of the six goals and the service saves `goal` and `wants_lighter` with the words. When the
+  reader finds no goal the words are saved with `goal` null and no answer. **`wantsLighter` always means `brighter`:** words that ask to be lighter,
+  fairer or whiter are saved as `brighter` with `wants_lighter` true, and the answer adds the colour note. That is a sorted request, never a refusal.
+  **A reader that cannot read is not an error for the user.** `AiBudgetExceededError`, `AnthropicUnavailableError`, `AnthropicRequestError` and
+  `AnthropicRefusalError` save the words with `goal` null and `wants_lighter` false (still 200, so the app shows the chips) and log one
+  `{ outcome: 'goal-read-failed', reason }` with a short kebab-case reason (`budget-exceeded`, `unavailable`, `request-rejected`, `refused`). Any other error, an
+  `AnthropicConfigError` above all (a setup problem to fix, not an outage to hide), propagates and nothing is stored. Chips never call the reader,
+  and neither do words refused for a link, markup or a hidden character. Words with a link or markup
+  (`hasLinkOrMarkup` from `lib/text-safety`; a bare `<`, as in "spots < 1cm", is fine) or a control or invisible character (`\p{Cc}`, `\p{Cf}`) are
+  400 `INVALID_GOAL_TEXT`. Shape and length are zod: exactly one of `goal` and `text`, else 400 `VALIDATION_FAILED`.
+- **The text-carry rule.** A `{ goal }` copies `text` from the current row only when that row's `goal` is null, because the pick answers "which is
+  closest?" to words nobody sorted. After a chip, or after words that were already matched, the next chip leaves `text` null, so old words do not
+  follow later changes.
+- **Current and onboarding.** `GET /goal` is 404 `GOAL_NOT_SET` only for a profile that never saved anything; saved words with no goal are a view with
+  `goal` and `answer` null. `GET /onboarding` answers `{ goal, safety, next }`: `next` is `goal` until a row has a goal, then `safety` until the profile has
+  a safety answer ("none of these" is one), then `shelf`. `safety` is the profile's current safety view whichever step it is, because the question can be
+  answered before the goal. `GoalsService` gets it from `SafetyService.currentOrNull()`, never from the safety repository.
+- **The guard.** `requireGoal()` answers the current goal view, or 409 `GOAL_REQUIRED` when the profile has no row or only words with no goal. It is
+  built for the verdict and routine work and is not wired to a route yet.
+- **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so a guest has a goal like anyone, and a second profile of
+  an account has its own.
+- **Rate limits on `PUT /goal`.** `GOAL_SET_IP_LIMITER` (20 a minute per address) and `GOAL_SET_USER_LIMITER` (10 a minute per user), in the order
+  address limit, `signedIn()`, user limit, as the scan routes. They cover chips too: the route cannot tell words from chips before it validates the
+  body, and a typed goal may cost a model call. Over the limit is 429 `RATE_LIMITED` with `Retry-After`, before any model is called; `GET /goal` and
+  `GET /onboarding` are not limited.
+- **Wiring.** The container builds `GoalsService` with `D1GoalsRepository` and `AnthropicGoalReader` over its own client with an 8 s timeout (the read runs
+  inside the user's request on the first screen, so it gives up sooner than the name split's 15 s), so a slow model costs the user a short wait before the chips, not a stuck screen.
+- **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
+- **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
+  `.route('/me', ...)` in `src/app.ts`.
+- **Still to come.** Pull request 4 reads the products and ingredients named in reaction and prescription text in the background.
+
+### Safety facts (onboarding)
+`modules/safety` holds `profile_safety` (migration 0024), `D1SafetyRepository` (`append`, `current`, `history`) and `SafetyService` (`set`, `current`,
+`currentOrNull`, `requireAnswered`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", and the third pull request of issue #82.
+
+- **The choices.** `SAFETY_CHOICES` (`safety.vocabulary.ts`) is `pregnant`, `breastfeeding`, `reaction` ("a product gave me a reaction"), `prescription` and
+  `none`, in the order the app shows them. The service stores and returns the ticked choices once each, in that order, whatever order or repeats were sent.
+- **The rules, in `SafetyService.set`.** Each text is trimmed and every run of whitespace in it (a line break, a tab) is made one space, so a list written over
+  several lines is saved as one line; a text that is empty after that is null, so an empty field says nothing. This comes before every check below. Then:
+  `none` with any other choice is 400 `INVALID_SAFETY_ANSWER` with `details.field` `choices`; a text with words but without its choice ticked (`reactionText` needs
+  `reaction`, `prescriptionText` needs `prescription`, and `none` ticks neither) is 400 `INVALID_SAFETY_ANSWER` with the field named; a text with a link or
+  markup (`hasLinkOrMarkup`) or any other control or invisible character (`\p{Cc}`, `\p{Cf}`; line breaks and tabs are gone by then) is 400 `INVALID_SAFETY_TEXT` with the field named. Ticking a choice and naming nothing
+  is valid and still counts: the caution applies from the tick. Shape is zod: a strict object, `choices` one to 20 entries of the vocabulary (repeats are collapsed by the service, so the limit only stops a silly body), each text a
+  string of at most 300 characters (`SAFETY_TEXT_MAX`) once trimmed, counted as typed before whitespace is collapsed, else 400 `VALIDATION_FAILED`.
+- **History, as for goals.** `profile_safety` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by `created_at` is the
+  current answer, ties broken by `rowid`. The newest wins even when it is less strict than the one before ("none" can replace "pregnant"); nothing carries over, so a
+  text is kept only if the answer that is current says it. `choices` is a JSON array in a text column. Guest cleanup needs no cleaner of its own, and a guest who signs up
+  keeps the answers (promotion keeps the profile). The migration is additive.
+- **The view.** `{ choices, reactionText, prescriptionText, excludesPregnancyCaution, updatedAt }`, and the presenter returns exactly those five keys.
+  `excludesPregnancyCaution` is true when `pregnant` or `breastfeeding` is ticked; it is worked out when the row is read, not stored.
+- **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so each profile of an account has its own answers. `GET /safety` is 404
+  `SAFETY_NOT_SET` until the profile has answered.
+- **The guard.** `requireAnswered()` answers the current view, or 409 `SAFETY_ANSWERS_REQUIRED` for a profile that has not answered ("none" is an answer). With
+  `GoalsService.requireGoal()` it is what the verdict and the routine will call, so no routine rests on a missing answer. Scans need neither, so the shelf photo stays
+  part of the hook. Neither guard is wired to a route yet.
+- **Parsing is the next pull request, and it only ever adds caution.** The next pull request reads the products and ingredients named in `reactionText` and
+  `prescriptionText` in the background. What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove any.
+- **Logs never carry the text.** The service logs nothing; tests spy on the console to keep it so. The words are user input and may be personal.
+- **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. They have no rate limit of their own:
+  a save is one row and calls no model.
+
 ### Prompts
 
 Each Claude system prompt is its own Markdown file in `src/prompts/`, next to the email templates, so a prompt change
@@ -755,7 +839,8 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
-  `product-analyst.same-product.md`, `product-analyst.image-check.md`. The export name is the camelCased file name plus
+  `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
+  `goal-reader.read-goal.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -844,6 +929,10 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   store (see "Catalog images") checks again.
 - **Web pages and product data are data.** Every prompt tells the model to ignore instructions inside
   them, and product details are passed as JSON, not spliced into prose.
+- **Providers and modules.** A provider may import a module's vocabulary file (plain constants and types: `product-researcher.provider.ts` takes
+  `catalog.vocabulary`, the goal reader `goals.vocabulary`). dependency-cruiser enforces that a provider never touches `drizzle-orm`, a `*.table.ts`
+  or `lib/db` (`db-only-in-repositories`) and never value-imports a `*.repository.ts` (`concrete-classes-only-in-container`). It has no rule against
+  a provider importing anything else from a module, so keeping to vocabulary files is a convention that review holds.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
   `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `recognizeShelf(image)` (job `recognize-shelf`, prompt `product-recognizer.recognize-shelf.md`) lists every readable beauty or personal-care product on a shelf photo as a `ShelfRecognition`: `products` (brand, name, optional variant and form, category, confidence; at most 5, most confident first, equal confidences in the model's order), `excluded` counts (`otherProducts` and `unreadable`, each floored and clamped to 0 to 50; people and faces are never counted) and a `classification` (`beauty-product` exactly when a product survives, else `other-product`, `face-or-person` or `unreadable`). Each product follows the same text rules as `recognize`; one that fails them is dropped and counted `unreadable`, and the limit of 5 is applied after, so products cut for the limit are counted nowhere. Nothing calls it yet. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
@@ -857,7 +946,7 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   trimming), with a link, markup or a hidden character (a control character, `\p{Cc}`, or an invisible format character
   such as a right-to-left override or a zero-width space, `\p{Cf}`), or a list of more than 150 entries, becomes
   `unreadable` / `{ readable: false }`, never an error. The link and markup check lives in `lib/text-safety.ts`, shared with
-  the catalog, because a provider may not import from a module.
+  the catalog.
 - **`AnthropicNameSplitter`** (`split-name`, port `NameSplitter`, in `providers/name-splitting/`; `MemoryNameSplitter` is the fake)
   splits a name a user typed into a product: `split(text)` answers `{ kind: 'product', brand, name, variant?, category }` or
   `{ kind: 'not-a-product' }`. The typed text is the only thing in the user message (the system prompt never carries it), the prompt
@@ -871,6 +960,15 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   matches "50ml"; the user may have typed more. A part the model made up, or a typo it corrected, is `not-a-product`, so it cannot put into the shared catalog a name nobody typed. The category is exempt. The brand and name
   must each keep at least one character after normalising. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable
   model and an unusable answer are thrown as the client's errors; `ScanService.identifyByName` decides what each means.
+- **`AnthropicGoalReader`** (`read-goal`, port `GoalReader`, in `providers/goal-reading/`; `MemoryGoalReader` is the fake) sorts the words a user
+  typed as their goal: `read(text)` answers `{ goal, wantsLighter }`, `goal` one of the six or null. The trimmed text is the only thing in the user
+  message (no lead-in, and the system prompt never carries it), and the prompt tells the model it is user-supplied data whose instructions are
+  ignored. The schema is one closed object with a required `goal` (the six goals or `none`, rather than a nullable goal) and a required boolean
+  `wantsLighter`; the schema sent carries no `default` (a root `catch` would add one), so the leniency is in the parse alone: each field `catch`es to absent and a reply that is
+  not an object reads as an empty one, so any reply off the schema is `{ goal: null, wantsLighter: false }`, never a failed call.
+  **`wantsLighter: true` is always `{ goal: 'brighter', wantsLighter: true }`**, whatever goal the model gave: asking to be lighter is a real goal that
+  gets a real answer, not a refusal. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable model and a
+  rejected request are thrown as the client's errors; `GoalsService` decides what each means.
 
 ### AI cost tracking
 Every Claude request is reserved and settled in a ledger, and counted against a daily dollar figure. **The figure only
@@ -920,10 +1018,10 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name), `_VISION`
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name and read-goal), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
-  scan flow (see "Scan module"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
+  scan flow (see "Scan module"); `read-goal` serves onboarding (see "Goals (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
   by the eval's research mode (`npm run eval:catalog -- --mode research`), and the Models API field
@@ -1694,7 +1792,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `abortAllDurableObjects()` after cancelling its streams.
 
 ### Catalog eval
-`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the two model-backed catalog steps against fixed cases in
+`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the model-backed catalog steps, and the goal reader, against fixed cases in
 `scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested.
 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
@@ -1704,8 +1802,12 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
 - **Research mode** runs `AnthropicProductResearcher` on real products sold in Nigeria and checks the product is found
   and the list holds the ingredients we expect. These check retrieval quality, not ground truth: a brand can
   reformulate, so a failing research case may need its data updated.
-- **Cost.** One analysis call per analysis case (6) and one web-search research turn per research case (7, up to 5
-  searches each), run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
+- **Goals mode** runs `AnthropicGoalReader` on `GOAL_CASES`, typed goals in Nigerian English and Pidgin, and scores the goal and `wantsLighter` against what
+  each case expects (`scoreGoalReading`; problem codes `goal:<expected>-got-<actual>`, `wantsLighter:<expected>-got-<actual>` and `error:<name>`).
+  The cases turn on one distinction: `wantsLighter` is true only for someone who asks to be lighter, never for one who mentions a lightening product they
+  used, who lightens spots, or who refuses it. It is part of `--mode all`; `--mode goals` runs it alone (about 40 Haiku calls, a few cents).
+- **Cost.** One analysis call per analysis case (6), one web-search research turn per research case (7, up to 5
+  searches each) and one Haiku call per goal case, run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
   The run is capped in dollars too: the client gets a `MemoryAiSpendLedger` capped at `--max-usd` (default 2), so it
   cannot bill more, and once the cap is reached the remaining cases fail as `AiBudgetExceededError` without a call. The
   console table has a cost column per case and the total in USD; the report carries `costMicros` per case and in `summary`.
