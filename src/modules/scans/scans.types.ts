@@ -7,6 +7,8 @@ export type ScanPhoto = typeof scanPhotos.$inferSelect
 export type ScanItem = typeof scanItems.$inferSelect
 
 export type ItemState = ScanItem['state']
+/** The states in which a front photo is still wanted: it may be shown to the user for a decision. In any other state it is released. */
+export const PHOTO_HELD_STATES: readonly ItemState[] = ['recognising', 'needs-confirmation']
 export type ItemReason = NonNullable<ScanItem['reason']>
 
 /** The column is nullable in SQL (see the table), but a new scan always has its profile. */

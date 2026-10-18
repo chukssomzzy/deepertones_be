@@ -1,8 +1,10 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
+import { PHOTO_HELD_STATES } from './scans.types'
 import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 const copyItem = (item: ScanItem): ScanItem => ({ ...item })
+const isHeld = (state: ItemState) => PHOTO_HELD_STATES.includes(state)
 
 /**
  * In-memory ScansRepository for unit tests. Its behaviour is pinned by scansRepositoryContract, which the D1 class also
@@ -211,6 +213,41 @@ export class FakeScansRepository implements ScansRepository {
       .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
       .slice(0, limit)
       .map(copyItem)
+  }
+
+  /** Items that hold a front photo key although their state is not `recognising` or `needs-confirmation`, oldest `updatedAt` first, at most `limit`. */
+  async itemsWithReleasablePhoto(limit: number): Promise<ScanItem[]> {
+    return [...this.items.values()]
+      .filter((i) => i.photoKey !== null && !isHeld(i.state))
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, limit)
+      .map(copyItem)
+  }
+
+  /** Clears the item's front photo key only while it is still `key`, and says whether it did. Nothing else changes, `updatedAt` included. */
+  async clearItemPhotoKey(itemId: string, key: string): Promise<boolean> {
+    const item = this.items.get(itemId)
+    if (!item || item.photoKey !== key) return false
+    item.photoKey = null
+    return true
+  }
+
+  /** Photos that hold a key although none of their items is `recognising` or `needs-confirmation`, oldest `updatedAt` first, at most `limit`. */
+  async shelfPhotosToRelease(limit: number): Promise<ScanPhoto[]> {
+    const items = [...this.items.values()]
+    return [...this.photos.values()]
+      .filter((p) => p.photoKey !== null && !items.some((i) => i.scanId === p.scanId && i.photoId === p.id && isHeld(i.state)))
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, limit)
+      .map((p) => ({ ...p }))
+  }
+
+  /** The same for a scan photo's key. */
+  async clearShelfPhotoKey(photoId: string, key: string): Promise<boolean> {
+    const photo = this.photos.get(photoId)
+    if (!photo || photo.photoKey !== key) return false
+    photo.photoKey = null
+    return true
   }
 
   /**

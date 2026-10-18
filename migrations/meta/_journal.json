@@ -148,6 +148,13 @@
       "when": 1792327027072,
       "tag": "0020_happy_lady_ursula",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1792336245619,
+      "tag": "0021_talented_gargoyle",
+      "breakpoints": true
     }
   ]
 }

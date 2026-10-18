@@ -1552,6 +1552,233 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
       })
     })
 
+    // A front photo is held only while an item using it is recognising or waiting for a confirmation; these reads find the keys the
+    // service missed releasing, and the guarded clears are how it lets go of one.
+    describe('photos to release', () => {
+      const HELD: ItemState[] = ['recognising', 'needs-confirmation']
+      const RELEASABLE: ItemState[] = ['matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'failed', 'rejected', 'unidentified']
+      const freshUser = async () => {
+        const { repository, newUser } = await make()
+        return { repository, userId: await newUser() }
+      }
+      /** One product item per entry, each moved to its state at its time (a state of `recognising` is left as made); returns their ids in order. */
+      const productItemsIn = async (repository: ScansRepository, userId: string, wanted: [ItemState, number][]) => {
+        const scan = newScan(userId, { createdAt: at(-DAY_MS) })
+        const items = wanted.map((_, position) => newItem(scan, position))
+        await createWithPhotos(repository, scan, items)
+        for (const [i, [state, updatedAt]] of wanted.entries()) {
+          if (state !== 'recognising') await repository.updateItem(items[i]!.id, 'recognising', { state, updatedAt: at(updatedAt) })
+        }
+        return items.map((i) => i.id)
+      }
+      /**
+       * A shelf photo with its placeholder in `states[0]` and one more item per further state, filed the way a read files them (one fanOut);
+       * a state a read cannot file (ready, failed, ...) is reached by a later move of that item.
+       */
+      const shelfPhotoIn = async (repository: ScansRepository, userId: string, states: ItemState[]) => {
+        const scan = newScan(userId, { kind: 'shelf', createdAt: at(-DAY_MS) })
+        const photo = newPhoto(scan, 0, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` })
+        const placeholder = newItem(scan, 0, { photoId: photo.id, photoKey: null })
+        await repository.createScan(scan, [photo], [placeholder])
+        const readState = (state: ItemState) => (state === 'needs-confirmation' ? 'needs-confirmation' : 'matching')
+        const siblings = states.slice(1).map((state, i) => newSibling(scan, photo, 1 + i, { state: readState(state) }))
+        await repository.fanOut({
+          photo: { id: photo.id, patch: readPhoto() },
+          placeholder: { id: placeholder.id, from: 'recognising', patch: { state: readState(states[0]!), updatedAt: at(-HOUR) } },
+          siblings,
+          maxItems: 20,
+        })
+        const ids = [placeholder.id, ...siblings.map((s) => s.id)]
+        for (const [i, state] of states.entries()) {
+          const read = readState(state)
+          if (state !== read) await repository.updateItem(ids[i]!, read, { state, updatedAt: at(-HOUR) })
+        }
+        return { photo, key: photo.photoKey!, ids }
+      }
+      const DAY_MS = 24 * HOUR
+
+      describe('itemsWithReleasablePhoto', () => {
+        it.each(RELEASABLE)('lists an item in %s that still has its photo key', async (state) => {
+          const { repository, userId } = await freshUser()
+          const [id] = await productItemsIn(repository, userId, [[state, -MINUTE]])
+
+          const listed = await repository.itemsWithReleasablePhoto(1000)
+
+          expect(listed.find((i) => i.id === id)).toMatchObject({ id, state, userId, photoKey: expect.any(String) })
+        })
+
+        it.each(HELD)('leaves out an item in %s: its photo is still wanted', async (state) => {
+          const { repository, userId } = await freshUser()
+          const [id] = await productItemsIn(repository, userId, [[state, -MINUTE]])
+
+          expect((await repository.itemsWithReleasablePhoto(1000)).map((i) => i.id)).not.toContain(id)
+        })
+
+        it('leaves out an item whose key is already cleared, and a shelf item, which never has a key of its own', async () => {
+          const { repository, userId } = await freshUser()
+          const [cleared] = await productItemsIn(repository, userId, [['matching', -MINUTE]])
+          await repository.clearItemPhotoKey(cleared!, (await repository.findItem(cleared!))!.photoKey!)
+          const shelf = await shelfPhotoIn(repository, userId, ['matching', 'matching'])
+
+          const ids = (await repository.itemsWithReleasablePhoto(1000)).map((i) => i.id)
+
+          expect(ids).not.toContain(cleared)
+          for (const id of shelf.ids) expect(ids).not.toContain(id)
+        })
+
+        it('returns at most the limit, in the same order as the unlimited read', async () => {
+          const { repository, userId } = await freshUser()
+          await productItemsIn(repository, userId, [['matching', -3 * HOUR], ['ready', -2 * HOUR], ['failed', -HOUR]])
+          const everything = (await repository.itemsWithReleasablePhoto(1000)).map((i) => i.id)
+
+          const limited = await repository.itemsWithReleasablePhoto(2)
+
+          expect(limited).toHaveLength(2)
+          expect(limited.map((i) => i.id)).toEqual(everything.slice(0, 2))
+        })
+      })
+
+      describe('clearItemPhotoKey', () => {
+        it('clears the key when it is the one given, says so, and changes nothing else about the item, its update time included', async () => {
+          const { repository, userId } = await freshUser()
+          const [id] = await productItemsIn(repository, userId, [['matching', -MINUTE]])
+          const before = (await repository.findItem(id!))!
+
+          const cleared = await repository.clearItemPhotoKey(id!, before.photoKey!)
+
+          expect(cleared).toBe(true)
+          expect(await repository.findItem(id!)).toEqual({ ...before, photoKey: null })
+        })
+
+        it('leaves the key, and says so, when the item holds a different one (a retake replaced it)', async () => {
+          const { repository, userId } = await freshUser()
+          const [id] = await productItemsIn(repository, userId, [['matching', -MINUTE]])
+          const before = (await repository.findItem(id!))!
+
+          expect(await repository.clearItemPhotoKey(id!, `${before.photoKey}.other`)).toBe(false)
+
+          expect(await repository.findItem(id!)).toEqual(before)
+        })
+
+        it('answers false when repeated, and for an unknown item', async () => {
+          const { repository, userId } = await freshUser()
+          const [id] = await productItemsIn(repository, userId, [['matching', -MINUTE]])
+          const key = (await repository.findItem(id!))!.photoKey!
+          await repository.clearItemPhotoKey(id!, key)
+
+          expect(await repository.clearItemPhotoKey(id!, key)).toBe(false)
+          expect(await repository.clearItemPhotoKey(freshId(), key)).toBe(false)
+        })
+      })
+
+      describe('shelfPhotosToRelease', () => {
+        it.each([
+          ['one matching item', ['matching']],
+          ['a run of items that are all past waiting', ['matching', 'ready', 'failed']],
+        ] as [string, ItemState[]][])('lists a photo whose items are %s', async (_label, states) => {
+          const { repository, userId } = await freshUser()
+          const { photo, key } = await shelfPhotoIn(repository, userId, states)
+
+          const listed = await repository.shelfPhotosToRelease(1000)
+
+          expect(listed.find((p) => p.id === photo.id)).toMatchObject({ id: photo.id, userId, photoKey: key })
+        })
+
+        it('leaves out a photo while any one of its items waits for a confirmation, whatever the others are doing', async () => {
+          const { repository, userId } = await freshUser()
+          const { photo } = await shelfPhotoIn(repository, userId, ['matching', 'needs-confirmation', 'ready'])
+
+          expect((await repository.shelfPhotosToRelease(1000)).map((p) => p.id)).not.toContain(photo.id)
+        })
+
+        it('leaves out a photo whose placeholder is still recognising', async () => {
+          const { repository, userId } = await freshUser()
+          const scan = newScan(userId, { kind: 'shelf' })
+          const photo = newPhoto(scan, 0, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` })
+          await repository.createScan(scan, [photo], [newItem(scan, 0, { photoId: photo.id, photoKey: null })])
+
+          expect((await repository.shelfPhotosToRelease(1000)).map((p) => p.id)).not.toContain(photo.id)
+        })
+
+        it('is held by an item of the same photo only: another photo of the scan that is done is listed on its own', async () => {
+          const { repository, userId } = await freshUser()
+          const scan = newScan(userId, { kind: 'shelf' })
+          const [done, waiting] = [newPhoto(scan, 0, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` }), newPhoto(scan, 1, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` })]
+          const items = [newItem(scan, 0, { photoId: done.id, photoKey: null }), newItem(scan, 5, { photoId: waiting.id, photoKey: null })]
+          await repository.createScan(scan, [done, waiting], items)
+          await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
+          await repository.updateItem(items[1]!.id, 'recognising', { state: 'needs-confirmation', updatedAt: at(MINUTE) })
+
+          const ids = (await repository.shelfPhotosToRelease(1000)).map((p) => p.id)
+
+          expect(ids).toContain(done.id)
+          expect(ids).not.toContain(waiting.id)
+        })
+
+        it('leaves out a photo with no key, which is every product photo', async () => {
+          const { repository, userId } = await freshUser()
+          const scan = newScan(userId)
+          const items = [newItem(scan, 0)]
+          await createWithPhotos(repository, scan, items)
+          await repository.updateItem(items[0]!.id, 'recognising', { state: 'matching', updatedAt: at(MINUTE) })
+
+          expect((await repository.shelfPhotosToRelease(1000)).map((p) => p.id)).not.toContain(items[0]!.photoId)
+        })
+
+        it('leaves out a photo whose key is already cleared', async () => {
+          const { repository, userId } = await freshUser()
+          const { photo, key } = await shelfPhotoIn(repository, userId, ['matching'])
+          await repository.clearShelfPhotoKey(photo.id, key)
+
+          expect((await repository.shelfPhotosToRelease(1000)).map((p) => p.id)).not.toContain(photo.id)
+        })
+
+        it('returns at most the limit, in the same order as the unlimited read', async () => {
+          const { repository, userId } = await freshUser()
+          await shelfPhotoIn(repository, userId, ['matching'])
+          await shelfPhotoIn(repository, userId, ['ready'])
+          await shelfPhotoIn(repository, userId, ['failed'])
+          const everything = (await repository.shelfPhotosToRelease(1000)).map((p) => p.id)
+
+          const limited = await repository.shelfPhotosToRelease(2)
+
+          expect(limited).toHaveLength(2)
+          expect(limited.map((p) => p.id)).toEqual(everything.slice(0, 2))
+        })
+      })
+
+      describe('clearShelfPhotoKey', () => {
+        it('clears the key when it is the one given, says so, and changes nothing else about the photo, its update time included', async () => {
+          const { repository, userId } = await freshUser()
+          const { photo, key } = await shelfPhotoIn(repository, userId, ['matching'])
+          const before = (await repository.findPhoto(photo.id))!
+
+          expect(await repository.clearShelfPhotoKey(photo.id, key)).toBe(true)
+
+          expect(await repository.findPhoto(photo.id)).toEqual({ ...before, photoKey: null })
+        })
+
+        it('leaves the key, and says so, when the photo holds a different one', async () => {
+          const { repository, userId } = await freshUser()
+          const { photo, key } = await shelfPhotoIn(repository, userId, ['matching'])
+          const before = (await repository.findPhoto(photo.id))!
+
+          expect(await repository.clearShelfPhotoKey(photo.id, `${key}.other`)).toBe(false)
+
+          expect(await repository.findPhoto(photo.id)).toEqual(before)
+        })
+
+        it('answers false when repeated, and for an unknown photo', async () => {
+          const { repository, userId } = await freshUser()
+          const { photo, key } = await shelfPhotoIn(repository, userId, ['matching'])
+          await repository.clearShelfPhotoKey(photo.id, key)
+
+          expect(await repository.clearShelfPhotoKey(photo.id, key)).toBe(false)
+          expect(await repository.clearShelfPhotoKey(freshId(), key)).toBe(false)
+        })
+      })
+    })
+
     describe('staleItems', () => {
       const WORKING: ItemState[] = ['recognising', 'matching']
 

@@ -1,10 +1,11 @@
-import { and, asc, count, eq, exists, gte, inArray, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
+import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
 import type { SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
 import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
+import { PHOTO_HELD_STATES } from './scans.types'
 import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto }
@@ -167,6 +168,61 @@ export class D1ScansRepository {
       .where(and(inArray(scanItems.state, states), lt(scanItems.updatedAt, before)))
       .orderBy(asc(scanItems.updatedAt))
       .limit(limit)
+  }
+
+  /**
+   * Items that still hold a front photo key although their state no longer needs the photo (anything but `recognising` and
+   * `needs-confirmation`), oldest `updated_at` first, at most `limit`. These are the keys a release missed. Read through the partial
+   * index on `updated_at` for items with a key, so it never reads the items whose photo is already gone.
+   */
+  async itemsWithReleasablePhoto(limit: number): Promise<ScanItem[]> {
+    return this.db
+      .select()
+      .from(scanItems)
+      .where(and(isNotNull(scanItems.photoKey), notInArray(scanItems.state, [...PHOTO_HELD_STATES])))
+      .orderBy(asc(scanItems.updatedAt))
+      .limit(limit)
+  }
+
+  /**
+   * Clears the item's front photo key only while it is still `key` (one conditional UPDATE), and says whether it did. Nothing else
+   * changes, `updated_at` included: this is bookkeeping, not a move, and must not look like one to the stale-item sweep or to `watch`.
+   */
+  async clearItemPhotoKey(itemId: string, key: string): Promise<boolean> {
+    const rows = await this.db
+      .update(scanItems)
+      .set({ photoKey: null })
+      .where(and(eq(scanItems.id, itemId), eq(scanItems.photoKey, key)))
+      .returning({ id: scanItems.id })
+    return rows.length === 1
+  }
+
+  /**
+   * Photos that still hold a key although none of their items needs it: no item with `photo_id` = the photo is `recognising` or
+   * `needs-confirmation`. Oldest `updated_at` first, at most `limit`. Read through the partial index on `updated_at` for photos with
+   * a key; the items of each are found through `(scan_id, position)`, at most a scan's cap of them.
+   */
+  async shelfPhotosToRelease(limit: number): Promise<ScanPhoto[]> {
+    const holding = this.db
+      .select({ one: sql`1` })
+      .from(scanItems)
+      .where(and(eq(scanItems.scanId, scanPhotos.scanId), eq(scanItems.photoId, scanPhotos.id), inArray(scanItems.state, [...PHOTO_HELD_STATES])))
+    return this.db
+      .select()
+      .from(scanPhotos)
+      .where(and(isNotNull(scanPhotos.photoKey), notExists(holding)))
+      .orderBy(asc(scanPhotos.updatedAt))
+      .limit(limit)
+  }
+
+  /** The same for a scan photo's key. */
+  async clearShelfPhotoKey(photoId: string, key: string): Promise<boolean> {
+    const rows = await this.db
+      .update(scanPhotos)
+      .set({ photoKey: null })
+      .where(and(eq(scanPhotos.id, photoId), eq(scanPhotos.photoKey, key)))
+      .returning({ id: scanPhotos.id })
+    return rows.length === 1
   }
 
   /**

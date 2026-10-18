@@ -665,7 +665,7 @@ describe('ScanService.create', () => {
 })
 
 describe('ScanService.advance: recognise', () => {
-  it('moves a clearly read beauty product on to matching and enqueues the match, keeping the photo', async () => {
+  it('moves a clearly read beauty product on to matching and enqueues the match, releasing the photo it no longer needs to show', async () => {
     const ctx = setup()
     const { scanId, itemId } = await scanOne(ctx)
 
@@ -673,8 +673,9 @@ describe('ScanService.advance: recognise', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' } })
-    expect(item.image.kind).toBe('user')
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect(item.image).toBeNull()
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
     expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
   })
 
@@ -908,7 +909,7 @@ describe('ScanService.advance: recognise, a front photo that cannot be read', ()
     expect(ctx.recognizer.calls).toHaveLength(2)
     expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser' } })
     expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
   })
 
   it('shows retakesLeft on no item that is not asking for a retake', async () => {
@@ -1071,7 +1072,7 @@ describe('ScanService.advance: match', () => {
     expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
   })
 
-  it('keeps the photo of an item that failed as research-busy, so the user can try again', async () => {
+  it('releases the photo of an item that failed as research-busy: nothing is left to show or decide', async () => {
     const ctx = setup()
     await catalogued(ctx, { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' })
     ctx.recognizer.respondWith(() => seen({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))
@@ -1081,8 +1082,8 @@ describe('ScanService.advance: match', () => {
 
     await run(ctx, itemId, 'match')
 
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-    expect((await itemOf(ctx, scanId, itemId)).image.kind).toBe('user')
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+    expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
   })
 
   it('does nothing for an item that is not matching: the catalog is not asked', async () => {
@@ -1377,18 +1378,17 @@ describe('ScanService.advance: the cap on back photos per item', () => {
     expect(ctx.jobs.enqueued).toHaveLength(queuedBefore)
   })
 
-  // The other final failures (fail(), e.g. research-busy, analysis-failed) keep the front photo: only a rejected photo is deleted. This mirrors them,
-  // so the failed item still shows the user's own photo.
-  it('keeps the front photo of an item it ends, as the other failures do', async () => {
+  // Every state after matching has released the front photo, so an item this ends has none left to show.
+  it('has no front photo left when it ends the item, the photo having been released at matching', async () => {
     const ctx = setup()
     const { scanId, itemId } = await readingBackPhoto(ctx, 3)
     unreadable(ctx)
 
     await run(ctx, itemId, 'read-label')
 
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-    expect((await ctx.repository.findItem(itemId))!.photoKey).toBe(photoKey(scanId, itemId))
-    expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
+    expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
   })
 
   it('still analyses the item when the 3rd back photo is readable: the cap applies only to a failure', async () => {
@@ -1697,7 +1697,7 @@ describe('ScanService.advance: whole scans through the queue', () => {
     expect(item.image.url).toMatch(/^https:\/\/images\.test\/catalog\/test\/products\//)
   })
 
-  it('shows the user\'s own photo for a ready product that has no stock image', async () => {
+  it('shows no image for a ready product that has no stock image: the user\'s photo was released, so the app shows brand and name', async () => {
     const ctx = setup()
     await catalogued(ctx)
     const { scanId, itemId } = await scanOne(ctx)
@@ -1705,7 +1705,7 @@ describe('ScanService.advance: whole scans through the queue', () => {
     await drain(ctx)
 
     const item = await itemOf(ctx, scanId, itemId)
-    expect(item).toMatchObject({ state: 'ready', image: { kind: 'user' } })
+    expect(item).toMatchObject({ state: 'ready', image: null })
   })
 
   it('waits for the user to confirm a doubtful read, then carries on with the corrected product', async () => {
@@ -2763,7 +2763,7 @@ describe('ScanService.advance: what the model cannot or will not do', () => {
       expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
     })
 
-    it('fails the item as research-busy, keeps its photo, and does not throw, when the AI spend cap is spent', async () => {
+    it('fails the item as research-busy, releases its photo, and does not throw, when the AI spend cap is spent', async () => {
       const ctx = setup()
       const { scanId, itemId } = await scanOne(ctx)
       ctx.recognizer.failNextWith(capped())
@@ -2771,8 +2771,8 @@ describe('ScanService.advance: what the model cannot or will not do', () => {
       await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
 
       expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-      expect((await itemOf(ctx, scanId, itemId)).image.kind).toBe('user')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
     })
 
     it('still throws when the model is merely unavailable, leaving the item recognising for the queue to retry', async () => {
@@ -6807,7 +6807,7 @@ describe('ScanService.advance: recognise, a shelf photo with no product', () => 
 describe('ScanService.advance: recognise, a shelf photo the model cannot or will not read', () => {
   const noSiblings = async (ctx: Ctx, scanId: string) => expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
 
-  it('fails the placeholder as research-busy, keeping the image, with no other item, when the AI spend cap is spent', async () => {
+  it('fails the placeholder as research-busy, releasing the image, with no other item, when the AI spend cap is spent', async () => {
     const ctx = setup()
     const { scanId, itemId } = await shelfScan(ctx)
     ctx.recognizer.failNextWith(new AiBudgetExceededError('cap'))
@@ -6815,7 +6815,7 @@ describe('ScanService.advance: recognise, a shelf photo the model cannot or will
     await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
 
     expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-    expect(ctx.photos.stored.size).toBe(1)
+    expect(ctx.photos.stored.size).toBe(0)
     expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising' })
     await noSiblings(ctx, scanId)
   })
@@ -6870,5 +6870,409 @@ describe('ScanService.advance: recognise, a product scan is not a shelf scan', (
     expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
     expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'matching', recognised: { brand: 'CeraVe' } })
     expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising', photoKey: null })
+  })
+})
+
+// A front photo is held only while it may still be shown to the user for a decision: an item using it is recognising or waiting for
+// a confirmation. Every other state releases it: the object leaves the bucket first, then the row's key is cleared.
+describe('ScanService: releasing a front photo once no item needs it', () => {
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+  const keyOnRow = async (ctx: Ctx, itemId: string) => (await ctx.repository.findItem(itemId))!.photoKey
+  const confirmItem = (ctx: Ctx, scanId: string, itemId: string) =>
+    asUser(() => ctx.service.confirm(scanId, itemId, { brand: 'Glow Co', name: 'Confirmed Serum', category: 'skin' }))
+  /** The bucket refuses every delete until the returned spy is restored. */
+  const bucketDown = (ctx: Ctx) => vi.spyOn(ctx.photos, 'delete').mockRejectedValue(new Error('r2 down'))
+  const silenced = () => vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+  describe('a product photo', () => {
+    it('is released the moment a sure read moves the item on to matching: gone from the bucket and from the row', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is kept, and still shown, while the item waits for the user to confirm the read', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    })
+
+    it('is released when the user confirms the read', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+      await confirmItem(ctx, scanId, itemId)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+      expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
+    })
+
+    it('stays held while the item is still recognising', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+    })
+
+    it.each(['researching', 'needs-back-photo', 'reading-label'] as const)('is gone by the time the item is %s', async (target) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await reach(ctx, target)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(target)
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is gone once the item is ready, and a ready product with no stock image shows no image', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', image: null })
+      expect(ctx.photos.stored.size).toBe(0)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('leaves a ready product its stock image, and the photo is gone all the same', async () => {
+      const ctx = setup()
+      ctx.images.respondTo(IMAGE_URL, jpegPhoto())
+      ctx.analyst.imageShowsProductWith(() => true)
+      await catalogued(ctx, CERAVE, { imageUrl: IMAGE_URL })
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      const item = await itemOf(ctx, scanId, itemId)
+      expect(item.image).toEqual({ kind: 'stock', url: item.product.imageUrl })
+      expect(ctx.photos.stored.size).toBe(0)
+    })
+
+    it('is gone once the item failed because the photo was missing from the bucket, and the row no longer points at it', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      ctx.photos.stored.clear()
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is released when the reaper fails an item that has sat recognising for over 2 hours', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      ctx.advance(2 * HOUR + 1)
+
+      await reap(ctx)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is released for a retaken photo as for the first: held while recognising, gone at matching', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, webpPhoto())
+      const retaken = photoKey(scanId, itemId, 'webp')
+      expect(ctx.photos.stored.has(retaken)).toBe(true)
+      ctx.recognizer.respondWith(() => seen())
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(retaken)).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is kept for a retaken photo that needs confirmation', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, webpPhoto())
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-confirmation')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId, 'webp'))).toBe(true)
+      expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    })
+
+    it('is never linked by an event for an item that has let it go', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      const letGo = ctx.events
+        .eventsFor(scanId)
+        .flatMap((event) => (event.type === 'item' && event.item.id === itemId && event.item.state !== 'recognising' ? [event.item] : []))
+      expect(letGo.map((item) => item.state)).toEqual(['matching', 'ready'])
+      expect(letGo.map((item) => item.image)).toEqual([null, null])
+    })
+
+    it('still moves the item on, queues its next step and does not throw, when the bucket refuses the delete; the key stays for a later try, and only ids are logged', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId, itemId }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
+
+    it('does not undo or fail a confirmation when the bucket refuses the delete', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(confirmItem(ctx, scanId, itemId)).resolves.toMatchObject({ id: itemId, state: 'matching' })
+
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId, itemId }))
+    })
+  })
+
+  describe('a shelf photo, shared by the items read from it', () => {
+    /** One shelf photo read as three products at the given confidences (at least 0.6 goes straight to matching, below waits for a confirmation). */
+    const readShelf = async (ctx: Ctx, confidences: number[], photos: ProductImage[] = [markedJpeg(1)]) => {
+      answerShelf(ctx, shelfRead(confidences.map((confidence, i) => shelfProduct(`Shelf ${i}`, confidence))))
+      const scan = await shelfScan(ctx, photos)
+      await run(ctx, scan.itemId, 'recognise')
+      const items = (await ctx.repository.itemsOf(scan.scanId)).filter((i) => i.position < 5)
+      const photo = await photoRow(ctx, scan.scanId)
+      return { ...scan, items, ids: items.map((i) => i.id), photo, key: shelfKey(scan.scanId, photo.id) }
+    }
+
+    it('is released at once when every product read from it is sure, since nothing is left to decide', async () => {
+      const ctx = setup()
+
+      const { scanId, key } = await readShelf(ctx, [0.9, 0.8, 0.7])
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is kept for every item while any one of them waits for a confirmation, and that item shows it through a signed link', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3, 0.8])
+
+      expect((await ctx.repository.itemsOf(scanId)).map((i) => i.state)).toEqual(['matching', 'needs-confirmation', 'matching'])
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+      const image = (await itemOf(ctx, scanId, ids[1]!)).image
+      expect(image).toEqual({ kind: 'user', url: expect.stringMatching(/^\/api\/v1\/scans\/products\/photos\/[A-Za-z0-9_-]+$/) })
+      const token = image.url.replace('/api/v1/scans/products/photos/', '')
+      expect(await verifyPhotoLink(token, PHOTO_SECRET, T0)).toEqual({ key, userId: USER })
+    })
+
+    it('stays held while the other items finish at their own pace, and goes when the last waiting item is confirmed', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3, 0.8])
+      await run(ctx, ids[0]!, 'match')
+      await run(ctx, ids[2]!, 'match')
+      expect(ctx.photos.stored.has(key)).toBe(true)
+
+      await confirmItem(ctx, scanId, ids[1]!)
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('stays held until the LAST of two waiting items is confirmed', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.3, 0.4, 0.9])
+
+      await confirmItem(ctx, scanId, ids[0]!)
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+
+      await confirmItem(ctx, scanId, ids[1]!)
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is released after a failed placeholder holds nothing: a photo whose read was stopped by the AI spend cap', async () => {
+      const ctx = setup()
+      ctx.recognizer.failNextWith(new AiBudgetExceededError('cap'))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const key = shelfKey(scanId, (await photoRow(ctx, scanId)).id)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is cleared from its row when the image was already missing and the placeholder failed as photo-missing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await shelfScan(ctx)
+      ctx.photos.stored.clear()
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('stays held while its placeholder is still recognising', async () => {
+      const ctx = setup()
+      const { scanId } = await shelfScan(ctx)
+
+      const photo = await photoRow(ctx, scanId)
+      expect(ctx.photos.stored.has(shelfKey(scanId, photo.id))).toBe(true)
+      expect(photo.photoKey).toBe(shelfKey(scanId, photo.id))
+    })
+
+    it('releases one photo without touching another that is still held', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('Only', 0.9)]))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [first, second] = await ctx.repository.photosOf(scanId)
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      expect(ctx.photos.stored.has(shelfKey(scanId, first!.id))).toBe(false)
+      expect((await photoRow(ctx, scanId, 0)).photoKey).toBeNull()
+      expect(ctx.photos.stored.has(shelfKey(scanId, second!.id))).toBe(true)
+      expect((await photoRow(ctx, scanId, 1)).photoKey).toBe(shelfKey(scanId, second!.id))
+    })
+
+    it('does not undo or fail the confirmation when the bucket refuses the delete; the photo keeps its key', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3])
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(confirmItem(ctx, scanId, ids[1]!)).resolves.toMatchObject({ id: ids[1], state: 'matching' })
+
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
+  })
+
+  describe('the reaper sweeps the keys that were missed', () => {
+    it('releases a product photo a refused delete left behind, and leaves the item as it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      const down = bucketDown(ctx)
+      silenced()
+      await run(ctx, itemId, 'recognise')
+      down.mockRestore()
+      const before = await ctx.repository.findItem(itemId)
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+      expect(await ctx.repository.findItem(itemId)).toEqual({ ...before, photoKey: null })
+    })
+
+    it('releases a shelf photo a refused delete left behind', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.8)]))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const key = shelfKey(scanId, (await photoRow(ctx, scanId)).id)
+      const down = bucketDown(ctx)
+      silenced()
+      await run(ctx, itemId, 'recognise')
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      down.mockRestore()
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('does not touch a photo that is still held: an item recognising or waiting for a confirmation, product or shelf', async () => {
+      const ctx = setup()
+      const recognising = await scanOne(ctx)
+      const waiting = await reach(ctx, 'needs-confirmation')
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.3)]))
+      const shelf = await shelfScan(ctx, [markedJpeg(5)])
+      await run(ctx, shelf.itemId, 'recognise')
+      const shelfStored = shelfKey(shelf.scanId, (await photoRow(ctx, shelf.scanId)).id)
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(recognising.scanId, recognising.itemId))).toBe(true)
+      expect(ctx.photos.stored.has(photoKey(waiting.scanId, waiting.itemId))).toBe(true)
+      expect(await keyOnRow(ctx, recognising.itemId)).toBe(photoKey(recognising.scanId, recognising.itemId))
+      expect(await keyOnRow(ctx, waiting.itemId)).toBe(photoKey(waiting.scanId, waiting.itemId))
+      expect(ctx.photos.stored.has(shelfStored)).toBe(true)
+      expect((await photoRow(ctx, shelf.scanId)).photoKey).toBe(shelfStored)
+    })
+
+    it('releases at most 100 keys in one sweep and the rest in the next', async () => {
+      const ctx = setup({ policy: { maxPhotosPerScan: 101, dailyPhotosPerUser: 1000, dailyPhotosPerIp: 1000 } })
+      const scan = await create(ctx, Array.from({ length: 101 }, (_, i) => markedJpeg(i)))
+      const down = bucketDown(ctx)
+      silenced()
+      for (const item of scan.items) await run(ctx, item.id, 'recognise')
+      expect(ctx.photos.stored.size).toBe(101)
+      down.mockRestore()
+
+      await reap(ctx)
+      expect(ctx.photos.stored.size).toBe(1)
+      expect((await ctx.repository.itemsOf(scan.id)).filter((i) => i.photoKey !== null)).toHaveLength(1)
+
+      await reap(ctx)
+      expect(ctx.photos.stored.size).toBe(0)
+      expect((await ctx.repository.itemsOf(scan.id)).filter((i) => i.photoKey !== null)).toHaveLength(0)
+    })
+
+    it('logs the item whose delete fails and carries on with the rest, leaving the failed key for the next sweep', async () => {
+      const ctx = setup()
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [stuck, other] = scan.items
+      const down = bucketDown(ctx)
+      const logged = silenced()
+      for (const item of scan.items) await run(ctx, item.id, 'recognise')
+      down.mockRestore()
+      const stuckKey = photoKey(scan.id, stuck.id)
+      const realDelete = ctx.photos.delete.bind(ctx.photos)
+      vi.spyOn(ctx.photos, 'delete').mockImplementation(async (key) => {
+        if (key === stuckKey) throw new Error('r2 down')
+        return realDelete(key)
+      })
+      logged.mockClear()
+
+      await expect(reap(ctx)).resolves.toBeDefined()
+
+      expect(ctx.photos.stored.has(photoKey(scan.id, other.id))).toBe(false)
+      expect(await keyOnRow(ctx, other.id)).toBeNull()
+      expect(ctx.photos.stored.has(stuckKey)).toBe(true)
+      expect(await keyOnRow(ctx, stuck.id)).toBe(stuckKey)
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', itemId: stuck.id }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
   })
 })

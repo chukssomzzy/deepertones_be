@@ -64,7 +64,12 @@ export const scanPhotos = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
   },
-  (t) => [uniqueIndex('scan_photos_scan_id_position_idx').on(t.scanId, t.position), index('scan_photos_user_id_idx').on(t.userId)],
+  (t) => [
+    uniqueIndex('scan_photos_scan_id_position_idx').on(t.scanId, t.position),
+    index('scan_photos_user_id_idx').on(t.userId),
+    // The reaper's sweep for shelf photos still holding a key: only those rows are in it, so it stays small as released photos leave it.
+    index('scan_photos_held_updated_at_idx').on(t.updatedAt).where(sql`${t.photoKey} IS NOT NULL`),
+  ],
 )
 
 /** One photo of one product, and where it has got to. `product_id` and `formulation_id` point into the catalog, which is not this module's, so they carry no foreign key. */
@@ -117,6 +122,8 @@ export const scanItems = sqliteTable(
     index('scan_items_user_id_created_at_idx').on(t.userId, t.createdAt),
     // The reaper looks for items that have sat in a working state for too long.
     index('scan_items_state_updated_at_idx').on(t.state, t.updatedAt),
+    // The reaper's sweep for product photos still holding a key: only those rows are in it, so it stays small as released photos leave it.
+    index('scan_items_held_updated_at_idx').on(t.updatedAt).where(sql`${t.photoKey} IS NOT NULL`),
   ],
 )
 
