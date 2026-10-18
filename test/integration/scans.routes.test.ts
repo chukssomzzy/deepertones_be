@@ -27,6 +27,8 @@ const DAY_SECONDS = 24 * 60 * 60
 // The one clock for hand-made tokens: "now" is the real clock the Worker runs on, fixtures are offsets.
 const NOW = Date.now()
 const SCAN_QUEUE = 'deepertones-scan-items-development'
+// The ten-photo body is about 20 MB, and how long workerd takes to upload it grows with machine load.
+const BIG_UPLOAD_TIMEOUT_MS = 30_000
 /** What a request is asked to hold at most, and what the service accepts per photo (SCAN_POLICY). */
 const MAX_PHOTO_BYTES = 2_000_000
 /** One byte over what POST /api/v1/scans/products accepts: 10 photos plus 1,000,000 of multipart framing. */
@@ -332,7 +334,7 @@ describe('POST /api/v1/scans/products', () => {
     const eleven = await createScan(await newGuest(), Array.from({ length: 11 }, (_, i) => fileOf(markedJpeg(i), `p${i}`)))
     expect(eleven.status).toBe(400)
     expect(await errorCodeOf(eleven)).toBe('TOO_MANY_IMAGES')
-  })
+  }, BIG_UPLOAD_TIMEOUT_MS)
 
   describe('what it refuses', () => {
     it('refuses a JSON body with 415', async () => {
