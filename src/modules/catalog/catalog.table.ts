@@ -1,5 +1,5 @@
 import { index, integer, primaryKey, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
-import { CATEGORIES, CONCERN_KINDS, SEVERITIES, TRAITS } from './catalog.vocabulary'
+import { CATEGORIES, CONCERN_KINDS, PRODUCT_FORMS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 /** A product, once for everyone. `identity_key` is built by catalog.identity. */
 export const products = sqliteTable(
@@ -13,6 +13,7 @@ export const products = sqliteTable(
     brand: text('brand').notNull(),
     name: text('name').notNull(),
     variant: text('variant'),
+    form: text('form', { enum: PRODUCT_FORMS }),
     category: text('category', { enum: CATEGORIES }).notNull(),
     // brand, name and variant, normalised (catalog.identity normaliseText), for search; '' for an unnamed product, which search never returns.
     searchText: text('search_text').notNull().default(''),

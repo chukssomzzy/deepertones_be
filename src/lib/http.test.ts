@@ -1,6 +1,6 @@
 import { firstValueFrom, lastValueFrom, toArray } from 'rxjs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { HttpNetworkError, HttpTimeoutError, HttpTooLargeError, HttpTransportError, requestBytes$, requestJson$ } from './http'
+import { HttpNetworkError, HttpTimeoutError, HttpTooLargeError, HttpTransportError, requestBytes$, requestHeadBytes$, requestJson$ } from './http'
 
 const URL_ = 'https://vendor.test/send'
 const TIMEOUT_MS = 20
@@ -312,5 +312,52 @@ describe('requestBytes$', () => {
 
     expect(error).toBeInstanceOf(Error)
     expect(error).not.toBeInstanceOf(HttpTransportError)
+  })
+})
+
+describe('requestHeadBytes$', () => {
+  const MAX_BYTES = 8
+  const request = () => requestHeadBytes$(URL_, { timeoutMs: TIMEOUT_MS, maxBytes: MAX_BYTES })
+
+  it('cuts a body bigger than maxBytes at the cap instead of failing', async () => {
+    stubFetch(async () => new Response(new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]), { headers: { 'content-length': '12' } }))
+
+    const result = await firstValueFrom(request())
+
+    expect(Array.from(result.bytes)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
+  it('returns a body under the cap whole', async () => {
+    stubFetch(async () => new Response(new Uint8Array([1, 2, 3])))
+
+    expect(Array.from((await firstValueFrom(request())).bytes)).toEqual([1, 2, 3])
+  })
+
+  it('stops pulling an endless body once the cap is reached', async () => {
+    let pulled = 0
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          pulled += 4
+          controller.enqueue(new Uint8Array(4))
+        },
+      },
+      { highWaterMark: 0 },
+    )
+    stubFetch(async () => new Response(body))
+
+    const result = await firstValueFrom(request())
+
+    expect(result.bytes.byteLength).toBe(MAX_BYTES)
+    expect(pulled).toBeLessThanOrEqual(MAX_BYTES + 4)
+  })
+
+  it('does not follow a redirect and emits its location', async () => {
+    const stub = stubFetch(async () => new Response(null, { status: 302, headers: { location: 'https://cdn.test/x' } }))
+
+    const result = await firstValueFrom(request())
+
+    expect(result).toMatchObject({ status: 302, location: 'https://cdn.test/x' })
+    expect(stub.mock.calls[0]![1]).toMatchObject({ redirect: 'manual' })
   })
 })

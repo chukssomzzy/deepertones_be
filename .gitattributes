@@ -1,0 +1,2 @@
+# The prompts generator requires LF line endings (scripts/prompts/generate.ts rejects CRLF).
+src/prompts/*.md text eol=lf

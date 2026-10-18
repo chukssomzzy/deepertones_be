@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "ae142563-66b4-4b8d-ac36-fdce72d1960c",
+  "id": "a6cbb842-8e94-4840-8b40-e446b407be08",
   "prevId": "c2ebe230-528e-4722-8a7f-e3bbfcb846f2",
   "tables": {
     "job_runs": {
@@ -614,6 +614,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "form": {
+          "name": "form",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "category": {
           "name": "category",
           "type": "text",
@@ -1063,6 +1070,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "recognised_form": {
+          "name": "recognised_form",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "recognised_category": {
           "name": "recognised_category",
           "type": "text",
@@ -1139,82 +1153,6 @@
           "tableTo": "scans",
           "columnsFrom": [
             "scan_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "scan_retakes": {
-      "name": "scan_retakes",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "item_id": {
-          "name": "item_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "ip_hash": {
-          "name": "ip_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "uploaded_at": {
-          "name": "uploaded_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "scan_retakes_user_id_uploaded_at_idx": {
-          "name": "scan_retakes_user_id_uploaded_at_idx",
-          "columns": [
-            "user_id",
-            "uploaded_at"
-          ],
-          "isUnique": false
-        },
-        "scan_retakes_ip_hash_uploaded_at_idx": {
-          "name": "scan_retakes_ip_hash_uploaded_at_idx",
-          "columns": [
-            "ip_hash",
-            "uploaded_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "scan_retakes_item_id_scan_items_id_fk": {
-          "name": "scan_retakes_item_id_scan_items_id_fk",
-          "tableFrom": "scan_retakes",
-          "tableTo": "scan_items",
-          "columnsFrom": [
-            "item_id"
           ],
           "columnsTo": [
             "id"

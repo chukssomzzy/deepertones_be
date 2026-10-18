@@ -20,6 +20,9 @@ export const hmacSha256Hex = async (key: string, value: string): Promise<string>
   return Array.from(new Uint8Array(signature), (b) => b.toString(16).padStart(2, '0')).join('')
 }
 
+export const sha256Hex = async (value: string): Promise<string> =>
+  Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(value))), (b) => b.toString(16).padStart(2, '0')).join('')
+
 /** Compares without stopping at the first difference, so timing does not reveal how much matched. */
 export const timingSafeEqual = (a: string, b: string): boolean => {
   if (a.length !== b.length) return false

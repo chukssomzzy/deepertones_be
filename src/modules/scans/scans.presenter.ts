@@ -12,6 +12,7 @@ const toProductResponse = ({ product, formulation, concerns, reference }: Produc
     brand: product.brand,
     name: product.name,
     variant: product.variant,
+    form: product.form,
     category: product.category,
     imageUrl: product.imageUrl,
   },
@@ -41,7 +42,15 @@ export const toScanItemResponse = (item: ScanItemView): z.infer<typeof ScanItemR
   reason: item.reason,
   ...(item.retakesLeft === undefined ? {} : { retakesLeft: item.retakesLeft }),
   ...(item.recognised
-    ? { recognised: { brand: item.recognised.brand, name: item.recognised.name, variant: item.recognised.variant, category: item.recognised.category } }
+    ? {
+        recognised: {
+          brand: item.recognised.brand,
+          name: item.recognised.name,
+          variant: item.recognised.variant,
+          form: item.recognised.form,
+          category: item.recognised.category,
+        },
+      }
     : {}),
   ...(item.product ? { product: toProductResponse(item.product) } : {}),
   image: item.image ? { kind: item.image.kind, url: item.image.url } : null,

@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9a62602a-1a7f-4dc8-8e92-72453ee548e5",
-  "prevId": "ae142563-66b4-4b8d-ac36-fdce72d1960c",
+  "id": "6454f60c-7e8e-4800-804a-f06221bb7dcd",
+  "prevId": "a6cbb842-8e94-4840-8b40-e446b407be08",
   "tables": {
     "job_runs": {
       "name": "job_runs",
@@ -593,14 +593,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "kind": {
-          "name": "kind",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'named'"
-        },
         "brand": {
           "name": "brand",
           "type": "text",
@@ -617,6 +609,13 @@
         },
         "variant": {
           "name": "variant",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "form": {
+          "name": "form",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -954,6 +953,13 @@
         }
       },
       "indexes": {
+        "scan_back_photos_item_id_idx": {
+          "name": "scan_back_photos_item_id_idx",
+          "columns": [
+            "item_id"
+          ],
+          "isUnique": false
+        },
         "scan_back_photos_user_id_uploaded_at_idx": {
           "name": "scan_back_photos_user_id_uploaded_at_idx",
           "columns": [
@@ -1071,6 +1077,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "recognised_form": {
+          "name": "recognised_form",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "recognised_category": {
           "name": "recognised_category",
           "type": "text",
@@ -1147,82 +1160,6 @@
           "tableTo": "scans",
           "columnsFrom": [
             "scan_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "scan_retakes": {
-      "name": "scan_retakes",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "item_id": {
-          "name": "item_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "ip_hash": {
-          "name": "ip_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "uploaded_at": {
-          "name": "uploaded_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "scan_retakes_user_id_uploaded_at_idx": {
-          "name": "scan_retakes_user_id_uploaded_at_idx",
-          "columns": [
-            "user_id",
-            "uploaded_at"
-          ],
-          "isUnique": false
-        },
-        "scan_retakes_ip_hash_uploaded_at_idx": {
-          "name": "scan_retakes_ip_hash_uploaded_at_idx",
-          "columns": [
-            "ip_hash",
-            "uploaded_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "scan_retakes_item_id_scan_items_id_fk": {
-          "name": "scan_retakes_item_id_scan_items_id_fk",
-          "tableFrom": "scan_retakes",
-          "tableTo": "scan_items",
-          "columnsFrom": [
-            "item_id"
           ],
           "columnsTo": [
             "id"
