@@ -27,8 +27,7 @@ type SummaryRow = {
 
 /**
  * In-memory AiUsageRepository for unit tests. Behaviour is pinned by aiUsageRepositoryContract.
- * insertReservation checks and inserts without awaiting in between, as the one conditional statement on D1 does,
- * so simultaneous callers cannot overshoot the cap here either.
+ * insertReservation inserts and sums without awaiting in between, as the one batch on D1 does.
  */
 export class FakeAiUsageRepository implements AiUsageRepository {
   private rows: Row[] = []
@@ -41,8 +40,7 @@ export class FakeAiUsageRepository implements AiUsageRepository {
     createdAt: Date
     capMicros: number
     since: Date
-  }): Promise<boolean> {
-    if (this.committed(input.since) + input.estimateMicros > input.capMicros) return false
+  }): Promise<{ overCap: boolean }> {
     if (this.rows.some((r) => r.id === input.id)) throw new Error(`duplicate reservation id ${input.id}`)
     this.rows.push({
       id: input.id,
@@ -55,7 +53,7 @@ export class FakeAiUsageRepository implements AiUsageRepository {
       createdAt: input.createdAt,
       settledAt: null,
     })
-    return true
+    return { overCap: this.committed(input.since) > input.capMicros }
   }
 
   async settle(id: string, input: { usage: AiUsage; costMicros: number; settledAt: Date }): Promise<void> {
