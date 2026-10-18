@@ -1,10 +1,12 @@
 import { convert } from 'html-to-text'
 import { layout, PREHEADER_CLASS } from './components/layout'
 import type { EmailContent } from './html'
+import { opsAlert } from './templates/ops-alert'
 import { otpCode } from './templates/otp-code'
 import type { EmailTemplate, TemplateOutput } from './templates/template'
 
 export const templates = {
+  'ops-alert': opsAlert,
   'otp-code': otpCode,
 } satisfies Record<string, { render(data: never): TemplateOutput; sample: unknown }>
 

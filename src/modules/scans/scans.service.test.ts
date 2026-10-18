@@ -3,8 +3,8 @@ import { PermanentJobError } from '../../jobs/job'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { runAs } from '../../lib/context'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
-import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
-import { AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
+import { AnthropicConfigError, AnthropicRefusalError, AnthropicRequestError, AnthropicUnavailableError } from '../../providers/anthropic/anthropic.provider'
+import { MemoryEmailSender } from '../../providers/email/memory.email'
 import { MemoryCatalogImageStore } from '../../providers/catalog-images/memory.catalog-image-store'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryLabelReader } from '../../providers/label-reading/memory.label-reader'
@@ -21,13 +21,15 @@ import type { ProductIdentity } from '../../providers/product-research/product-r
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
-import { AnalysisInProgressError, CatalogBusyError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
+import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
 import { REFERENCE_VERSION } from '../catalog/catalog.reference'
 import { ANALYSIS_VERSION, FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
 import { NotificationsService } from '../notifications/notifications.service'
 import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
+import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import { advanceScanItemSpec, type AdvanceScanItemMessage } from './scans.job-specs'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from './scans.photos.fake'
@@ -89,12 +91,23 @@ const setup = (options: SetupOptions = {}) => {
   const researcher = new MemoryProductResearcher()
   const analyst = new MemoryProductAnalyst()
   const images = new MemoryCatalogImageStore()
+  // The real alerting service, on a queue of its own (`queued`, `queuedWithTime` and `drain` read every message on `jobs` as a scan step).
+  const opsJobs = new MemoryJobQueue()
+  const opsAlerts = new OpsAlertsService({
+    repository: new FakeOpsAlertsRepository(),
+    jobs: opsJobs,
+    email: new MemoryEmailSender(),
+    recipient: 'ops@example.com',
+    environment: 'test',
+    now: () => clock,
+  })
   const catalog = new ProductCatalogService({
     repository: catalogRepository,
     researcher,
     analyst,
     images,
     imageKeyPrefix: 'catalog/test',
+    opsAlerts,
     now: () => clock,
     newId: () => `cat-${++c}`,
   })
@@ -125,6 +138,7 @@ const setup = (options: SetupOptions = {}) => {
     jobs,
     events,
     notifications,
+    opsAlerts,
     photoLinkSecret: PHOTO_SECRET,
     ipHashSecret: options.ipHashSecret ?? IP_SECRET,
     environment: 'test',
@@ -146,6 +160,9 @@ const setup = (options: SetupOptions = {}) => {
     photos,
     jobs,
     pushJobs,
+    opsJobs,
+    /** The kind and window of every ops alert queued so far. */
+    alerts: () => opsJobs.enqueued.map((e) => e.body as { kind: string; windowStart: number }),
     events,
     advance: (ms: number) => (clock = new Date(clock.getTime() + ms)),
     now: () => clock,
@@ -1017,34 +1034,6 @@ describe('ScanService.advance: match', () => {
     expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'analysis-failed' })
   })
 
-  it('fails the item as research-busy, without throwing, when the catalog is busy', async () => {
-    const ctx = setup()
-    await catalogued(ctx, { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' })
-    // A near miss the catalog must ask the model about, while the AI spend cap is spent.
-    ctx.recognizer.respondWith(() => seen({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))
-    const { scanId, itemId } = await scanOne(ctx)
-    await run(ctx, itemId, 'recognise')
-    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
-
-    await run(ctx, itemId, 'match')
-
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-  })
-
-  it('keeps the photo of an item that failed as research-busy, so the user can try again', async () => {
-    const ctx = setup()
-    await catalogued(ctx, { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' })
-    ctx.recognizer.respondWith(() => seen({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))
-    const { scanId, itemId } = await scanOne(ctx)
-    await run(ctx, itemId, 'recognise')
-    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
-
-    await run(ctx, itemId, 'match')
-
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-    expect((await itemOf(ctx, scanId, itemId)).image.kind).toBe('user')
-  })
-
   it('does nothing for an item that is not matching: the catalog is not asked', async () => {
     const ctx = setup()
     const { scanId, itemId } = await scanOne(ctx)
@@ -1105,30 +1094,6 @@ describe('ScanService.advance: research', () => {
 
     expect((await itemOf(ctx, scanId, itemId))).toMatchObject({ state: 'ready', product: { formulation: { id: old.formulationId } } })
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: old.productId, formulationId: old.formulationId })
-  })
-
-  it('shows the earlier analysed formulation as ready when the AI spend cap stops the new research', async () => {
-    const ctx = setup()
-    const old = await catalogued(ctx)
-    ctx.advance(STALE)
-    const { scanId, itemId } = await reach(ctx, 'matching')
-    await run(ctx, itemId, 'match')
-    ctx.researcher.failNextWith(new AiBudgetExceededError('cap'))
-
-    await run(ctx, itemId, 'research')
-
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'ready', reason: null })
-    expect(await ctx.repository.findItem(itemId)).toMatchObject({ formulationId: old.formulationId })
-  })
-
-  it('fails the item as research-busy, without throwing, when the spend cap stops research and there is nothing earlier to show', async () => {
-    const ctx = setup()
-    const { scanId, itemId } = await reach(ctx, 'researching')
-    ctx.researcher.failNextWith(new AiBudgetExceededError('cap'))
-
-    await run(ctx, itemId, 'research')
-
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
   })
 
   it('does nothing for an item that is not researching: the researcher is not asked', async () => {
@@ -1337,7 +1302,7 @@ describe('ScanService.advance: the cap on back photos per item', () => {
     expect(ctx.jobs.enqueued).toHaveLength(queuedBefore)
   })
 
-  // The other final failures (fail(), e.g. research-busy, analysis-failed) keep the front photo: only a rejected photo is deleted. This mirrors them,
+  // The other final failures (fail(), e.g. unavailable, analysis-failed) keep the front photo: only a rejected photo is deleted. This mirrors them,
   // so the failed item still shows the user's own photo.
   it('keeps the front photo of an item it ends, as the other failures do', async () => {
     const ctx = setup()
@@ -1442,16 +1407,6 @@ describe('ScanService.advance: analyse', () => {
     const stored = await ctx.repository.findItem(itemId)
     expect(item.product).toEqual(await ctx.catalog.productView(stored!.formulationId!))
     expect(item.product.formulation.analysedAt).toEqual(T0)
-  })
-
-  it('fails the item as research-busy, without throwing, when the catalog cannot analyse today', async () => {
-    const ctx = setup()
-    const { scanId, itemId } = await analysingItem(ctx)
-    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
-
-    await expect(run(ctx, itemId, 'analyse')).resolves.toBeUndefined()
-
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
   })
 
   it('throws, leaving the item analysing so the queue retries, when the analysis is rejected but may yet pass', async () => {
@@ -2678,7 +2633,6 @@ describe('ScanService: a queue that fails', () => {
 describe('ScanService.advance: what the model cannot or will not do', () => {
   const refused = () => new AnthropicRefusalError('Claude refused to answer')
   const unusable = () => new AnthropicRequestError('Claude returned text that is not valid JSON')
-  const capped = () => new AiBudgetExceededError('cap')
 
   describe('recognise', () => {
     it('asks for a retake of a photo the model refused to look at, as unreadable, deletes it, and does not throw', async () => {
@@ -2703,18 +2657,6 @@ describe('ScanService.advance: what the model cannot or will not do', () => {
 
       expect(error).toBeInstanceOf(PermanentJobError)
       expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
-    })
-
-    it('fails the item as research-busy, keeps its photo, and does not throw, when the AI spend cap is spent', async () => {
-      const ctx = setup()
-      const { scanId, itemId } = await scanOne(ctx)
-      ctx.recognizer.failNextWith(capped())
-
-      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
-
-      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-      expect((await itemOf(ctx, scanId, itemId)).image.kind).toBe('user')
     })
 
     it('still throws when the model is merely unavailable, leaving the item recognising for the queue to retry', async () => {
@@ -2743,17 +2685,6 @@ describe('ScanService.advance: what the model cannot or will not do', () => {
       expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-back-photo', reason: 'label-unreadable' })
       expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(false)
       expect((await ctx.repository.findItem(itemId))!.backPhotoKey).toBeNull()
-    })
-
-    it('fails the item as research-busy, keeps the back photo, and does not throw, when the AI spend cap is spent', async () => {
-      const ctx = setup()
-      const { scanId, itemId } = await reach(ctx, 'reading-label')
-      ctx.labelReader.failNextWith(capped())
-
-      await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
-
-      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-      expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
     })
 
     it('asks again for a photo of the back, rather than failing, when the back photo is gone', async () => {
@@ -2840,6 +2771,185 @@ describe('ScanService.advance: waiting for work another call is doing', () => {
     await expect(run(ctx, itemId, 'research')).rejects.toBe(outage)
 
     expect((await stateOf(ctx, scanId, itemId)).state).toBe('researching')
+  })
+})
+
+describe('ScanService.advance: Claude refuses our account (no credit, a bad key, permissions)', () => {
+  // An environment-wide problem is ours to fix, never the user's: the item waits and the owner is emailed, at most once an hour.
+  const account = () => new AnthropicConfigError('Claude rejected our credentials')
+  const ACCOUNT_WAIT_SECONDS = 300
+  const KNOWN = { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' } as const
+  const ALERT = [{ kind: 'ai-account', windowStart: T0.getTime() }]
+
+  type Arrange = (ctx: Ctx) => Promise<{ scanId: string; itemId: string }>
+  const STEPS: [string, Step, string, Arrange, (ctx: Ctx) => void][] = [
+    ['recognise', 'recognise', 'recognising', (ctx) => scanOne(ctx), (ctx) => ctx.recognizer.failNextWith(account())],
+    [
+      'match (the catalog asks the same-product judge)',
+      'match',
+      'matching',
+      async (ctx) => {
+        await catalogued(ctx, KNOWN)
+        ctx.recognizer.respondWith(() => seen({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))
+        const taken = await scanOne(ctx)
+        await run(ctx, taken.itemId, 'recognise')
+        return taken
+      },
+      (ctx) => ctx.analyst.failNextWith(account()),
+    ],
+    ['research', 'research', 'researching', (ctx) => reach(ctx, 'researching'), (ctx) => ctx.researcher.failNextWith(account())],
+    ['read-label', 'read-label', 'reading-label', (ctx) => reach(ctx, 'reading-label'), (ctx) => ctx.labelReader.failNextWith(account())],
+    ['read-label of an item with no product', 'read-label', 'reading-label', (ctx) => readingUnidentified(ctx), (ctx) => ctx.labelReader.failNextWith(account())],
+    ['analyse', 'analyse', 'analysing', (ctx) => analysingItem(ctx), (ctx) => ctx.analyst.failNextWith(account())],
+  ]
+
+  describe.each(STEPS)('in the %s step', (_label, step, state, arrange, arrangeFailure) => {
+    it(`leaves the item ${state}, queues the same step again ${ACCOUNT_WAIT_SECONDS} seconds later under a key of its own, raises ai-account and does not throw`, async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const original = queuedWithTime(ctx).filter((m) => m.itemId === itemId).at(-1)!
+      ctx.advance(MINUTE)
+      arrangeFailure(ctx)
+      const before = ctx.jobs.enqueued.length
+      const events = ctx.events.published.length
+
+      await expect(run(ctx, itemId, step)).resolves.toBeUndefined()
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state, reason: null })
+      const waited = queuedWithTime(ctx).slice(before)
+      expect(waited).toEqual([{ itemId, step, at: ctx.now().getTime(), delaySeconds: ACCOUNT_WAIT_SECONDS }])
+      expect(advanceScanItemSpec.key(waited[0]!)).not.toBe(advanceScanItemSpec.key(original))
+      expect(ctx.alerts()).toEqual(ALERT)
+      expect(ctx.events.published).toHaveLength(events)
+    })
+
+    it('does not change the item\'s updatedAt, so the reaper\'s 2 hour limit counts from when it entered the state', async () => {
+      const ctx = setup()
+      const { itemId } = await arrange(ctx)
+      const entered = (await ctx.repository.findItem(itemId))!.updatedAt
+      ctx.advance(MINUTE)
+      arrangeFailure(ctx)
+
+      await run(ctx, itemId, step)
+
+      expect((await ctx.repository.findItem(itemId))!.updatedAt).toEqual(entered)
+    })
+
+    it('goes on from where it was once the account works again', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      arrangeFailure(ctx)
+      await run(ctx, itemId, step)
+      ctx.advance(ACCOUNT_WAIT_SECONDS * SECOND)
+
+      await run(ctx, itemId, step)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).not.toBe(state)
+    })
+
+    it('throws, for the queue to retry, when the waiting message cannot be queued, leaving the item as it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      arrangeFailure(ctx)
+      const outage = new Error('queue is down')
+      ctx.jobs.failNextWith(outage)
+
+      await expect(run(ctx, itemId, step)).rejects.toBe(outage)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state, reason: null })
+    })
+
+    it('still waits when the alert cannot be queued: the alert never costs the item its wait', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {})
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      arrangeFailure(ctx)
+      ctx.opsJobs.failNextWith(new Error('alert queue is down'))
+      const before = ctx.jobs.enqueued.length
+
+      await expect(run(ctx, itemId, step)).resolves.toBeUndefined()
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
+      expect(queuedWithTime(ctx).slice(before)).toHaveLength(1)
+    })
+  })
+
+  it('keeps the photo of a waiting item, so nothing is lost while the account is fixed', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await scanOne(ctx)
+    ctx.recognizer.failNextWith(account())
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect((await itemOf(ctx, scanId, itemId)).image.kind).toBe('user')
+  })
+
+  describe('the alert, at most once an hour for the kind', () => {
+    const twoItems = async () => {
+      const ctx = setup()
+      ctx.recognizer.respondWith(() => {
+        throw account()
+      })
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+      return { ctx, a: scan.items[0].id as string, b: scan.items[1].id as string }
+    }
+
+    it('is one email for many items: two items waiting on the account queue two waits and one alert', async () => {
+      const { ctx, a, b } = await twoItems()
+      const before = ctx.jobs.enqueued.length
+
+      await run(ctx, a, 'recognise')
+      await run(ctx, b, 'recognise')
+
+      expect(ctx.jobs.enqueued).toHaveLength(before + 2)
+      expect(ctx.alerts()).toEqual(ALERT)
+    })
+
+    it('is one email for the same item waiting again and again within the hour', async () => {
+      const { ctx, a } = await twoItems()
+
+      await run(ctx, a, 'recognise')
+      ctx.advance(ACCOUNT_WAIT_SECONDS * SECOND)
+      await run(ctx, a, 'recognise')
+
+      expect(ctx.alerts()).toEqual(ALERT)
+    })
+
+    it('is still the same alert at the last millisecond of the hour, and a new one at the first millisecond of the next', async () => {
+      const { ctx, a, b } = await twoItems()
+      await run(ctx, a, 'recognise')
+
+      ctx.advance(HOUR - 1)
+      await run(ctx, b, 'recognise')
+      expect(ctx.alerts()).toEqual(ALERT)
+
+      ctx.advance(1)
+      await run(ctx, a, 'recognise')
+      expect(ctx.alerts()).toEqual([...ALERT, { kind: 'ai-account', windowStart: T0.getTime() + HOUR }])
+    })
+  })
+
+  it('raises no alert for a model that is merely unavailable', async () => {
+    const ctx = setup()
+    const { itemId } = await scanOne(ctx)
+    ctx.recognizer.failNextWith(new AnthropicUnavailableError('overloaded'))
+
+    await expect(run(ctx, itemId, 'recognise')).rejects.toBeInstanceOf(AnthropicUnavailableError)
+
+    expect(ctx.alerts()).toEqual([])
+  })
+
+  it('is still bounded by the reaper: an item that has waited on the account for over 2 hours is failed as unavailable, not research-busy', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await scanOne(ctx)
+    ctx.recognizer.failNextWith(account())
+    await run(ctx, itemId, 'recognise')
+    ctx.advance(2 * HOUR + 1)
+
+    await asJob(() => ctx.service.reap(ctx.now()))
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
   })
 })
 
@@ -4271,16 +4381,6 @@ describe('ScanService.advance: read-label, an item with no product, whose back c
     expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
   })
 
-  it('fails the item as research-busy, keeps the back photo and does not throw, when the AI spend cap is spent', async () => {
-    const ctx = setup()
-    const { scanId, itemId } = await readingUnidentified(ctx)
-    ctx.labelReader.failNextWith(new AiBudgetExceededError('cap'))
-
-    await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
-
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
-    expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
-  })
 })
 
 describe('ScanService: an item identified by its back photo, through the queue', () => {
@@ -4316,35 +4416,36 @@ describe('ScanService: an item identified by its back photo, through the queue',
   })
 })
 
-describe('ScanService.advance: read-label, an item with no product, when the AI spend cap stops the catalog\'s question', () => {
+describe('ScanService.advance: read-label, an item with no product, when Claude refuses our account on the catalog\'s question', () => {
   const KNOWN = { brand: 'Acme', name: 'Radiance Serum Vitamin Glow', category: 'skin' } as const
   // Its name nearly matches KNOWN's, so the catalog asks the judge whether they are the same product.
   const NEAR_MISS = readNamed(CLEAN, { brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster', category: 'skin' })
 
-  it('fails the item as research-busy without throwing, keeping the back photo, creating no product or alias and queueing nothing', async () => {
+  it('leaves the item reading, queues the read again 300 seconds on and raises ai-account, creating no product or alias, keeping the back photo and not throwing', async () => {
     const ctx = setup()
     await catalogued(ctx, KNOWN)
     const { scanId, itemId } = await readingUnidentified(ctx)
     ctx.labelReader.respondWith(() => NEAR_MISS)
-    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+    ctx.analyst.failNextWith(new AnthropicConfigError('Claude rejected our credentials'))
     const jobs = ctx.jobs.enqueued.length
 
     await expect(run(ctx, itemId, 'read-label')).resolves.toBeUndefined()
 
-    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'research-busy' })
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'reading-label', reason: null })
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: null, formulationId: null })
     expect(await ctx.catalogRepository.findProductByKey(identityKey({ brand: 'Acme', name: 'Radiance Serum Vitamin Glow Booster' }))).toBeNull()
     expect(await ctx.catalogRepository.productsByBrandFamily('acme', 10)).toHaveLength(1)
-    expect(ctx.jobs.enqueued).toHaveLength(jobs)
+    expect(queuedWithTime(ctx).slice(jobs)).toEqual([{ itemId, step: 'read-label', at: ctx.now().getTime(), delaySeconds: 300 }])
     expect(ctx.photos.stored.has(backKey(scanId, itemId))).toBe(true)
+    expect(ctx.alerts()).toEqual([{ kind: 'ai-account', windowStart: T0.getTime() }])
   })
 
-  it('shows nothing as recognised for the failed item, because nothing was identified', async () => {
+  it('shows nothing as recognised for the waiting item, because nothing was identified', async () => {
     const ctx = setup()
     await catalogued(ctx, KNOWN)
     const { scanId, itemId } = await readingUnidentified(ctx)
     ctx.labelReader.respondWith(() => NEAR_MISS)
-    ctx.analyst.failNextWith(new AiBudgetExceededError('cap'))
+    ctx.analyst.failNextWith(new AnthropicConfigError('Claude rejected our credentials'))
 
     await run(ctx, itemId, 'read-label')
 
@@ -4391,6 +4492,56 @@ describe('ScanService.identifyByName', () => {
       expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { variant: 'Night' } })
       expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
       expect(queued(ctx)).toEqual(queuedBefore)
+    })
+
+    it('shows the chosen product\'s form as what the item was recognised as, and keeps it on the item', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx, { ...CERAVE, form: 'spray' })
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: 'spray', category: 'skin' })
+      expect(view.product.product).toMatchObject({ id: productId, form: 'spray' })
+      expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'spray' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ recognisedForm: 'spray' })
+    })
+
+    it('shows a null form for a chosen product that has none', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const { productId } = await catalogued(ctx)
+
+      const view = await identify(ctx, scanId, itemId, { productId })
+
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin' })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ recognisedForm: null })
+    })
+
+    it('takes the form of the product picked, not of a sibling that differs only by form', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      await catalogued(ctx, { ...CERAVE, form: 'spray' })
+      const rollOn = await catalogued(ctx, { ...CERAVE, form: 'roll-on' })
+
+      const view = await identify(ctx, scanId, itemId, { productId: rollOn.productId })
+
+      expect(view.recognised).toMatchObject({ form: 'roll-on' })
+      expect(view.product.product).toMatchObject({ id: rollOn.productId, form: 'roll-on' })
+    })
+
+    it('shows the chosen product\'s form for a product that still has to be researched or analysed, too', async () => {
+      const ctx = setup()
+      const first = await arrange(ctx)
+      const second = await arrange(ctx)
+      const unresearched = await ctx.catalog.resolve({ ...CERAVE, form: 'spray' })
+      const unanalysed = await catalogued(ctx, { ...CERAVE, form: 'roll-on' }, { analysed: false })
+
+      const researching = await identify(ctx, first.scanId, first.itemId, { productId: unresearched.productId })
+      const analysing = await identify(ctx, second.scanId, second.itemId, { productId: unanalysed.productId })
+
+      expect(researching).toMatchObject({ state: 'researching', recognised: { form: 'spray' } })
+      expect(analysing).toMatchObject({ state: 'analysing', recognised: { form: 'roll-on' } })
     })
 
     it('makes no AI call of any kind for an analysed product: no recognizer, splitter, researcher or analyst', async () => {
@@ -4570,6 +4721,23 @@ describe('ScanService.identifyByName', () => {
       expect(ctx.nameSplitter.calls).toHaveLength(1)
     })
 
+    it('leaves the form null, as the split gives none, and matches the form-less product though a sibling of another form is in the catalog', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await arrange(ctx)
+      const spray = await catalogued(ctx, { ...CERAVE, form: 'spray' })
+      const formless = await catalogued(ctx)
+      ctx.nameSplitter.respondWith(() => SPLIT_CERAVE)
+      const view = await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })
+      expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: null, category: 'skin' })
+      const resolve = vi.spyOn(ctx.catalog, 'resolve')
+
+      await drain(ctx)
+
+      expect(resolve.mock.calls[0]![0]).not.toHaveProperty('form')
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { form: null }, product: { product: { id: formless.productId, form: null } } })
+      expect(formless.productId).not.toBe(spray.productId)
+    })
+
     it('researches a product the catalog does not hold, as a confirmation does, and creates it under the split\'s brand, name and variant', async () => {
       const ctx = setup()
       const { scanId, itemId } = await arrange(ctx)
@@ -4637,18 +4805,21 @@ describe('ScanService.identifyByName', () => {
       expect((await identify(ctx, scanId, itemId, { text: 'cerave cleanser' })).state).toBe('matching')
     })
 
-    it('answers CatalogBusyError (CATALOG_BUSY), queues nothing and leaves the item where it was, when the AI spend cap stops the split', async () => {
+    it('answers AI_UNAVAILABLE (503), raises ai-account, queues nothing and leaves the item where it was, when Claude refuses our account on the split', async () => {
       const ctx = setup()
       const { scanId, itemId } = await arrange(ctx)
-      ctx.nameSplitter.failNextWith(new AiBudgetExceededError('cap'))
+      ctx.nameSplitter.failNextWith(new AnthropicConfigError('Claude rejected our credentials'))
       const jobs = ctx.jobs.enqueued.length
 
       const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
 
-      expect(error).toBeInstanceOf(CatalogBusyError)
-      expect(error.code).toBe('CATALOG_BUSY')
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error.code).toBe('AI_UNAVAILABLE')
+      // The user is told to try again, never that a limit was reached or that our account is the problem.
+      expect(error.message).not.toMatch(/limit|credit|key|account|billing/i)
       expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
       expect(ctx.jobs.enqueued).toHaveLength(jobs)
+      expect(ctx.alerts()).toEqual([{ kind: 'ai-account', windowStart: T0.getTime() }])
     })
 
     it('puts the item back and rethrows when the match cannot be queued', async () => {
@@ -4678,11 +4849,11 @@ describe('ScanService.identifyByName', () => {
       expect(ctx.jobs.enqueued).toHaveLength(jobs)
     })
 
-    // A provider outage is not the daily limit: the user is told to try again, and the message must not blame a limit. The budget error above stays CATALOG_BUSY.
+    // A provider outage is not a limit: the user is told to try again, and the message must not blame one.
     it.each([
       ['unavailable', () => new AnthropicUnavailableError('overloaded')],
       ['rejects the request', () => new AnthropicRequestError('unusable answer')],
-    ])('answers AI_UNAVAILABLE (503), not CATALOG_BUSY, when the provider %s; the item stays and nothing is queued', async (_label, failure) => {
+    ])('answers AI_UNAVAILABLE (503), raising no ops alert, when the provider %s; the item stays and nothing is queued', async (_label, failure) => {
       const ctx = setup()
       const { scanId, itemId } = await arrange(ctx)
       ctx.nameSplitter.failNextWith(failure())
@@ -4691,9 +4862,9 @@ describe('ScanService.identifyByName', () => {
       const error = await errorOf(identify(ctx, scanId, itemId, { text: 'cerave cleanser' }))
 
       expect(error).toBeInstanceOf(UnavailableError)
-      expect(error).not.toBeInstanceOf(CatalogBusyError)
       expect(error.code).toBe('AI_UNAVAILABLE')
       expect(error.message).not.toMatch(/limit/i)
+      expect(ctx.alerts()).toEqual([])
       expect((await stateOf(ctx, scanId, itemId)).state).toBe(state)
       expect(ctx.jobs.enqueued).toHaveLength(jobs)
     })
@@ -5564,6 +5735,112 @@ describe('ScanService: push notifications', () => {
     })
   })
 
+  describe('when an item needs identifying (the third unreadable front photo)', () => {
+    const FACE: Recognition = { classification: 'face-or-person' }
+    const OTHER_PRODUCT: Recognition = { classification: 'other-product' }
+    const needsYouPushes = (ctx: Ctx) => pushes(ctx).filter((body) => body.kind === 'scan-needs-you')
+    /** The first two photos of a scan made by `OTHER_USER`'s profile have been unreadable; a third has been retaken and waits to be read. */
+    const thirdPhotoWaiting = async (ctx: Ctx) => {
+      const scan = await create(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+      const itemId = scan.items[0].id as string
+      for (const [i, read] of [BLURRY, TURNED_AWAY, BLURRY].entries()) {
+        ctx.recognizer.respondWith(() => read)
+        if (i > 0) {
+          ctx.advance(SECOND)
+          await retake(ctx, scan.id, itemId, markedJpeg(20 + i), { userId: OTHER_USER, profileId: OTHER_PROFILE })
+        }
+        if (i < 2) await run(ctx, itemId, 'recognise')
+      }
+      return { scanId: scan.id as string, itemId }
+    }
+
+    it('tells the profile that made the scan, once, with a key that is the scan and the need', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await thirdPhotoWaiting(ctx)
+      expect(pushes(ctx)).toEqual([])
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-identification')
+      // Only this push: the scan is not done while an item waits for the person, so there is no finished push either.
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-needs-you', userId: OTHER_USER, profileId: OTHER_PROFILE, scanId, itemId, need: 'identify' }])
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scanId}:identify`])
+      expect(ctx.pushJobs.enqueued[0]!.job).toBe('send-push')
+    })
+
+    it.each([
+      ['the first', [BLURRY]],
+      ['the second', [TURNED_AWAY, BLURRY]],
+    ])('says nothing when %s photo is unreadable, since the item only asks for a retake', async (_which, reads) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await failedFront(ctx, reads)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it.each([
+      ['a face on the first photo', [FACE]],
+      ['another product on the first photo', [OTHER_PRODUCT]],
+      ['a face on the third photo, after two unreadable ones', [BLURRY, BLURRY, FACE]],
+      ['another product on the third photo, after two unreadable ones', [BLURRY, TURNED_AWAY, OTHER_PRODUCT]],
+    ])('says nothing to identify for %s: a rejected photo is not an unreadable one', async (_label, reads) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await failedFront(ctx, reads)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('rejected')
+      expect(needsYouPushes(ctx)).toEqual([])
+    })
+
+    it('says it once when the same step is delivered twice', async () => {
+      const ctx = setup()
+      const { itemId } = await failedFront(ctx, [BLURRY, BLURRY, BLURRY])
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('says nothing when another call moved the item first, so the guarded update did not apply', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, markedJpeg(30))
+      ctx.recognizer.respondWith(() => BLURRY)
+      const read = ctx.recognizer.recognize.bind(ctx.recognizer)
+      vi.spyOn(ctx.recognizer, 'recognize').mockImplementationOnce(async (image) => {
+        const answer = await read(image)
+        await ctx.repository.updateItem(itemId, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+        return answer
+      })
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('failed')
+      expect(needsYouPushes(ctx)).toEqual([])
+    })
+
+    it('still moves the item to identification, and the step succeeds, when the push cannot be queued', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, markedJpeg(30))
+      ctx.recognizer.respondWith(() => BLURRY)
+      ctx.pushJobs.failNextWith(new Error('queue is down'))
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect(await stateOf(ctx, scanId, itemId)).toMatchObject({ state: 'needs-identification' })
+      // The push was tried (and its failure logged by kind and scan), not skipped.
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'push-enqueue-failed', kind: 'scan-needs-you', scanId }))
+      expect(pushes(ctx)).toEqual([])
+      logged.mockRestore()
+    })
+  })
+
   describe('when an item needs the back of the pack', () => {
     const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
     const addBack = (ctx: Ctx, scanId: string, itemId: string, marker: number) => asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(marker), IP))
@@ -5673,6 +5950,54 @@ describe('ScanService: push notifications', () => {
     })
   })
 
+  describe('when an item with no product has an unreadable back photo', () => {
+    const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
+    /** An item with no product that has had `n` back photos uploaded, the first `n - 1` read as unreadable, the last waiting to be read. */
+    const readingBackPhoto = async (ctx: Ctx, n: number) => {
+      const taken = await readingUnidentified(ctx)
+      for (let i = 1; i < n; i++) {
+        unreadable(ctx)
+        await run(ctx, taken.itemId, 'read-label')
+        ctx.advance(SECOND)
+        await sendBack(ctx, taken.scanId, taken.itemId, 10 + i)
+      }
+      return taken
+    }
+    const needsYouKeys = (ctx: Ctx) => keys(ctx).filter((key) => key.startsWith('scan-needs-you'))
+
+    it.each([1, 2])('asks it to be identified again, as ask number %i, not for another photo of the back, under an item-scoped key', async (n) => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, n)
+      const before = pushes(ctx).length
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'needs-identification', reason: 'label-unreadable' })
+      // Exactly one push is added by this read, and it is the identify need.
+      expect(pushes(ctx).slice(before)).toEqual([{ kind: 'scan-needs-you', userId: USER, profileId: PROFILE, scanId, itemId, need: 'identify', ask: n }])
+      expect(keys(ctx).at(-1)).toBe(`scan-needs-you:${scanId}:${itemId}:ask-${n}`)
+    })
+
+    it('does not ask a third time: the 3rd unreadable back photo ends the item as failed with no needs-you push', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await readingBackPhoto(ctx, 3)
+      const before = needsYouKeys(ctx)
+      expect(before.slice(-2)).toEqual([`scan-needs-you:${scanId}:${itemId}:ask-1`, `scan-needs-you:${scanId}:${itemId}:ask-2`])
+      // The two asks so far were to identify the item, not for a photo of the back.
+      expect(pushes(ctx).slice(-2).map((body) => body.kind === 'scan-needs-you' && body.need)).toEqual(['identify', 'identify'])
+      const sent = pushes(ctx).length
+      unreadable(ctx)
+
+      await run(ctx, itemId, 'read-label')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'label-unreadable' })
+      expect(needsYouKeys(ctx)).toEqual(before)
+      // The only push this read adds is the scan's own finish: its single item is now final.
+      expect(pushes(ctx).slice(sent)).toEqual([{ kind: 'scan-finished', userId: USER, profileId: PROFILE, scanId, readyCount: 0 }])
+    })
+  })
+
   describe('when a scan is finished', () => {
     const recogniseAs = (ctx: Ctx, answer: (marker: number) => Recognition) => ctx.recognizer.respondWith((image) => answer(image.bytes.at(-1)!))
 
@@ -5692,14 +6017,16 @@ describe('ScanService: push notifications', () => {
       await catalogued(ctx)
       recogniseAs(ctx, (marker) => {
         if (marker === 3) return { classification: 'face-or-person' }
-        if (marker === 4) throw new AiBudgetExceededError('cap')
+        if (marker === 4) throw new AnthropicRequestError('unusable answer')
         return seen()
       })
       const scan = await create(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3), markedJpeg(4)])
       const [a, b, c, d] = scan.items.map((i: { id: string }) => i.id) as [string, string, string, string]
-      for (const id of [a, b, c, d]) await run(ctx, id, 'recognise')
+      for (const id of [a, b, c]) await run(ctx, id, 'recognise')
+      // An answer that cannot be used fails the item for good (a second try would pay again), and the run is recorded as failed.
+      await expect(run(ctx, d, 'recognise')).rejects.toBeInstanceOf(PermanentJobError)
       expect(await stateOf(ctx, scan.id, c)).toEqual({ state: 'rejected', reason: 'face-or-person' })
-      expect(await stateOf(ctx, scan.id, d)).toEqual({ state: 'failed', reason: 'research-busy' })
+      expect(await stateOf(ctx, scan.id, d)).toEqual({ state: 'failed', reason: 'unavailable' })
       await run(ctx, a, 'match')
       expect(pushes(ctx)).toEqual([])
 
@@ -5924,6 +6251,27 @@ describe('ScanService: push notifications', () => {
       expect(pushes(ctx)).toEqual([])
       expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
       expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-confirmation')
+      log.mockRestore()
+    })
+
+    it('skips the identify push, logging push-skipped-no-profile, and still moves the item to identification', async () => {
+      const { ctx, scanId, itemId } = await withOrphan()
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      ctx.recognizer.respondWith(() => BLURRY)
+      await run(ctx, itemId, 'recognise')
+      // Nobody owns an orphan, so the service cannot take a retake for it; the retakes are written the way the service writes them.
+      for (const n of [1, 2]) {
+        ctx.advance(SECOND)
+        const key = `photos/test/${USER}/${scanId}/${itemId}.jpg`
+        await ctx.photos.put(key, markedJpeg(20 + n))
+        const retaken = { id: `retake-${n}`, itemId, userId: USER, ipHash: 'ip', uploadedAt: ctx.now() }
+        await ctx.repository.updateItem(itemId, 'needs-retake', { state: 'recognising', reason: null, photoKey: key, updatedAt: ctx.now() }, undefined, retaken)
+        await run(ctx, itemId, 'recognise')
+      }
+
+      expect(pushes(ctx)).toEqual([])
+      expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
+      expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-identification')
       log.mockRestore()
     })
   })

@@ -14,6 +14,14 @@ import { json, messageResponse, stubFetch, textBlock } from '../../src/providers
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
+import { MemoryEmailSender } from '../../src/providers/email/memory.email'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
+
+/** An alerting service that goes nowhere: these tests are not about ops alerts. */
+const quietOpsAlerts = () =>
+  new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 
 // The scan's background steps, driven through the Worker's real queue handler against local D1 and R2, with only the
 // outbound Anthropic call stubbed at fetch. Each queue message is built by hand ({ itemId, step, at }): the producer is the
@@ -83,6 +91,7 @@ const catalogued = async (brand: string, name: string) => {
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
   })
   const resolved = await catalog.resolve({ brand, name, category: 'skin' })
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)
@@ -516,6 +525,7 @@ describe('scan items identified by a typed name, through the Worker queue handle
       analyst: new MemoryProductAnalyst(),
       images: new MemoryCatalogImageStore(),
       imageKeyPrefix: 'catalog/test',
+      opsAlerts: quietOpsAlerts(),
     }).resolve({ brand, name: 'Hydrating Cleanser', category: 'skin' })
     const taken = await identifying()
     const calls = stubAnthropic(face)
@@ -556,6 +566,20 @@ describe('push notifications queued by the steps, through the Worker queue handl
 
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-confirmation' })
     expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId, need: 'confirm' }])
+  })
+
+  it('queues one scan-needs-you identify push when the third unreadable front photo is read, and none for the first two', async () => {
+    const { userId, scanId, itemId } = await startScan()
+    stubAnthropic(unreadable, labelNotVisible, unreadable)
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    for (const n of [1, 2]) {
+      await asUser(userId, () => container.scans.retake(scanId, itemId, jpegPhoto(), RETAKE_IP))
+      expect(pushQueued).toEqual([])
+      await runQueue(MAIN, { itemId, step: 'recognise', at: AT + n })
+    }
+
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'needs-identification' })
+    expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId, need: 'identify' }])
   })
 
   it('queues one push when the same finishing step is delivered twice', async () => {

@@ -17,8 +17,8 @@ const refused = async (promise: Promise<unknown>) => {
 
 /**
  * What every AiSpendLedger must do about the cap. `make(capMicros)` returns a ledger with nothing spent and that cap.
- * Runs against MemoryAiSpendLedger (which the eval script uses) and AiUsageService (the real ledger on a fake repository),
- * so the in-memory one cannot drift from the real one.
+ * Runs against MemoryAiSpendLedger only, which the eval script uses so that its --max-usd really stops spending. The real ledger
+ * (AiUsageService) no longer refuses on the cap: it records the call and raises an ops alert (see ai-usage.service.test.ts).
  */
 export const aiSpendLedgerContract = (name: string, make: (capMicros: number) => AiSpendLedger) => {
   describe(`AiSpendLedger contract: ${name}`, () => {

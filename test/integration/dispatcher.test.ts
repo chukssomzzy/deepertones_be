@@ -63,7 +63,7 @@ type Message = { id?: string; attempts?: number; body: unknown }
 const dispatch = async (
   queue: string,
   messages: Message[],
-  options: { random?: () => number; now?: () => Date } = {},
+  { jobs = [testJob], ...options }: { random?: () => number; now?: () => Date; jobs?: Parameters<typeof createQueueHandler>[0] } = {},
 ) => {
   const batch = createMessageBatch(
     queue,
@@ -77,7 +77,7 @@ const dispatch = async (
       original(opts)
     })
   }
-  const handler = createQueueHandler([testJob], { random: () => 0.999, now: () => NOW, ...options })
+  const handler = createQueueHandler(jobs, { random: () => 0.999, now: () => NOW, ...options })
   const ctx = createExecutionContext()
   await handler(batch, env, ctx)
   const result = await getQueueResult(batch, ctx)
@@ -471,6 +471,167 @@ describe('queue handler: bookkeeping failures', () => {
     expect(result.explicitAcks).toEqual([])
     expect(delays.get('m')).toEqual(expect.any(Number))
     expect(log).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'dispatcher-error' }))
+  })
+})
+
+// Several jobs on one queue (the email queue): the message names its job, { job, body }. A queue of one job still accepts a bare body,
+// so messages sent before a job joined a shared queue (or by the last deploy) are not lost.
+describe('queue handler: a queue that carries several jobs', () => {
+  const SHARED = 'deepertones-shared-test-development'
+  const SHARED_DLQ = 'deepertones-shared-test-dlq-development'
+  const SINGLE_SHARED = 'deepertones-solo-test-development'
+  const schema = z.object({ id: z.string() })
+  const retry = { baseSeconds: 5, factor: 3, capSeconds: 135 }
+  let ran: string[]
+  let hooks: string[]
+  const jobOn = (name: string, queue: string, shared: boolean) =>
+    defineJob(jobSpec({ name, queue, ...(shared ? { shared: true as const } : {}), schema, key: (body) => body.id, retry }), {
+      handle: async (body) => void ran.push(`${name}:${body.id}`),
+      onDeadLetter: async (body) => void hooks.push(`${name}:${body.id}`),
+    })
+  const alpha = jobOn('alpha-job', 'shared-test', true)
+  const beta = jobOn('beta-job', 'shared-test', true)
+  const solo = jobOn('solo-job', 'solo-test', true)
+  const jobs = [alpha, beta, solo]
+
+  beforeEach(() => {
+    ran = []
+    hooks = []
+  })
+
+  it('runs the job the message names, and only that one', async () => {
+    const id = freshId()
+
+    const { result } = await dispatch(SHARED, [{ id: 'a', body: { job: 'beta-job', body: { id } } }], { jobs })
+
+    expect(ran).toEqual([`beta-job:${id}`])
+    expect(result.explicitAcks).toEqual(['a'])
+    expect(await runs.get('beta-job', id)).toMatchObject({ status: 'done' })
+    expect(await runs.get('alpha-job', id)).toBeNull()
+  })
+
+  it('keeps idempotency keys per job: the same key under two jobs runs both', async () => {
+    const id = freshId()
+
+    await dispatch(SHARED, [{ body: { job: 'alpha-job', body: { id } } }, { body: { job: 'beta-job', body: { id } } }], { jobs })
+
+    expect(ran.sort()).toEqual([`alpha-job:${id}`, `beta-job:${id}`])
+  })
+
+  it('acks a duplicate of a finished key of the job it names', async () => {
+    const id = freshId()
+    const message = { body: { job: 'alpha-job', body: { id } } }
+    await dispatch(SHARED, [message], { jobs })
+
+    const { result } = await dispatch(SHARED, [{ id: 'dup', ...message }], { jobs })
+
+    expect(ran).toEqual([`alpha-job:${id}`])
+    expect(result.explicitAcks).toEqual(['dup'])
+  })
+
+  it('validates the body against the named job\'s schema: acks without running when it fails', async () => {
+    const { result } = await dispatch(SHARED, [{ id: 'bad', body: { job: 'alpha-job', body: { id: 5 } } }], { jobs })
+
+    expect(ran).toEqual([])
+    expect(result.explicitAcks).toEqual(['bad'])
+  })
+
+  it.each([
+    ['names a job this queue does not carry', { job: 'gamma-job', body: { id: 'x' } }],
+    ['names a job that another queue carries', { job: 'solo-job', body: { id: 'x' } }],
+    ['is a bare body, which a shared queue cannot attribute', { id: 'x' }],
+    ['has no body', { job: 'alpha-job' }],
+    ['is not an object', 'text'],
+  ])('logs unknown-job and acks, without running anything, a message that %s: it can never succeed', async (_label, body) => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const { result } = await dispatch(SHARED, [{ id: 'odd', body }], { jobs })
+
+    expect(ran).toEqual([])
+    expect(result.explicitAcks).toEqual(['odd'])
+    expect(result.retryMessages).toEqual([])
+    expect(log).toHaveBeenCalledWith(expect.objectContaining({ queue: SHARED, outcome: 'unknown-job' }))
+  })
+
+  it('does not put the message body in the unknown-job log line', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await dispatch(SHARED, [{ body: { job: 'gamma-job', body: { id: 'sk-secret-body' } } }], { jobs })
+
+    expect(JSON.stringify(log.mock.calls)).not.toContain('sk-secret-body')
+  })
+
+  it('routes a dead letter to the hook of the job the message names', async () => {
+    const id = freshId()
+
+    const { result } = await dispatch(SHARED_DLQ, [{ id: 'dead', body: { job: 'beta-job', body: { id } } }], { jobs })
+
+    expect(hooks).toEqual([`beta-job:${id}`])
+    expect(result.explicitAcks).toEqual(['dead'])
+    expect(await runs.get('beta-job', id)).toMatchObject({ status: 'failed' })
+  })
+
+  it('acks a dead letter that names an unknown job without running any hook', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const { result } = await dispatch(SHARED_DLQ, [{ id: 'dead', body: { job: 'gamma-job', body: { id: 'x' } } }], { jobs })
+
+    expect(hooks).toEqual([])
+    expect(result.explicitAcks).toEqual(['dead'])
+  })
+
+  it('handles the messages of one batch independently, each by its own job', async () => {
+    const [x, y] = [freshId(), freshId()]
+
+    const { result } = await dispatch(
+      SHARED,
+      [
+        { id: 'one', body: { job: 'alpha-job', body: { id: x } } },
+        { id: 'two', body: { job: 'beta-job', body: { id: y } } },
+      ],
+      { jobs },
+    )
+
+    expect(ran.sort()).toEqual([`alpha-job:${x}`, `beta-job:${y}`].sort())
+    expect(result.explicitAcks.sort()).toEqual(['one', 'two'])
+  })
+
+  describe('a queue that carries one job', () => {
+    it('still runs a bare body, as the last deploy sent it', async () => {
+      const id = freshId()
+
+      const { result } = await dispatch(MAIN, [{ id: 'bare', body: { id } }])
+
+      expect(handled.map((h) => h.body)).toEqual([{ id }])
+      expect(result.explicitAcks).toEqual(['bare'])
+    })
+
+    it('also runs a message that names its job', async () => {
+      const id = freshId()
+
+      const { result } = await dispatch(SINGLE_SHARED, [{ id: 'named', body: { job: 'solo-job', body: { id } } }], { jobs })
+
+      expect(ran).toEqual([`solo-job:${id}`])
+      expect(result.explicitAcks).toEqual(['named'])
+    })
+
+    it('runs a bare body on it', async () => {
+      const id = freshId()
+
+      await dispatch(SINGLE_SHARED, [{ body: { id } }], { jobs })
+
+      expect(ran).toEqual([`solo-job:${id}`])
+    })
+
+    it('logs unknown-job and acks a message that names another job', async () => {
+      const log = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+      const { result } = await dispatch(SINGLE_SHARED, [{ id: 'odd', body: { job: 'alpha-job', body: { id: 'x' } } }], { jobs })
+
+      expect(ran).toEqual([])
+      expect(result.explicitAcks).toEqual(['odd'])
+      expect(log).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'unknown-job' }))
+    })
   })
 })
 
