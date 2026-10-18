@@ -1,6 +1,6 @@
 import { type SQL, and, asc, count, desc, eq, exists, gte, inArray, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
-import type { Db } from '../../lib/db'
+import { queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { analysisAttempts, concernTraits, formulationConcerns, formulations, productAliases, products, researchAttempts } from './catalog.table'
 import type { AnalysisAttempt, DraftConcernRow, Formulation, NewFormulation, NewProduct, Product, ResearchAttempt, StoredConcern } from './catalog.types'
@@ -15,8 +15,6 @@ const isForeignKeyFailure = (error: unknown): boolean => {
 
 // D1 allows 100 bound parameters per statement; a trait row binds 2.
 const TRAIT_CHUNK = 40
-// A lookup by id binds one parameter per id.
-const ID_CHUNK = 90
 
 export class D1CatalogRepository {
   constructor(private readonly db: Db) {}
@@ -42,11 +40,7 @@ export class D1CatalogRepository {
 
   /** The products with these ids; an id nobody has is simply absent. */
   async findProductsByIds(ids: string[]): Promise<Product[]> {
-    const found: Product[] = []
-    for (let i = 0; i < ids.length; i += ID_CHUNK) {
-      found.push(...(await this.db.select().from(products).where(inArray(products.id, ids.slice(i, i + ID_CHUNK)))))
-    }
-    return found
+    return queryByIds(ids, (chunk) => this.db.select().from(products).where(inArray(products.id, chunk)))
   }
 
   /** The product whose identity key is `key`, else the one an alias maps `key` to; null if neither. */
@@ -208,11 +202,7 @@ export class D1CatalogRepository {
 
   /** The formulations with these ids; an id nobody has is simply absent. */
   async findFormulationsByIds(ids: string[]): Promise<Formulation[]> {
-    const found: Formulation[] = []
-    for (let i = 0; i < ids.length; i += ID_CHUNK) {
-      found.push(...(await this.db.select().from(formulations).where(inArray(formulations.id, ids.slice(i, i + ID_CHUNK)))))
-    }
-    return found
+    return queryByIds(ids, (chunk) => this.db.select().from(formulations).where(inArray(formulations.id, chunk)))
   }
 
   /** The product's formulation found most recently; the later insert wins a tie. */

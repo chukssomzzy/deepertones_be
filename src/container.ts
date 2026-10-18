@@ -260,7 +260,9 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
-  const shelf = once(() => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }))
+  const shelf = once(
+    () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
+  )
 
   const auth = once(
     () =>

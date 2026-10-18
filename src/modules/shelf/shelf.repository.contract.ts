@@ -96,6 +96,18 @@ export const shelfRepositoryContract = (name: string, make: () => ShelfContractS
         expect(second).toEqual(first)
       })
 
+      it('puts entries scanned at the same moment in id order, under newer ones', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        // One shared prefix keeps the ids unique across runs on a shared D1 while their order stays the suffixes'.
+        const prefix = `entry-${crypto.randomUUID()}`
+        const newer = productRow(profileId, { id: `${prefix}-c`, lastScannedAt: at(MINUTE) })
+        const rows = [productRow(profileId, { id: `${prefix}-b` }), noLabelRow(profileId, { id: `${prefix}-a` }), productRow(profileId, { id: `${prefix}-d` })]
+        for (const row of [rows[0]!, newer, rows[2]!, rows[1]!]) await put(row)
+
+        expect(idsOf(await repository.activeFor(profileId, 200))).toEqual([`${prefix}-c`, `${prefix}-a`, `${prefix}-b`, `${prefix}-d`])
+      })
+
       it('returns at most the limit, keeping the newest', async () => {
         const { repository, newProfile, put } = await make()
         const profileId = await newProfile()

@@ -25,6 +25,81 @@
       }
     },
     "schemas": {
+      "ProductSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "named",
+              "unnamed"
+            ],
+            "description": "An `unnamed` product is an ingredient list the label gave no brand and name for: its `brand` and `name` are empty strings and its `category` is `other` unless the label said otherwise."
+          },
+          "brand": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "form": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "spray",
+              "roll-on",
+              "stick",
+              "cream",
+              "lotion",
+              "gel",
+              "oil",
+              "serum",
+              "liquid",
+              "bar",
+              "powder",
+              "balm",
+              null
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "skin",
+              "hair",
+              "body",
+              "makeup",
+              "other"
+            ]
+          },
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "brand",
+          "name",
+          "variant",
+          "form",
+          "category",
+          "imageUrl"
+        ]
+      },
       "HealthResponse": {
         "type": "object",
         "properties": {
@@ -717,7 +792,14 @@
             "description": "`product` carries `product`; `no-label` carries `noLabel`."
           },
           "product": {
-            "$ref": "#/components/schemas/ProductSummary"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductSummary"
+              },
+              {
+                "description": "Only on a `product` entry: the same summary a scan item shows."
+              }
+            ]
           },
           "noLabel": {
             "type": "object",
@@ -827,82 +909,6 @@
           "source",
           "kind"
         ]
-      },
-      "ProductSummary": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "named",
-              "unnamed"
-            ],
-            "description": "An `unnamed` product is an ingredient list the label gave no brand and name for: its `brand` and `name` are empty strings and its `category` is `other` unless the label said otherwise."
-          },
-          "brand": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "variant": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "form": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "enum": [
-              "spray",
-              "roll-on",
-              "stick",
-              "cream",
-              "lotion",
-              "gel",
-              "oil",
-              "serum",
-              "liquid",
-              "bar",
-              "powder",
-              "balm",
-              null
-            ]
-          },
-          "category": {
-            "type": "string",
-            "enum": [
-              "skin",
-              "hair",
-              "body",
-              "makeup",
-              "other"
-            ]
-          },
-          "imageUrl": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "brand",
-          "name",
-          "variant",
-          "form",
-          "category",
-          "imageUrl"
-        ],
-        "description": "Only on a `product` entry."
       },
       "RemoveShelfEntryBody": {
         "type": "object",

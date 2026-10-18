@@ -19,7 +19,7 @@ export const ShelfEntryResponse = z
     lastScannedAt: z.iso.datetime().openapi({ description: 'When it was last scanned. The shelf is ordered by this, newest first.' }),
     source: z.object({ scanId: z.string(), itemId: z.string() }).openapi({ description: 'The scan and item the entry was last read from.' }),
     kind: z.enum(['product', 'no-label']).openapi({ description: '`product` carries `product`; `no-label` carries `noLabel`.' }),
-    product: ProductSummary.optional().openapi({ description: 'Only on a `product` entry.' }),
+    product: ProductSummary.optional().openapi({ description: 'Only on a `product` entry: the same summary a scan item shows.' }),
     noLabel: NoLabelResponse.optional().openapi({ description: 'Only on a `no-label` entry: what the user said about it, and the cautions that earns.' }),
   })
   .openapi('ShelfEntry')

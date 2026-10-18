@@ -100,6 +100,13 @@ const deleteEntry = (guest: Guest | undefined, entryId: string, body?: Record<st
     { param: { entryId }, ...(body === undefined ? {} : { json: body }) },
     { headers: guest ? guest.headers() : { 'cf-connecting-ip': freshIp() } },
   )
+// A DELETE as a client sends it when it always sets the JSON Content-Type, with whatever text it has as the body.
+const deleteEntryRaw = (guest: Guest, entryId: string, body?: string) =>
+  fetchWorker(`http://deepertones.test/api/v1/me/shelf/${entryId}`, {
+    method: 'DELETE',
+    headers: { ...guest.headers(), 'content-type': 'application/json' },
+    ...(body === undefined ? {} : { body }),
+  })
 const entriesOf = async (guest: Guest) => (await dataOf<{ entries: EntryBody[] }>(await getShelf(guest))).entries
 
 // --- driving items to ready and unidentified, by the real routes and steps ---
@@ -333,6 +340,34 @@ describe('DELETE /api/v1/me/shelf/{entryId}', () => {
     expect(row).toMatchObject({ removedReason: null })
     expect(row!.removedAt).toBeInstanceOf(Date)
   })
+
+  it.each([undefined, '', '  \n'])('answers 204 for the JSON Content-Type with an empty body (%j), and keeps no reason', async (body) => {
+    const guest = await newGuest()
+    await scanNoLabel(guest)
+    const [entry] = await entriesOf(guest)
+
+    expect((await deleteEntryRaw(guest, entry!.id, body)).status).toBe(204)
+
+    expect(await entriesOf(guest)).toEqual([])
+    const [row] = await db.select().from(profileProducts).where(eq(profileProducts.id, entry!.id))
+    expect(row).toMatchObject({ removedReason: null })
+    expect(row!.removedAt).toBeInstanceOf(Date)
+  })
+
+  it.each(['{"reason":"because"}', '{"reson":"finished"}', '{"reason":"finished","extra":1}', '{not json', '"finished"', 'null'])(
+    'answers 400 VALIDATION_FAILED for the JSON body %s, and removes nothing',
+    async (body) => {
+      const guest = await newGuest()
+      await scanNoLabel(guest)
+      const [entry] = await entriesOf(guest)
+
+      const res = await deleteEntryRaw(guest, entry!.id, body)
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+      expect(await entriesOf(guest)).toHaveLength(1)
+    },
+  )
 
   it.each(['finished', 'stopped', 'not-mine'] as const)('answers 204 for the reason %s, which is kept with the removed entry', async (reason) => {
     const guest = await newGuest()

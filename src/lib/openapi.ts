@@ -156,7 +156,7 @@ export const defineRoute = <const R extends DocumentedRoute>(route: R) =>
     } as DefaultErrors<R> & R['responses'],
   })
 
-const toValidationError = (target: string, error: z.ZodError) =>
+export const toValidationError = (target: string, error: z.ZodError) =>
   new ValidationError(
     'VALIDATION_FAILED',
     `Invalid ${target}`,

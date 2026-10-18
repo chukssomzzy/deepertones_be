@@ -190,6 +190,57 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
       })
     })
 
+    // D1 binds at most 100 parameters per statement, so the repository reads ids in chunks; these sizes straddle the chunk edge.
+    describe.each([
+      {
+        method: 'findProductsByIds' as const,
+        store: async (repo: CatalogRepository, count: number) => {
+          const rows = Array.from({ length: count }, () => newProduct())
+          for (const row of rows) await repo.createProduct(row)
+          return rows.map((row) => row.id)
+        },
+      },
+      {
+        method: 'findFormulationsByIds' as const,
+        store: async (repo: CatalogRepository, count: number) => {
+          const product = newProduct()
+          await repo.createProduct(product)
+          const rows = Array.from({ length: count }, () => newFormulation(product.id))
+          for (const row of rows) await repo.createFormulation(row)
+          return rows.map((row) => row.id)
+        },
+      },
+    ])('$method', ({ method, store }) => {
+      const idsOf = (rows: { id: string }[]) => rows.map((row) => row.id)
+
+      it.each([1, 90, 91, 95, 181])('returns each of %i stored ids once', async (count) => {
+        const repo = await make()
+        const ids = await store(repo, count)
+
+        const found = idsOf(await repo[method](ids))
+
+        expect(found).toHaveLength(count)
+        expect([...found].sort()).toEqual([...ids].sort())
+      })
+
+      it('returns exactly the stored ones when some of the ids are unknown', async () => {
+        const repo = await make()
+        const ids = await store(repo, 95)
+
+        const found = idsOf(await repo[method]([...ids.slice(0, 50), freshId(), ...ids.slice(50), freshId()]))
+
+        expect(found).toHaveLength(95)
+        expect([...found].sort()).toEqual([...ids].sort())
+      })
+
+      it('returns nothing for no ids, and nothing for ids nobody has', async () => {
+        const repo = await make()
+
+        expect(await repo[method]([])).toEqual([])
+        expect(await repo[method](Array.from({ length: 95 }, freshId))).toEqual([])
+      })
+    })
+
     describe('aliases', () => {
       it('findProductByKey finds a product by an alias', async () => {
         const repo = await make()

@@ -1,7 +1,7 @@
 import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
 import type { SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
-import type { Db } from '../../lib/db'
+import { chunked, queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
 import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
@@ -10,15 +10,6 @@ import { PHOTO_HELD_STATES } from './scans.types'
 import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto }
-
-// D1 allows 100 bound parameters per statement; this many ids leave headroom.
-const ID_CHUNK = 90
-
-const chunks = <T>(items: T[]): T[][] => {
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += ID_CHUNK) out.push(items.slice(i, i + ID_CHUNK))
-  return out
-}
 
 /** A scan row as a Scan: rows from before `kind` existed hold NULL, and are product scans. */
 const asScan = (row: typeof scans.$inferSelect): Scan => ({ ...row, kind: row.kind ?? 'product' })
@@ -71,12 +62,7 @@ export class D1ScansRepository {
 
   /** The items with these ids; an id nobody has is simply absent. */
   async findItems(itemIds: string[]): Promise<ScanItem[]> {
-    const found: ScanItem[] = []
-    // D1 allows 100 bound parameters per statement.
-    for (let i = 0; i < itemIds.length; i += 90) {
-      found.push(...(await this.db.select().from(scanItems).where(inArray(scanItems.id, itemIds.slice(i, i + 90)))))
-    }
-    return found
+    return queryByIds(itemIds, (chunk) => this.db.select().from(scanItems).where(inArray(scanItems.id, chunk)))
   }
 
   /**
@@ -305,7 +291,7 @@ export class D1ScansRepository {
   /** Every photo key and back-photo key still stored for these users' items, and every key on their scan photos (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const keys: string[] = []
-    for (const ids of chunks(userIds)) {
+    for (const ids of chunked(userIds)) {
       const rows = await this.db
         .select({ photoKey: scanItems.photoKey, backPhotoKey: scanItems.backPhotoKey })
         .from(scanItems)
@@ -351,7 +337,7 @@ export class D1ScansRepository {
   /** Deletes the users' back-photo and retake records, items, scan photos and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
-    const statements: BatchItem<'sqlite'>[] = chunks(userIds).flatMap((ids) => [
+    const statements: BatchItem<'sqlite'>[] = chunked(userIds).flatMap((ids) => [
       this.db.delete(scanBackPhotos).where(inArray(scanBackPhotos.userId, ids)),
       this.db.delete(scanRetakes).where(inArray(scanRetakes.userId, ids)),
       this.db.delete(scanItems).where(inArray(scanItems.userId, ids)),

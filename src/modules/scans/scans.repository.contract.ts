@@ -643,6 +643,48 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
       })
     })
 
+    // D1 binds at most 100 parameters per statement, so the repository reads ids in chunks; these sizes straddle the chunk edge.
+    describe('findItems', () => {
+      /** `count` items, spread over several scans: findItems does not care which scan an item is in. */
+      const storeItems = async (count: number) => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const ids: string[] = []
+        for (let stored = 0; stored < count; stored += 20) {
+          const scan = newScan(userId)
+          const items = Array.from({ length: Math.min(20, count - stored) }, (_, i) => newItem(scan, i))
+          await createWithPhotos(repository, scan, items)
+          ids.push(...items.map((item) => item.id))
+        }
+        return { repository, ids }
+      }
+
+      it.each([1, 90, 91, 95, 181])('returns each of %i stored ids once', async (count) => {
+        const { repository, ids } = await storeItems(count)
+
+        const found = (await repository.findItems(ids)).map((item) => item.id)
+
+        expect(found).toHaveLength(count)
+        expect([...found].sort()).toEqual([...ids].sort())
+      })
+
+      it('returns exactly the stored ones when some of the ids are unknown', async () => {
+        const { repository, ids } = await storeItems(95)
+
+        const found = (await repository.findItems([...ids.slice(0, 50), freshId(), ...ids.slice(50), freshId()])).map((item) => item.id)
+
+        expect(found).toHaveLength(95)
+        expect([...found].sort()).toEqual([...ids].sort())
+      })
+
+      it('returns nothing for no ids, and nothing for ids nobody has', async () => {
+        const { repository } = await storeItems(1)
+
+        expect(await repository.findItems([])).toEqual([])
+        expect(await repository.findItems(Array.from({ length: 95 }, freshId))).toEqual([])
+      })
+    })
+
     describe('updateItem', () => {
       it('applies the patch, with the new time, while the item is in the expected state, and says so', async () => {
         const { repository, items } = await seeded(1)
