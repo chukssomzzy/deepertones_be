@@ -118,6 +118,9 @@ type WorkingState = 'recognising' | 'matching' | 'researching' | 'reading-label'
 type Filed = { analysed: boolean; patch: Omit<ItemPatch, 'updatedAt'> }
 type ValidPhoto = { image: ProductImage; extension: 'jpg' | 'webp' }
 
+/** A shelf photo that still holds its image. */
+type ShelfPhoto = ScanPhoto & { photoKey: string }
+
 export class ScanService {
   private static readonly MINUTE = 60 * 1000
   private static readonly HOUR = 60 * ScanService.MINUTE
@@ -836,8 +839,16 @@ export class ScanService {
    * kept). Then, in turn, three limits drop the least confident (the recognizer lists the most confident first), each counted on the photo:
    * 5 per photo and the scan's `maxItemsPerScan` (both `skippedOverLimit`), then the day's allowance (`skippedDailyLimit`), which is
    * the smaller of the user's and the scan address's, the placeholder already counted. The placeholder is never dropped.
+   *
+   * One answer per photo: a fresh model answer is stored on the photo (`storeRecognition`, first writer wins) BEFORE anything else is
+   * done, and the photo is read back, so every retry and every concurrent delivery goes on with the stored (winner's) answer. A
+   * rejection whose `fanOut` failed after the image was deleted therefore retries into the same rejection, not `photo-missing`.
+   *
+   * Two accepted races, like `create`'s quota: the daily allowance is read, not reserved, so concurrent photos can each pass it and
+   * the day may be exceeded by up to 4 extras per concurrent photo; and a sibling the SQL cap guard drops because another photo filled
+   * the scan first is not counted in `skippedOverLimit` (the count was made from the items read before the write).
    */
-  private async recogniseShelf(item: ScanItem, photo: ScanPhoto & { photoKey: string }): Promise<void> {
+  private async recogniseShelf(item: ScanItem, photo: ShelfPhoto): Promise<void> {
     const read = await this.shelfRead(item, photo)
     if (!read) return
     if (read.products.length === 0) return this.rejectShelfPhoto(item, photo, read)
@@ -863,7 +874,7 @@ export class ScanService {
     }))
 
     const { placeholderMoved } = await this.repository.fanOut({
-      photo: { id: photo.id, patch: { state: 'recognised', recognition: JSON.stringify(read), ...ScanService.skipped(read, overLimit, extras - allowed), updatedAt: at } },
+      photo: { id: photo.id, patch: { state: 'recognised', recognition: JSON.stringify(read), ...ScanService.skipped({ read, overLimit, dailyLimit: extras - allowed }), updatedAt: at } },
       placeholder: { id: item.id, from: 'recognising', patch: { state: stateOf(kept[0]!), ...ScanService.recognisedFields(kept[0]!), updatedAt: at } },
       siblings,
       maxItems: this.policy.maxItemsPerScan,
@@ -871,8 +882,11 @@ export class ScanService {
     if (placeholderMoved) await this.startShelfItems(item, photo, stateOf(kept[0]!), at)
   }
 
-  /** The photo's answer: the one stored with it by an earlier attempt, else the recognizer's. Undefined when the item has been failed instead. */
-  private async shelfRead(item: ScanItem, photo: ScanPhoto & { photoKey: string }): Promise<ShelfRecognition | undefined> {
+  /**
+   * The photo's answer: the one stored with it by an earlier attempt or a concurrent delivery, else the recognizer's, stored first
+   * and read back so that the answer used is the one that won. Undefined when the item has been failed instead.
+   */
+  private async shelfRead(item: ScanItem, photo: ShelfPhoto): Promise<ShelfRecognition | undefined> {
     const earlier = ScanService.storedShelfRead(photo.recognition)
     if (earlier) return earlier
     const image = await this.photos.get(photo.photoKey)
@@ -880,16 +894,19 @@ export class ScanService {
       await this.fail(item, 'recognising', 'photo-missing')
       return undefined
     }
-    return this.askRecognizer<ShelfRecognition>(item, () => this.recognizer.recognizeShelf(image), { classification: 'unreadable', products: [], excluded: { otherProducts: 0, unreadable: 0 } })
+    const fresh = await this.askRecognizer<ShelfRecognition>(item, () => this.recognizer.recognizeShelf(image), { classification: 'unreadable', products: [], excluded: { otherProducts: 0, unreadable: 0 } })
+    await this.repository.storeRecognition(photo.id, JSON.stringify(fresh), this.now())
+    const stored = ScanService.storedShelfRead((await this.repository.findPhoto(photo.id))?.recognition ?? null)
+    return stored ?? fresh
   }
 
   /** No readable product: the image goes first, then the photo and its placeholder are rejected, and the scan may be done. */
-  private async rejectShelfPhoto(item: ScanItem, photo: ScanPhoto & { photoKey: string }, read: ShelfRecognition): Promise<void> {
+  private async rejectShelfPhoto(item: ScanItem, photo: ShelfPhoto, read: ShelfRecognition): Promise<void> {
     await this.photos.delete(photo.photoKey)
     const at = this.now()
     const reason = read.classification === 'other-product' ? 'not-a-beauty-product' : read.classification === 'face-or-person' ? 'face-or-person' : 'unreadable'
     const { placeholderMoved } = await this.repository.fanOut({
-      photo: { id: photo.id, patch: { state: 'rejected', photoKey: null, recognition: JSON.stringify(read), ...ScanService.skipped(read, 0, 0), updatedAt: at } },
+      photo: { id: photo.id, patch: { state: 'rejected', photoKey: null, recognition: JSON.stringify(read), ...ScanService.skipped({ read, overLimit: 0, dailyLimit: 0 }), updatedAt: at } },
       placeholder: { id: item.id, from: 'recognising', patch: { state: 'rejected', reason, updatedAt: at } },
       siblings: [],
       maxItems: this.policy.maxItemsPerScan,
@@ -901,7 +918,7 @@ export class ScanService {
    * What follows a read whose placeholder moved: its `match` first (if it cannot be queued the move is undone and the error rethrown, as
    * `transition` does, and the retry reuses the stored answer), then each new item's, in rank order (a failure is logged by id and
    * left to the reaper, the item stays `matching`), one "needs you" push for the photo if any of its items waits for a confirmation, and
-   * the item events. All use the batch's time `at`, the key the reaper reuses.
+   * the item events. The placeholder's uses this attempt's time `at` (its move just stored it); each new item's uses its own stored `updatedAt`, which on a retry is the first attempt's, the key the reaper reuses.
    */
   private async startShelfItems(item: ScanItem, photo: ScanPhoto, placeholderState: 'matching' | 'needs-confirmation', at: Date): Promise<void> {
     if (placeholderState === 'matching') await this.queueNext(item, { from: 'recognising', to: 'matching', next: 'match', at })
@@ -914,7 +931,7 @@ export class ScanService {
     }
     for (const sibling of mine.filter((candidate) => candidate.id !== item.id && candidate.state === 'matching')) {
       try {
-        await this.jobs.enqueue(advanceScanItemSpec, { itemId: sibling.id, step: 'match', at: at.getTime() })
+        await this.jobs.enqueue(advanceScanItemSpec, { itemId: sibling.id, step: 'match', at: sibling.updatedAt.getTime() })
       } catch {
         console.error({ outcome: 'enqueue-failed', scanId: item.scanId, itemId: sibling.id })
       }
@@ -972,7 +989,7 @@ export class ScanService {
   }
 
   /** What the photo records of the products left out: the recognizer's own counts, and the ones the limits cut. */
-  private static skipped(read: ShelfRecognition, overLimit: number, dailyLimit: number) {
+  private static skipped({ read, overLimit, dailyLimit }: { read: ShelfRecognition; overLimit: number; dailyLimit: number }) {
     return { skippedNotBeauty: read.excluded.otherProducts, skippedUnreadable: read.excluded.unreadable, skippedOverLimit: overLimit, skippedDailyLimit: dailyLimit }
   }
 

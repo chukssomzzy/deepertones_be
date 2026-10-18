@@ -1292,7 +1292,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
 - **fanOut.** `ScansRepository.fanOut({ photo: { id, patch }, placeholder: { id, from, patch }, siblings, maxItems })` files a shelf photo's read in ONE `db.batch`, all or nothing
   (a taken item id fails the whole batch), and returns `{ placeholderMoved }`. The photo's patch applies only while the photo is `recognising`, so a repeat leaves the first answer.
   Each sibling is its own `INSERT ... SELECT ... WHERE (SELECT count(*) FROM scan_items WHERE scan_id = ?) < maxItems ON CONFLICT (scan_id, position) DO NOTHING` (the cap guard
-  counts as the batch runs, so the first in the list wins; a position already held is skipped, which is what makes a retry idempotent; one statement each keeps D1's bound-parameter
+  counts as the batch runs, so the first in the list wins; a position already held is skipped, which is what makes a retry idempotent (SQLite checks that conflict target before the primary key, so a sibling clashing on both is skipped, and the fake does the same); one statement each keeps D1's bound-parameter
   limit). A scan already at the cap stores none, yet the photo and placeholder still move. The placeholder's move is a guarded UPDATE ... RETURNING, whose applied-ness is the result.
   The fake mirrors it, checking the whole call before changing anything.
 - **IP hashing.** `ip_hash` is HMAC-SHA-256 of the address under a key derived from `DEVICE_ID_KEY`
@@ -1318,7 +1318,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
     answer survived a failed enqueue, which the undo does not clear), the recognizer is not called again, and the stored
     confidence decides `matching` or `needs-confirmation`.
   - `recognise` on a **shelf placeholder** (the item has no `photo_key` and its photo holds one): the shelf path, `ScanService.recogniseShelf`. The photo's answer is
-    `scan_photos.recognition` if an earlier attempt stored it (no second model call), else `recognizer.recognizeShelf` on the photo's image; errors are today's, on the
+    `scan_photos.recognition` if an earlier attempt stored it (no second model call), else `recognizer.recognizeShelf` on the photo's image. **One answer per photo:** a fresh
+    answer is stored at once with `ScansRepository.storeRecognition(photoId, json, at)` (guarded `WHERE state = 'recognising' AND recognition IS NULL`, so the first writer wins) and the
+    photo is read back, so every retry and every concurrent delivery goes on with the same, stored answer (a rejection whose `fanOut` failed after the image was deleted retries into the
+    same rejection, not `photo-missing`; two deliveries cannot file siblings from different answers). Errors are today's, on the
     placeholder only (spend cap `research-busy`, unusable answer `unavailable` + `PermanentJobError`, a refusal is an `unreadable` answer, a missing image `photo-missing`).
     - **Faces are never counted** (decision E): `skipped_*` never includes a person or a face.
     - **No product** (decision A): the image is deleted first, then `fanOut` with no siblings rejects the photo (counts and answer recorded, `photo_key` null) and the placeholder
@@ -1326,10 +1329,11 @@ notifications never imports scans) to tell the person when a scan needs them or 
     - **Products:** identical ones (brand, name, variant, form, ignoring case and spacing) collapse, keeping the first. The placeholder becomes product #1 and the rest become
       items at `photo position * 5 + rank`, each `matching` or, below `confirmBelowConfidence`, `needs-confirmation`. Then the limits cut from the tail (the recognizer lists the most
       confident first): 5 per photo and `maxItemsPerScan` (20, counting the items the scan already holds) are `skipped_over_limit`; the day's allowance, the smaller of the user's
-      and the scan's `ip_hash` remaining with the placeholder already counted, is `skipped_daily_limit`. The recognizer's own counts are `skipped_not_beauty` / `skipped_unreadable`.
+      and the scan's `ip_hash` remaining with the placeholder already counted, is `skipped_daily_limit`. The allowance is read, not reserved, so it is racy across concurrent photos (it may be exceeded by up to 4 extras per concurrent photo, the same accepted race as `create`'s quota),
+      and a sibling that the SQL cap guard drops because another photo filled the scan first is not counted in `skipped_over_limit`. The recognizer's own counts are `skipped_not_beauty` / `skipped_unreadable`.
     - **After `fanOut`**, only if the placeholder moved (a repeat does nothing): its `match` is queued first (if that fails the placeholder goes back to `recognising` and the error is
       rethrown, as `transition` does; the retry reuses the stored answer), then each `matching` item's in rank order (a failure logs ids only and leaves it to the reaper), one
-      `scanNeedsYou('confirm')` for the photo, then the item events. Every enqueue is stamped with the batch's time (the key the reaper reuses). Model text is never logged.
+      `scanNeedsYou('confirm')` for the photo, then the item events. The placeholder's `match` is stamped with this attempt's time (its move stored it); each new item's with its own stored `updatedAt`, which on a retry is the first attempt's (the key the reaper reuses). Model text is never logged.
   - `match` (`matching`): `catalog.resolve`. `ready` makes the item ready; `needs-analysis` goes to `analysing`;
     `needs-research` to `researching`; `analysis-failed` fails the item; a busy catalog (`CatalogBusyError`) fails it as
     `research-busy` without throwing. Missing recognised fields fail the item as `unavailable`.

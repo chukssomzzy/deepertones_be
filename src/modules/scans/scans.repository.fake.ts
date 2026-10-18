@@ -123,10 +123,19 @@ export class FakeScansRepository implements ScansRepository {
     return true
   }
 
+  /** Stores the answer on the photo only while it is `recognising` and holds none, and says whether it did: of any number of callers exactly one wins. */
+  async storeRecognition(photoId: string, recognition: string, at: Date): Promise<boolean> {
+    const photo = this.photos.get(photoId)
+    if (!photo || photo.state !== 'recognising' || photo.recognition !== null) return false
+    photo.recognition = recognition
+    photo.updatedAt = at
+    return true
+  }
+
   /**
    * Files what reading a shelf photo found, all or nothing (the whole call is checked before anything is changed). The photo's patch applies
    * only while the photo is `recognising`. Each sibling is stored, in list order, only while the scan holds fewer than `maxItems` items and
-   * no item holds its position (no error otherwise); a stored sibling whose id is taken rejects the whole call, as D1's primary key does.
+   * no item holds its position (no error otherwise, even if its id is taken too); a stored sibling at a free position whose id is taken rejects the whole call, as D1's primary key does.
    * The placeholder moves out of `from` as `updateItem` does, whatever became of the siblings, and the result says whether it did.
    */
   async fanOut(input: {
@@ -144,8 +153,9 @@ export class FakeScansRepository implements ScansRepository {
       const slot = `${sibling.scanId}:${sibling.position}`
       const count = counts.get(sibling.scanId) ?? 0
       if (count >= maxItems) continue
-      if (this.items.has(sibling.id) || added.has(sibling.id)) throw new Error('duplicate id')
+      // The slot first, as SQLite checks the ON CONFLICT target before the primary key: a clash on both is skipped, not an error.
       if (held.has(slot)) continue
+      if (this.items.has(sibling.id) || added.has(sibling.id)) throw new Error('duplicate id')
       const stored: ScanItem = {
         ...sibling,
         reason: null,

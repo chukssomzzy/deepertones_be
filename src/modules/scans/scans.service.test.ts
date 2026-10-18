@@ -6639,6 +6639,70 @@ describe('ScanService.advance: recognise, a shelf photo with products', () => {
     })
   })
 
+  describe('a match that cannot be queued for the placeholder: the keys of the retry', () => {
+    it('stamps each new item\'s match with its own stored time (the first attempt\'s, the reaper\'s key) and the placeholder\'s with the retry\'s', async () => {
+      const ctx = setup()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+      ctx.jobs.failNextWith(new Error('queue is down'))
+      await errorOf(run(ctx, itemId, 'recognise'))
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      const items = await ctx.repository.itemsOf(scanId)
+      const stamped = new Map(queuedWithTime(ctx).filter((m) => m.step === 'match').map((m) => [m.itemId, m.at]))
+      expect(items[1]!.updatedAt.getTime()).toBe(T0.getTime())
+      expect(stamped.get(items[1]!.id)).toBe(items[1]!.updatedAt.getTime())
+      expect(stamped.get(items[2]!.id)).toBe(items[2]!.updatedAt.getTime())
+      expect(stamped.get(itemId)).toBe(items[0]!.updatedAt.getTime())
+      expect(items[0]!.updatedAt.getTime()).toBe(T0.getTime() + SECOND)
+    })
+  })
+
+  describe('one stored answer per photo', () => {
+    it('files the first stored answer when a second delivery\'s model answer differs: no extra items from the other answer', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await shelfScan(ctx)
+      const first = shelfRead(shelfList(2))
+      const second = shelfRead(shelfList(4).map((p) => ({ ...p, name: `Other ${p.name}` })))
+      let calls = 0
+      vi.spyOn(ctx.recognizer, 'recognizeShelf').mockImplementation((async () => {
+        // The 1st delivery's model call is still out when the 2nd delivery runs to the end with its own answer.
+        if (++calls === 1) {
+          await run(ctx, itemId, 'recognise')
+          return second
+        }
+        return first
+      }) as never)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(calls).toBe(2)
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Product 0', 'matching'],
+        [1, 'Product 1', 'matching'],
+      ])
+      expect(JSON.parse((await photoRow(ctx, scanId)).recognition!)).toEqual(first)
+    })
+
+    it('retries a rejection whose filing failed after the image was deleted into the same rejection, not photo-missing', async () => {
+      const ctx = setup()
+      answerShelf(ctx, NOTHING_READ('other-product', { otherProducts: 2, unreadable: 0 }))
+      const { scanId, itemId } = await shelfScan(ctx)
+      vi.spyOn(ctx.repository, 'fanOut').mockRejectedValueOnce(new Error('database is down'))
+
+      await expect(run(ctx, itemId, 'recognise')).rejects.toThrow('database is down')
+      expect(ctx.photos.stored.size).toBe(0)
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason: 'not-a-beauty-product' })
+      expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 2 })
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+    })
+  })
+
   describe('a repeated delivery after the photo was read', () => {
     it('adds nothing and calls nothing: no model call, no duplicate items, the same counts', async () => {
       const ctx = setup()

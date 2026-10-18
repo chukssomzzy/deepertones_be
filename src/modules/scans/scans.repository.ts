@@ -93,6 +93,19 @@ export class D1ScansRepository {
   }
 
   /**
+   * Stores the model's answer on the photo (one conditional UPDATE) and says whether it did. It applies only while the photo is
+   * `recognising` and holds no answer, so of any number of callers exactly one wins and the stored answer is never replaced.
+   */
+  async storeRecognition(photoId: string, recognition: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(scanPhotos)
+      .set({ recognition, updatedAt: at })
+      .where(and(eq(scanPhotos.id, photoId), eq(scanPhotos.state, 'recognising'), isNull(scanPhotos.recognition)))
+      .returning({ id: scanPhotos.id })
+    return rows.length === 1
+  }
+
+  /**
    * Files what reading a shelf photo found, in one batch (all or nothing): the photo's patch, the new items, and the placeholder's move.
    * Safe to repeat, so a retried read cannot duplicate or lose a product.
    *

@@ -362,6 +362,49 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
       })
     })
 
+    describe('storeRecognition', () => {
+      const seededPhoto = async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const scan = newScan(userId, { kind: 'shelf' })
+        const photo = newPhoto(scan, 0, { photoKey: `photos/test/${userId}/${scan.id}/${freshId()}.jpg` })
+        await repository.createScan(scan, [photo], [newItem(scan, 0, { photoId: photo.id, photoKey: null })])
+        return { repository, scan, photo }
+      }
+
+      it('stores the answer and the time on a recognising photo that holds none, and says so, leaving the state alone', async () => {
+        const { repository, photo } = await seededPhoto()
+
+        expect(await repository.storeRecognition(photo.id, '{"first":true}', at(MINUTE))).toBe(true)
+
+        expect(await repository.findPhoto(photo.id)).toMatchObject({ state: 'recognising', recognition: '{"first":true}', updatedAt: at(MINUTE) })
+      })
+
+      it('keeps the first answer: a second call changes nothing and says so', async () => {
+        const { repository, photo } = await seededPhoto()
+        await repository.storeRecognition(photo.id, '{"first":true}', at(MINUTE))
+
+        expect(await repository.storeRecognition(photo.id, '{"second":true}', at(2 * MINUTE))).toBe(false)
+
+        expect(await repository.findPhoto(photo.id)).toMatchObject({ recognition: '{"first":true}', updatedAt: at(MINUTE) })
+      })
+
+      it('does nothing once the photo has left recognising, or for an unknown photo', async () => {
+        const { repository, scan, photo } = await seededPhoto()
+        const placeholder = (await repository.itemsOf(scan.id))[0]!
+        await repository.fanOut({
+          photo: { id: photo.id, patch: readPhoto({ recognition: null }) },
+          placeholder: { id: placeholder.id, from: 'recognising', patch: { state: 'rejected', reason: 'unreadable', updatedAt: at(MINUTE) } },
+          siblings: [],
+          maxItems: 20,
+        })
+
+        expect(await repository.storeRecognition(photo.id, '{"late":true}', at(2 * MINUTE))).toBe(false)
+        expect(await repository.storeRecognition(freshId(), '{}', at(2 * MINUTE))).toBe(false)
+        expect((await repository.findPhoto(photo.id))!.recognition).toBeNull()
+      })
+    })
+
     describe('fanOut', () => {
       /** A shelf scan with one photo that holds its image, and one placeholder item at slot 0 still recognising. */
       const shelfSeeded = async (otherPositions: number[] = []) => {
@@ -447,6 +490,19 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [newSibling(scan, photo, 1), newSibling(scan, photo, 2)], maxItems: 20 })
 
         expect((await repository.photosSince(scan.userId, at(0))).count).toBe(3)
+      })
+
+      it('skips, without an error, a new item that clashes on both its id and its position', async () => {
+        const { repository, scan, photo, placeholder, move } = await shelfSeeded()
+        const clash = newSibling(scan, photo, 0, { id: placeholder.id })
+
+        const result = await repository.fanOut({ photo: { id: photo.id, patch: readPhoto() }, placeholder: move(), siblings: [clash, newSibling(scan, photo, 1)], maxItems: 20 })
+
+        expect(result).toEqual({ placeholderMoved: true })
+        expect((await repository.itemsOf(scan.id)).map((i) => [i.position, i.state])).toEqual([
+          [0, 'matching'],
+          [1, 'matching'],
+        ])
       })
 
       it('stores nothing at all when one new item cannot be stored (its id is taken)', async () => {
