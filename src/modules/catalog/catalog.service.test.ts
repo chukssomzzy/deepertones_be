@@ -580,7 +580,7 @@ describe('ProductCatalogService.research', () => {
       await ctx.service.research(first!).catch(() => undefined)
 
       expect(await ctx.service.research(second!)).toEqual({ kind: 'not-found' })
-      expect(ctx.researcher.calls).toHaveLength(2)
+      expect(ctx.researcher.calls).toHaveLength(1)
       expect(ctx.alerts()).toEqual([])
     })
 
