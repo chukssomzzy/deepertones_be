@@ -258,12 +258,13 @@ export class ScanService {
    * The scan has no photo and one item at position 0. It is created in `needs-identification`, not `recognising`: with no photo the
    * reaper would requeue a recognise that can only fail as photo-missing, whereas this state is one it leaves alone and the app can still
    * identify by hand. The item is then moved on exactly as picking the product for an item is (`identifyByChoice`), so a failure there
-   * (the next step cannot be queued) leaves it waiting in `needs-identification` and propagates.
+   * (the next step cannot be queued) leaves it waiting in `needs-identification`, no longer counted (the client never learns its id, so
+   * the slot is given back, best effort), and propagates.
    */
   async createTyped(input: { productId: string; clientIp: string }): Promise<{ scanId: string; itemId: string }> {
     const { userId, profileId } = requireUser()
     const resolved = await this.catalog.choose(input.productId)
-    await this.catalog.namedProduct(input.productId)
+    const product = await this.catalog.namedProduct(input.productId)
     const needsModel = resolved.kind === 'needs-research' || resolved.kind === 'needs-analysis'
     const now = this.now()
     const ipHash = await this.hashIp(input.clientIp)
@@ -278,7 +279,15 @@ export class ScanService {
     )
     const item = await this.repository.findItem(itemId)
     if (!item) throw new Error('typed scan item vanished')
-    await this.identifyByChoice(item, 'needs-identification', input.productId)
+    try {
+      // Routed on the answer that was counted above: asking the catalog again could send a model call out uncounted.
+      await this.identifyByChoice(item, 'needs-identification', input.productId, { resolved, product })
+    } catch (error) {
+      // The client never learns the scan id, so it cannot retry this item: give the slot back instead of holding it for 24 hours.
+      console.error({ outcome: 'typed-move-failed', scanId, itemId })
+      await this.repository.updateItem(itemId, 'needs-identification', { counted: false, updatedAt: this.now() }).catch(() => console.error({ outcome: 'typed-refund-failed', scanId, itemId }))
+      throw error
+    }
     return { scanId, itemId }
   }
 
@@ -568,9 +577,10 @@ export class ScanService {
     return this.itemViewOf(itemId)
   }
 
-  private async identifyByChoice(item: ScanItem, from: ItemState, productId: string): Promise<boolean> {
-    const resolved = await this.catalog.choose(productId)
-    const product = await this.catalog.namedProduct(productId)
+  /** `known` is an answer the caller already has (and acted on), so it is not asked for again. */
+  private async identifyByChoice(item: ScanItem, from: ItemState, productId: string, known?: { resolved: ResolveResult; product: ProductSummary }): Promise<boolean> {
+    const resolved = known?.resolved ?? (await this.catalog.choose(productId))
+    const product = known?.product ?? (await this.catalog.namedProduct(productId))
     return this.moveOn(
       item,
       from,

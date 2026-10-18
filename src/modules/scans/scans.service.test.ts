@@ -8363,18 +8363,55 @@ describe('ScanService.createTyped', () => {
     })
   })
 
+  describe('the catalog\'s answer', () => {
+    it('is asked once: the item goes where the answer that was counted says, even if the catalog would now answer otherwise', async () => {
+      const ctx = setup()
+      const { productId, formulationId } = await catalogued(ctx)
+      const real = ctx.catalog.choose.bind(ctx.catalog)
+      const choose = vi
+        .spyOn(ctx.catalog, 'choose')
+        .mockImplementationOnce(real)
+        .mockResolvedValue({ kind: 'needs-analysis', productId, formulationId })
+
+      const { itemId } = await addTyped(ctx, productId)
+
+      expect(choose).toHaveBeenCalledTimes(1)
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ state: 'ready', counted: false })
+    })
+  })
+
   describe('an item that waits for a name', () => {
-    it('is left in needs-identification, to be identified by hand, when the next step cannot be queued', async () => {
+    it('is left in needs-identification, to be identified by hand, and no longer counted, when the next step cannot be queued', async () => {
       const ctx = setup()
       const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      await takePhotos(ctx, 29)
       ctx.jobs.failNextWith(new Error('queue down'))
 
       await expect(addTyped(ctx, productId)).rejects.toThrow('queue down')
 
       const waiting = await waitingItems(ctx)
       expect(waiting).toHaveLength(1)
-      expect(waiting[0]).toMatchObject({ state: 'needs-identification', photoId: null, photoKey: null, counted: true })
+      expect(waiting[0]).toMatchObject({ state: 'needs-identification', photoId: null, photoKey: null, counted: false })
       expect(rowsOf(ctx)).toEqual([])
+      // The client never learned the scan id, so the slot it took is given back: 29 photos and a retry are still within the 30.
+      await expect(addTyped(ctx, productId)).resolves.toMatchObject({ itemId: expect.any(String) })
+    })
+
+    it('still rethrows the original error when giving the slot back fails too', async () => {
+      const ctx = setup()
+      const { productId } = await catalogued(ctx, CERAVE, { analysed: false })
+      ctx.jobs.failNextWith(new Error('queue down'))
+      const real = ctx.repository.updateItem.bind(ctx.repository)
+      vi.spyOn(ctx.repository, 'updateItem').mockImplementation(async (id, expected, patch, ...rest) => {
+        if (patch.counted === false) throw new Error('db down')
+        return real(id, expected, patch, ...rest)
+      })
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      await expect(addTyped(ctx, productId)).rejects.toThrow('queue down')
+
+      expect(logged).toHaveBeenCalledWith({ outcome: 'typed-move-failed', scanId: expect.any(String), itemId: expect.any(String) })
+      logged.mockRestore()
     })
   })
 })

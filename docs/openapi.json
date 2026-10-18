@@ -3641,16 +3641,6 @@
               }
             }
           },
-          "415": {
-            "description": "The Content-Type of the body is not supported by this route",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "429": {
             "description": "Too many requests; wait for the Retry-After header (seconds) when present",
             "content": {
@@ -3736,16 +3726,6 @@
           },
           "404": {
             "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "415": {
-            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {

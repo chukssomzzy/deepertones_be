@@ -2,7 +2,7 @@ import type { z } from '@hono/zod-openapi'
 import { ValidationError } from '../../lib/errors'
 import { defineRoute, errorResponses, jsonBody, ok, openapiApp, success, toValidationError } from '../../lib/openapi'
 import { ProductSummary } from '../scans/scans.schemas'
-import { rateLimit } from '../../middleware/rate-limit'
+import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toEntryResponse, toShelfResponse } from './shelf.presenter'
 import { AddShelfProductBody, AddShelfProductResponse, EntryParams, RemoveShelfEntryBody, ShelfEntryResponse, ShelfResponse } from './shelf.schemas'
@@ -82,7 +82,6 @@ const readBody = <Schema extends z.ZodType>(text: string, schema: Schema): z.inf
 const readRemoveBody = (text: string) => (text.trim() === '' ? {} : readBody(text, RemoveShelfEntryBody))
 
 // The client address is Cloudflare's own header, as in rateLimit and the scan routes. The service hashes it for the daily per-address quota.
-const FALLBACK_IP = 'unknown'
 
 const shelfApp = openapiApp()
 // Registered ahead of its first use, so the component keeps its own shape: left to the generator, it takes the description of the
@@ -103,5 +102,11 @@ export const shelfRoutes = shelfApp
     return c.body(null, 204)
   })
 
-shelfRoutes.openAPIRegistry.registerPath(addShelfProduct)
-shelfRoutes.openAPIRegistry.registerPath(removeShelfEntry)
+// defineRoute adds 415 to any route with a body, but these are served by reading the text, which never refuses a Content-Type: do not document it.
+const withoutUnsupportedMediaType = <Route extends { responses: object }>(route: Route): Route => {
+  const { 415: _unsupported, ...responses } = route.responses as Record<number, unknown>
+  return { ...route, responses }
+}
+
+shelfRoutes.openAPIRegistry.registerPath(withoutUnsupportedMediaType(addShelfProduct))
+shelfRoutes.openAPIRegistry.registerPath(withoutUnsupportedMediaType(removeShelfEntry))

@@ -70,6 +70,9 @@ export class ShelfService {
    * only when a model is needed) and its ids are returned: the entry appears on the shelf when the scan's item is ready. A product the
    * caller removed earlier is not "on the shelf": it goes through a scan, which puts it back as the same entry.
    *
+   * A row whose product no longer resolves is not shown by `list` and so is not "on the shelf" here either: it falls through to a new typed
+   * scan (harmless: the latest scan wins).
+   *
    * The check and the scan are not one write, so two simultaneous adds can each start a scan; both end on the one entry (latest wins).
    */
   async add(productId: string, clientIp: string): Promise<ShelfAddResult> {

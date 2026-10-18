@@ -5,6 +5,9 @@ type LimiterName = { [K in keyof CloudflareBindings]-?: CloudflareBindings[K] ex
 
 const RETRY_AFTER_SECONDS = 60
 
+/** What stands for the client address when Cloudflare's header is missing (local dev and tests); routes that pass the address on use it too. */
+export const FALLBACK_IP = 'unknown'
+
 /**
  * Route middleware (`middleware: [rateLimit(...)]` in defineRoute) over a Workers rate-limit binding.
  * It runs after `auth` but outside requestContext, so it reads c.var.auth and never currentActor().
@@ -19,7 +22,7 @@ export const rateLimit = (binding: LimiterName, key: 'ip' | 'user') =>
     if (key === 'ip') {
       // Cloudflare always sets cf-connecting-ip at the edge; the fallback only triggers in local dev and
       // tests, where every caller then shares one bucket.
-      subject = c.req.header('cf-connecting-ip') ?? 'unknown'
+      subject = c.req.header('cf-connecting-ip') ?? FALLBACK_IP
     } else {
       const actor = c.var.auth?.actor
       subject = actor?.kind === 'user' ? actor.userId : undefined
