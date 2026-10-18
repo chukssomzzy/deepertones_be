@@ -53,6 +53,10 @@ describe('wrangler.jsonc product catalog config', () => {
     expect(block?.vars?.ANTHROPIC_MODEL_ANALYSIS).toBe('claude-sonnet-5-5')
   })
 
+  it.each(blocks)('%s sets its own cheap model for the shelf recognizer, so the eval can move it alone', (_, block) => {
+    expect(block?.vars?.ANTHROPIC_MODEL_RECOGNIZE_SHELF).toBe('claude-haiku-5-5')
+  })
+
   it.each(blocks)('%s no longer sets the single ANTHROPIC_MODEL', (_, block) => {
     expect(block?.vars).not.toHaveProperty('ANTHROPIC_MODEL')
   })
@@ -177,6 +181,9 @@ describe('wrangler.jsonc scan, goal and product search route rate limits', () =>
   const limiters: [string, number][] = [
     ['SCAN_CREATE_IP_LIMITER', 20],
     ['SCAN_CREATE_USER_LIMITER', 10],
+    // The shelf route reads up to 5 products per photo, so it costs what the product route does: the same numbers, a counter of its own.
+    ['SCAN_SHELF_IP_LIMITER', 20],
+    ['SCAN_SHELF_USER_LIMITER', 10],
     ['SCAN_BACK_PHOTO_USER_LIMITER', 10],
     ['SCAN_BACK_PHOTO_IP_LIMITER', 20],
     ['SCAN_RETAKE_IP_LIMITER', 20],

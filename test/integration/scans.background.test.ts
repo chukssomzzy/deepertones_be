@@ -9,6 +9,7 @@ import { createDb } from '../../src/lib/db'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { jpegPhoto } from '../../src/modules/scans/scans.photos.fake'
+import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { json, messageResponse, stubFetch, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
@@ -81,6 +82,19 @@ const itemOf = async (userId: string, scanId: string, itemId: string) => {
   return scan.items.find((i) => i.id === itemId)!
 }
 
+/** What the catalog holds for a formulation (its ingredients and source): a scan's item carries the product's identity only. */
+const catalogViewOf = (formulationId: string) =>
+  new ProductCatalogService({
+    repository: new D1CatalogRepository(createDb(env.DB)),
+    researcher: new MemoryProductResearcher(),
+    analyst: new MemoryProductAnalyst(),
+    images: new MemoryCatalogImageStore(),
+    imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
+  }).productView(formulationId)
+/** The formulation the stored item points at. */
+const formulationIdOf = async (itemId: string) => (await new D1ScansRepository(createDb(env.DB)).findItem(itemId))!.formulationId!
+
 /** A product the catalog already holds, researched and analysed, so a scan of it needs no research or analysis call. */
 const catalogued = async (brand: string, name: string) => {
   const researcher = new MemoryProductResearcher()
@@ -133,7 +147,7 @@ describe('the job registry the Worker runs', () => {
 describe('scan items advanced through the Worker queue handler', () => {
   it('takes a photo of a product the catalog already holds to ready, with one vision call on the stored photo and nothing else', async () => {
     const brand = freshBrand()
-    const formulationId = await catalogued(brand, 'Hydrating Cleanser')
+    await catalogued(brand, 'Hydrating Cleanser')
     const { userId, photo, scanId, itemId } = await startScan()
     expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'recognising' })
     const calls = stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
@@ -146,10 +160,27 @@ describe('scan items advanced through the Worker queue handler', () => {
 
     expect(match.explicitAcks).toEqual(['m'])
     const item = await itemOf(userId, scanId, itemId)
-    expect(item).toMatchObject({ state: 'ready', reason: null, image: { kind: 'user' }, product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(item).toMatchObject({ state: 'ready', reason: null, image: null, product: { brand } })
+    expect(item.product).not.toHaveProperty('formulation')
+    expect(item.product).not.toHaveProperty('concerns')
+    expect(item.product).not.toHaveProperty('reference')
+    expect(item.product).not.toHaveProperty('product')
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toBe(ANTHROPIC_URL)
     expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(photo.bytes))
+  })
+
+  it('deletes the front photo from the private bucket as soon as a sure read moves the item on to matching', async () => {
+    const brand = freshBrand()
+    const { userId, scanId, itemId, key } = await startScan()
+    expect(await env.PRIVATE_PHOTOS.get(key)).not.toBeNull()
+    stubAnthropic(beautyProduct(brand, 'Hydrating Cleanser'))
+
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'matching', image: null })
+    expect(await env.PRIVATE_PHOTOS.get(key)).toBeNull()
+    expect((await new D1ScansRepository(createDb(env.DB)).findItem(itemId))!.photoKey).toBeNull()
   })
 
   it('acks a repeated delivery of a finished step without calling Anthropic again', async () => {
@@ -365,8 +396,9 @@ describe('scan items identified by their back photo, through the Worker queue ha
       state: 'ready',
       reason: null,
       recognised: { brand, name: 'Hydrating Cleanser', category: 'skin' },
-      product: { formulation: { id: formulationId }, product: { kind: 'named', brand, name: 'Hydrating Cleanser' } },
+      product: { kind: 'named', brand, name: 'Hydrating Cleanser' },
     })
+    expect(await formulationIdOf(taken.itemId)).toBe(formulationId)
     expect(calls.map(jobOf)).toEqual(['read-label'])
     expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(back.bytes))
     expect(hasWebSearch(calls)).toBe(false)
@@ -392,8 +424,9 @@ describe('scan items identified by their back photo, through the Worker queue ha
     expect(analysed.explicitAcks).toEqual(['m'])
     expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({
       state: 'ready',
-      product: { product: { kind: 'named', brand, name: 'Bright Tone Serum', variant: 'Night' }, formulation: { ingredients: list, source: { kind: 'label', url: null } } },
+      product: { kind: 'named', brand, name: 'Bright Tone Serum', variant: 'Night' },
     })
+    expect((await catalogViewOf(await formulationIdOf(taken.itemId))).formulation).toMatchObject({ ingredients: list, source: { kind: 'label', url: null } })
     expect(calls.map(jobOf)).toEqual(['read-label', 'analysis'])
     expect(hasWebSearch(calls)).toBe(false)
   })
@@ -413,9 +446,9 @@ describe('scan items identified by their back photo, through the Worker queue ha
 
     expect(result.explicitAcks).toEqual(['m'])
     const [a, b] = [await itemOf(first.userId, first.scanId, first.itemId), await itemOf(second.userId, second.scanId, second.itemId)]
-    expect(a).toMatchObject({ state: 'ready', product: { product: { kind: 'unnamed', brand: '', name: '' } } })
-    expect(b).toMatchObject({ state: 'ready', product: { product: { kind: 'unnamed', brand: '', name: '' } } })
-    expect(b.product!.formulation.id).toBe(a.product!.formulation.id)
+    expect(a).toMatchObject({ state: 'ready', product: { kind: 'unnamed', brand: '', name: '' } })
+    expect(b).toMatchObject({ state: 'ready', product: { kind: 'unnamed', brand: '', name: '' } })
+    expect(await formulationIdOf(second.itemId)).toBe(await formulationIdOf(first.itemId))
     expect(a).not.toHaveProperty('recognised')
     expect(firstCalls.map(jobOf)).toEqual(['read-label', 'analysis'])
     expect(secondCalls.map(jobOf)).toEqual(['read-label'])
@@ -437,9 +470,9 @@ describe('scan items identified by their back photo, through the Worker queue ha
     await readBack(second)
 
     const [a, b] = [await itemOf(first.userId, first.scanId, first.itemId), await itemOf(second.userId, second.scanId, second.itemId)]
-    expect(b).toMatchObject({ state: 'ready', product: { product: { kind: 'named', brand, name: 'Bright Tone Serum' } } })
-    expect(a).toMatchObject({ state: 'ready', product: { product: { kind: 'named', brand, id: b.product!.product.id } } })
-    expect(a.product!.formulation.id).toBe(b.product!.formulation.id)
+    expect(b).toMatchObject({ state: 'ready', product: { kind: 'named', brand, name: 'Bright Tone Serum' } })
+    expect(a).toMatchObject({ state: 'ready', product: { kind: 'named', brand, id: b.product!.id } })
+    expect(await formulationIdOf(first.itemId)).toBe(await formulationIdOf(second.itemId))
     expect(secondCalls.map(jobOf)).toEqual(['read-label'])
     expect(hasWebSearch([...firstCalls, ...secondCalls])).toBe(false)
   })
@@ -499,7 +532,8 @@ describe('scan items identified by a typed name, through the Worker queue handle
     const match = await runQueue(MAIN, { itemId: taken.itemId, step: 'match', at: AT + 20 })
 
     expect(match.explicitAcks).toEqual(['m'])
-    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'ready', product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(await itemOf(taken.userId, taken.scanId, taken.itemId)).toMatchObject({ state: 'ready', product: { brand } })
+    expect(await formulationIdOf(taken.itemId)).toBe(formulationId)
     expect(calls.map(jobOf)).toEqual(['split-name'])
   })
 
@@ -532,7 +566,8 @@ describe('scan items identified by a typed name, through the Worker queue handle
 
     const moved = await identifyByName(taken, { productId: resolved.productId })
 
-    expect(moved).toMatchObject({ state: 'ready', product: { formulation: { id: formulationId }, product: { brand } } })
+    expect(moved).toMatchObject({ state: 'ready', product: { brand } })
+    expect(await formulationIdOf(taken.itemId)).toBe(formulationId)
     expect(calls).toHaveLength(0)
   })
 
@@ -593,3 +628,109 @@ describe('push notifications queued by the steps, through the Worker queue handl
   })
 })
 
+
+// A shelf photo is read once for up to 5 products; the fan-out writes the photo, its new items and the placeholder's move in one D1 batch.
+const shelfProduct = (brand: string, name: string, confidence: number) => ({ brand, name, variant: '', form: 'unknown', category: 'skin', confidence })
+const shelfRead = (products: ReturnType<typeof shelfProduct>[], excluded = { otherProducts: 0, unreadable: 0 }) =>
+  recognised({ classification: 'beauty-product', products, excluded })
+
+/** A one-photo shelf scan, made through the real service (the photo is in the real bucket, the photo row and its placeholder in D1). */
+const startShelfScan = async () => {
+  const userId = await guest()
+  const photo = jpegPhoto()
+  const scan = await asUser(userId, () => container.scans.createShelf({ photos: [photo], clientIp: SCAN_IP }))
+  return { userId, photo, scanId: scan.id, itemId: scan.items[0]!.id }
+}
+const shelfPhotosOf = (scanId: string) => new D1ScansRepository(createDb(env.DB)).photosOf(scanId)
+const shelfItemsOf = (scanId: string) => new D1ScansRepository(createDb(env.DB)).itemsOf(scanId)
+
+describe('a shelf scan advanced through the Worker queue handler', () => {
+  it('turns one photo into one item per product, at slots 0, 1, 2, reading the stored photo once, and records what was left out on the photo', async () => {
+    const brand = freshBrand()
+    const { userId, photo, scanId, itemId } = await startShelfScan()
+    expect((await shelfPhotosOf(scanId)).map((p) => [p.position, p.state])).toEqual([[0, 'recognising']])
+    expect((await shelfItemsOf(scanId)).map((i) => [i.position, i.photoKey])).toEqual([[0, null]])
+    const calls = stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Toner', 0.85), shelfProduct(brand, 'Serum', 0.4)], { otherProducts: 2, unreadable: 1 }))
+
+    const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.body.messages[0].content[0].source.data).toBe(base64Of(photo.bytes))
+    const items = await shelfItemsOf(scanId)
+    expect(items.map((i) => [i.position, i.recognisedName, i.state])).toEqual([
+      [0, 'Cleanser', 'matching'],
+      [1, 'Toner', 'matching'],
+      [2, 'Serum', 'needs-confirmation'],
+    ])
+    expect(items[0]!.id).toBe(itemId)
+    const [stored] = await shelfPhotosOf(scanId)
+    expect(items.map((i) => i.photoId)).toEqual([stored!.id, stored!.id, stored!.id])
+    expect(stored).toMatchObject({ state: 'recognised', skippedNotBeauty: 2, skippedUnreadable: 1, skippedOverLimit: 0, skippedDailyLimit: 0 })
+    expect(JSON.parse(stored!.recognition!).products).toHaveLength(3)
+    const view = await asUser(userId, () => container.scans.getScan(scanId))
+    expect(view.items.map((i) => [i.position, i.state])).toEqual([
+      [0, 'matching'],
+      [1, 'matching'],
+      [2, 'needs-confirmation'],
+    ])
+    expect(pushQueued).toEqual([{ kind: 'scan-needs-you', userId, profileId: `profile-${userId}`, scanId, itemId: items[2]!.id, need: 'confirm' }])
+  })
+
+  it('adds nothing and calls Anthropic no more when the same delivery comes again', async () => {
+    const brand = freshBrand()
+    const { scanId, itemId } = await startShelfScan()
+    const calls = stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Toner', 0.85)]))
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    const before = await shelfItemsOf(scanId)
+
+    const again = await runQueue(MAIN, { itemId, step: 'recognise', at: AT }, 2)
+
+    expect(again.explicitAcks).toEqual(['m'])
+    expect(calls).toHaveLength(1)
+    expect(await shelfItemsOf(scanId)).toEqual(before)
+  })
+
+  it('rejects the photo and its placeholder, and deletes the image from the private bucket, when the shelf holds no readable product', async () => {
+    const { userId, scanId, itemId } = await startShelfScan()
+    const [photo] = await shelfPhotosOf(scanId)
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).not.toBeNull()
+    stubAnthropic(recognised({ classification: 'other-product', products: [], excluded: { otherProducts: 3, unreadable: 0 } }))
+
+    const result = await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(result.explicitAcks).toEqual(['m'])
+    expect(await itemOf(userId, scanId, itemId)).toMatchObject({ state: 'rejected', reason: 'not-a-beauty-product' })
+    expect((await shelfPhotosOf(scanId))[0]).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 3 })
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).toBeNull()
+  })
+
+  it('keeps the shelf photo in the private bucket while an item awaits confirmation, and deletes it once that item is confirmed', async () => {
+    const brand = freshBrand()
+    const { userId, scanId, itemId } = await startShelfScan()
+    const [photo] = await shelfPhotosOf(scanId)
+    stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Serum', 0.4)]))
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+    const items = await shelfItemsOf(scanId)
+    expect(items.map((i) => i.state)).toEqual(['matching', 'needs-confirmation'])
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).not.toBeNull()
+    expect((await shelfPhotosOf(scanId))[0]!.photoKey).toBe(photo!.photoKey)
+
+    await asUser(userId, () => container.scans.confirm(scanId, items[1]!.id, { brand, name: 'Serum', category: 'skin' }))
+
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).toBeNull()
+    expect((await shelfPhotosOf(scanId))[0]!.photoKey).toBeNull()
+  })
+
+  it('deletes the shelf photo at once when every product read from it is sure', async () => {
+    const brand = freshBrand()
+    const { scanId, itemId } = await startShelfScan()
+    const [photo] = await shelfPhotosOf(scanId)
+    stubAnthropic(shelfRead([shelfProduct(brand, 'Cleanser', 0.92), shelfProduct(brand, 'Toner', 0.85)]))
+
+    await runQueue(MAIN, { itemId, step: 'recognise', at: AT })
+
+    expect(await env.PRIVATE_PHOTOS.get(photo!.photoKey!)).toBeNull()
+    expect((await shelfPhotosOf(scanId))[0]!.photoKey).toBeNull()
+  })
+})

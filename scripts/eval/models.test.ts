@@ -7,13 +7,14 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product, split-name and read-goal.
+// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name and read-goal.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
   'same-product': 'ANTHROPIC_MODEL_JUDGE',
   'image-check': 'ANTHROPIC_MODEL_VISION',
   recognize: 'ANTHROPIC_MODEL_VISION',
+  'recognize-shelf': 'ANTHROPIC_MODEL_RECOGNIZE_SHELF',
   'read-label': 'ANTHROPIC_MODEL_VISION',
   'split-name': 'ANTHROPIC_MODEL_JUDGE',
   'read-goal': 'ANTHROPIC_MODEL_JUDGE',
@@ -32,6 +33,11 @@ describe('the eval default models', () => {
   it('run the goal read on the cheap judge model: it sorts words for the app, it is not text the user reads', () => {
     expect(AI_JOBS).toContain('read-goal')
     expect(DEFAULT_MODELS['read-goal']).toBe('claude-haiku-5-5')
+  })
+
+  it('run the shelf recognizer on the cheap model by default, like recognize', () => {
+    expect(DEFAULT_MODELS['recognize-shelf']).toBe('claude-haiku-5-5')
+    expect(DEFAULT_MODELS['recognize-shelf']).toBe(DEFAULT_MODELS.recognize)
   })
 
   it('cover exactly the jobs there are', () => {

@@ -12,6 +12,8 @@ import type { ScanEvent } from './scan-events.provider'
 const SNAPSHOT = { id: 'scan', items: [] }
 const ITEM = { id: 'item-1', position: 0, state: 'matching', reason: null }
 const itemEvent = { type: 'item', item: ITEM } as unknown as ScanEvent
+const PHOTO = { id: 'photo-1', position: 0, state: 'rejected', skipped: { notBeauty: 1, unreadable: 0, overLimit: 0, dailyLimit: 0 } }
+const photoEvent = { type: 'photo', photo: PHOTO } as unknown as ScanEvent
 const DONE: ScanEvent = { type: 'done' }
 
 const opened: SseReader[] = []
@@ -39,6 +41,15 @@ describe('DurableObjectScanEvents', () => {
     await new DurableObjectScanEvents(env.SCAN_STREAM).publish(scanId, itemEvent)
 
     expect((await stream.read(1)).frames).toEqual([`event: item\ndata: ${JSON.stringify(ITEM)}`])
+  })
+
+  it('delivers a published photo event to a client watching that scan, as a photo frame', async () => {
+    const scanId = freshScanId()
+    const stream = await watch(scanId)
+
+    await new DurableObjectScanEvents(env.SCAN_STREAM).publish(scanId, photoEvent)
+
+    expect((await stream.read(1)).frames).toEqual([`event: photo\ndata: ${JSON.stringify(PHOTO)}`])
   })
 
   it('delivers done to a client watching that scan, and the stream ends', async () => {

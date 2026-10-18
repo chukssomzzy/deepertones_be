@@ -1,8 +1,10 @@
 import { FakeProfilesRepository } from '../profiles/profiles.repository.fake'
 import type { ScansRepository } from './scans.repository'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import { PHOTO_HELD_STATES } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
 const copyItem = (item: ScanItem): ScanItem => ({ ...item })
+const isHeld = (state: ItemState) => PHOTO_HELD_STATES.includes(state)
 
 /**
  * In-memory ScansRepository for unit tests. Its behaviour is pinned by scansRepositoryContract, which the D1 class also
@@ -10,6 +12,7 @@ const copyItem = (item: ScanItem): ScanItem => ({ ...item })
  */
 export class FakeScansRepository implements ScansRepository {
   private scans = new Map<string, Scan>()
+  private photos = new Map<string, ScanPhoto>()
   private items = new Map<string, ScanItem>()
   private backPhotos = new Map<string, NewBackPhoto>()
   private retakes = new Map<string, NewRetake>()
@@ -21,15 +24,38 @@ export class FakeScansRepository implements ScansRepository {
   }
 
   /**
-   * Stores the scan and all its items, or nothing. Every item starts `recognising` with no reason, no recognised
-   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken.
+   * Stores the scan, its photos and all its items, or nothing. Every photo starts `recognising` with no recognition and nothing
+   * skipped, with `updatedAt` equal to `createdAt`. Every item starts `recognising` with no reason, no recognised
+   * fields, no product, no back photo, and `updatedAt` equal to `createdAt`. Rejects (storing nothing) if any id is taken, or two photos or two items of the
+   * scan share a position, as D1's unique indexes do.
    */
-  async createScan(scan: NewScan, items: NewScanItem[]): Promise<void> {
+  async createScan(scan: NewScan, photos: NewScanPhoto[], items: NewScanItem[]): Promise<void> {
     const ids = items.map((i) => i.id)
-    if (this.scans.has(scan.id) || new Set(ids).size !== ids.length || ids.some((id) => this.items.has(id))) {
+    const photoIds = photos.map((p) => p.id)
+    if (
+      this.scans.has(scan.id) ||
+      new Set(ids).size !== ids.length ||
+      ids.some((id) => this.items.has(id)) ||
+      new Set(photoIds).size !== photoIds.length ||
+      photoIds.some((id) => this.photos.has(id)) ||
+      new Set(photos.map((p) => p.position)).size !== photos.length ||
+      new Set(items.map((i) => i.position)).size !== items.length
+    ) {
       throw new Error('duplicate id')
     }
     this.scans.set(scan.id, { ...scan, doneAt: null })
+    for (const photo of photos) {
+      this.photos.set(photo.id, {
+        ...photo,
+        state: 'recognising',
+        recognition: null,
+        skippedNotBeauty: 0,
+        skippedUnreadable: 0,
+        skippedOverLimit: 0,
+        skippedDailyLimit: 0,
+        updatedAt: photo.createdAt,
+      })
+    }
     for (const item of items) {
       this.items.set(item.id, {
         ...item,
@@ -51,6 +77,19 @@ export class FakeScansRepository implements ScansRepository {
         updatedAt: item.createdAt,
       })
     }
+  }
+
+  /** The scan's photos in position order. */
+  async photosOf(scanId: string): Promise<ScanPhoto[]> {
+    return [...this.photos.values()]
+      .filter((p) => p.scanId === scanId)
+      .sort((a, b) => a.position - b.position)
+      .map((p) => ({ ...p }))
+  }
+
+  async findPhoto(photoId: string): Promise<ScanPhoto | null> {
+    const photo = this.photos.get(photoId)
+    return photo ? { ...photo } : null
   }
 
   async findScan(scanId: string): Promise<Scan | null> {
@@ -80,12 +119,66 @@ export class FakeScansRepository implements ScansRepository {
   async updateItem(itemId: string, expected: ItemState, patch: ItemPatch, backPhoto?: NewBackPhoto, retake?: NewRetake): Promise<boolean> {
     const item = this.items.get(itemId)
     if (!item || item.state !== expected) return false
-    for (const [field, value] of Object.entries(patch)) {
-      if (value !== undefined) (item as Record<string, unknown>)[field] = value
-    }
+    this.apply(item, patch)
     if (backPhoto) this.backPhotos.set(backPhoto.id, { ...backPhoto })
     if (retake) this.retakes.set(retake.id, { ...retake })
     return true
+  }
+
+  /** Stores the answer on the photo only while it is `recognising` and holds none, and says whether it did: of any number of callers exactly one wins. */
+  async storeRecognition(photoId: string, recognition: string, at: Date): Promise<boolean> {
+    const photo = this.photos.get(photoId)
+    if (!photo || photo.state !== 'recognising' || photo.recognition !== null) return false
+    photo.recognition = recognition
+    photo.updatedAt = at
+    return true
+  }
+
+  /**
+   * Files what reading a shelf photo found, all or nothing (the whole call is checked before anything is changed). The photo's patch applies
+   * only while the photo is `recognising`. Each sibling is stored, in list order, only while the scan holds fewer than `maxItems` items and
+   * no item holds its position (no error otherwise, even if its id is taken too); a stored sibling at a free position whose id is taken rejects the whole call, as D1's primary key does.
+   * The placeholder moves out of `from` as `updateItem` does, whatever became of the siblings, and the result says whether it did.
+   */
+  async fanOut(input: {
+    photo: { id: string; patch: PhotoPatch }
+    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    siblings: NewSibling[]
+    maxItems: number
+  }): Promise<{ placeholderMoved: boolean }> {
+    const { photo, placeholder, siblings, maxItems } = input
+    const added = new Map<string, ScanItem>()
+    const held = new Map([...this.items.values()].map((i) => [`${i.scanId}:${i.position}`, i]))
+    const counts = new Map<string, number>()
+    for (const item of this.items.values()) counts.set(item.scanId, (counts.get(item.scanId) ?? 0) + 1)
+    for (const sibling of siblings) {
+      const slot = `${sibling.scanId}:${sibling.position}`
+      const count = counts.get(sibling.scanId) ?? 0
+      if (count >= maxItems) continue
+      // The slot first, as SQLite checks the ON CONFLICT target before the primary key: a clash on both is skipped, not an error.
+      if (held.has(slot)) continue
+      if (this.items.has(sibling.id) || added.has(sibling.id)) throw new Error('duplicate id')
+      const stored: ScanItem = {
+        ...sibling,
+        reason: null,
+        backPhotoKey: null,
+        productId: null,
+        formulationId: null,
+        noLabelSource: null,
+        noLabelPurpose: null,
+        noLabelUsedFor: null,
+        noLabelDescription: null,
+        updatedAt: sibling.createdAt,
+      }
+      added.set(sibling.id, stored)
+      held.set(slot, stored)
+      counts.set(sibling.scanId, count + 1)
+    }
+
+    const storedPhoto = this.photos.get(photo.id)
+    if (storedPhoto?.state === 'recognising') this.apply(storedPhoto, photo.patch)
+    for (const [id, item] of added) this.items.set(id, item)
+    return { placeholderMoved: await this.updateItem(placeholder.id, placeholder.from, placeholder.patch) }
   }
 
   /**
@@ -122,6 +215,41 @@ export class FakeScansRepository implements ScansRepository {
       .map(copyItem)
   }
 
+  /** Items that hold a front photo key although their state is not `recognising` or `needs-confirmation`, oldest `updatedAt` first, at most `limit`. */
+  async itemsWithReleasablePhoto(limit: number): Promise<ScanItem[]> {
+    return [...this.items.values()]
+      .filter((i) => i.photoKey !== null && !isHeld(i.state))
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, limit)
+      .map(copyItem)
+  }
+
+  /** Clears the item's front photo key only while it is still `key`, and says whether it did. Nothing else changes, `updatedAt` included. */
+  async clearItemPhotoKey(itemId: string, key: string): Promise<boolean> {
+    const item = this.items.get(itemId)
+    if (!item || item.photoKey !== key) return false
+    item.photoKey = null
+    return true
+  }
+
+  /** Photos that hold a key although none of their items is `recognising` or `needs-confirmation`, oldest `updatedAt` first, at most `limit`. */
+  async shelfPhotosToRelease(limit: number): Promise<ScanPhoto[]> {
+    const items = [...this.items.values()]
+    return [...this.photos.values()]
+      .filter((p) => p.photoKey !== null && !items.some((i) => i.scanId === p.scanId && i.photoId === p.id && isHeld(i.state)))
+      .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
+      .slice(0, limit)
+      .map((p) => ({ ...p }))
+  }
+
+  /** The same for a scan photo's key. */
+  async clearShelfPhotoKey(photoId: string, key: string): Promise<boolean> {
+    const photo = this.photos.get(photoId)
+    if (!photo || photo.photoKey !== key) return false
+    photo.photoKey = null
+    return true
+  }
+
   /**
    * Scans with no done time, created at or after `createdSince`, whose items are all in one of `states` and were all last
    * updated before `before` (not at it), oldest scan first, at most `limit`. A scan with no items is never listed.
@@ -153,7 +281,7 @@ export class FakeScansRepository implements ScansRepository {
     return this.photoTimes((item) => scanIds.has(item.scanId), (upload) => upload.ipHash === ipHash, since)
   }
 
-  /** Every photo key and back-photo key still stored for these users' items (nulls left out). */
+  /** Every photo key and back-photo key still stored for these users' items, and every key on their scan photos (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const wanted = new Set(userIds)
     const keys: string[] = []
@@ -161,6 +289,9 @@ export class FakeScansRepository implements ScansRepository {
       if (!wanted.has(item.userId)) continue
       if (item.photoKey !== null) keys.push(item.photoKey)
       if (item.backPhotoKey !== null) keys.push(item.backPhotoKey)
+    }
+    for (const photo of this.photos.values()) {
+      if (wanted.has(photo.userId) && photo.photoKey !== null) keys.push(photo.photoKey)
     }
     return keys
   }
@@ -182,11 +313,14 @@ export class FakeScansRepository implements ScansRepository {
     return chosen.length
   }
 
-  /** Deletes the users' scans, items, back-photo records and retake records. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' scans, photos, items, back-photo records and retake records. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     const wanted = new Set(userIds)
     for (const [id, scan] of this.scans) {
       if (wanted.has(scan.userId)) this.scans.delete(id)
+    }
+    for (const [id, photo] of this.photos) {
+      if (wanted.has(photo.userId)) this.photos.delete(id)
     }
     for (const [id, item] of this.items) {
       if (wanted.has(item.userId)) this.items.delete(id)
@@ -206,6 +340,13 @@ export class FakeScansRepository implements ScansRepository {
   /** How many retakes have been uploaded for the item, whatever became of their photos. */
   async countRetakes(itemId: string): Promise<number> {
     return [...this.retakes.values()].filter((upload) => upload.itemId === itemId).length
+  }
+
+  /** Sets each field the patch names; a field left out (undefined) is unchanged, and null clears. */
+  private apply(row: ScanItem | ScanPhoto, patch: ItemPatch | PhotoPatch): void {
+    for (const [field, value] of Object.entries(patch)) {
+      if (value !== undefined) (row as Record<string, unknown>)[field] = value
+    }
   }
 
   private photoTimes(ownsItem: (item: ScanItem) => boolean, ownsUpload: (upload: NewBackPhoto) => boolean, since: Date) {

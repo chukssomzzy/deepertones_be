@@ -31,6 +31,7 @@
     // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
     "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
     // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
@@ -139,8 +140,10 @@
     { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "1013", "simple": { "limit": 10, "period": 60 } },
     { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "1016", "simple": { "limit": 20, "period": 60 } },
     { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "1017", "simple": { "limit": 10, "period": 60 } },
-    { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "1018", "simple": { "limit": 20, "period": 60 } },
-    { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "1019", "simple": { "limit": 10, "period": 60 } },
+    { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "1018", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "1019", "simple": { "limit": 10, "period": 60 } },
+    { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "1020", "simple": { "limit": 20, "period": 60 } },
+    { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "1021", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -225,6 +228,7 @@
         // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
         "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
         // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
@@ -331,8 +335,10 @@
         { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "2013", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "2016", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "2017", "simple": { "limit": 10, "period": 60 } },
-        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "2018", "simple": { "limit": 20, "period": 60 } },
-        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "2019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "2018", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "2019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "2020", "simple": { "limit": 20, "period": 60 } },
+        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "2021", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -383,6 +389,7 @@
         // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
         "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
         // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
@@ -489,8 +496,10 @@
         { "name": "SCAN_IDENTIFY_USER_LIMITER", "namespace_id": "3013", "simple": { "limit": 10, "period": 60 } },
         { "name": "SCAN_NO_LABEL_IP_LIMITER", "namespace_id": "3016", "simple": { "limit": 20, "period": 60 } },
         { "name": "SCAN_NO_LABEL_USER_LIMITER", "namespace_id": "3017", "simple": { "limit": 10, "period": 60 } },
-        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "3018", "simple": { "limit": 20, "period": 60 } },
-        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "3019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "SCAN_SHELF_IP_LIMITER", "namespace_id": "3018", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SCAN_SHELF_USER_LIMITER", "namespace_id": "3019", "simple": { "limit": 10, "period": 60 } },
+        { "name": "GOAL_SET_IP_LIMITER", "namespace_id": "3020", "simple": { "limit": 20, "period": 60 } },
+        { "name": "GOAL_SET_USER_LIMITER", "namespace_id": "3021", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],
