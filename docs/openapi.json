@@ -660,6 +660,265 @@
         ],
         "additionalProperties": false
       },
+      "Shelf": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShelfEntry"
+            },
+            "description": "The products the profile uses, most recently scanned first, at most 200."
+          }
+        },
+        "required": [
+          "entries"
+        ]
+      },
+      "ShelfEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "The entry's own id, kept when the product is scanned again. Use it to remove the entry."
+          },
+          "addedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the product first reached the shelf."
+          },
+          "lastScannedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was last scanned. The shelf is ordered by this, newest first."
+          },
+          "source": {
+            "type": "object",
+            "properties": {
+              "scanId": {
+                "type": "string"
+              },
+              "itemId": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "scanId",
+              "itemId"
+            ],
+            "description": "The scan and item the entry was last read from."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "product",
+              "no-label"
+            ],
+            "description": "`product` carries `product`; `no-label` carries `noLabel`."
+          },
+          "product": {
+            "$ref": "#/components/schemas/ProductSummary"
+          },
+          "noLabel": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "market-vendor",
+                  "pharmacy",
+                  "online",
+                  "gift",
+                  "not-sure"
+                ],
+                "description": "Where the product came from."
+              },
+              "purpose": {
+                "type": "string",
+                "enum": [
+                  "lighten",
+                  "moisturise",
+                  "treat-spots",
+                  "not-sure"
+                ],
+                "description": "What the product is used for."
+              },
+              "usedFor": {
+                "type": "string",
+                "enum": [
+                  "under-1-month",
+                  "1-6-months",
+                  "6-months-2-years",
+                  "over-2-years"
+                ],
+                "description": "How long the product has been used."
+              },
+              "description": {
+                "type": "string",
+                "description": "What the user noted, if anything."
+              },
+              "concerns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string"
+                    },
+                    "ingredients": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "why": {
+                      "type": "string"
+                    },
+                    "whoShouldTakeCare": {
+                      "type": "string"
+                    },
+                    "traits": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sources": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "severity",
+                    "ingredients",
+                    "why",
+                    "whoShouldTakeCare",
+                    "traits",
+                    "sources"
+                  ]
+                },
+                "description": "Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label."
+              },
+              "rulesVersion": {
+                "type": "integer",
+                "description": "Which version of the caution rules wrote `concerns`."
+              }
+            },
+            "required": [
+              "source",
+              "purpose",
+              "usedFor",
+              "concerns",
+              "rulesVersion"
+            ],
+            "description": "Only on a `no-label` entry: what the user said about it, and the cautions that earns."
+          }
+        },
+        "required": [
+          "id",
+          "addedAt",
+          "lastScannedAt",
+          "source",
+          "kind"
+        ]
+      },
+      "ProductSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "named",
+              "unnamed"
+            ],
+            "description": "An `unnamed` product is an ingredient list the label gave no brand and name for: its `brand` and `name` are empty strings and its `category` is `other` unless the label said otherwise."
+          },
+          "brand": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "variant": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "form": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "spray",
+              "roll-on",
+              "stick",
+              "cream",
+              "lotion",
+              "gel",
+              "oil",
+              "serum",
+              "liquid",
+              "bar",
+              "powder",
+              "balm",
+              null
+            ]
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "skin",
+              "hair",
+              "body",
+              "makeup",
+              "other"
+            ]
+          },
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "brand",
+          "name",
+          "variant",
+          "form",
+          "category",
+          "imageUrl"
+        ],
+        "description": "Only on a `product` entry."
+      },
+      "RemoveShelfEntryBody": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "finished",
+              "stopped",
+              "not-mine"
+            ],
+            "description": "Why the product left the shelf. Leave it out when the user did not say."
+          }
+        },
+        "additionalProperties": false
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -952,7 +1211,14 @@
             "description": "What the photo was read as, or what the user corrected it to. Absent until it has been read."
           },
           "product": {
-            "$ref": "#/components/schemas/ProductSummary"
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductSummary"
+              },
+              {
+                "description": "The product's identity, only on a `ready` item. Its ingredients and concerns are not part of a scan."
+              }
+            ]
           },
           "noLabel": {
             "type": "object",
@@ -1086,82 +1352,6 @@
           "reason",
           "image"
         ]
-      },
-      "ProductSummary": {
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "string"
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "named",
-              "unnamed"
-            ],
-            "description": "An `unnamed` product is an ingredient list the label gave no brand and name for: its `brand` and `name` are empty strings and its `category` is `other` unless the label said otherwise."
-          },
-          "brand": {
-            "type": "string"
-          },
-          "name": {
-            "type": "string"
-          },
-          "variant": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "form": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "enum": [
-              "spray",
-              "roll-on",
-              "stick",
-              "cream",
-              "lotion",
-              "gel",
-              "oil",
-              "serum",
-              "liquid",
-              "bar",
-              "powder",
-              "balm",
-              null
-            ]
-          },
-          "category": {
-            "type": "string",
-            "enum": [
-              "skin",
-              "hair",
-              "body",
-              "makeup",
-              "other"
-            ]
-          },
-          "imageUrl": {
-            "type": [
-              "string",
-              "null"
-            ]
-          }
-        },
-        "required": [
-          "id",
-          "kind",
-          "brand",
-          "name",
-          "variant",
-          "form",
-          "category",
-          "imageUrl"
-        ],
-        "description": "The product's identity, only on a `ready` item. Its ingredients and concerns are not part of a scan."
       },
       "CreateScanBody": {
         "type": "object",
@@ -2853,6 +3043,172 @@
           },
           "404": {
             "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/shelf": {
+      "get": {
+        "operationId": "getShelf",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "The products this profile uses",
+        "description": "Guests included. Every product a scan has put on the shelf, most recently scanned first, at most 200. A product scanned again is still one entry, pointing at the newest scan. A `product` entry carries `product`, the same summary a scan item shows; a `no-label` entry carries `noLabel`, the same view its scan item shows. Removed entries are left out.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The shelf",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Shelf"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/shelf/{entryId}": {
+      "delete": {
+        "operationId": "removeShelfEntry",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "Take a product off the shelf",
+        "description": "Optional JSON body `{ reason }`, one of `finished`, `stopped` or `not-mine`; no body, or `{}`, removes it with no reason. Removing an entry already removed is 204 again and keeps the first reason. Another profile's entry is 404 `SHELF_ENTRY_NOT_FOUND`, the same as one that never existed. Scanning the product again puts it back on the shelf.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`."
+            },
+            "required": true,
+            "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoveShelfEntryBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "The entry is off the shelf"
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {

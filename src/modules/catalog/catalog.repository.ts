@@ -15,6 +15,8 @@ const isForeignKeyFailure = (error: unknown): boolean => {
 
 // D1 allows 100 bound parameters per statement; a trait row binds 2.
 const TRAIT_CHUNK = 40
+// A lookup by id binds one parameter per id.
+const ID_CHUNK = 90
 
 export class D1CatalogRepository {
   constructor(private readonly db: Db) {}
@@ -36,6 +38,15 @@ export class D1CatalogRepository {
   async findProductById(id: string): Promise<Product | null> {
     const [row] = await this.db.select().from(products).where(eq(products.id, id))
     return row ?? null
+  }
+
+  /** The products with these ids; an id nobody has is simply absent. */
+  async findProductsByIds(ids: string[]): Promise<Product[]> {
+    const found: Product[] = []
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      found.push(...(await this.db.select().from(products).where(inArray(products.id, ids.slice(i, i + ID_CHUNK)))))
+    }
+    return found
   }
 
   /** The product whose identity key is `key`, else the one an alias maps `key` to; null if neither. */
@@ -193,6 +204,15 @@ export class D1CatalogRepository {
   async findFormulation(id: string): Promise<Formulation | null> {
     const [row] = await this.db.select().from(formulations).where(eq(formulations.id, id))
     return row ?? null
+  }
+
+  /** The formulations with these ids; an id nobody has is simply absent. */
+  async findFormulationsByIds(ids: string[]): Promise<Formulation[]> {
+    const found: Formulation[] = []
+    for (let i = 0; i < ids.length; i += ID_CHUNK) {
+      found.push(...(await this.db.select().from(formulations).where(inArray(formulations.id, ids.slice(i, i + ID_CHUNK)))))
+    }
+    return found
   }
 
   /** The product's formulation found most recently; the later insert wins a tie. */

@@ -82,7 +82,7 @@ const Concern = z.object({
   sources: z.array(z.string()),
 })
 
-const ProductSummary = z
+export const ProductSummary = z
   .object({
     id: z.string(),
     kind: z.enum(['named', 'unnamed']).openapi({
@@ -96,6 +96,16 @@ const ProductSummary = z
     imageUrl: z.string().nullable(),
   })
   .openapi('ProductSummary')
+
+/** What the user said about a product with no label, and the cautions that earns. Shared by a scan item and a shelf entry. */
+export const NoLabelResponse = z.object({
+  source: Source,
+  purpose: Purpose,
+  usedFor: UsedFor,
+  description: z.string().optional().openapi({ description: 'What the user noted, if anything.' }),
+  concerns: z.array(Concern).openapi({ description: 'Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label.' }),
+  rulesVersion: z.number().int().openapi({ description: 'Which version of the caution rules wrote `concerns`.' }),
+})
 
 export const ScanItemResponse = z
   .object({
@@ -125,16 +135,7 @@ export const ScanItemResponse = z
     product: ProductSummary.optional().openapi({
       description: 'The product\'s identity, only on a `ready` item. Its ingredients and concerns are not part of a scan.',
     }),
-    noLabel: z
-      .object({
-        source: Source,
-        purpose: Purpose,
-        usedFor: UsedFor,
-        description: z.string().optional().openapi({ description: 'What the user noted, if anything.' }),
-        concerns: z.array(Concern).openapi({ description: 'Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label.' }),
-        rulesVersion: z.number().int().openapi({ description: 'Which version of the caution rules wrote `concerns`.' }),
-      })
-      .optional()
+    noLabel: NoLabelResponse.optional()
       .openapi({ description: 'Only on an `unidentified` item: what the user said about the product, and the cautions that earns.' }),
     image: z
       .object({

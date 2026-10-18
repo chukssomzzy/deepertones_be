@@ -43,6 +43,13 @@ export class FakeCatalogRepository implements CatalogRepository {
     return found ? { ...found } : null
   }
 
+  async findProductsByIds(ids: string[]): Promise<Product[]> {
+    return ids.flatMap((id) => {
+      const found = this.products.get(id)
+      return found ? [{ ...found }] : []
+    })
+  }
+
   async addAlias(aliasKey: string, productId: string): Promise<void> {
     if (!this.products.has(productId)) throw new Error(`unknown product ${productId}`)
     const isIdentityKey = [...this.products.values()].some((p) => p.identityKey === aliasKey)
@@ -137,6 +144,10 @@ export class FakeCatalogRepository implements CatalogRepository {
   async findFormulation(id: string): Promise<Formulation | null> {
     const found = this.formulations.find((f) => f.id === id)
     return found ? copyFormulation(found) : null
+  }
+
+  async findFormulationsByIds(ids: string[]): Promise<Formulation[]> {
+    return this.formulations.filter((f) => ids.includes(f.id)).map(copyFormulation)
   }
 
   async latestFormulation(productId: string): Promise<Formulation | null> {

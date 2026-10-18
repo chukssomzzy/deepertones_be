@@ -69,6 +69,16 @@ export class D1ScansRepository {
     return row ?? null
   }
 
+  /** The items with these ids; an id nobody has is simply absent. */
+  async findItems(itemIds: string[]): Promise<ScanItem[]> {
+    const found: ScanItem[] = []
+    // D1 allows 100 bound parameters per statement.
+    for (let i = 0; i < itemIds.length; i += 90) {
+      found.push(...(await this.db.select().from(scanItems).where(inArray(scanItems.id, itemIds.slice(i, i + 90)))))
+    }
+    return found
+  }
+
   /**
    * Applies the patch only while the item is still in the `expected` state, and says whether it did (one conditional
    * UPDATE, so of two simultaneous callers exactly one wins). A field the patch leaves out is unchanged; one it sets to
