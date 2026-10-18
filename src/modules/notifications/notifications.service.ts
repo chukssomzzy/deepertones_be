@@ -122,7 +122,7 @@ export class NotificationsService {
    * Queues "your scan needs you" for the scan's profile, linking to `itemId`. `ask` counts the times this item asks again after
    * an unreadable back photo. A failed enqueue is logged and swallowed.
    */
-  async scanNeedsYou(input: { userId: string; profileId: string; scanId: string; itemId: string; need: 'back-photo' | 'confirm'; ask?: number }): Promise<void> {
+  async scanNeedsYou(input: { userId: string; profileId: string; scanId: string; itemId: string; need: 'back-photo' | 'confirm' | 'identify'; ask?: number }): Promise<void> {
     await this.enqueue({ kind: 'scan-needs-you', ...input })
   }
 
@@ -258,12 +258,18 @@ export class NotificationsService {
           body: body.readyCount === 0 ? 'Open the app to see what we found' : `${body.readyCount} ${body.readyCount === 1 ? 'product' : 'products'} analysed`,
           data: { url: deepLinkFor(body.kind, { scanId: body.scanId }), kind: body.kind, scanId: body.scanId, profileId: body.profileId },
         }
-      case 'scan-needs-you':
+      case 'scan-needs-you': {
+        const text = {
+          'back-photo': 'We need a photo of the back of a product',
+          confirm: 'Please confirm a product we were not sure about',
+          identify: "We couldn't read a product. Tell us what it is",
+        }[body.need]
         return {
           title: 'Your scan needs you',
-          body: body.need === 'back-photo' ? 'We need a photo of the back of a product' : 'Please confirm a product we were not sure about',
+          body: text,
           data: { url: deepLinkFor(body.kind, { scanId: body.scanId, itemId: body.itemId }), kind: body.kind, scanId: body.scanId, itemId: body.itemId, profileId: body.profileId },
         }
+      }
       case 'new-sign-in': {
         const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''
         return {

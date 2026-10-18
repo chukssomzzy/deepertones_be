@@ -10,6 +10,7 @@ import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memo
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import { inOneRateWindow, RATE_TEST_TIMEOUT_MS, SEARCH_BURST_NEEDS_MS } from './rate-window'
+import type { ProductForm } from '../../src/providers/product-research/product-researcher.provider'
 
 // GET /api/v1/products/search through the Worker's real entrypoint, with the frontend's typed client and real local D1. Products are put
 // into the catalog the way a scan puts them there (the catalog service over the real repository), so what search finds is what the product made.
@@ -35,7 +36,7 @@ const freshIp = () => {
 
 type Envelope<T> = { success: true; status: number; message: string; data: T } | { success: false; status: number; error: { code: string } }
 type Reply = { json(): Promise<unknown>; status: number; headers: Headers }
-type Hit = { id: string; brand: string; name: string; variant: string | null; category: string; imageUrl: string | null }
+type Hit = { id: string; brand: string; name: string; variant: string | null; form: string | null; category: string; imageUrl: string | null }
 
 const read = async <T>(res: Reply) => (await res.json()) as Envelope<T>
 const errorCodeOf = async (res: Reply) => {
@@ -73,11 +74,11 @@ const catalog = new ProductCatalogService({
   images: new MemoryCatalogImageStore(),
   imageKeyPrefix: 'catalog/test',
 })
-const resolved = async (brand: string, name: string, over: { variant?: string; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' } = {}) =>
-  (await catalog.resolve({ brand, name, category: over.category ?? 'skin', ...(over.variant ? { variant: over.variant } : {}) })).productId
+const resolved = async (brand: string, name: string, over: { variant?: string; form?: ProductForm; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' } = {}) =>
+  (await catalog.resolve({ brand, name, category: over.category ?? 'skin', ...(over.variant ? { variant: over.variant } : {}), ...(over.form ? { form: over.form } : {}) })).productId
 
 describe('GET /api/v1/products/search', () => {
-  it('finds products by a fragment of their brand, name and variant, as { id, brand, name, variant, category, imageUrl }, in a list under `products`', async () => {
+  it('finds products by a fragment of their brand, name and variant, as { id, brand, name, variant, form, category, imageUrl }, in a list under `products`', async () => {
     const guest = await newGuest()
     const brand = word()
     const id = await resolved(brand, 'Hydrating Cleanser', { variant: 'Night', category: 'body' })
@@ -86,7 +87,21 @@ describe('GET /api/v1/products/search', () => {
 
     expect(res.status).toBe(200)
     expect(await read<unknown>(res)).toMatchObject({ success: true, status: 200 })
-    expect(await hitsOf(await search(guest, `${brand} hydrating`))).toEqual([{ id, brand, name: 'Hydrating Cleanser', variant: 'Night', category: 'body', imageUrl: null }])
+    expect(await hitsOf(await search(guest, `${brand} hydrating`))).toEqual([{ id, brand, name: 'Hydrating Cleanser', variant: 'Night', form: null, category: 'body', imageUrl: null }])
+  })
+
+  it('shows each product\'s form, so two products that differ only by form are both listed and told apart', async () => {
+    const guest = await newGuest()
+    const brand = word()
+    const spray = await resolved(brand, 'Dry Impact', { category: 'body', form: 'spray' })
+    const rollOn = await resolved(brand, 'Dry Impact', { category: 'body', form: 'roll-on' })
+    const plain = await resolved(brand, 'Dry Impact', { category: 'body' })
+
+    const hits = await hitsOf(await search(guest, `${brand} dry impact`))
+
+    expect(new Set([spray, rollOn, plain]).size).toBe(3)
+    expect(hits).toHaveLength(3)
+    expect(Object.fromEntries(hits.map((h) => [h.id, h.form]))).toEqual({ [spray]: 'spray', [rollOn]: 'roll-on', [plain]: null })
   })
 
   it('normalises the query like the search text: case, accents, punctuation and surrounding spaces do not matter', async () => {
@@ -305,6 +320,16 @@ describe('GET /api/v1/products/search in the OpenAPI document', () => {
     expect(operation?.operationId).toBe('searchProducts')
     expect(operation?.tags).toEqual(['Products'])
     expect((operation?.security ?? []).some((requirement) => 'bearerAuth' in requirement)).toBe(true)
+  })
+
+  it('documents the product summary\'s form as one of the twelve forms or null, and always present', async () => {
+    const res = await fetchWorker('http://deepertones.test/openapi.json')
+    const document = (await res.json()) as { components: { schemas: Record<string, { properties?: Record<string, { items?: { required?: string[]; properties?: Record<string, { type?: unknown; enum?: unknown[] }> } }> }> } }
+    const summary = document.components.schemas.ProductSearch?.properties?.products?.items
+
+    expect(summary?.properties?.form?.type).toEqual(['string', 'null'])
+    expect(summary?.properties?.form?.enum).toEqual(['spray', 'roll-on', 'stick', 'cream', 'lotion', 'gel', 'oil', 'serum', 'liquid', 'bar', 'powder', 'balm', null])
+    expect(summary?.required).toContain('form')
   })
 
   it('documents a required query parameter q', async () => {
