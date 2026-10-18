@@ -917,7 +917,7 @@ export class ScanService {
       change: { state: ask ? asking : 'failed', reason: 'label-unreadable', backPhotoKey: null },
     })
     // The number of uploads so far is which time the item asks again, and the push's key.
-    if (moved && ask) await this.notifyNeedsYou(item, 'back-photo', uploads)
+    if (moved && ask) await this.notifyNeedsYou(item, item.productId === null ? 'identify' : 'back-photo', uploads)
   }
 
   private async analyse(item: ScanItem): Promise<void> {
