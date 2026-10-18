@@ -13,18 +13,47 @@ type Options = {
   now?: () => Date
 }
 
+type AnyJob = JobDefinition<z.ZodType, Container>
+
+/** `{ job, body }` and nothing else: what a producer writes to a queue its jobs share (see JobSpec.shared). */
+const asEnvelope = (message: unknown): { job: unknown; body: unknown } | undefined => {
+  if (typeof message !== 'object' || message === null || Array.isArray(message)) return undefined
+  const keys = Object.keys(message)
+  if (keys.length !== 2 || !keys.includes('job') || !keys.includes('body')) return undefined
+  return message as { job: unknown; body: unknown }
+}
+
 /**
- * The Worker's `queue` export: one handler for every job queue and dead-letter queue.
- * Per message: validate, claim the idempotency key, run the handler as a system actor,
+ * Which job a message is for, and its body. A message that names its job goes to that job, if the queue carries it. A bare body goes
+ * to the job of a queue that carries only one (what the last deploy sent, before the queue was shared). Anything else, a job this
+ * queue does not carry or a bare body on a queue of several, can never succeed, so it is undefined and the caller acks it.
+ */
+const pick = (jobsOnQueue: Map<string, AnyJob>, message: unknown): { job: AnyJob; body: unknown } | undefined => {
+  const envelope = asEnvelope(message)
+  if (envelope) {
+    const job = typeof envelope.job === 'string' ? jobsOnQueue.get(envelope.job) : undefined
+    return job && { job, body: envelope.body }
+  }
+  const [only] = jobsOnQueue.values()
+  return jobsOnQueue.size === 1 && only ? { job: only, body: message } : undefined
+}
+
+/**
+ * The Worker's `queue` export: one handler for every job queue and dead-letter queue. A queue carries one job or several
+ * (the jobs marked `shared`); a message on the latter names its job, and a dead letter is routed the same way.
+ * Per message: validate, claim the idempotency key (per job), run the handler as a system actor,
  * then ack or retry. Message bodies are never logged: they may carry secrets.
  */
-export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], { random = Math.random, now = () => new Date() }: Options = {}) => {
+export const createQueueHandler = (jobs: AnyJob[], { random = Math.random, now = () => new Date() }: Options = {}) => {
   return async (batch: MessageBatch<unknown>, env: CloudflareBindings, _ctx?: ExecutionContext): Promise<void> => {
-    const route = new Map<string, { job: JobDefinition<z.ZodType, Container>; deadLetter: boolean }>()
+    const route = new Map<string, { jobs: Map<string, AnyJob>; deadLetter: boolean }>()
     for (const job of jobs) {
       const names = queueNames(job.queue, env.ENVIRONMENT)
-      route.set(names.main, { job, deadLetter: false })
-      route.set(names.deadLetter, { job, deadLetter: true })
+      for (const [name, deadLetter] of [[names.main, false], [names.deadLetter, true]] as const) {
+        const target = route.get(name) ?? { jobs: new Map<string, AnyJob>(), deadLetter }
+        target.jobs.set(job.name, job)
+        route.set(name, target)
+      }
     }
     const target = route.get(batch.queue)
     if (!target) {
@@ -34,19 +63,28 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
     }
 
     const { services, jobRuns } = buildJobRuntime(env)
-    const { job, deadLetter } = target
-    const delaySeconds = (attempts: number) => {
-      const { baseSeconds, factor, capSeconds } = job.retry
-      return Math.floor(random() * Math.min(capSeconds, baseSeconds * factor ** (attempts - 1)))
-    }
-    const log = (level: 'log' | 'error', key: string | undefined, attempt: number, outcome: string) =>
-      console[level]({ job: job.name, key, attempt, outcome })
+    const { deadLetter } = target
 
     for (const message of batch.messages) {
       const attempt = message.attempts
+      const picked = pick(target.jobs, message.body)
+      if (!picked) {
+        // Only the job's name is logged, never the body, and only when it is text of a plausible length.
+        const named = asEnvelope(message.body)?.job
+        console.error({ queue: batch.queue, attempt, outcome: 'unknown-job', named: typeof named === 'string' ? named.slice(0, 64) : undefined })
+        message.ack()
+        continue
+      }
+      const { job } = picked
+      const delaySeconds = (attempts: number) => {
+        const { baseSeconds, factor, capSeconds } = job.retry
+        return Math.floor(random() * Math.min(capSeconds, baseSeconds * factor ** (attempts - 1)))
+      }
+      const log = (level: 'log' | 'error', key: string | undefined, attempt: number, outcome: string) =>
+        console[level]({ job: job.name, key, attempt, outcome })
       let key: string | undefined
       try {
-        const parsed = job.schema.safeParse(message.body)
+        const parsed = job.schema.safeParse(picked.body)
         if (!parsed.success) {
           log('error', undefined, attempt, 'invalid-message')
           message.ack()
@@ -119,7 +157,7 @@ export const createQueueHandler = (jobs: JobDefinition<z.ZodType, Container>[], 
     try {
       await jobRuns.purgeOlderThan(new Date(now().getTime() - KEEP_RUNS_MS))
     } catch (error) {
-      console.error({ job: job.name, outcome: 'purge-failed', error: describeError(error) })
+      console.error({ queue: batch.queue, outcome: 'purge-failed', error: describeError(error) })
     }
   }
 }

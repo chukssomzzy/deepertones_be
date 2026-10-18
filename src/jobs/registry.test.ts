@@ -29,8 +29,33 @@ describe('the job registry', () => {
     expect(job!.queue).toBe('push-receipts')
   })
 
-  it('gives every job its own name and its own queue, so a backlog in one never delays another', () => {
+  it('lists the send-ops-alert job on the shared email queue', () => {
+    const job = jobs.find((j) => j.name === 'send-ops-alert')
+
+    expect(job).toBeDefined()
+    expect(job!.queue).toBe('email')
+    expect(job!.shared).toBe(true)
+  })
+
+  it('gives every job its own name, because the dispatcher and the job_runs table tell jobs apart by it', () => {
     expect(new Set(jobs.map((j) => j.name)).size).toBe(jobs.length)
-    expect(new Set(jobs.map((j) => queueNames(j.queue, 'test').main)).size).toBe(jobs.length)
+  })
+
+  // A message on a shared queue names its job; the dispatcher accepts a bare body only on a queue that carries one job.
+  it('flags every job of a queue as shared or none of them, and flags the jobs of a queue that carries several', () => {
+    for (const [queue, onQueue] of Map.groupBy(jobs, (j) => j.queue)) {
+      const flags = new Set(onQueue.map((j) => Boolean(j.shared)))
+
+      expect(flags.size, queue).toBe(1)
+      if (onQueue.length > 1) expect(flags.has(true), queue).toBe(true)
+    }
+  })
+
+  it('gives every queue its own dead-letter queue, and no two queues the same names', () => {
+    const queues = [...new Set(jobs.map((j) => j.queue))]
+    const names = queues.flatMap((q) => Object.values(queueNames(q, 'test')))
+
+    expect(new Set(names).size).toBe(queues.length * 2)
+    for (const queue of queues) expect(queueNames(queue, 'test').deadLetter).not.toBe(queueNames(queue, 'test').main)
   })
 })

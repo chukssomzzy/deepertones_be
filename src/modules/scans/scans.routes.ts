@@ -125,7 +125,7 @@ const identifyItem = defineRoute({
   description:
     'For an item in `needs-retake` or `needs-identification`. Send exactly one of `productId` (picked from `GET /api/v1/products/search`; no model is called) ' +
     'or `text` (a name the user typed, which is split into brand, name and variant by a model: 400 `NOT_A_PRODUCT_NAME` when it is not a product\'s name, ' +
-    '503 `AI_UNAVAILABLE` when the model is unavailable, 503 `CATALOG_BUSY` when the daily AI budget is spent). The item goes on to matching, researching, analysing or ready. ' +
+    '503 `AI_UNAVAILABLE` when the model is unavailable). The item goes on to matching, researching, analysing or ready. ' +
     'It sends no photo, so no photo quota or retake is used.',
   security: bearer,
   // In this order, as for the photo routes: the address limit counts every caller, signedIn turns the unsigned away before the body is read,

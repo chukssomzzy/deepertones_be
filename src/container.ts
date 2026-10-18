@@ -13,6 +13,8 @@ import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
 import { NotificationsService } from './modules/notifications/notifications.service'
+import { D1OpsAlertsRepository } from './modules/ops-alerts/ops-alerts.repository'
+import { OpsAlertsService } from './modules/ops-alerts/ops-alerts.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
@@ -72,14 +74,14 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
-  // The app's only AI spend cap. Built here, not by the client, so the client can be given a different ledger (the eval's).
+  // The day's AI spend figure, which emails the owner when passed and refuses nothing. Built here, not by the client, so the client can be given a different ledger (the eval's).
   const aiUsage = once(() => {
     const dailyBudgetUsd = Number(env.AI_DAILY_BUDGET_USD)
     // A cap that is missing or unreadable must not quietly become "no cap" (or "everything refused").
     if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
       throw new Error('AI_DAILY_BUDGET_USD must be a positive number of US dollars, e.g. "5"')
     }
-    return new AiUsageService({ repository: new D1AiUsageRepository(db()), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
+    return new AiUsageService({ repository: new D1AiUsageRepository(db()), opsAlerts: opsAlerts(), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
   })
 
   // The clients share the key, the models and the spend ledger. `timeoutMs` is the client's alone, so a caller that must answer within a
@@ -118,6 +120,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         analyst: new AnthropicProductAnalyst(anthropic()),
         // The bucket is shared with the CI asset sync, which refuses any catalog/ key; the environment keeps staging and production apart.
         imageKeyPrefix: `catalog/${env.ENVIRONMENT}`,
+        opsAlerts: opsAlerts(),
         images: new R2CatalogImageStore({
           bucket: env.CATALOG_IMAGES,
           publicBaseUrl: env.CATALOG_IMAGES_PUBLIC_URL,
@@ -135,6 +138,19 @@ export const buildContainer = (env: CloudflareBindings) => {
         'scan-items': env.SCAN_ITEMS_QUEUE,
         'push-delivery': env.PUSH_DELIVERY_QUEUE,
         'push-receipts': env.PUSH_RECEIPTS_QUEUE,
+        email: env.EMAIL_QUEUE,
+      }),
+  )
+
+  // Emails the owner when an environment-wide limit is passed or Claude refuses our account. The alert is a job on the shared email queue.
+  const opsAlerts = once(
+    () =>
+      new OpsAlertsService({
+        repository: new D1OpsAlertsRepository(db()),
+        jobs: jobQueue(),
+        email: email(),
+        recipient: env.OPS_ALERT_EMAIL,
+        environment: env.ENVIRONMENT,
       }),
   )
 
@@ -171,6 +187,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         jobs: jobQueue(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         notifications: notifications(),
+        opsAlerts: opsAlerts(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         // A separate HKDF info (see ScanService) keeps the IP hash key unrelated to how device ids are hashed with the same secret.
@@ -248,6 +265,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get notifications() {
       return notifications()
+    },
+    get opsAlerts() {
+      return opsAlerts()
     },
     get otp() {
       return otp()

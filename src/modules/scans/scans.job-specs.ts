@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 
-/** One job for every step of an item: the dispatcher routes one job per queue, so the steps share this queue pair. */
+/** One job for every step of an item: the steps share its queue pair. */
 export const advanceScanItemSpec = jobSpec({
   name: 'advance-scan-item',
   queue: 'scan-items',
