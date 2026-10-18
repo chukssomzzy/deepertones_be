@@ -7,6 +7,8 @@ import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
+import { D1GoalsRepository } from './modules/goals/goals.repository'
+import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
 import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
@@ -176,7 +178,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
-  // (push_tokens and notification_settings are not listed: their foreign keys cascade from users.)
+  // (push_tokens, notification_settings and profile_goals are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
@@ -201,6 +203,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const goals = once(() => new GoalsService({ repository: new D1GoalsRepository(db()), now: () => new Date(), newId: () => crypto.randomUUID() }))
+
   const auth = once(
     () =>
       new AuthService({
@@ -222,6 +226,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get catalog() {
       return catalog()
+    },
+    get goals() {
+      return goals()
     },
     get health() {
       return health()

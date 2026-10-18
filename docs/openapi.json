@@ -400,6 +400,170 @@
           }
         }
       },
+      "Goal": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              null
+            ],
+            "description": "Null while the user has typed words but not picked a goal.",
+            "example": "fade-dark-marks"
+          },
+          "wantsLighter": {
+            "type": "boolean"
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user's own words, when they typed any."
+          },
+          "answer": {
+            "$ref": "#/components/schemas/GoalAnswer"
+          },
+          "answersVersion": {
+            "type": "integer",
+            "description": "Which version of the answer copy `answer` is from."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the goal was last set."
+          }
+        },
+        "required": [
+          "goal",
+          "wantsLighter",
+          "text",
+          "answer",
+          "answersVersion",
+          "updatedAt"
+        ]
+      },
+      "GoalAnswer": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "howLong": {
+            "type": "string",
+            "description": "How long it usually takes, honestly."
+          },
+          "helps": {
+            "type": "string"
+          },
+          "inTheWay": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A line about natural colour, only for someone who asked to be lighter."
+          }
+        },
+        "required": [
+          "title",
+          "howLong",
+          "helps",
+          "inTheWay",
+          "note"
+        ],
+        "description": "Null while there is no goal."
+      },
+      "SetGoalBody": {
+        "anyOf": [
+          {
+            "type": "object",
+            "properties": {
+              "goal": {
+                "type": "string",
+                "enum": [
+                  "clear-skin",
+                  "even-tone",
+                  "fade-dark-marks",
+                  "brighter",
+                  "glow"
+                ],
+                "description": "One of the five goals the app offers.",
+                "example": "fade-dark-marks"
+              }
+            },
+            "required": [
+              "goal"
+            ],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "The goal in the user's own words, 1 to 200 characters once trimmed. Links, markup and control or invisible characters are refused with 400 `INVALID_GOAL_TEXT`.",
+                "example": "make my face clear"
+              }
+            },
+            "required": [
+              "text"
+            ],
+            "additionalProperties": false
+          }
+        ]
+      },
+      "Onboarding": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/Goal"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "The current goal, or null when none was set."
+              }
+            ]
+          },
+          "safety": {
+            "type": "null",
+            "description": "Always null until the safety answers are built."
+          },
+          "next": {
+            "type": "string",
+            "enum": [
+              "goal",
+              "safety"
+            ],
+            "description": "The first-run step to show next."
+          }
+        },
+        "required": [
+          "goal",
+          "safety",
+          "next"
+        ]
+      },
       "ProductSearch": {
         "type": "object",
         "properties": {
@@ -2141,6 +2305,263 @@
           },
           "415": {
             "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/goal": {
+      "put": {
+        "operationId": "setGoal",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Say what you want your skin to look like",
+        "description": "Guests included. Send `{ goal }` (a chip) or `{ text }` (the user's own words), not both. A chip answers with the honest answer for that goal. Typed words are saved with no goal and no answer for now; a chip picked next keeps those words. Every change is kept with its date, and the newest is the current goal. Words with a link, markup or an invisible character are 400 `INVALID_GOAL_TEXT`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetGoalBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The goal as it is now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Goal"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getGoal",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "The goal this profile set",
+        "description": "The same view PUT answers. 404 `GOAL_NOT_SET` until the profile has saved a goal or some words.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current goal",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Goal"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/onboarding": {
+      "get": {
+        "operationId": "getOnboarding",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "Which first-run step comes next",
+        "description": "`next` is `goal` until a goal is picked (typed words alone do not count), then `safety`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Where the profile is in the first run",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Onboarding"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
             "content": {
               "application/json": {
                 "schema": {

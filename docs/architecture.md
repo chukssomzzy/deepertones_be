@@ -460,6 +460,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `POST /api/v1/auth/logout` | bearer: bumps the token version, returns a fresh guest for `{ deviceId, platform }` | shares bootstrap's 10 per IP (it creates guests) |
 | `GET /api/v1/me` | bearer | none |
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
+| `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
   profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
@@ -731,6 +732,41 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 - **Queue settings.** `push-delivery` is modelled on `otp-delivery` (batch 10, a 1 second batch timeout since a person waits, 5 attempts,
   backoff 5 s x3 up to 135 s). `push-receipts` is not urgent, so it lets a batch fill (25, up to 30 seconds), 5 attempts, backoff 30 s x3
   up to 600 s.
+
+### Goals (onboarding)
+`modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `onboarding`).
+It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
+is built in four pull requests; this is the first (the five chips only).
+
+- **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
+  `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the five goals or null, `text` is the user's own
+  words or null, `wants_lighter` and `answers_version` are always written. Rows go with their profile, so guest cleanup needs no cleaner of its own,
+  and a guest who signs up keeps the goal (promotion keeps the profile).
+- **The five goals are the catalog's.** `GOALS` (`goals.vocabulary.ts`) is the catalog's `goal:` traits without the prefix, in the same order, so a
+  user can pick no goal a product cannot be tagged with. A test pins that the two lists match.
+- **The answer is not stored.** `answerFor(goal, wantsLighter)` (`goals.answers.ts`) is a fixed copy table: a title, `howLong`, `helps`, `inTheWay` per
+  goal, plus one colour `note` that only a row with `wants_lighter` gets (the same note whichever goal it was sorted into; the plan itself does not
+  change). The view is built when a row is read, so a new version of the copy reaches goals saved earlier. `GOAL_ANSWERS_VERSION` is bumped whenever
+  the meaning of any text changes; the view always carries the current one, and each row records the version it was saved under. The copy is a DRAFT that
+  needs owner and qualified review before launch.
+- **Typed words are saved with no goal.** `{ text }` is trimmed (1 to 200 characters, by the schema) and stored with `goal` null, no answer and
+  `wants_lighter` false, because nothing reads the words yet (a later pull request sorts them with a small model call). Words with a link or markup
+  (`hasLinkOrMarkup` from `lib/text-safety`; a bare `<`, as in "spots < 1cm", is fine) or a control or invisible character (`\p{Cc}`, `\p{Cf}`) are
+  400 `INVALID_GOAL_TEXT`. Shape and length are zod: exactly one of `goal` and `text`, else 400 `VALIDATION_FAILED`.
+- **The text-carry rule.** A `{ goal }` copies `text` from the current row only when that row's `goal` is null, because the pick answers "which is
+  closest?" to words nobody sorted. After a chip, or after words that were already matched, the next chip leaves `text` null, so old words do not
+  follow later changes.
+- **Current and onboarding.** `GET /goal` is 404 `GOAL_NOT_SET` only for a profile that never saved anything; saved words with no goal are a view with
+  `goal` and `answer` null. `GET /onboarding` answers `{ goal, safety, next }`: `next` is `goal` until a row has a goal, then `safety`.
+  `safety` is always null for now.
+- **Guests are allowed.** Every method calls `requireUser()` and uses `actor.profileId`, so a guest has a goal like anyone, and a second profile of
+  an account has its own. No rate limit yet: nothing the routes do costs money.
+- **Logs never carry the text.** The service logs nothing; a test spies on the console to keep it so. The words are user input and may be personal.
+- **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
+  `.route('/me', ...)` in `src/app.ts`.
+- **Still to come.** Pull request 2 sorts typed words into a goal with one small model call (and sets `wants_lighter` for "fairer" or "lighter"),
+  with rate limits on the text path. Pull request 3 adds the safety answers (`profile_safety`) and fills `safety` and `next: 'shelf'`. Pull request 4
+  reads the products and ingredients named in reaction and prescription text in the background.
 
 ### Prompts
 

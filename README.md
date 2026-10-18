@@ -120,6 +120,13 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
    a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
    the ids to route the tap.
+7. **For onboarding**, before anything else: `PUT /api/v1/me/goal` with `{ goal }` (one of `clear-skin`, `even-tone`, `fade-dark-marks`,
+   `brighter`, `glow`) or `{ text }` (the user's own words, 1 to 200 characters; not both) and the bearer token, guests included. It answers
+   `{ goal, wantsLighter, text, answer, answersVersion, updatedAt }`, where `answer` is `{ title, howLong, helps, inTheWay, note }` (all
+   draft copy for now). Typed words are saved with `goal` and `answer` null until a goal is picked; a chip picked next keeps the words.
+   `GET /api/v1/me/goal` returns the same view (404 `GOAL_NOT_SET` before anything was saved), and `GET /api/v1/me/onboarding` returns
+   `{ goal, safety, next }` with `next` of `goal` or `safety`: use it to resume the first run. Words with a link or markup are a
+   400 `INVALID_GOAL_TEXT`.
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.
@@ -130,6 +137,7 @@ Error codes to handle (in `error.code`):
 - `USER_NOT_FOUND` (404, on `/api/v1/me` and logout): the account is gone; re-bootstrap.
 - `RATE_LIMITED` (429): wait `Retry-After` seconds.
 - `PUSH_TOKEN_INVALID` (400): the token is not an Expo push token.
+- `INVALID_GOAL_TEXT` (400): the typed goal has a link, markup or an invisible character. `GOAL_NOT_SET` (404): no goal saved yet.
 - `ACCOUNT_LINKING_UNAVAILABLE` (409): a verified user tried to add a different, unowned email. Not supported yet;
   no code is sent or used. `NOT_A_GUEST` (409) should now be unreachable in practice.
 - `VALIDATION_FAILED` (400), and from the code flow `INVALID_EMAIL`, `OTP_CHANNEL_UNAVAILABLE`, `OTP_COOLDOWN` (429)
