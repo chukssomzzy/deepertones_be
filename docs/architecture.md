@@ -668,7 +668,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | `recognise` | the item moved to `needs-confirmation` | `scanNeedsYou({ need: 'confirm' })` | `scan-needs-you:<scanId>:confirm` |
   | `recognise` | the 3rd front photo could not be read and the item moved to `needs-identification` (not for the first two, which ask for a retake, nor for a rejected photo) | `scanNeedsYou({ need: 'identify' })` | `scan-needs-you:<scanId>:identify` |
   | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
-  | `labelUnreadable` | the item moved back to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo', ask: n })`, `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
+  | `labelUnreadable` | the item moved back to `needs-identification` when it has no product, else to `needs-back-photo` | `scanNeedsYou({ need: 'identify' \| 'back-photo', ask: n })` (`identify` when it has no product), `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
   | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
 
