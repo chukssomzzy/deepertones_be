@@ -9,6 +9,8 @@ import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
+import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
+import { NotificationsService } from './modules/notifications/notifications.service'
 import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
@@ -29,6 +31,7 @@ import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
 import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductRecognizer } from './providers/product-recognition/anthropic.product-recognizer'
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
+import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
@@ -111,7 +114,15 @@ export const buildContainer = (env: CloudflareBindings) => {
   )
 
   // One producer for every job: each job's `queue` name picks its binding.
-  const jobQueue = once(() => new CloudflareQueuesJobQueue({ 'otp-delivery': env.OTP_DELIVERY_QUEUE, 'scan-items': env.SCAN_ITEMS_QUEUE }))
+  const jobQueue = once(
+    () =>
+      new CloudflareQueuesJobQueue({
+        'otp-delivery': env.OTP_DELIVERY_QUEUE,
+        'scan-items': env.SCAN_ITEMS_QUEUE,
+        'push-delivery': env.PUSH_DELIVERY_QUEUE,
+        'push-receipts': env.PUSH_RECEIPTS_QUEUE,
+      }),
+  )
 
   const otp = once(
     () =>
@@ -144,6 +155,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         photos: privatePhotos(),
         jobs: jobQueue(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        notifications: notifications(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         // A separate HKDF info (see ScanService) keeps the IP hash key unrelated to how device ids are hashed with the same secret.
@@ -156,6 +168,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
+  // (push_tokens and notification_settings are not listed: their foreign keys cascade from users.)
   const users = once(
     () =>
       new UsersService({
@@ -168,8 +181,28 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const tokens = once(() => new TokenService({ secret: env.JWT_SECRET, previousSecret: env.JWT_SECRET_PREVIOUS || undefined }))
 
+  // The same DEVICE_ID_KEY as the auth service, so a token row's device hash is the `devices` table's hash of that phone.
+  const notifications = once(
+    () =>
+      new NotificationsService({
+        pushTokens: new D1PushTokensRepository(db()),
+        settings: new D1NotificationSettingsRepository(db()),
+        push: new ExpoPushSender({ accessToken: env.EXPO_ACCESS_TOKEN }),
+        jobs: jobQueue(),
+        deviceIdKey: env.DEVICE_ID_KEY,
+      }),
+  )
+
   const auth = once(
-    () => new AuthService({ users: users(), profiles: profiles(), otp: otp(), tokens: tokens(), deviceIdKey: env.DEVICE_ID_KEY }),
+    () =>
+      new AuthService({
+        users: users(),
+        profiles: profiles(),
+        otp: otp(),
+        tokens: tokens(),
+        notifications: notifications(),
+        deviceIdKey: env.DEVICE_ID_KEY,
+      }),
   )
 
   return {
@@ -184,6 +217,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get health() {
       return health()
+    },
+    get notifications() {
+      return notifications()
     },
     get otp() {
       return otp()

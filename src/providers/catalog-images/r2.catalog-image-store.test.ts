@@ -618,3 +618,291 @@ describe('R2CatalogImageStore blockedHostSuffixes', () => {
     expect((await make().fetchImage(START))?.mediaType).toBe('image/jpeg')
   })
 })
+
+describe('R2CatalogImageStore.pageImageUrl', () => {
+  const PAGE = 'https://www.nivea.example/products/dry-impact-spray.html'
+  const PACKSHOT = 'https://assets.brand.example/media/packshot.png?mh=1200&mw=1200'
+  const PAGE_CAP = 512 * 1024
+
+  const html = (head: string, contentType = 'text/html; charset=utf-8') =>
+    new Response(`<!doctype html><html><head><title>x</title>${head}</head><body></body></html>`, { headers: { 'content-type': contentType } })
+  const serving = (head: string) => stubFetch(() => html(head))
+
+  it('returns the og:image of the page', async () => {
+    serving(`<meta property="og:image" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('falls back to twitter:image when there is no og:image', async () => {
+    serving(`<meta name="twitter:image" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('prefers og:image over twitter:image whichever comes first', async () => {
+    const other = 'https://assets.brand.example/media/other.png'
+    serving(`<meta name="twitter:image" content="${other}"/><meta property="og:image" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it.each(['og:image:secure_url', 'og:image:url'])('falls back to %s when there is no og:image', async (property) => {
+    serving(`<meta property="${property}" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('decodes HTML entities in the value', async () => {
+    serving('<meta property="og:image" content="https://assets.brand.example/m/p.png?mh=1200&amp;mw=1200&#x26;q=a&#38;r=b"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/m/p.png?mh=1200&mw=1200&q=a&r=b')
+  })
+
+  it('decodes numeric character references in the path', async () => {
+    serving('<meta property="og:image" content="https:&#x2F;&#x2F;assets.brand.example&#47;m&#x2F;p.png"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/m/p.png')
+  })
+
+  it('resolves a relative image url against the page url', async () => {
+    serving('<meta property="og:image" content="/media/p.png"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://www.nivea.example/media/p.png')
+  })
+
+  it('resolves a protocol-relative image url as https', async () => {
+    serving('<meta property="og:image" content="//assets.brand.example/p.png"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/p.png')
+  })
+
+  it.each([
+    ['content before property', `<meta content="${PACKSHOT}" property="og:image">`],
+    ['single quotes', `<meta property='og:image' content='${PACKSHOT}'>`],
+    ['extra attributes in between', `<meta data-rh="true" property="og:image" id="x" content="${PACKSHOT}" />`],
+    ['upper-case tag and attribute names', `<META PROPERTY="og:image" CONTENT="${PACKSHOT}">`],
+    ['name instead of property on og:image', `<meta name="og:image" content="${PACKSHOT}">`],
+    ['a newline between attributes', `<meta\n  property="og:image"\n  content="${PACKSHOT}"\n/>`],
+  ])('finds the image with %s', async (_label, tag) => {
+    serving(tag)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('returns null when the page has no image meta tag', async () => {
+    serving('<meta property="og:title" content="Spray"/><meta name="description" content="og:image"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null when the og:image has an empty content', async () => {
+    serving('<meta property="og:image" content=""/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null for a response that is not text/html', async () => {
+    stubFetch(() => html(`<meta property="og:image" content="${PACKSHOT}"/>`, 'application/json'))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null for a response with no content type', async () => {
+    stubFetch(() => new Response(`<meta property="og:image" content="${PACKSHOT}"/>`, { headers: {} }))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null for a 404 even if the body carries an image', async () => {
+    stubFetch(() => new Response(`<meta property="og:image" content="${PACKSHOT}"/>`, { status: 404, headers: { 'content-type': 'text/html' } }))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null, without throwing, when the network fails', async () => {
+    stubFetch(() => {
+      throw new TypeError('network down')
+    })
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('returns null, without throwing, when the page does not answer in time', async () => {
+    stubFetch(() => new Promise<Response>(() => undefined))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it.each([
+    ['an http page', 'http://www.nivea.example/p.html'],
+    ['a private IPv4 host', 'https://10.0.0.5/p.html'],
+    ['a loopback host', 'https://127.0.0.1/p.html'],
+    ['localhost', 'https://localhost/p.html'],
+    ['a single-label host', 'https://intranet/p.html'],
+    ['a url with credentials', 'https://user:pw@www.nivea.example/p.html'],
+    ['not a url', 'nivea spray'],
+  ])('returns null without fetching for %s', async (_label, pageUrl) => {
+    const stub = serving(`<meta property="og:image" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(pageUrl)).toBeNull()
+    expect(stub).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['an http image', 'http://assets.brand.example/p.png'],
+    ['a private-host image', 'https://192.168.1.10/p.png'],
+    ['a loopback image', 'https://127.0.0.1/p.png'],
+    ['a localhost image', 'https://localhost/p.png'],
+    ['a javascript url', 'javascript:alert(1)'],
+    ['a data url', 'data:image/png;base64,AAAA'],
+  ])('returns null when the og:image is %s', async (_label, content) => {
+    serving(`<meta property="og:image" content="${content}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('follows a redirect to another public https page', async () => {
+    const MOVED = 'https://www.nivea.example/new/p.html'
+    stubFetch((url) => (url === PAGE ? redirect(MOVED, 301) : html(`<meta property="og:image" content="${PACKSHOT}"/>`)))
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it.each([
+    ['a private host', 'https://10.0.0.5/p.html'],
+    ['an http url', 'http://www.nivea.example/p.html'],
+  ])('returns null, without fetching it, when the page redirects to %s', async (_label, target) => {
+    const stub = stubFetch((url) => (url === PAGE ? redirect(target) : html(`<meta property="og:image" content="${PACKSHOT}"/>`)))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(stub.mock.calls.map(([input]) => String(input))).toEqual([PAGE])
+  })
+
+  it('returns null for a host in blockedHostSuffixes', async () => {
+    const stub = serving(`<meta property="og:image" content="${PACKSHOT}"/>`)
+
+    expect(await make({ blockedHostSuffixes: ['nivea.example'] }).pageImageUrl(PAGE)).toBeNull()
+    expect(stub).not.toHaveBeenCalled()
+  })
+
+  it('finds a meta tag in the head of a page far bigger than the read cap', async () => {
+    const filler = '<p>padding</p>'.repeat(Math.ceil((4 * PAGE_CAP) / 14))
+    stubFetch(() => new Response(`<html><head><meta property="og:image" content="${PACKSHOT}"/></head><body>${filler}</body></html>`, { headers: { 'content-type': 'text/html' } }))
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('does not read past 512 KB: a meta tag after the cap is not found', async () => {
+    const padding = '<!-- -->'.repeat(Math.ceil((PAGE_CAP + 1024) / 8))
+    stubFetch(() => new Response(`<html><head>${padding}<meta property="og:image" content="${PACKSHOT}"/></head></html>`, { headers: { 'content-type': 'text/html' } }))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
+  it('stops pulling the body once the cap is reached, so an endless page cannot fill memory', async () => {
+    let pulled = 0
+    const chunk = new TextEncoder().encode('<p>padding</p>'.repeat(1024))
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulled += chunk.byteLength
+        controller.enqueue(chunk)
+      },
+    })
+    stubFetch(() => new Response(body, { headers: { 'content-type': 'text/html' } }))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(pulled).toBeLessThan(PAGE_CAP * 4)
+  })
+
+  describe('hostile pages', () => {
+    const htmlOf = (body: string) => new Response(body, { headers: { 'content-type': 'text/html' } })
+    const timed = async (body: string) => {
+      stubFetch(() => htmlOf(body))
+      const started = performance.now()
+      const result = await make().pageImageUrl(PAGE)
+      return { result, elapsed: performance.now() - started }
+    }
+
+    it('scans 512 KB of unclosed <meta in linear time', async () => {
+      const { result, elapsed } = await timed('<meta'.repeat(PAGE_CAP / 5))
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('scans a 512 KB single-token meta tag in linear time', async () => {
+      const { result, elapsed } = await timed(`<meta ${'a'.repeat(PAGE_CAP - 8)}>`)
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('scans 512 KB of attribute-like noise in linear time', async () => {
+      const { result, elapsed } = await timed(`<meta ${'a=" '.repeat(PAGE_CAP / 4)}`)
+
+      expect(result).toBeNull()
+      expect(elapsed).toBeLessThan(1000)
+    }, 20_000)
+
+    it('ignores a meta tag longer than 4 KB', async () => {
+      const { result } = await timed(`<meta data-x="${'a'.repeat(5000)}" property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBeNull()
+    })
+
+    it('stops at </head>', async () => {
+      const { result } = await timed(`<head></head><body><meta property="og:image" content="${PACKSHOT}"></body>`)
+
+      expect(result).toBeNull()
+    })
+
+    it('reads at most 200 meta tags', async () => {
+      const fillers = '<meta name="x" content="y">'.repeat(200)
+      const { result } = await timed(`${fillers}<meta property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBeNull()
+    })
+
+    it('still finds the image after a broken tag fragment', async () => {
+      const { result } = await timed(`<meta property="og:image" content="${PACKSHOT}">`)
+
+      expect(result).toBe(PACKSHOT)
+    })
+  })
+
+  it('does not decode entities twice', async () => {
+    serving('<meta property="og:image" content="https://assets.brand.example/p.png?a=1&amp;#38;b=2"/>')
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/p.png?a=1&#38;b=2')
+  })
+
+  it('uses the first og:image when the page has several', async () => {
+    const other = 'https://assets.brand.example/media/other.png'
+    serving(`<meta property="og:image" content="${PACKSHOT}"/><meta property="og:image" content="${other}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('resolves a relative image url against the final url after a redirect', async () => {
+    const MOVED = 'https://shop.other.example/new/p.html'
+    stubFetch((url) => (url === PAGE ? redirect(MOVED, 301) : html('<meta property="og:image" content="/media/p.png"/>')))
+
+    expect(await make().pageImageUrl(PAGE)).toBe('https://shop.other.example/media/p.png')
+  })
+
+  it('gives up after 2 redirects (3 requests)', async () => {
+    const stub = stubFetch((url) => redirect(`${url}x`))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(stub).toHaveBeenCalledTimes(3)
+  })
+
+  it('returns null when a later hop of the redirect chain is unsafe', async () => {
+    const MID = 'https://www.nivea.example/mid'
+    const stub = stubFetch((url) => (url === PAGE ? redirect(MID) : redirect('https://127.0.0.1/p.html')))
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+    expect(stub.mock.calls.map(([input]) => String(input))).toEqual([PAGE, MID])
+  })
+})

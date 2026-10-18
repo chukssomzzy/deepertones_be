@@ -108,14 +108,33 @@ export const requestBytes$ = (url: string, init: RequestInit & { timeoutMs: numb
       ok: response.ok,
       contentType: response.headers.get('content-type'),
       location: response.headers.get('location'),
-      bytes: await readCapped(response, maxBytes),
+      bytes: await readCapped(response, maxBytes, false),
     }),
   }).pipe(timeout({ first: timeoutMs }), transportErrors(timeoutMs))
 }
 
-const readCapped = async (response: Response, maxBytes: number): Promise<Uint8Array> => {
+/**
+ * Like `requestBytes$`, for when only the start of a body matters (the head of a web page). A body
+ * past `maxBytes` is cut there and the stream cancelled, not an error.
+ */
+export const requestHeadBytes$ = (url: string, init: RequestInit & { timeoutMs: number; maxBytes: number }): Observable<HttpBytesResponse> => {
+  const { timeoutMs, maxBytes, ...fetchInit } = init
+  return fromFetch<HttpBytesResponse>(url, {
+    ...fetchInit,
+    redirect: 'manual',
+    selector: async (response) => ({
+      status: response.status,
+      ok: response.ok,
+      contentType: response.headers.get('content-type'),
+      location: response.headers.get('location'),
+      bytes: await readCapped(response, maxBytes, true),
+    }),
+  }).pipe(timeout({ first: timeoutMs }), transportErrors(timeoutMs))
+}
+
+const readCapped = async (response: Response, maxBytes: number, truncate: boolean): Promise<Uint8Array> => {
   const declared = Number(response.headers.get('content-length'))
-  if (declared > maxBytes) {
+  if (!truncate && declared > maxBytes) {
     await response.body?.cancel()
     throw new HttpTooLargeError(`Body is ${declared} bytes, over the ${maxBytes} byte limit`)
   }
@@ -127,11 +146,14 @@ const readCapped = async (response: Response, maxBytes: number): Promise<Uint8Ar
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
-    total += value.byteLength
-    if (total > maxBytes) {
+    if (total + value.byteLength > maxBytes) {
       await reader.cancel()
-      throw new HttpTooLargeError(`Body is over the ${maxBytes} byte limit`)
+      if (!truncate) throw new HttpTooLargeError(`Body is over the ${maxBytes} byte limit`)
+      chunks.push(value.subarray(0, maxBytes - total))
+      total = maxBytes
+      break
     }
+    total += value.byteLength
     chunks.push(value)
   }
   const bytes = new Uint8Array(total)

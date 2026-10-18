@@ -54,6 +54,7 @@ describe('SECRETS', () => {
     expect(Object.keys(SECRETS).sort()).toEqual([
       'ANTHROPIC_API_KEY',
       'DEVICE_ID_KEY',
+      'EXPO_ACCESS_TOKEN',
       'JWT_SECRET',
       'JWT_SECRET_PREVIOUS',
       'OTP_PEPPER',
@@ -65,13 +66,14 @@ describe('SECRETS', () => {
     expect(SECRETS.OTP_PEPPER!.required).toBe(true)
     expect(SECRETS.JWT_SECRET!.required).toBe(true)
     expect(SECRETS.DEVICE_ID_KEY!.required).toBe(true)
+    expect(SECRETS.EXPO_ACCESS_TOKEN!.required).toBe(true)
     expect(SECRETS.JWT_SECRET_PREVIOUS!.required).toBe(false)
     expect(SECRETS.WHATSAPP_ACCESS_TOKEN!.required).toBe(false)
   })
 })
 
 describe('planSecretPush', () => {
-  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak' }
+  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak', EXPO_ACCESS_TOKEN: 'ek' }
 
   it('sends known secrets that have a value', () => {
     const plan = planSecretPush({ values: map({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' }) })
@@ -114,6 +116,7 @@ describe('planSecretPush', () => {
     expect(planSecretPush({ values: map({}) }).missingRequired).toEqual([
       'ANTHROPIC_API_KEY',
       'DEVICE_ID_KEY',
+      'EXPO_ACCESS_TOKEN',
       'JWT_SECRET',
       'OTP_PEPPER',
       'ZEPTOMAIL_API_KEY',

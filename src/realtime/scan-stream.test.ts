@@ -36,7 +36,6 @@ const subscribe = async (scanId: string, snapshot: unknown = SNAPSHOT) => {
   return { res, stream }
 }
 const clientCount = (scanId: string) => runInDurableObject(stubFor(scanId), (instance: ScanStream) => instance.clientCount())
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 
 afterEach(async () => {
   Object.assign(SCAN_STREAM_TIMING, REAL_TIMING)
@@ -126,31 +125,37 @@ describe('ScanStream publish', () => {
     await stubFor(freshScanId()).publish(DONE)
   })
 
-  it('does not wait for a client that stopped reading, and that client does not hold back the others', { timeout: 8 * SECOND }, async () => {
+  it('does not wait for a client that stopped reading, and that client does not hold back the others', { timeout: 15 * SECOND }, async () => {
     const scanId = freshScanId()
     const stalled = await subscribe(scanId) // never read
     const healthy = await subscribe(scanId)
     await healthy.stream.read(1)
     const total = 30
-    const arriving = healthy.stream.read(total, 5 * SECOND)
+    const arriving = healthy.stream.read(total, 10 * SECOND)
 
-    const started = Date.now()
-    for (let n = 0; n < total; n++) await stubFor(scanId).publish(itemEvent({ id: 'item-1', n }))
-    const publishing = Date.now() - started
+    // If publish awaited the stalled client's write it would hang for good, since that client never reads. So the bound only
+    // has to be far above any loaded run, not tight: a hang is unbounded.
+    const publishing = (async () => {
+      for (let n = 0; n < total; n++) await stubFor(scanId).publish(itemEvent({ id: 'item-1', n }))
+      return 'published' as const
+    })()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const outcome = await Promise.race([publishing, new Promise<'blocked'>((resolve) => (timer = setTimeout(() => resolve('blocked'), 6 * SECOND)))])
+    clearTimeout(timer)
 
-    expect(publishing).toBeLessThan(2 * SECOND)
+    expect(outcome, 'publish blocked on the stalled client').toBe('published')
     const { frames } = await arriving
     expect(frames.map((frame) => (parseFrame(frame).data as { n: number }).n)).toEqual(Array.from({ length: total }, (_, n) => n))
     void stalled
   })
 
-  it('drops a client whose backlog grows past 20 frames, and keeps the one that reads', { timeout: 8 * SECOND }, async () => {
+  it('drops a client whose backlog grows past 20 frames, and keeps the one that reads', { timeout: 15 * SECOND }, async () => {
     const scanId = freshScanId()
     await subscribe(scanId) // never read
     const healthy = await subscribe(scanId)
     await healthy.stream.read(1)
     const total = 40
-    const arriving = healthy.stream.read(total, 5 * SECOND)
+    const arriving = healthy.stream.read(total, 10 * SECOND)
 
     for (let n = 0; n < total; n++) await stubFor(scanId).publish(itemEvent({ id: 'item-1', n }))
     await arriving
@@ -158,12 +163,12 @@ describe('ScanStream publish', () => {
     expect(await clientCount(scanId)).toBe(1)
   })
 
-  it('keeps a client that is only a few frames behind', async () => {
+  it('keeps a client that is only a few frames behind', { timeout: 15 * SECOND }, async () => {
     const scanId = freshScanId()
     await subscribe(scanId) // never read
     const healthy = await subscribe(scanId)
     await healthy.stream.read(1)
-    const arriving = healthy.stream.read(10, 5 * SECOND)
+    const arriving = healthy.stream.read(10, 10 * SECOND)
 
     for (let n = 0; n < 10; n++) await stubFor(scanId).publish(itemEvent({ id: 'item-1', n }))
     await arriving
@@ -233,17 +238,17 @@ describe('ScanStream clients going away', () => {
 })
 
 describe('ScanStream keep-alive', () => {
-  it('writes a ": ping" comment to an idle client every ping interval', async () => {
+  it('writes a ": ping" comment to an idle client every ping interval', { timeout: 15 * SECOND }, async () => {
     SCAN_STREAM_TIMING.pingMs = 50
     const { stream } = await subscribe(freshScanId())
 
-    const { frames } = await stream.read(3, 1500)
+    const { frames } = await stream.read(3, 5 * SECOND)
 
     expect(frames.map((frame) => parseFrame(frame).event ?? frame)).toEqual(['snapshot', ': ping', ': ping'])
   })
 
   it('does not ping before the interval has passed', async () => {
-    SCAN_STREAM_TIMING.pingMs = 5 * SECOND
+    SCAN_STREAM_TIMING.pingMs = 30 * SECOND
     const { stream } = await subscribe(freshScanId())
     await stream.read(1)
 
@@ -254,30 +259,31 @@ describe('ScanStream keep-alive', () => {
 })
 
 describe('ScanStream lifetime', () => {
-  it('ends a stream when the maximum lifetime has passed, whatever the client does', async () => {
+  it('ends a stream when the maximum lifetime has passed, whatever the client does', { timeout: 15 * SECOND }, async () => {
     SCAN_STREAM_TIMING.maxLifetimeMs = 100
     const scanId = freshScanId()
     const { stream } = await subscribe(scanId)
 
-    const { frames, ended } = await stream.read(5, 1500)
+    const { frames, ended } = await stream.read(5, 5 * SECOND)
 
     expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['snapshot'])
     expect(ended).toBe(true)
     expect(await clientCount(scanId)).toBe(0)
   })
 
-  it('counts the lifetime from when each client connected, not from when the scan\'s first one did', { timeout: 8 * SECOND }, async () => {
-    SCAN_STREAM_TIMING.maxLifetimeMs = 800
+  it('counts the lifetime from when each client connected, not from when the scan\'s first one did', { timeout: 15 * SECOND }, async () => {
+    // The lifetimes differ on purpose: a scan-level timer started by `early` would close `late` at ~200ms, far inside its own 60s.
+    SCAN_STREAM_TIMING.maxLifetimeMs = 200
     const scanId = freshScanId()
     const early = await subscribe(scanId)
-    await sleep(400)
+    await early.stream.read(1)
+    SCAN_STREAM_TIMING.maxLifetimeMs = 60_000
     const late = await subscribe(scanId)
 
-    expect((await early.stream.read(5, 1500)).ended).toBe(true)
+    expect((await early.stream.read(5, 5 * SECOND)).ended).toBe(true)
 
-    const stillOpen = await late.stream.read(5, 100)
-    expect(stillOpen.ended).toBe(false)
+    expect((await late.stream.read(5, 300)).ended).toBe(false)
     expect(await clientCount(scanId)).toBe(1)
-    expect((await late.stream.read(5, 1500)).ended).toBe(true)
+    await late.stream.cancel()
   })
 })

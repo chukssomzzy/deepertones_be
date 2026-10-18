@@ -4,9 +4,9 @@ import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
-import type { ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
+import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandKey, identityKey, nearMissCandidates, normaliseText } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -102,6 +102,7 @@ export type ProductView = {
     brand: string
     name: string
     variant: string | null
+    form: ProductForm | null
     category: Product['category']
     imageUrl: string | null
   }
@@ -149,6 +150,7 @@ export class ProductCatalogService {
     name: product.name,
     category: product.category,
     ...(product.variant === null ? {} : { variant: product.variant }),
+    ...(product.form === null ? {} : { form: product.form }),
   })
 
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
@@ -194,10 +196,13 @@ export class ProductCatalogService {
     const known = await this.repository.findProductByKey(key)
     if (known) return known
 
-    const brandProducts = await this.repository.productsByBrandKey(brandKey(identity.brand), this.policy.brandScanLimit)
+    const brandProducts = await this.repository.productsByBrandFamily(brandFirstWord(identity.brand), this.policy.brandScanLimit)
     // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
-      (p) => (identity.category === undefined || p.category === identity.category) && !ProductCatalogService.variantsConflict(p.variant, identity.variant),
+      (p) =>
+        (identity.category === undefined || p.category === identity.category) &&
+        sameForm(p, identity) &&
+        !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
       threshold: this.policy.nearMissThreshold,
@@ -219,6 +224,7 @@ export class ProductCatalogService {
       brand: identity.brand,
       name: identity.name,
       variant: identity.variant ?? null,
+      form: identity.form ?? null,
       category: identity.category ?? 'other',
       createdAt: this.now(),
     })
@@ -289,7 +295,7 @@ export class ProductCatalogService {
     }
     await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    await this.importStockImage(product, result.imageUrl, now)
+    await this.importStockImage(product, result.sourceUrl, now)
     return { kind: 'found', formulationId }
   }
 
@@ -328,6 +334,7 @@ export class ProductCatalogService {
         brand: '',
         name: '',
         variant: null,
+        form: null,
         category: label.category ?? 'other',
         createdAt: this.now(),
       })
@@ -474,6 +481,7 @@ export class ProductCatalogService {
         brand: product.brand,
         name: product.name,
         variant: product.variant,
+        form: product.form,
         category: product.category,
         imageUrl: product.imageKey === null ? null : this.images.publicUrl(product.imageKey),
       },
@@ -589,11 +597,12 @@ export class ProductCatalogService {
    * may fail the research: the ingredients are already stored, and a missing image is normal. The log carries the
    * product id only, never a URL, which came from a web page.
    */
-  private async importStockImage(product: Product, imageUrl: string | undefined, now: Date): Promise<void> {
+  private async importStockImage(product: Product, sourceUrl: string, now: Date): Promise<void> {
     const checkedAt = product.imageCheckedAt
     if (product.imageKey !== null || (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.DAY))
       return
     try {
+      const imageUrl = await this.images.pageImageUrl(sourceUrl)
       const image = imageUrl ? await this.images.fetchImage(imageUrl) : null
       if (!imageUrl || !image || !(await this.analyst.imageShowsProduct(image, ProductCatalogService.identityOf(product)))) {
         await this.repository.markImageChecked(product.id, now)

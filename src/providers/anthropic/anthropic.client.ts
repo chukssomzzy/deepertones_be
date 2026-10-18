@@ -30,7 +30,7 @@ export type AnthropicClientConfig = {
   fetch?: typeof fetch
 }
 
-/** Calls the Claude Messages API through the official SDK. Takes raw requests; the product adapters own the prompts. */
+/** Calls the Claude Messages API through the official SDK. Takes raw requests; the product adapters choose the prompts (src/prompts) and the answer shapes. */
 export class AnthropicClient {
   /** How many times a paused turn (server-side tools hit their iteration limit) is re-sent before giving up. */
   private static readonly MAX_CONTINUATIONS = 3
