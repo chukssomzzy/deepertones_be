@@ -3067,6 +3067,34 @@ describe('ProductCatalogService.search', () => {
     ])
   })
 
+  it('shows the form of a product, so a spray and a roll-on of the same line are told apart in the list', async () => {
+    const ctx = setup()
+    const nivea = { brand: 'NIVEA MEN', name: 'Dry Impact', category: 'body' } as const
+    const spray = await ctx.service.resolve(identity({ ...nivea, form: 'spray' }))
+    const rollOn = await ctx.service.resolve(identity({ ...nivea, form: 'roll-on' }))
+
+    const found = await ctx.service.search('nivea men dry impact')
+
+    expect(spray.productId).not.toBe(rollOn.productId)
+    expect(found).toHaveLength(2)
+    expect(found).toEqual(
+      expect.arrayContaining([
+        { id: spray.productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'spray', category: 'body', imageUrl: null },
+        { id: rollOn.productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: null, form: 'roll-on', category: 'body', imageUrl: null },
+      ]),
+    )
+  })
+
+  it('gives a null form for a product that has none, next to one that has', async () => {
+    const ctx = setup()
+    const plain = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Glow Serum' }))
+    const spray = await ctx.service.resolve(identity({ brand: 'Acme', name: 'Glow Serum', form: 'spray' }))
+
+    const found = await ctx.service.search('acme glow serum')
+
+    expect(Object.fromEntries(found.map((p) => [p.id, p.form]))).toEqual({ [plain.productId]: null, [spray.productId]: 'spray' })
+  })
+
   it.each([
     ['upper case', 'CERAVE HYDRATING'],
     ['surrounding and repeated spaces', '  cerave    hydrating  '],
@@ -3184,6 +3212,31 @@ describe('ProductCatalogService.search', () => {
     await ctx.service.search('zzz')
 
     expect(callsToAi(ctx)).toBe(before)
+  })
+})
+
+describe('ProductCatalogService.namedProduct', () => {
+  it('reads a named product back as { id, kind, brand, name, variant, form, category, imageUrl }, with the form it was made with', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity({ brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', category: 'body', form: 'spray' }))
+
+    expect(await ctx.service.namedProduct(productId)).toEqual({ id: productId, kind: 'named', brand: 'NIVEA MEN', name: 'Dry Impact', variant: 'Night', form: 'spray', category: 'body', imageUrl: null })
+  })
+
+  it('gives a null form for a product made without one', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.namedProduct(productId)).toMatchObject({ id: productId, form: null })
+  })
+
+  it('reads each product of one line by its own form, not the form of its sibling', async () => {
+    const ctx = setup()
+    const spray = await ctx.service.resolve(identity({ form: 'spray' }))
+    const rollOn = await ctx.service.resolve(identity({ form: 'roll-on' }))
+
+    expect((await ctx.service.namedProduct(spray.productId)).form).toBe('spray')
+    expect((await ctx.service.namedProduct(rollOn.productId)).form).toBe('roll-on')
   })
 })
 
