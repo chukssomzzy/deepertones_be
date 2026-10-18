@@ -55,6 +55,7 @@ describe('the old unversioned API paths', () => {
     ['POST', `/scans/${SCAN_ID}/items/${ITEM_ID}/back-photo`],
     ['GET', '/scans/photos/x'],
     ['GET', '/products/search?q=serum'],
+    ['GET', '/onboarding/content'],
     ['POST', '/scans/products'],
     ['GET', `/scans/products/${SCAN_ID}`],
   ]
@@ -141,6 +142,7 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label',
         'GET /api/v1/scans/products/photos/{token}',
         'GET /api/v1/products/search',
+        'GET /api/v1/onboarding/content',
       ].sort(),
     )
   })

@@ -291,8 +291,8 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/products`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
-`client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
+(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+`client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products`, `client.api.v1.onboarding` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
 Anything that builds a link to an API route starts from `API_V1_PREFIX` (the service's photo link does, via `productPhotoUrl`
@@ -486,6 +486,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
 | `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
 | `PUT`/`GET /api/v1/me/safety` | bearer (guests included); see "Safety facts (onboarding)" | none |
+| `GET /api/v1/onboarding/content` | public: a token is ignored; see "Onboarding content" | none (cached) |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
   profile (the app reads it from `GET /api/v1/me`). Refreshing slides the refresh token's 60 days.
@@ -887,6 +888,27 @@ two texts is the fourth.
 - **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. `PUT /safety` is rate limited like `PUT /goal`, in the same order
   (`SAFETY_SET_IP_LIMITER` 20 a minute per address, then `signedIn()`, then `SAFETY_SET_USER_LIMITER` 10 a minute per user; 429 `RATE_LIMITED` with `Retry-After`; namespace ids 1022/1023, 2022/2023 and 3022/3023): a
   save can queue a parse that researches a product into the shared catalog, and a guest costs nothing to make. `GET /safety` is not limited. A save calls no model itself.
+
+### Onboarding content
+`GET /api/v1/onboarding/content` (`modules/onboarding`, operation `getOnboardingContent`, tag "Onboarding", mounted at `/api/v1/onboarding`) serves the text of onboarding screens 1.2 to 1.5
+(goal, answer, safety), the fifth pull request of issue #82, so a copy change, a new chip or a new choice is a deploy and not an app release. The app fetches it first and renders from it.
+
+- **Public and the same for everyone.** `security: []`, no rate limit (it is static and cached). A bearer token, valid or not, changes nothing: `auth` never rejects, and the route reads no actor.
+  The route calls `contentFor` (`onboarding.content.ts`) directly: the content is pure data with nothing to wire, so there is no service or repository. `toOnboardingContentResponse` (`onboarding.presenter.ts`) maps it to the response schema, field by field.
+- **The source of truth is not in this module.** The chip and choice ids come from the vocabularies the API itself validates (`GOALS`, `SAFETY_CHOICES`), in their order, so every
+  id the app shows is one `PUT /me/goal` and `PUT /me/safety` accept (the integration test tries each). The answer cards come from `goals.answers` (`answerFor(goal, false)` without its `note`), and
+  `colourNote` is `answerFor(goal, true).note`, so the words have one source and `PUT`/`GET /me/goal` keep answering from the same table. The labels are typed `Record<Goal, string>` and
+  `Record<SafetyChoice, …>`: a new goal or choice without a label does not compile. This module may import other modules' vocabulary and answers files (pure, as scans imports `catalog.vocabulary`), never their services.
+- **Response.** `{ locale, contentVersion, goalScreen, answerScreen, answers, colourNote, safetyScreen }`. A safety choice has a `field` (`{ label, hint? }`, the text box under it) only for `reaction` and `prescription`.
+  The mock text of the screens is used word for word; the sixth chip ("Calm, healthy skin") and the reaction field are DRAFT and need owner review before launch. They are named in `DRAFT_COPY` (a test pins the list, and that each string is shown by the content) and marked DRAFT in the source; approving a string means removing it from both.
+- **Version and caching.** `contentVersion` is the first 16 hex digits of the SHA-256 of the content without `contentVersion` (`locale` included), serialised as JSON with object keys sorted and array order kept, so a changed word, id, or position
+  is a new version and a reordering of fields in the source is not. A key set to `undefined` is left out, as JSON leaves it out. `CONTENT_SHAPE_VERSION` is hashed in too: bump it when the response shape changes without any copy changing, or apps holding the old ETag keep getting 304 and the old shape. It is computed once per isolate (`once`) and is also the `ETag`, in quotes. `Cache-Control` is `public, max-age=300, stale-while-revalidate=86400`: five minutes
+  so a copy deploy reaches the apps quickly, and a day of serving the old text while it revalidates, so opening the app never waits on this call. `If-None-Match` naming the current ETag (a list, weak `W/` forms and `*` count) is 304 with no body, still carrying `ETag` and `Cache-Control`.
+  CORS exposes no response headers anywhere in the app, and this is a mobile client, so `ETag` is not added to them.
+- **Locale.** `?locale=` is optional and lenient: only exactly `en` (case-sensitive) is served as itself, and anything else (empty, long, a path, markup, repeated) falls back to `en`, with `locale` in the response saying so and the same ETag.
+  It is never a 400. Only English ships now; a language is added by writing its content and listing it in `LOCALES`.
+- **The presenter holds the shape.** The bodiless 304 makes @hono/zod-openapi type this route's handler return as `Response`, so the compiler does not check the body of the `ok(...)` call (see "Routes document themselves"). `toOnboardingContentResponse` is typed `z.infer<typeof OnboardingContentResponse>`, so a field that differs from the schema fails to compile there. The integration test checks the strings.
+- **Copy changes ship with a deploy.** Nothing here is read from a database or a setting. After a deploy, apps pick up the new text within the cache window.
 
 ### Prompts
 
