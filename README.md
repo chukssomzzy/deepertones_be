@@ -128,8 +128,8 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    `{ goal, safety, next }` with `next` of `goal`, `safety` or `shelf`: use it to resume the first run. Words with a link or markup are a
    400 `INVALID_GOAL_TEXT`.
 8. **For the safety question** (screen 1.5, after the goal): `PUT /api/v1/me/safety` with `{ choices, reactionText?, prescriptionText? }` and the bearer token,
-   guests included. `choices` is one to five of `pregnant`, `breastfeeding`, `reaction`, `prescription` and `none`; the optional texts (up to 300 characters)
-   name the products or ingredients behind `reaction` and `prescription`. `none` stands alone, and a text needs its own choice ticked (400
+   guests included. `choices` is a list (up to 20 entries, repeats are collapsed) of `pregnant`, `breastfeeding`, `reaction`, `prescription` and `none`; the optional texts (up to 300 characters
+   as typed; line breaks and tabs are fine and come back as one space) name the products or ingredients behind `reaction` and `prescription`. `none` stands alone, and a text needs its own choice ticked (400
    `INVALID_SAFETY_ANSWER`, with `error.details.field` naming the field); words with a link, markup or an invisible character are a 400 `INVALID_SAFETY_TEXT`.
    Ticking a choice and naming nothing is fine, and a blank text counts as left out. It answers `{ choices, reactionText, prescriptionText,
    excludesPregnancyCaution, updatedAt }`; `GET /api/v1/me/safety` returns the same (404 `SAFETY_NOT_SET` before the first answer). The answers can be changed

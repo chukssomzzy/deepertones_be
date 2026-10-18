@@ -118,6 +118,12 @@ describe('SafetyService.set canonical choices', () => {
     expect(one.choices).toEqual(other.choices)
   })
 
+  it('collapses a choice repeated many times to one', async () => {
+    const view = await set(AMARA, { choices: ['pregnant', 'pregnant', 'pregnant', 'pregnant', 'pregnant', 'pregnant'] })
+
+    expect(view.choices).toEqual(['pregnant'])
+  })
+
   it('keeps "none" as the only choice, once, even if it was sent twice', async () => {
     const view = await set(AMARA, { choices: ['none', 'none'] })
 
@@ -181,11 +187,38 @@ describe('SafetyService.set refusing a contradictory answer', () => {
 })
 
 describe('SafetyService.set texts', () => {
-  it('saves a text trimmed, keeping the inner spaces as typed', async () => {
-    const view = await set(AMARA, { choices: ['reaction', 'prescription'], reactionText: '  Caro  White and fragrance  ', prescriptionText: '\n clobetasol \t' })
+  it('saves a text trimmed, with every run of spaces inside it made one space', async () => {
+    const view = await set(AMARA, { choices: ['reaction', 'prescription'], reactionText: '  Caro  White   and fragrance  ', prescriptionText: '\n clobetasol \t' })
 
-    expect(view.reactionText).toBe('Caro  White and fragrance')
+    expect(view.reactionText).toBe('Caro White and fragrance')
     expect(view.prescriptionText).toBe('clobetasol')
+  })
+
+  it.each([
+    ['a line break', 'Caro White\nshea butter'],
+    ['a Windows line break', 'Caro White\r\nshea butter'],
+    ['a tab', 'Caro White\tshea butter'],
+    ['a blank line and indent', 'Caro White\n\n   shea butter'],
+    ['line breaks and tabs at the edges', '\n\tCaro White\r\nshea butter\t\n'],
+  ])('accepts a list written over several lines (%s) and saves it with every run of whitespace as one space', async (_label, text) => {
+    const view = await set(AMARA, { choices: ['reaction', 'prescription'], reactionText: text, prescriptionText: text })
+
+    expect(view.reactionText).toBe('Caro White shea butter')
+    expect(view.prescriptionText).toBe('Caro White shea butter')
+    expect(await repository.current('profile-amara-1')).toMatchObject({ reactionText: 'Caro White shea butter', prescriptionText: 'Caro White shea butter' })
+  })
+
+  it('still refuses another control character next to a line break', async () => {
+    const error = await errorOf(set(AMARA, { choices: ['reaction'], reactionText: 'Caro White\n\u0007shea butter' }))
+
+    expect(error.code).toBe('INVALID_SAFETY_TEXT')
+    expect(error.details).toEqual({ field: 'reactionText' })
+  })
+
+  it('still refuses a link on the second line', async () => {
+    const error = await errorOf(set(AMARA, { choices: ['reaction'], reactionText: 'Caro White\nhttps://evil.example' }))
+
+    expect(error.code).toBe('INVALID_SAFETY_TEXT')
   })
 
   it.each([
@@ -228,6 +261,20 @@ describe('SafetyService.set texts', () => {
     expect(error.code).toBe('INVALID_SAFETY_ANSWER')
     expect(error.details).toEqual({ field: 'prescriptionText' })
     expect(await repository.history('profile-amara-1')).toEqual([])
+  })
+
+  it('names the answer rule, not the text rule, when a text with a link has no choice ticked for it', async () => {
+    const error = await errorOf(set(AMARA, { choices: ['pregnant'], reactionText: 'https://x.example' }))
+
+    expect(error.code).toBe('INVALID_SAFETY_ANSWER')
+    expect(error.details).toEqual({ field: 'reactionText' })
+  })
+
+  it('names the choices rule first when "none" is combined with another choice and a text carries a link', async () => {
+    const error = await errorOf(set(AMARA, { choices: ['none', 'pregnant'], reactionText: 'https://x.example' }))
+
+    expect(error.code).toBe('INVALID_SAFETY_ANSWER')
+    expect(error.details).toEqual({ field: 'choices' })
   })
 
   it('takes a plain angle bracket as ordinary text', async () => {

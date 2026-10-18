@@ -4,8 +4,11 @@ import { hc } from 'hono/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
+import type { EmailAddress } from '../../src/lib/email-address'
 import { TokenService } from '../../src/modules/auth/tokens.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
+import { D1UsersRepository } from '../../src/modules/users/users.repository'
+import { UsersService } from '../../src/modules/users/users.service'
 
 // The safety routes through the Worker's public surface, as the app uses them: the typed client against the real entrypoint and real
 // local D1. No model is involved in this step (the goal is picked with a chip, and the safety answers are only stored), so nothing
@@ -130,6 +133,14 @@ const signIn = async (device: Device, bearer: string, address: string) => {
 
 const db = createDb(env.DB)
 const tokenService = new TokenService({ secret: env.JWT_SECRET })
+const users = new UsersService({ repository: new D1UsersRepository(db) })
+
+/** An account that signed up some time ago and owns an address: made the way auth.test.ts makes one (promote a guest), so the OTP cooldown of that address is not in play. */
+const seedVerifiedUser = async (email: string) => {
+  const guest = await users.guestForDevice(`seed-${runSalt}-${next()}`, 'ios')
+  const { user } = await users.promote(guest.id, { kind: 'email', email: email.toLowerCase() as EmailAddress })
+  return user
+}
 
 /** An access token for a second profile of the guest's account, as profile switching will issue one. */
 const onSecondProfile = async (userId: string) => {
@@ -253,6 +264,67 @@ describe('PUT /api/v1/me/safety', () => {
     expect(await dataOf(await getSafety(accessToken))).toMatchObject({ choices: ['pregnant'], prescriptionText: null })
   })
 
+  it.each([
+    ['a line break', 'Caro White\nshea butter'],
+    ['a Windows line break', 'Caro White\r\nshea butter'],
+    ['a tab', 'Caro White\tshea butter'],
+    ['a blank line and indent', 'Caro White\n\n   shea butter'],
+  ])('accepts a list written over several lines (%s) and answers it with every run of whitespace as one space', async (_label, text) => {
+    const { accessToken } = await newGuest()
+
+    const res = await putSafety(accessToken, { choices: ['reaction', 'prescription'], reactionText: `  ${text}  `, prescriptionText: text })
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toMatchObject({ reactionText: 'Caro White shea butter', prescriptionText: 'Caro White shea butter' })
+    expect(await dataOf(await getSafety(accessToken))).toMatchObject({ reactionText: 'Caro White shea butter', prescriptionText: 'Caro White shea butter' })
+  })
+
+  it('counts the 300-character limit on the words as typed, line breaks included, before they are made one space', async () => {
+    const { accessToken } = await newGuest()
+    const manyLines = (length: number) => `${'x\n'.repeat((length - 1) / 2)}x`
+
+    const atLimit = await putSafety(accessToken, { choices: ['reaction'], reactionText: manyLines(299) })
+    const over = await putSafety(accessToken, { choices: ['reaction'], reactionText: manyLines(301) })
+
+    expect(manyLines(299)).toHaveLength(299)
+    expect(manyLines(301)).toHaveLength(301)
+    expect(atLimit.status).toBe(200)
+    expect(over.status).toBe(400)
+    expect(await errorCodeOf(over)).toBe('VALIDATION_FAILED')
+  })
+
+  it('answers 400 INVALID_SAFETY_ANSWER, not INVALID_SAFETY_TEXT, for a link in words whose choice is not ticked', async () => {
+    const { accessToken } = await newGuest()
+
+    const res = await putSafety(accessToken, { choices: ['pregnant'], reactionText: 'https://x.example' })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('INVALID_SAFETY_ANSWER')
+    expect(error.details).toEqual({ field: 'reactionText' })
+  })
+
+  it('collapses a choice sent six times to one', async () => {
+    const { accessToken } = await newGuest()
+
+    const res = await putSafety(accessToken, { choices: ['pregnant', 'pregnant', 'pregnant', 'pregnant', 'pregnant', 'pregnant'] })
+
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toMatchObject({ choices: ['pregnant'], excludesPregnancyCaution: true })
+  })
+
+  it('accepts exactly 20 choices when they are repeats, and refuses 21', async () => {
+    const { accessToken } = await newGuest()
+
+    const twenty = await putSafety(accessToken, { choices: Array(20).fill('pregnant') })
+    const twentyOne = await putSafety(accessToken, { choices: Array(21).fill('pregnant') })
+
+    expect(twenty.status).toBe(200)
+    expect((await dataOf<SafetyBody>(twenty)).choices).toEqual(['pregnant'])
+    expect(twentyOne.status).toBe(400)
+    expect(await errorCodeOf(twentyOne)).toBe('VALIDATION_FAILED')
+  })
+
   it('returns the choices in the app\'s order whatever order they were sent in, and once each', async () => {
     const { accessToken } = await newGuest()
 
@@ -361,7 +433,7 @@ describe('PUT /api/v1/me/safety validation', () => {
     ['choices that are not a list', { choices: 'pregnant' }],
     ['a choice that is not one of the five', { choices: ['allergic'] }],
     ['a choice that is not a string', { choices: [4] }],
-    ['six choices', { choices: ['pregnant', 'breastfeeding', 'reaction', 'prescription', 'none', 'none'] }],
+    ['21 choices, repeats or not', { choices: Array(21).fill('pregnant') }],
     ['reaction words that are not a string', { choices: ['reaction'], reactionText: 42 }],
     ['prescription words that are not a string', { choices: ['prescription'], prescriptionText: ['clobetasol'] }],
     ['301 characters of reaction words', { choices: ['reaction'], reactionText: 'x'.repeat(301) }],
@@ -514,6 +586,28 @@ describe('a guest who signs up', () => {
     const after = session.tokens.accessToken
     expect(await dataOf(await getSafety(after))).toEqual(saved)
     expect((await dataOf<OnboardingBody>(await getOnboarding(after))).next).toBe('shelf')
+  })
+})
+
+describe('a guest who signs in to an existing account', () => {
+  it('does not give the guest\'s answers to the account, which is asked again, and leaves the guest\'s own answers where they were', async () => {
+    const owner = await seedVerifiedUser(freshEmail())
+    const guest = await newGuest()
+    await pickGoal(guest.accessToken, 'glow')
+    const guestsAnswer = await answer(guest.accessToken, { choices: ['pregnant'] })
+
+    const res = await signIn(guest.device, guest.accessToken, owner.email!.toUpperCase())
+
+    expect(res.status).toBe(200)
+    const session = await dataOf<Session>(res)
+    expect(session.user.id).toBe(owner.id)
+    const asOwner = session.tokens.accessToken
+    const got = await getSafety(asOwner)
+    expect(got.status).toBe(404)
+    expect(await errorCodeOf(got)).toBe('SAFETY_NOT_SET')
+    expect(await dataOf(await getOnboarding(asOwner))).toEqual({ goal: null, safety: null, next: 'goal' })
+    // The guest row is left behind, not deleted (as auth.test.ts shows for /me): what the guest said is still its own.
+    expect(await dataOf(await getSafety(guest.accessToken))).toEqual(guestsAnswer)
   })
 })
 
