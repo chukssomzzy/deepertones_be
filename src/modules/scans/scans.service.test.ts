@@ -5040,6 +5040,112 @@ describe('ScanService: push notifications', () => {
     })
   })
 
+  describe('when an item needs identifying (the third unreadable front photo)', () => {
+    const FACE: Recognition = { classification: 'face-or-person' }
+    const OTHER_PRODUCT: Recognition = { classification: 'other-product' }
+    const needsYouPushes = (ctx: Ctx) => pushes(ctx).filter((body) => body.kind === 'scan-needs-you')
+    /** The first two photos of a scan made by `OTHER_USER`'s profile have been unreadable; a third has been retaken and waits to be read. */
+    const thirdPhotoWaiting = async (ctx: Ctx) => {
+      const scan = await create(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+      const itemId = scan.items[0].id as string
+      for (const [i, read] of [BLURRY, TURNED_AWAY, BLURRY].entries()) {
+        ctx.recognizer.respondWith(() => read)
+        if (i > 0) {
+          ctx.advance(SECOND)
+          await retake(ctx, scan.id, itemId, markedJpeg(20 + i), { userId: OTHER_USER, profileId: OTHER_PROFILE })
+        }
+        if (i < 2) await run(ctx, itemId, 'recognise')
+      }
+      return { scanId: scan.id as string, itemId }
+    }
+
+    it('tells the profile that made the scan, once, with a key that is the scan and the need', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await thirdPhotoWaiting(ctx)
+      expect(pushes(ctx)).toEqual([])
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-identification')
+      // Only this push: the scan is not done while an item waits for the person, so there is no finished push either.
+      expect(pushes(ctx)).toEqual([{ kind: 'scan-needs-you', userId: OTHER_USER, profileId: OTHER_PROFILE, scanId, itemId, need: 'identify' }])
+      expect(keys(ctx)).toEqual([`scan-needs-you:${scanId}:identify`])
+      expect(ctx.pushJobs.enqueued[0]!.job).toBe('send-push')
+    })
+
+    it.each([
+      ['the first', [BLURRY]],
+      ['the second', [TURNED_AWAY, BLURRY]],
+    ])('says nothing when %s photo is unreadable, since the item only asks for a retake', async (_which, reads) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await failedFront(ctx, reads)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-retake')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it.each([
+      ['a face on the first photo', [FACE]],
+      ['another product on the first photo', [OTHER_PRODUCT]],
+      ['a face on the third photo, after two unreadable ones', [BLURRY, BLURRY, FACE]],
+      ['another product on the third photo, after two unreadable ones', [BLURRY, TURNED_AWAY, OTHER_PRODUCT]],
+    ])('says nothing to identify for %s: a rejected photo is not an unreadable one', async (_label, reads) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await failedFront(ctx, reads)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('rejected')
+      expect(needsYouPushes(ctx)).toEqual([])
+    })
+
+    it('says it once when the same step is delivered twice', async () => {
+      const ctx = setup()
+      const { itemId } = await failedFront(ctx, [BLURRY, BLURRY, BLURRY])
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('says nothing when another call moved the item first, so the guarded update did not apply', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, markedJpeg(30))
+      ctx.recognizer.respondWith(() => BLURRY)
+      const read = ctx.recognizer.recognize.bind(ctx.recognizer)
+      vi.spyOn(ctx.recognizer, 'recognize').mockImplementationOnce(async (image) => {
+        const answer = await read(image)
+        await ctx.repository.updateItem(itemId, 'recognising', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+        return answer
+      })
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('failed')
+      expect(needsYouPushes(ctx)).toEqual([])
+    })
+
+    it('still moves the item to identification, and the step succeeds, when the push cannot be queued', async () => {
+      const ctx = setup()
+      const logged = quiet()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY, BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, markedJpeg(30))
+      ctx.recognizer.respondWith(() => BLURRY)
+      ctx.pushJobs.failNextWith(new Error('queue is down'))
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect(await stateOf(ctx, scanId, itemId)).toMatchObject({ state: 'needs-identification' })
+      // The push was tried (and its failure logged by kind and scan), not skipped.
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'push-enqueue-failed', kind: 'scan-needs-you', scanId }))
+      expect(pushes(ctx)).toEqual([])
+      logged.mockRestore()
+    })
+  })
+
   describe('when an item needs the back of the pack', () => {
     const unreadable = (ctx: Ctx) => ctx.labelReader.respondWith(() => ({ readable: false }))
     const addBack = (ctx: Ctx, scanId: string, itemId: string, marker: number) => asUser(() => ctx.service.addBackPhoto(scanId, itemId, markedJpeg(marker), IP))
@@ -5400,6 +5506,27 @@ describe('ScanService: push notifications', () => {
       expect(pushes(ctx)).toEqual([])
       expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
       expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-confirmation')
+      log.mockRestore()
+    })
+
+    it('skips the identify push, logging push-skipped-no-profile, and still moves the item to identification', async () => {
+      const { ctx, scanId, itemId } = await withOrphan()
+      const log = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+      ctx.recognizer.respondWith(() => BLURRY)
+      await run(ctx, itemId, 'recognise')
+      // Nobody owns an orphan, so the service cannot take a retake for it; the retakes are written the way the service writes them.
+      for (const n of [1, 2]) {
+        ctx.advance(SECOND)
+        const key = `photos/test/${USER}/${scanId}/${itemId}.jpg`
+        await ctx.photos.put(key, markedJpeg(20 + n))
+        const retaken = { id: `retake-${n}`, itemId, userId: USER, ipHash: 'ip', uploadedAt: ctx.now() }
+        await ctx.repository.updateItem(itemId, 'needs-retake', { state: 'recognising', reason: null, photoKey: key, updatedAt: ctx.now() }, undefined, retaken)
+        await run(ctx, itemId, 'recognise')
+      }
+
+      expect(pushes(ctx)).toEqual([])
+      expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
+      expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-identification')
       log.mockRestore()
     })
   })

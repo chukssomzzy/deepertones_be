@@ -653,7 +653,7 @@ export class ScanService {
    * for its profile (a step runs as a system actor, so there is no session to take it from); that read is guarded, because the
    * item has already moved and a throw would only be retried into a no-op. Nothing here fails the step.
    */
-  private async notifyNeedsYou(item: ScanItem, need: 'back-photo' | 'confirm', ask?: number): Promise<void> {
+  private async notifyNeedsYou(item: ScanItem, need: 'back-photo' | 'confirm' | 'identify', ask?: number): Promise<void> {
     try {
       const scan = await this.repository.findScan(item.scanId)
       if (!scan) return
@@ -724,10 +724,12 @@ export class ScanService {
     if (seen.classification === 'unreadable' || seen.classification === 'label-not-visible') {
       // Every photo sent is a try, the first included: the retakes recorded so far plus this one.
       const tries = 1 + (await this.repository.countRetakes(item.id))
-      await this.transition(item, {
+      const identify = tries >= this.policy.maxFrontPhotos
+      const moved = await this.transition(item, {
         from: 'recognising',
-        change: { state: tries < this.policy.maxFrontPhotos ? 'needs-retake' : 'needs-identification', reason: seen.classification, photoKey: null },
+        change: { state: identify ? 'needs-identification' : 'needs-retake', reason: seen.classification, photoKey: null },
       })
+      if (moved && identify) await this.notifyNeedsYou(item, 'identify')
       return
     }
     const reason = { 'face-or-person': 'face-or-person', 'other-product': 'not-a-beauty-product' } as const
