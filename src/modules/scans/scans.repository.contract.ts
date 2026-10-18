@@ -787,6 +787,17 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
         })
       })
 
+      it('records an upload and shelves the item when one move into ready carries both, and says the move applied', async () => {
+        const { repository, userId, profileId, scanItems, shelfOf } = await shelving()
+        const { items } = await scanItems()
+
+        const applied = await repository.updateItem(items[0]!.id, 'recognising', ready(fresh('product'), fresh('formulation'), MOVE_AT), newUpload(items[0]!.id, userId, MOVE_AT))
+
+        expect(applied).toBe(true)
+        expect(await repository.countBackPhotos(items[0]!.id)).toBe(1)
+        expect(await shelfOf(profileId)).toHaveLength(1)
+      })
+
       it('keeps one row when a second item of the same product reaches ready for the profile: formulation, source and last scanned follow the newer item, added stays the first time', async () => {
         const { repository, profileId, scanItems, shelfOf } = await shelving()
         const productId = fresh('product')

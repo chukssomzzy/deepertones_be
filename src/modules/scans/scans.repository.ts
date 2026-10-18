@@ -129,7 +129,8 @@ export class D1ScansRepository {
    */
   async fanOut(input: {
     photo: { id: string; patch: PhotoPatch }
-    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    // Never into ready or unidentified: only updateItem puts an item on its profile's shelf.
+    placeholder: { id: string; from: ItemState; patch: ItemPatch & { state?: Exclude<ItemState, 'ready' | 'unidentified'> } }
     siblings: NewSibling[]
     maxItems: number
   }): Promise<{ placeholderMoved: boolean }> {
