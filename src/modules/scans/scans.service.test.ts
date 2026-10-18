@@ -14,7 +14,7 @@ import { MemoryProductAnalyst } from '../../providers/product-analysis/memory.pr
 import type { LabelReading } from '../../providers/label-reading/label-reader.provider'
 import type { DraftConcern, ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { MemoryProductRecognizer } from '../../providers/product-recognition/memory.product-recognizer'
-import type { Recognition } from '../../providers/product-recognition/product-recognizer.provider'
+import type { Recognition, ShelfProduct, ShelfRecognition } from '../../providers/product-recognition/product-recognizer.provider'
 import { MemoryProductResearcher } from '../../providers/product-research/memory.product-researcher'
 import { MemoryPushSender } from '../../providers/push/memory.push'
 import type { ProductIdentity } from '../../providers/product-research/product-researcher.provider'
@@ -191,6 +191,10 @@ const create = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?:
   asUser(() => ctx.service.create({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
 const getScan = (ctx: Ctx, scanId: string, userId = USER, profileId = PROFILE): Promise<any> => asUser(() => ctx.service.getScan(scanId), userId, profileId)
 const run = (ctx: Ctx, itemId: string, step: Step) => asJob(() => ctx.service.advance(itemId, step))
+/** The formulation the stored item points at (a scan's view carries the product's identity only, not its formulation). */
+const formulationIdOf = async (ctx: Ctx, itemId: string) => (await ctx.repository.findItem(itemId))!.formulationId!
+/** What the catalog holds for the item's formulation: its ingredients, source and concerns. */
+const formulationViewOf = async (ctx: Ctx, itemId: string) => ctx.catalog.productView(await formulationIdOf(ctx, itemId))
 const itemOf = async (ctx: Ctx, scanId: string, itemId: string): Promise<any> => (await getScan(ctx, scanId)).items.find((i: { id: string }) => i.id === itemId)!
 const stateOf = async (ctx: Ctx, scanId: string, itemId: string) => {
   const item = await itemOf(ctx, scanId, itemId)
@@ -290,7 +294,7 @@ const failedFront = async (ctx: Ctx, reads: Recognition[]) => {
 }
 
 describe('SCAN_POLICY', () => {
-  it('sets the photo, size, dimension, front photo, back photo, daily quota and confirmation limits', () => {
+  it('sets the photo, size, dimension, front photo, back photo, daily quota, confirmation, shelf photo and items-per-scan limits', () => {
     expect(SCAN_POLICY).toEqual({
       maxPhotosPerScan: 10,
       maxPhotoBytes: 2_000_000,
@@ -301,6 +305,8 @@ describe('SCAN_POLICY', () => {
       dailyPhotosPerIp: 100,
       confirmBelowConfidence: 0.6,
       doneRepairWindowMs: 3 * HOUR,
+      maxShelfPhotos: 3,
+      maxItemsPerScan: 20,
     })
   })
 })
@@ -343,6 +349,40 @@ describe('ScanService.create', () => {
     expect(ctx.photos.stored.get(photoKey(scan.id, a.id, 'jpg'))).toEqual(first)
     expect(ctx.photos.stored.get(photoKey(scan.id, b.id, 'webp'))).toEqual(second)
     expect(ctx.photos.stored.size).toBe(2)
+  })
+
+  it('makes every scan of this route a product scan', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect((await ctx.repository.findScan(scan.id))!.kind).toBe('product')
+  })
+
+  it('records one photo per uploaded photo, in upload order, each still recognising and holding no image of its own', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), webpPhoto(), markedJpeg(3)])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    expect(photos.map((p) => [p.position, p.state, p.photoKey, p.userId, p.scanId])).toEqual([
+      [0, 'recognising', null, USER, scan.id],
+      [1, 'recognising', null, USER, scan.id],
+      [2, 'recognising', null, USER, scan.id],
+    ])
+    expect(new Set(photos.map((p) => p.id)).size).toBe(3)
+    expect(photos.every((p) => p.createdAt.getTime() === T0.getTime())).toBe(true)
+  })
+
+  it('points each item at the photo it was made from, and keeps the image on the item', async () => {
+    const ctx = setup()
+
+    const scan = await create(ctx, [markedJpeg(1), webpPhoto()])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    const items = await ctx.repository.itemsOf(scan.id)
+    expect(items.map((i) => i.photoId)).toEqual(photos.map((p) => p.id))
+    expect(items.map((i) => i.photoKey)).toEqual([photoKey(scan.id, items[0]!.id, 'jpg'), photoKey(scan.id, items[1]!.id, 'webp')])
   })
 
   it('enqueues one recognise job per item and nothing else', async () => {
@@ -627,9 +667,9 @@ describe('ScanService.create', () => {
       constructor(private readonly store: MemoryPhotoStore) {
         super()
       }
-      override async createScan(scan: Parameters<FakeScansRepository['createScan']>[0], items: Parameters<FakeScansRepository['createScan']>[1]): Promise<void> {
-        for (const item of items) present.push((await this.store.get(item.photoKey)) !== null)
-        return super.createScan(scan, items)
+      override async createScan(...[scan, photos, items]: Parameters<FakeScansRepository['createScan']>): Promise<void> {
+        for (const item of items) present.push(item.photoKey !== null && (await this.store.get(item.photoKey)) !== null)
+        return super.createScan(scan, photos, items)
       }
     }
     const photos = new MemoryPhotoStore({ environment: 'test' })
@@ -642,7 +682,7 @@ describe('ScanService.create', () => {
 })
 
 describe('ScanService.advance: recognise', () => {
-  it('moves a clearly read beauty product on to matching and enqueues the match, keeping the photo', async () => {
+  it('moves a clearly read beauty product on to matching and enqueues the match, releasing the photo it no longer needs to show', async () => {
     const ctx = setup()
     const { scanId, itemId } = await scanOne(ctx)
 
@@ -650,8 +690,9 @@ describe('ScanService.advance: recognise', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', category: 'skin' } })
-    expect(item.image.kind).toBe('user')
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect(item.image).toBeNull()
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
     expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
   })
 
@@ -885,7 +926,7 @@ describe('ScanService.advance: recognise, a front photo that cannot be read', ()
     expect(ctx.recognizer.calls).toHaveLength(2)
     expect(await states(ctx, scanId, itemId)).toMatchObject({ state: 'matching', reason: null, recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser' } })
     expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
   })
 
   it('shows retakesLeft on no item that is not asking for a retake', async () => {
@@ -995,7 +1036,7 @@ describe('ScanService.advance: match', () => {
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'ready', reason: null })
-    expect(item.product).toEqual(await ctx.catalog.productView(formulationId))
+    expect(item.product).toEqual(await ctx.catalog.productSummary(formulationId))
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
     expect(ctx.researcher.calls).toHaveLength(1)
     expect(ctx.analyst.calls.analyse).toHaveLength(1)
@@ -1092,7 +1133,7 @@ describe('ScanService.advance: research', () => {
 
     await run(ctx, itemId, 'research')
 
-    expect((await itemOf(ctx, scanId, itemId))).toMatchObject({ state: 'ready', product: { formulation: { id: old.formulationId } } })
+    expect((await itemOf(ctx, scanId, itemId))).toMatchObject({ state: 'ready', product: { id: old.productId } })
     expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId: old.productId, formulationId: old.formulationId })
   })
 
@@ -1302,18 +1343,17 @@ describe('ScanService.advance: the cap on back photos per item', () => {
     expect(ctx.jobs.enqueued).toHaveLength(queuedBefore)
   })
 
-  // The other final failures (fail(), e.g. unavailable, analysis-failed) keep the front photo: only a rejected photo is deleted. This mirrors them,
-  // so the failed item still shows the user's own photo.
-  it('keeps the front photo of an item it ends, as the other failures do', async () => {
+  // Every state after matching has released the front photo, so an item this ends has none left to show.
+  it('has no front photo left when it ends the item, the photo having been released at matching', async () => {
     const ctx = setup()
     const { scanId, itemId } = await readingBackPhoto(ctx, 3)
     unreadable(ctx)
 
     await run(ctx, itemId, 'read-label')
 
-    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
-    expect((await ctx.repository.findItem(itemId))!.photoKey).toBe(photoKey(scanId, itemId))
-    expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+    expect((await ctx.repository.findItem(itemId))!.photoKey).toBeNull()
+    expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
   })
 
   it('still analyses the item when the 3rd back photo is readable: the cap applies only to a failure', async () => {
@@ -1396,6 +1436,25 @@ describe('ScanService.advance: the cap on back photos per item', () => {
   })
 })
 
+describe('ScanService: what a ready item shows of its product', () => {
+  it('shows only the product\'s identity, with no formulation, concerns or reference, in the scan and in the published item event', async () => {
+    const ctx = setup()
+    const { productId } = await catalogued(ctx)
+    const { scanId, itemId } = await reach(ctx, 'matching')
+
+    await run(ctx, itemId, 'match')
+
+    const item = await itemOf(ctx, scanId, itemId)
+    expect(Object.keys(item.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
+    expect(item.product).toMatchObject({ id: productId, brand: CERAVE.brand, name: CERAVE.name })
+    expect(item.product).not.toHaveProperty('product')
+    const published = ctx.events.published.map((p) => p.event).filter((event) => event.type === 'item' && event.item.id === itemId && event.item.state === 'ready')
+    expect(published).toHaveLength(1)
+    const sent = (published[0] as { item: typeof item }).item
+    expect(Object.keys(sent.product).sort()).toEqual(['brand', 'category', 'form', 'id', 'imageUrl', 'kind', 'name', 'variant'])
+  })
+})
+
 describe('ScanService.advance: analyse', () => {
   it('makes the item ready with the analysed product', async () => {
     const ctx = setup()
@@ -1405,8 +1464,7 @@ describe('ScanService.advance: analyse', () => {
     const item = await itemOf(ctx, scanId, itemId)
     expect(item.state).toBe('ready')
     const stored = await ctx.repository.findItem(itemId)
-    expect(item.product).toEqual(await ctx.catalog.productView(stored!.formulationId!))
-    expect(item.product.formulation.analysedAt).toEqual(T0)
+    expect(item.product).toEqual(await ctx.catalog.productSummary(stored!.formulationId!))
   })
 
   it('throws, leaving the item analysing so the queue retries, when the analysis is rejected but may yet pass', async () => {
@@ -1590,11 +1648,11 @@ describe('ScanService.advance: whole scans through the queue', () => {
     await drain(ctx)
 
     const item = await itemOf(ctx, scanId, itemId)
-    expect(item.image).toEqual({ kind: 'stock', url: item.product.product.imageUrl })
+    expect(item.image).toEqual({ kind: 'stock', url: item.product.imageUrl })
     expect(item.image.url).toMatch(/^https:\/\/images\.test\/catalog\/test\/products\//)
   })
 
-  it('shows the user\'s own photo for a ready product that has no stock image', async () => {
+  it('shows no image for a ready product that has no stock image: the user\'s photo was released, so the app shows brand and name', async () => {
     const ctx = setup()
     await catalogued(ctx)
     const { scanId, itemId } = await scanOne(ctx)
@@ -1602,7 +1660,7 @@ describe('ScanService.advance: whole scans through the queue', () => {
     await drain(ctx)
 
     const item = await itemOf(ctx, scanId, itemId)
-    expect(item).toMatchObject({ state: 'ready', image: { kind: 'user' } })
+    expect(item).toMatchObject({ state: 'ready', image: null })
   })
 
   it('waits for the user to confirm a doubtful read, then carries on with the corrected product', async () => {
@@ -2405,7 +2463,7 @@ describe('ScanService.getScan', () => {
     expect(matching).not.toHaveProperty('product')
 
     await run(ctx, itemId, 'match')
-    expect(await itemOf(ctx, scanId, itemId)).toHaveProperty('product.formulation.ingredients', CLEAN)
+    expect(await itemOf(ctx, scanId, itemId)).toHaveProperty('product.brand', CERAVE.brand)
   })
 
   it('links the user\'s own photo for 5 minutes at a time, signed for that user and that photo', async () => {
@@ -3761,9 +3819,11 @@ describe('ScanService.reap: scans the old Worker left without a profile', () => 
     const profiles = new FakeProfilesRepository()
     const ctx = setup({ repository: new FakeScansRepository({ profiles }) })
     const scanId = 'orphan-scan'
-    await ctx.repository.createScan({ id: scanId, userId: owner, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
-      { id: 'orphan-item', scanId, userId: owner, position: 0, photoKey: 'photos/test/orphan.jpg', createdAt: ctx.now() },
-    ])
+    await ctx.repository.createScan(
+      { id: scanId, kind: 'product', userId: owner, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() },
+      [{ id: 'orphan-photo', scanId, userId: owner, position: 0, photoKey: null, createdAt: ctx.now() }],
+      [{ id: 'orphan-item', scanId, userId: owner, position: 0, photoId: 'orphan-photo', photoKey: 'photos/test/orphan.jpg', createdAt: ctx.now() }],
+    )
     return { ctx, profiles, scanId }
   }
   const giveDefault = (profiles: FakeProfilesRepository, userId = USER) =>
@@ -4075,8 +4135,9 @@ describe('ScanService.advance: read-label, an item with no product, whose back n
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item.state).toBe('ready')
-    expect(item.product.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
-    expect(item.product.formulation).toMatchObject({ ingredients: CLEAN, source: { kind: 'label', url: null } })
+    expect(item.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' })
+    expect(item.product).not.toHaveProperty('formulation')
+    expect((await formulationViewOf(ctx, itemId)).formulation).toMatchObject({ ingredients: CLEAN, source: { kind: 'label', url: null } })
     expect(ctx.researcher.calls).toEqual([])
   })
 
@@ -4186,10 +4247,12 @@ describe('ScanService.advance: read-label, an item with no product, whose back g
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item.state).toBe('ready')
-    expect(item.product.product).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null, category: 'other' })
-    expect(item.product.formulation).toMatchObject({ ingredients: WITH_MERCURY, source: { kind: 'label', url: null } })
-    expect(item.product.concerns).toHaveLength(1)
-    expect(item.product.concerns[0]).toMatchObject({ kind: 'banned-substance', severity: 'high', ingredients: ['Mercury'] })
+    expect(item.product).toMatchObject({ kind: 'unnamed', brand: '', name: '', variant: null, category: 'other' })
+    expect(item.product).not.toHaveProperty('concerns')
+    const view = await formulationViewOf(ctx, itemId)
+    expect(view.formulation).toMatchObject({ ingredients: WITH_MERCURY, source: { kind: 'label', url: null } })
+    expect(view.concerns).toHaveLength(1)
+    expect(view.concerns[0]).toMatchObject({ kind: 'banned-substance', severity: 'high', ingredients: ['Mercury'] })
     // The front photo went at needs-identification and the back photo once read, and an unnamed product has no stock image.
     expect(item.image).toBeNull()
     expect(ctx.researcher.calls).toEqual([])
@@ -4212,9 +4275,10 @@ describe('ScanService.advance: read-label, an item with no product, whose back g
     expect(ctx.jobs.enqueued).toHaveLength(jobs)
     expect(ctx.analyst.calls.analyse).toHaveLength(1)
     const [a, b] = [await itemOf(ctx, first.scanId, first.itemId), await itemOf(ctx, second.scanId, second.itemId)]
-    expect(b.product.formulation.id).toBe(a.product.formulation.id)
-    expect(b.product.concerns).toEqual(a.product.concerns)
-    expect(b.product.product).toMatchObject({ kind: 'unnamed' })
+    const [formulationA, formulationB] = [await formulationIdOf(ctx, first.itemId), await formulationIdOf(ctx, second.itemId)]
+    expect(formulationB).toBe(formulationA)
+    expect((await ctx.catalog.productView(formulationB)).concerns).toHaveLength(1)
+    expect(b.product).toMatchObject({ kind: 'unnamed', id: a.product.id })
     expect(ctx.researcher.calls).toEqual([])
   })
 
@@ -4249,7 +4313,7 @@ describe('ScanService.advance: read-label, an item with no product, whose back g
     ctx.analyst.analyseWith(() => [MERCURY_CONCERN])
     await run(ctx, first.itemId, 'read-label')
     await run(ctx, first.itemId, 'analyse')
-    expect((await itemOf(ctx, first.scanId, first.itemId)).product.product).toMatchObject({ kind: 'unnamed' })
+    expect((await itemOf(ctx, first.scanId, first.itemId)).product).toMatchObject({ kind: 'unnamed' })
     const second = await readingUnidentified(ctx, 10)
     ctx.labelReader.respondWith(() => readNamed(WITH_MERCURY))
 
@@ -4257,11 +4321,13 @@ describe('ScanService.advance: read-label, an item with no product, whose back g
 
     expect(await stateOf(ctx, second.scanId, second.itemId)).toEqual({ state: 'ready', reason: null })
     const [a, b] = [await itemOf(ctx, first.scanId, first.itemId), await itemOf(ctx, second.scanId, second.itemId)]
-    expect(b.product.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum' })
+    expect(b.product).toMatchObject({ kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum' })
     expect(a.state).toBe('ready')
-    expect(a.product.product).toMatchObject({ kind: 'named', id: b.product.product.id, brand: 'Glow Co' })
-    expect(a.product.concerns).toEqual(b.product.concerns)
-    expect(a.product.concerns).toHaveLength(1)
+    expect(a.product).toMatchObject({ kind: 'named', id: b.product.id, brand: 'Glow Co' })
+    expect(a.product).not.toHaveProperty('concerns')
+    const formulationId = await formulationIdOf(ctx, second.itemId)
+    expect(await formulationIdOf(ctx, first.itemId)).toBe(formulationId)
+    expect((await ctx.catalog.productView(formulationId)).concerns).toHaveLength(1)
     expect(await ctx.catalogRepository.findProductByKey(MERCURY_UNNAMED_KEY)).toBeNull()
     expect(ctx.analyst.calls.analyse).toHaveLength(1)
     expect(ctx.researcher.calls).toEqual([])
@@ -4411,7 +4477,7 @@ describe('ScanService: an item identified by its back photo, through the queue',
 
     const item = await itemOf(ctx, scanId, itemId)
     expect(item).toMatchObject({ state: 'ready', reason: null })
-    expect(item.product.product).toMatchObject({ kind: 'unnamed', brand: '', name: '' })
+    expect(item.product).toMatchObject({ kind: 'unnamed', brand: '', name: '' })
     expect(ctx.researcher.calls).toEqual([])
   })
 })
@@ -4486,7 +4552,7 @@ describe('ScanService.identifyByName', () => {
         state: 'ready',
         reason: null,
         recognised: { brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', category: 'skin' },
-        product: { product: { id: productId, kind: 'named', brand: 'CeraVe' }, formulation: { id: formulationId } },
+        product: { id: productId, kind: 'named', brand: 'CeraVe' },
       })
       expect(view).not.toHaveProperty('retakesLeft')
       expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { variant: 'Night' } })
@@ -4502,7 +4568,7 @@ describe('ScanService.identifyByName', () => {
       const view = await identify(ctx, scanId, itemId, { productId })
 
       expect(view.recognised).toEqual({ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: null, form: 'spray', category: 'skin' })
-      expect(view.product.product).toMatchObject({ id: productId, form: 'spray' })
+      expect(view.product).toMatchObject({ id: productId, form: 'spray' })
       expect((await itemOf(ctx, scanId, itemId)).recognised).toMatchObject({ form: 'spray' })
       expect(await ctx.repository.findItem(itemId)).toMatchObject({ recognisedForm: 'spray' })
     })
@@ -4527,7 +4593,7 @@ describe('ScanService.identifyByName', () => {
       const view = await identify(ctx, scanId, itemId, { productId: rollOn.productId })
 
       expect(view.recognised).toMatchObject({ form: 'roll-on' })
-      expect(view.product.product).toMatchObject({ id: rollOn.productId, form: 'roll-on' })
+      expect(view.product).toMatchObject({ id: rollOn.productId, form: 'roll-on' })
     })
 
     it('shows the chosen product\'s form for a product that still has to be researched or analysed, too', async () => {
@@ -4716,7 +4782,8 @@ describe('ScanService.identifyByName', () => {
       const ran = await drain(ctx)
 
       expect(ran).toEqual(['match'])
-      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', product: { product: { id: productId }, formulation: { id: formulationId } } })
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', product: { id: productId } })
+      expect(await ctx.repository.findItem(itemId)).toMatchObject({ productId, formulationId })
       expect(aiCalls(ctx)).toBe(before + 1)
       expect(ctx.nameSplitter.calls).toHaveLength(1)
     })
@@ -4734,7 +4801,7 @@ describe('ScanService.identifyByName', () => {
       await drain(ctx)
 
       expect(resolve.mock.calls[0]![0]).not.toHaveProperty('form')
-      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { form: null }, product: { product: { id: formless.productId, form: null } } })
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', recognised: { form: null }, product: { id: formless.productId, form: null } })
       expect(formless.productId).not.toBe(spray.productId)
     })
 
@@ -4751,7 +4818,7 @@ describe('ScanService.identifyByName', () => {
       expect(ctx.researcher.calls).toHaveLength(1)
       expect(await itemOf(ctx, scanId, itemId)).toMatchObject({
         state: 'ready',
-        product: { product: { kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' } },
+        product: { kind: 'named', brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night', category: 'skin' },
       })
       expect(await ctx.catalogRepository.findProductByKey(identityKey({ brand: 'Glow Co', name: 'Bright Tone Serum', variant: 'Night' }))).not.toBeNull()
     })
@@ -6222,9 +6289,11 @@ describe('ScanService: push notifications', () => {
       const itemId = 'orphan-item'
       const photoKey = 'photos/test/user-1/orphan-scan/orphan-item.jpg'
       await ctx.photos.put(photoKey, markedJpeg(1))
-      await ctx.repository.createScan({ id: scanId, userId: USER, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() }, [
-        { id: itemId, scanId, userId: USER, position: 0, photoKey, createdAt: ctx.now() },
-      ])
+      await ctx.repository.createScan(
+        { id: scanId, kind: 'product', userId: USER, profileId: null as unknown as string, ipHash: 'ip', createdAt: ctx.now() },
+        [{ id: 'orphan-photo', scanId, userId: USER, position: 0, photoKey: null, createdAt: ctx.now() }],
+        [{ id: itemId, scanId, userId: USER, position: 0, photoId: 'orphan-photo', photoKey, createdAt: ctx.now() }],
+      )
       return { ctx, scanId, itemId }
     }
 
@@ -6237,6 +6306,7 @@ describe('ScanService: push notifications', () => {
 
       expect(pushes(ctx)).toEqual([])
       expect(log).toHaveBeenCalledWith({ outcome: 'push-skipped-no-profile', scanId })
+      // A product scan: its photo's state never changes, so it publishes no photo event.
       expect(ctx.events.eventsFor(scanId).map((e) => e.type)).toEqual(['item', 'done'])
       log.mockRestore()
     })
@@ -6274,5 +6344,1506 @@ describe('ScanService: push notifications', () => {
       expect((await ctx.repository.findItem(itemId))!.state).toBe('needs-identification')
       log.mockRestore()
     })
+  })
+})
+
+// ---- shelf scans: one photo of several products (#74, part 3) ----
+
+const createShelf = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}): Promise<any> =>
+  asUser(() => ctx.service.createShelf({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
+
+const shelfProduct = (name: string, confidence = 0.9, over: Partial<ShelfProduct> = {}): ShelfProduct => ({ brand: 'Glow Co', name, category: 'skin', confidence, ...over })
+const shelfRead = (products: ShelfProduct[], over: Partial<ShelfRecognition> = {}): ShelfRecognition => ({
+  classification: 'beauty-product',
+  products,
+  excluded: { otherProducts: 0, unreadable: 0 },
+  ...over,
+})
+/** `count` distinct products, most confident first, as the recognizer lists them: Product 0 at 0.95, then 0.05 less each. */
+const shelfList = (count: number): ShelfProduct[] => Array.from({ length: count }, (_, i) => shelfProduct(`Product ${i}`, Math.round((0.95 - i * 0.05) * 100) / 100))
+const NOTHING_READ = (classification: 'other-product' | 'face-or-person' | 'unreadable', excluded = { otherProducts: 0, unreadable: 0 }): ShelfRecognition => ({ classification, products: [], excluded })
+
+/** A shelf scan of the given photos, created. `itemIds` are the placeholders, one per photo. */
+const shelfScan = async (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}) => {
+  const scan = await createShelf(ctx, photos, over)
+  const itemIds = scan.items.map((i: { id: string }) => i.id) as string[]
+  return { scanId: scan.id as string, itemIds, itemId: itemIds[0]! }
+}
+const answerShelf = (ctx: Ctx, read: ShelfRecognition) => ctx.recognizer.respondToShelfWith(() => read)
+/** position, recognised name and state of each item the scan holds, in position order. */
+const shape = async (ctx: Ctx, scanId: string) => (await ctx.repository.itemsOf(scanId)).map((i) => [i.position, i.recognisedName, i.state])
+const photoRow = async (ctx: Ctx, scanId: string, position = 0) => (await ctx.repository.photosOf(scanId))[position]!
+const shelfKey = (scanId: string, photoId: string, extension = 'jpg', userId = USER) => `photos/test/${userId}/${scanId}/${photoId}.${extension}`
+const matchesQueued = (ctx: Ctx) => queued(ctx).filter((m) => m.step === 'match').map((m) => m.itemId)
+
+describe('SCAN_POLICY: shelf scans', () => {
+  it('allows 3 shelf photos and 20 items in a scan', () => {
+    expect(SCAN_POLICY.maxShelfPhotos).toBe(3)
+    expect(SCAN_POLICY.maxItemsPerScan).toBe(20)
+  })
+})
+
+describe('ScanService.createShelf', () => {
+  it('makes a scan of kind shelf, with one recognising placeholder item per photo, in photo order, at slot positions 0, 5 and 10', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), webpPhoto(), markedJpeg(3)])
+
+    expect(scan).toMatchObject({ id: expect.any(String), createdAt: T0 })
+    expect(scan.items.map((i: { position: number; state: string; reason: unknown }) => [i.position, i.state, i.reason])).toEqual([
+      [0, 'recognising', null],
+      [5, 'recognising', null],
+      [10, 'recognising', null],
+    ])
+    expect((await ctx.repository.findScan(scan.id))!.kind).toBe('shelf')
+  })
+
+  it('records one photo per uploaded photo at positions 0, 1, 2, each holding its own image under photos/<environment>/<user>/<scan>/<photoId>.<jpg|webp>', async () => {
+    const ctx = setup()
+    const [first, second] = [markedJpeg(1), webpPhoto()]
+
+    const scan = await createShelf(ctx, [first, second])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    expect(photos.map((p) => [p.position, p.state, p.userId, p.scanId])).toEqual([
+      [0, 'recognising', USER, scan.id],
+      [1, 'recognising', USER, scan.id],
+    ])
+    expect(photos.map((p) => p.photoKey)).toEqual([shelfKey(scan.id, photos[0]!.id, 'jpg'), shelfKey(scan.id, photos[1]!.id, 'webp')])
+    expect(ctx.photos.stored.get(photos[0]!.photoKey!)).toEqual(first)
+    expect(ctx.photos.stored.get(photos[1]!.photoKey!)).toEqual(second)
+    expect(ctx.photos.stored.size).toBe(2)
+  })
+
+  it('points each placeholder at its photo and gives it no image of its own', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    const photos = await ctx.repository.photosOf(scan.id)
+    const items = await ctx.repository.itemsOf(scan.id)
+    expect(items.map((i) => i.photoId)).toEqual(photos.map((p) => p.id))
+    expect(items.map((i) => i.photoKey)).toEqual([null, null])
+  })
+
+  it('enqueues one recognise job per placeholder and nothing else', async () => {
+    const ctx = setup()
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(queued(ctx)).toEqual(scan.items.map((i: { id: string }) => advanceMessage(i.id, 'recognise')))
+  })
+
+  it('accepts 3 photos and refuses 4 as TOO_MANY_IMAGES, naming 3, keeping nothing', async () => {
+    const three = Array.from({ length: 3 }, (_, i) => markedJpeg(i))
+    expect((await createShelf(setup(), three)).items).toHaveLength(3)
+
+    const ctx = setup()
+    const error = await errorOf(createShelf(ctx, [...three, markedJpeg(4)]))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('TOO_MANY_IMAGES')
+    expect(error.message).toContain('3')
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('refuses a scan with no photo as NO_IMAGES', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(createShelf(ctx, []))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('NO_IMAGES')
+  })
+
+  it.each([
+    ['a PNG', () => pngPhoto(), 'UNSUPPORTED_IMAGE'],
+    ['a photo 1601 pixels wide', () => jpegPhoto({ width: 1601, height: 600 }), 'IMAGE_TOO_LARGE'],
+    ['a photo one byte over 2,000,000', () => jpegPhoto({ size: 2_000_001 }), 'IMAGE_TOO_LARGE'],
+  ])('refuses the whole scan, storing none of its photos, when one photo is %s', async (_label, make, code) => {
+    const ctx = setup()
+
+    const error = await errorOf(createShelf(ctx, [markedJpeg(1), make()]))
+
+    expect(error.code).toBe(code)
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('refuses a public caller with AUTH_REQUIRED and keeps nothing', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.createShelf({ photos: [markedJpeg(1)], clientIp: IP })))
+
+    expect(error).toBeInstanceOf(UnauthorizedError)
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  describe('daily quotas, one per photo', () => {
+    it('lets a user reach the daily limit with shelf photos and refuses the photo past it, keeping nothing of the refused scan', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 4 } })
+      await createShelf(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+      const stored = ctx.photos.stored.size
+      const enqueued = ctx.jobs.enqueued.length
+
+      const error = await errorOf(createShelf(ctx, [markedJpeg(4), markedJpeg(5)]))
+
+      expect(error).toBeInstanceOf(RateLimitedError)
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+      expect(ctx.photos.stored.size).toBe(stored)
+      expect(ctx.jobs.enqueued).toHaveLength(enqueued)
+      // One photo takes the user to exactly 4: allowed.
+      await expect(createShelf(ctx, [markedJpeg(6)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+
+    it('counts a photo for the address too: the daily limit per IP is reached by one photo per placeholder, whoever made the scans', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+
+      const error = await errorOf(createShelf(ctx, [markedJpeg(2), markedJpeg(3), markedJpeg(4)]))
+      expect(error.code).toBe('SCAN_DAILY_LIMIT')
+
+      await expect(createShelf(ctx, [markedJpeg(2), markedJpeg(3)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+  })
+
+  it('deletes the photos it already put when the scan cannot be saved, rethrows, and enqueues nothing', async () => {
+    class SaveFails extends FakeScansRepository {
+      override async createScan(): Promise<void> {
+        throw new Error('database is down')
+      }
+    }
+    const ctx = setup({ repository: new SaveFails() })
+
+    await expect(createShelf(ctx, [markedJpeg(1), webpPhoto()])).rejects.toThrow('database is down')
+
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(ctx.jobs.enqueued).toEqual([])
+  })
+
+  it('puts the photos before it saves the scan, so a saved photo never points at a missing image', async () => {
+    const present: boolean[] = []
+    class Probe extends FakeScansRepository {
+      constructor(private readonly store: MemoryPhotoStore) {
+        super()
+      }
+      override async createScan(...[scan, photos, items]: Parameters<FakeScansRepository['createScan']>): Promise<void> {
+        for (const photo of photos) present.push(photo.photoKey !== null && (await this.store.get(photo.photoKey)) !== null)
+        return super.createScan(scan, photos, items)
+      }
+    }
+    const photos = new MemoryPhotoStore({ environment: 'test' })
+    const ctx = setup({ photos, repository: new Probe(photos) })
+
+    await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(present).toEqual([true, true])
+  })
+
+  it('fails a placeholder as unavailable when its recognise job cannot be queued, and queues the others', async () => {
+    const ctx = setup()
+    ctx.jobs.failNextWith(new Error('queue is down'))
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const scan = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(scan.items.map((i: { state: string; reason: unknown }) => [i.state, i.reason])).toEqual([
+      ['failed', 'unavailable'],
+      ['recognising', null],
+    ])
+    expect(queued(ctx)).toEqual([advanceMessage(scan.items[1].id, 'recognise')])
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo with products', () => {
+  it('turns a photo of 3 products into 3 items at slots 0, 1, 2, the placeholder taking the first, every one pointing at the photo', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await shape(ctx, scanId)).toEqual([
+      [0, 'Product 0', 'matching'],
+      [1, 'Product 1', 'matching'],
+      [2, 'Product 2', 'matching'],
+    ])
+    const items = await ctx.repository.itemsOf(scanId)
+    expect(items[0]!.id).toBe(itemId)
+    expect(new Set(items.map((i) => i.id)).size).toBe(3)
+    const photo = await photoRow(ctx, scanId)
+    expect(items.map((i) => i.photoId)).toEqual([photo.id, photo.id, photo.id])
+    expect(items.map((i) => i.photoKey)).toEqual([null, null, null])
+    expect(items.map((i) => i.recognisedBrand)).toEqual(['Glow Co', 'Glow Co', 'Glow Co'])
+    expect(items.map((i) => i.recognisedConfidence)).toEqual([0.95, 0.9, 0.85])
+    // A new item is made when it is read.
+    expect(items.slice(1).map((i) => i.createdAt)).toEqual([new Date(T0.getTime() + SECOND), new Date(T0.getTime() + SECOND)])
+  })
+
+  it('reads the photo\'s own image once, and no product scan\'s recognizer', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(2)))
+    const shelfPhoto = markedJpeg(7)
+    const { itemId } = await shelfScan(ctx, [shelfPhoto])
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.shelfCalls).toEqual([shelfPhoto])
+    expect(ctx.recognizer.calls).toEqual([])
+  })
+
+  it('files each product\'s variant and form, and leaves them null when the product has none', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead([shelfProduct('Serum', 0.9, { variant: 'Night', form: 'serum' }), shelfProduct('Plain Soap', 0.8)]))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const items = await ctx.repository.itemsOf(scanId)
+    expect(items.map((i) => [i.recognisedVariant, i.recognisedForm, i.recognisedCategory])).toEqual([
+      ['Night', 'serum', 'skin'],
+      [null, null, 'skin'],
+    ])
+  })
+
+  it('numbers the items of each photo from its own slot: photo 1\'s products are 5, 6, 7 and the other photos are left as they were', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    await run(ctx, itemIds[1]!, 'recognise')
+
+    expect(await shape(ctx, scanId)).toEqual([
+      [0, null, 'recognising'],
+      [5, 'Product 0', 'matching'],
+      [6, 'Product 1', 'matching'],
+      [7, 'Product 2', 'matching'],
+      [10, null, 'recognising'],
+    ])
+    const photos = await ctx.repository.photosOf(scanId)
+    expect(photos.map((p) => p.state)).toEqual(['recognising', 'recognised', 'recognising'])
+    expect((await ctx.repository.itemsOf(scanId)).filter((i) => i.position >= 5 && i.position <= 7).every((i) => i.photoId === photos[1]!.id)).toBe(true)
+  })
+
+  it('takes 3 photos of 5 products each to 15 items at positions 0-4, 5-9 and 10-14, none colliding, in any order of reading', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(5)))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    for (const id of [itemIds[2]!, itemIds[0]!, itemIds[1]!]) await run(ctx, id, 'recognise')
+
+    expect((await ctx.repository.itemsOf(scanId)).map((i) => i.position)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14])
+  })
+
+  it('marks the photo recognised, storing the recognizer\'s whole answer and the counts of what was left out', async () => {
+    const ctx = setup()
+    const read = shelfRead(shelfList(2), { excluded: { otherProducts: 2, unreadable: 3 } })
+    answerShelf(ctx, read)
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    const photo = await photoRow(ctx, scanId)
+    expect(photo).toMatchObject({ state: 'recognised', skippedNotBeauty: 2, skippedUnreadable: 3, skippedOverLimit: 0, skippedDailyLimit: 0, updatedAt: new Date(T0.getTime() + SECOND) })
+    expect(JSON.parse(photo.recognition!)).toEqual(read)
+  })
+
+  it('announces every item of the photo (the placeholder and each new one) after all of them are stored, and no done', async () => {
+    class Probe extends MemoryScanEvents {
+      readonly storedAtEachEvent: number[] = []
+      constructor(private readonly repo: FakeScansRepository) {
+        super()
+      }
+      override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+        this.storedAtEachEvent.push((await this.repo.itemsOf(scanId)).length)
+        return super.publish(scanId, event)
+      }
+    }
+    const ctx = setup({ events: (repository) => new Probe(repository) })
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const events = ctx.events.eventsFor(scanId)
+    const announced = events.flatMap((e) => (e.type === 'item' ? [e.item.id] : []))
+    expect(new Set(announced)).toEqual(new Set((await ctx.repository.itemsOf(scanId)).map((i) => i.id)))
+    expect(announced).toHaveLength(3)
+    expect(events.some((e) => e.type === 'done')).toBe(false)
+    expect((ctx.events as Probe).storedAtEachEvent.every((n) => n === 3)).toBe(true)
+  })
+
+  describe('identical products', () => {
+    it('counts one product once however it is cased or spaced, keeping the first, and counts the repeat nowhere', async () => {
+      const ctx = setup()
+      answerShelf(
+        ctx,
+        shelfRead([
+          shelfProduct('Bright Serum', 0.95, { brand: 'Glow Co', variant: 'Night' }),
+          shelfProduct('Other Soap', 0.9),
+          shelfProduct('  bright   SERUM ', 0.85, { brand: 'GLOW   co', variant: ' night' }),
+        ]),
+      )
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Bright Serum', 'matching'],
+        [1, 'Other Soap', 'matching'],
+      ])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedNotBeauty: 0, skippedUnreadable: 0, skippedOverLimit: 0, skippedDailyLimit: 0 })
+    })
+
+    it.each([
+      ['brand', { brand: 'Other Co' }],
+      ['name', { name: 'Bright Serum 2' }],
+      ['variant', { variant: 'Day' }],
+      ['form', { form: 'cream' as const }],
+    ])('keeps two products that differ in %s', async (_field, change) => {
+      const ctx = setup()
+      const base = shelfProduct('Bright Serum', 0.95, { variant: 'Night', form: 'serum' })
+      answerShelf(ctx, shelfRead([base, { ...base, ...change, confidence: 0.9 }]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(2)
+    })
+
+    it('collapses before anything is counted against a limit: 5 products with 2 repeats are 3 items and use no allowance', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 3 } })
+      const [a, b, c] = shelfList(3)
+      answerShelf(ctx, shelfRead([a!, { ...a!, confidence: 0.9 }, b!, { ...b!, confidence: 0.8 }, c!]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(3)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 0, skippedOverLimit: 0 })
+    })
+  })
+
+  describe('the cap on items in a scan', () => {
+    it('skips the least confident products that would take the scan past its cap, and counts them as over the limit', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 6 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      // 3 placeholders already; 4 more products would make 7.
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1', 'Product 2', 'Product 3', null, null])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 1 })
+    })
+
+    it('skips nothing when the items come to exactly the cap', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 7 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(7)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 0 })
+    })
+
+    it('counts the items the scan already has, whichever photo they came from', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 6 } })
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      await run(ctx, itemIds[1]!, 'recognise')
+
+      // photo 0: 2 placeholders + 2 more = 4 items; photo 1: its 2 more would make 6, which is the cap.
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(6)
+      expect((await ctx.repository.photosOf(scanId)).map((p) => p.skippedOverLimit)).toEqual([0, 0])
+    })
+  })
+
+  describe('the daily allowance', () => {
+    it('counts the placeholder, then keeps as many of the most confident extra products as the user has allowance left for, skipping the rest as over the daily limit', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 3 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1', 'Product 2'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2, skippedOverLimit: 0 })
+    })
+
+    it('skips nothing when the extra products come to exactly the allowance left', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 5 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(5)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 0 })
+    })
+
+    it('adds no item when the placeholder used the last of the allowance, and still reads the first product', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 1 } })
+      answerShelf(ctx, shelfRead(shelfList(4)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([[0, 'Product 0', 'matching']])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 3 })
+    })
+
+    it('stops at the address\'s allowance too, counting what other accounts took from the same address', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(9)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      // 2 photos from this address (the other account's and this placeholder): 1 left.
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 3 })
+    })
+
+    it('does not count what another address took', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 3 } })
+      await create(ctx, [markedJpeg(9)], { userId: OTHER_USER, profileId: OTHER_PROFILE, ip: OTHER_IP })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(3)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2 })
+    })
+
+    it('uses the scan\'s own address, not the one of whoever runs the job', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerIp: 2 } })
+      const { scanId, itemId } = await shelfScan(ctx, [markedJpeg(1)], { ip: OTHER_IP })
+      answerShelf(ctx, shelfRead(shelfList(4)))
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await ctx.repository.itemsOf(scanId)).toHaveLength(2)
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedDailyLimit: 2 })
+    })
+
+    it('applies the cap first, then the allowance to what the cap left', async () => {
+      const ctx = setup({ policy: { maxItemsPerScan: 3, dailyPhotosPerUser: 2 } })
+      answerShelf(ctx, shelfRead(shelfList(5)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await shape(ctx, scanId)).map((row) => row[1])).toEqual(['Product 0', 'Product 1'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ skippedOverLimit: 2, skippedDailyLimit: 1 })
+    })
+
+    it('counts the new items against the allowance of the next scan', async () => {
+      const ctx = setup({ policy: { dailyPhotosPerUser: 4 } })
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { itemId } = await shelfScan(ctx)
+      await run(ctx, itemId, 'recognise')
+
+      // 3 items so far: one more photo is the 4th, a second is the 5th.
+      await expect(createShelf(ctx, [markedJpeg(2), markedJpeg(3)])).rejects.toBeInstanceOf(RateLimitedError)
+      await expect(createShelf(ctx, [markedJpeg(2)])).resolves.toMatchObject({ id: expect.any(String) })
+    })
+  })
+
+  describe('the next step of each new item', () => {
+    it('queues a match for the placeholder and for each new item that is sure enough', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      const ids = (await ctx.repository.itemsOf(scanId)).map((i) => i.id)
+      expect(matchesQueued(ctx)).toEqual(ids)
+      expect(queuedWithTime(ctx).filter((m) => m.step === 'match').map((m) => m.at)).toEqual([T0.getTime(), T0.getTime(), T0.getTime()])
+    })
+
+    it('asks the user to confirm products read below 0.6, with a match only for those at 0.6 or more', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.6), shelfProduct('C', 0.59), shelfProduct('D', 0.3)]))
+      const { scanId, itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'A', 'matching'],
+        [1, 'B', 'matching'],
+        [2, 'C', 'needs-confirmation'],
+        [3, 'D', 'needs-confirmation'],
+      ])
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(matchesQueued(ctx)).toEqual([items[0]!.id, items[1]!.id])
+    })
+
+    it('sends one "needs you" push for the photo, whoever of its products needs confirming and however many', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.5), shelfProduct('C', 0.4)]))
+      const { scanId, itemId } = await shelfScan(ctx, [markedJpeg(1)], { userId: OTHER_USER, profileId: OTHER_PROFILE })
+
+      await run(ctx, itemId, 'recognise')
+
+      const pushes = ctx.pushJobs.enqueued.map((e) => e.body as SendPushMessage)
+      expect(pushes).toEqual([{ kind: 'scan-needs-you', userId: OTHER_USER, profileId: OTHER_PROFILE, scanId, itemId: expect.any(String), need: 'confirm' }])
+      const waiting = (await ctx.repository.itemsOf(scanId)).filter((i) => i.state === 'needs-confirmation').map((i) => i.id)
+      expect(waiting).toContain((pushes[0] as { itemId: string }).itemId)
+    })
+
+    it('sends the push when only the placeholder\'s product needs confirming', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.5)]))
+      const { itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.pushJobs.enqueued).toHaveLength(1)
+      expect(matchesQueued(ctx)).toEqual([])
+    })
+
+    it('sends no push when every product is sure enough', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { itemId } = await shelfScan(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.pushJobs.enqueued).toEqual([])
+    })
+
+    it('carries on, leaving the item matching for the reaper, when a new item\'s match cannot be queued', async () => {
+      const ctx = setup()
+      const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const real = ctx.jobs.enqueue.bind(ctx.jobs)
+      let calls = 0
+      vi.spyOn(ctx.jobs, 'enqueue').mockImplementation((async (job: never, body: never, options: never) => {
+        // 1st is the placeholder's match, 2nd the first new item's.
+        if (++calls === 2) throw new Error('queue is down')
+        return real(job, body, options)
+      }) as never)
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(items.map((i) => i.state)).toEqual(['matching', 'matching', 'matching'])
+      expect(matchesQueued(ctx)).toEqual([items[0]!.id, items[2]!.id])
+      expect(error).toHaveBeenCalledWith(expect.objectContaining({ itemId: items[1]!.id }))
+    })
+  })
+
+  describe('a match that cannot be queued for the placeholder', () => {
+    const queueFails = async () => {
+      const ctx = setup()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3), { excluded: { otherProducts: 1, unreadable: 2 } }))
+      const scan = await shelfScan(ctx)
+      ctx.jobs.failNextWith(new Error('queue is down'))
+      const error = await errorOf(run(ctx, scan.itemId, 'recognise'))
+      return { ctx, error, ...scan }
+    }
+
+    it('puts the placeholder back to recognising and rethrows, with the other items and the photo\'s answer kept', async () => {
+      const { ctx, error, scanId, itemId } = await queueFails()
+
+      expect(error.message).toBe('queue is down')
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'recognising', reason: null })
+      const items = await ctx.repository.itemsOf(scanId)
+      expect(items.map((i) => [i.position, i.state])).toEqual([
+        [0, 'recognising'],
+        [1, 'matching'],
+        [2, 'matching'],
+      ])
+      expect(items.slice(1).map((i) => i.recognisedName)).toEqual(['Product 1', 'Product 2'])
+      expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognised', skippedNotBeauty: 1, skippedUnreadable: 2 })
+    })
+
+    it('is retried for free: no second call to the model, no duplicate items, the same counts, and the placeholder moves on', async () => {
+      const { ctx, scanId, itemId } = await queueFails()
+      const before = await photoRow(ctx, scanId)
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Product 0', 'matching'],
+        [1, 'Product 1', 'matching'],
+        [2, 'Product 2', 'matching'],
+      ])
+      expect(await photoRow(ctx, scanId)).toEqual(before)
+      expect(matchesQueued(ctx)).toContain(itemId)
+    })
+  })
+
+  describe('a match that cannot be queued for the placeholder: the keys of the retry', () => {
+    it('stamps each new item\'s match with its own stored time (the first attempt\'s, the reaper\'s key) and the placeholder\'s with the retry\'s', async () => {
+      const ctx = setup()
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      answerShelf(ctx, shelfRead(shelfList(3)))
+      const { scanId, itemId } = await shelfScan(ctx)
+      ctx.jobs.failNextWith(new Error('queue is down'))
+      await errorOf(run(ctx, itemId, 'recognise'))
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      const items = await ctx.repository.itemsOf(scanId)
+      const stamped = new Map(queuedWithTime(ctx).filter((m) => m.step === 'match').map((m) => [m.itemId, m.at]))
+      expect(items[1]!.updatedAt.getTime()).toBe(T0.getTime())
+      expect(stamped.get(items[1]!.id)).toBe(items[1]!.updatedAt.getTime())
+      expect(stamped.get(items[2]!.id)).toBe(items[2]!.updatedAt.getTime())
+      expect(stamped.get(itemId)).toBe(items[0]!.updatedAt.getTime())
+      expect(items[0]!.updatedAt.getTime()).toBe(T0.getTime() + SECOND)
+    })
+  })
+
+  describe('one stored answer per photo', () => {
+    it('files the first stored answer when a second delivery\'s model answer differs: no extra items from the other answer', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await shelfScan(ctx)
+      const first = shelfRead(shelfList(2))
+      const second = shelfRead(shelfList(4).map((p) => ({ ...p, name: `Other ${p.name}` })))
+      let calls = 0
+      vi.spyOn(ctx.recognizer, 'recognizeShelf').mockImplementation((async () => {
+        // The 1st delivery's model call is still out when the 2nd delivery runs to the end with its own answer.
+        if (++calls === 1) {
+          await run(ctx, itemId, 'recognise')
+          return second
+        }
+        return first
+      }) as never)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(calls).toBe(2)
+      expect(await shape(ctx, scanId)).toEqual([
+        [0, 'Product 0', 'matching'],
+        [1, 'Product 1', 'matching'],
+      ])
+      expect(JSON.parse((await photoRow(ctx, scanId)).recognition!)).toEqual(first)
+    })
+
+    it('retries a rejection whose filing failed after the image was deleted into the same rejection, not photo-missing', async () => {
+      const ctx = setup()
+      answerShelf(ctx, NOTHING_READ('other-product', { otherProducts: 2, unreadable: 0 }))
+      const { scanId, itemId } = await shelfScan(ctx)
+      vi.spyOn(ctx.repository, 'fanOut').mockRejectedValueOnce(new Error('database is down'))
+
+      await expect(run(ctx, itemId, 'recognise')).rejects.toThrow('database is down')
+      expect(ctx.photos.stored.size).toBe(0)
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason: 'not-a-beauty-product' })
+      expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 2 })
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+    })
+  })
+
+  describe('a repeated delivery after the photo was read', () => {
+    it('adds nothing and calls nothing: no model call, no duplicate items, the same counts', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(3), { excluded: { otherProducts: 1, unreadable: 0 } }))
+      const { scanId, itemId } = await shelfScan(ctx)
+      await run(ctx, itemId, 'recognise')
+      const items = await ctx.repository.itemsOf(scanId)
+      const photo = await photoRow(ctx, scanId)
+      const pushes = ctx.pushJobs.enqueued.length
+      const matches = matchesQueued(ctx).length
+      ctx.advance(SECOND)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(ctx.recognizer.shelfCalls).toHaveLength(1)
+      expect(await ctx.repository.itemsOf(scanId)).toEqual(items)
+      expect(await photoRow(ctx, scanId)).toEqual(photo)
+      expect(ctx.pushJobs.enqueued).toHaveLength(pushes)
+      expect(matchesQueued(ctx)).toHaveLength(matches)
+    })
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo with no product', () => {
+  it.each([
+    ['other-product', 'not-a-beauty-product'],
+    ['face-or-person', 'face-or-person'],
+    ['unreadable', 'unreadable'],
+  ] as const)('rejects the placeholder as %s -> %s, rejects the photo, and deletes the image, never asking for a retake', async (classification, reason) => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ(classification, { otherProducts: 2, unreadable: 1 }))
+    const { scanId, itemId } = await shelfScan(ctx)
+    const key = (await photoRow(ctx, scanId)).photoKey!
+    expect(ctx.photos.stored.has(key)).toBe(true)
+    ctx.advance(SECOND)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason })
+    expect(await photoRow(ctx, scanId)).toMatchObject({
+      state: 'rejected',
+      photoKey: null,
+      skippedNotBeauty: 2,
+      skippedUnreadable: 1,
+      updatedAt: new Date(T0.getTime() + SECOND),
+    })
+    expect(JSON.parse((await photoRow(ctx, scanId)).recognition!)).toEqual(NOTHING_READ(classification, { otherProducts: 2, unreadable: 1 }))
+    expect(ctx.photos.stored.has(key)).toBe(false)
+    expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+    expect(matchesQueued(ctx)).toEqual([])
+    expect(await ctx.repository.countRetakes(itemId)).toBe(0)
+  })
+
+  it('treats a refusal to look at the photo as unreadable: rejected, not a retake, the image deleted', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AnthropicRefusalError('Claude refused to answer'))
+
+    await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'rejected', reason: 'unreadable' })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'rejected', photoKey: null, skippedNotBeauty: 0, skippedUnreadable: 0 })
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('finishes the scan: the rejected placeholder was its only item', async () => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ('face-or-person'))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.events.eventsFor(scanId).map((e) => e.type)).toEqual(['photo', 'item', 'done'])
+  })
+
+  it('deletes the image before it says anything is rejected: a failed delete leaves the photo and the placeholder as they were', async () => {
+    class DeleteFails extends MemoryPhotoStore {
+      failing = false
+      override async delete(key: string): Promise<void> {
+        if (this.failing) throw new Error('bucket is down')
+        return super.delete(key)
+      }
+      override async deleteMany(keys: string[]): Promise<void> {
+        if (this.failing) throw new Error('bucket is down')
+        return super.deleteMany(keys)
+      }
+    }
+    const photos = new DeleteFails({ environment: 'test' })
+    const ctx = setup({ photos })
+    answerShelf(ctx, NOTHING_READ('other-product'))
+    const { scanId, itemId } = await shelfScan(ctx)
+    photos.failing = true
+
+    await expect(run(ctx, itemId, 'recognise')).rejects.toThrow('bucket is down')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'recognising', reason: null })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising' })
+    expect(photos.stored.size).toBe(1)
+  })
+})
+
+describe('ScanService.advance: recognise, a shelf photo the model cannot or will not read', () => {
+  const noSiblings = async (ctx: Ctx, scanId: string) => expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+
+  it('leaves the placeholder recognising, keeping the image, with no other item, queues recognise again 300 seconds on and raises ai-account, when Claude refuses our account', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AnthropicConfigError('Claude rejected our credentials'))
+    const before = ctx.jobs.enqueued.length
+
+    await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'recognising', reason: null })
+    expect(ctx.photos.stored.size).toBe(1)
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising' })
+    await noSiblings(ctx, scanId)
+    expect(queuedWithTime(ctx).slice(before)).toEqual([{ itemId, step: 'recognise', at: ctx.now().getTime(), delaySeconds: 300 }])
+    expect(ctx.alerts().map((alert) => alert.kind)).toEqual(['ai-account'])
+  })
+
+  it('fails the placeholder as unavailable and throws a PermanentJobError when the answer was unusable', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.recognizer.failNextWith(new AnthropicRequestError('Claude returned text that is not valid JSON'))
+
+    const error = await errorOf(run(ctx, itemId, 'recognise'))
+
+    expect(error).toBeInstanceOf(PermanentJobError)
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
+    await noSiblings(ctx, scanId)
+  })
+
+  it('throws, leaving the placeholder recognising for the queue to retry, when the model is merely unavailable', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    const outage = new AnthropicUnavailableError('overloaded')
+    ctx.recognizer.failNextWith(outage)
+
+    await expect(run(ctx, itemId, 'recognise')).rejects.toBe(outage)
+
+    expect((await stateOf(ctx, scanId, itemId)).state).toBe('recognising')
+    await noSiblings(ctx, scanId)
+  })
+
+  it('fails the placeholder as photo-missing, without calling the model, when the photo\'s image is gone', async () => {
+    const ctx = setup()
+    const { scanId, itemId } = await shelfScan(ctx)
+    ctx.photos.stored.clear()
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+    expect(ctx.recognizer.shelfCalls).toEqual([])
+    await noSiblings(ctx, scanId)
+  })
+})
+
+describe('ScanService.advance: recognise, a product scan is not a shelf scan', () => {
+  it('gives a product photo ONE item through the single-product recognizer, even if the shelf recognizer would have listed several', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3)))
+    const { scanId, itemId } = await scanOne(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.recognizer.calls).toHaveLength(1)
+    expect(ctx.recognizer.shelfCalls).toEqual([])
+    expect(await ctx.repository.itemsOf(scanId)).toHaveLength(1)
+    expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'matching', recognised: { brand: 'CeraVe' } })
+    expect(await photoRow(ctx, scanId)).toMatchObject({ state: 'recognising', photoKey: null })
+  })
+})
+
+// A front photo is held only while it may still be shown to the user for a decision: an item using it is recognising or waiting for
+// a confirmation. Every other state releases it: the object leaves the bucket first, then the row's key is cleared.
+describe('ScanService: releasing a front photo once no item needs it', () => {
+  const reap = (ctx: Ctx) => asJob(() => ctx.service.reap(ctx.now()))
+  const keyOnRow = async (ctx: Ctx, itemId: string) => (await ctx.repository.findItem(itemId))!.photoKey
+  const confirmItem = (ctx: Ctx, scanId: string, itemId: string) =>
+    asUser(() => ctx.service.confirm(scanId, itemId, { brand: 'Glow Co', name: 'Confirmed Serum', category: 'skin' }))
+  /** The bucket refuses every delete until the returned spy is restored. */
+  const bucketDown = (ctx: Ctx) => vi.spyOn(ctx.photos, 'delete').mockRejectedValue(new Error('r2 down'))
+  const silenced = () => vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+  describe('a product photo', () => {
+    it('is released the moment a sure read moves the item on to matching: gone from the bucket and from the row', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is kept, and still shown, while the item waits for the user to confirm the read', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    })
+
+    it('is released when the user confirms the read', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+
+      await confirmItem(ctx, scanId, itemId)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+      expect((await itemOf(ctx, scanId, itemId)).image).toBeNull()
+    })
+
+    it('stays held while the item is still recognising', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+    })
+
+    it.each(['researching', 'needs-back-photo', 'reading-label'] as const)('is gone by the time the item is %s', async (target) => {
+      const ctx = setup()
+
+      const { scanId, itemId } = await reach(ctx, target)
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe(target)
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is gone once the item is ready, and a ready product with no stock image shows no image', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      expect(await itemOf(ctx, scanId, itemId)).toMatchObject({ state: 'ready', image: null })
+      expect(ctx.photos.stored.size).toBe(0)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('leaves a ready product its stock image, and the photo is gone all the same', async () => {
+      const ctx = setup()
+      ctx.images.respondTo(IMAGE_URL, jpegPhoto())
+      ctx.analyst.imageShowsProductWith(() => true)
+      await catalogued(ctx, CERAVE, { imageUrl: IMAGE_URL })
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      const item = await itemOf(ctx, scanId, itemId)
+      expect(item.image).toEqual({ kind: 'stock', url: item.product.imageUrl })
+      expect(ctx.photos.stored.size).toBe(0)
+    })
+
+    it('is gone once the item failed because the photo was missing from the bucket, and the row no longer points at it', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      ctx.photos.stored.clear()
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is released when the reaper fails an item that has sat recognising for over 2 hours', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      ctx.advance(2 * HOUR + 1)
+
+      await reap(ctx)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is released for a retaken photo as for the first: held while recognising, gone at matching', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, webpPhoto())
+      const retaken = photoKey(scanId, itemId, 'webp')
+      expect(ctx.photos.stored.has(retaken)).toBe(true)
+      ctx.recognizer.respondWith(() => seen())
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(ctx.photos.stored.has(retaken)).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+    })
+
+    it('is kept for a retaken photo that needs confirmation', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await failedFront(ctx, [BLURRY])
+      ctx.advance(SECOND)
+      await retake(ctx, scanId, itemId, webpPhoto())
+      ctx.recognizer.respondWith(() => seen({ confidence: 0.3 }))
+
+      await run(ctx, itemId, 'recognise')
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('needs-confirmation')
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId, 'webp'))).toBe(true)
+      expect((await itemOf(ctx, scanId, itemId)).image).toMatchObject({ kind: 'user' })
+    })
+
+    it('is never linked by an event for an item that has let it go', async () => {
+      const ctx = setup()
+      await catalogued(ctx)
+      const { scanId, itemId } = await scanOne(ctx)
+
+      await drain(ctx)
+
+      const letGo = ctx.events
+        .eventsFor(scanId)
+        .flatMap((event) => (event.type === 'item' && event.item.id === itemId && event.item.state !== 'recognising' ? [event.item] : []))
+      expect(letGo.map((item) => item.state)).toEqual(['matching', 'ready'])
+      expect(letGo.map((item) => item.image)).toEqual([null, null])
+    })
+
+    it('still moves the item on, queues its next step and does not throw, when the bucket refuses the delete; the key stays for a later try, and only ids are logged', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(run(ctx, itemId, 'recognise')).resolves.toBeUndefined()
+
+      expect((await stateOf(ctx, scanId, itemId)).state).toBe('matching')
+      expect(queued(ctx).at(-1)).toEqual(advanceMessage(itemId, 'match'))
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(true)
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId, itemId }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
+
+    it('does not undo or fail a confirmation when the bucket refuses the delete', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await reach(ctx, 'needs-confirmation')
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(confirmItem(ctx, scanId, itemId)).resolves.toMatchObject({ id: itemId, state: 'matching' })
+
+      expect(await keyOnRow(ctx, itemId)).toBe(photoKey(scanId, itemId))
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId, itemId }))
+    })
+  })
+
+  describe('a shelf photo, shared by the items read from it', () => {
+    /** One shelf photo read as three products at the given confidences (at least 0.6 goes straight to matching, below waits for a confirmation). */
+    const readShelf = async (ctx: Ctx, confidences: number[], photos: ProductImage[] = [markedJpeg(1)]) => {
+      answerShelf(ctx, shelfRead(confidences.map((confidence, i) => shelfProduct(`Shelf ${i}`, confidence))))
+      const scan = await shelfScan(ctx, photos)
+      await run(ctx, scan.itemId, 'recognise')
+      const items = (await ctx.repository.itemsOf(scan.scanId)).filter((i) => i.position < 5)
+      const photo = await photoRow(ctx, scan.scanId)
+      return { ...scan, items, ids: items.map((i) => i.id), photo, key: shelfKey(scan.scanId, photo.id) }
+    }
+
+    it('is released at once when every product read from it is sure, since nothing is left to decide', async () => {
+      const ctx = setup()
+
+      const { scanId, key } = await readShelf(ctx, [0.9, 0.8, 0.7])
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is kept for every item while any one of them waits for a confirmation, and that item shows it through a signed link', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3, 0.8])
+
+      expect((await ctx.repository.itemsOf(scanId)).map((i) => i.state)).toEqual(['matching', 'needs-confirmation', 'matching'])
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+      const image = (await itemOf(ctx, scanId, ids[1]!)).image
+      expect(image).toEqual({ kind: 'user', url: expect.stringMatching(/^\/api\/v1\/scans\/products\/photos\/[A-Za-z0-9_-]+$/) })
+      const token = image.url.replace('/api/v1/scans/products/photos/', '')
+      expect(await verifyPhotoLink(token, PHOTO_SECRET, T0)).toEqual({ key, userId: USER })
+    })
+
+    it('stays held while the other items finish at their own pace, and goes when the last waiting item is confirmed', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3, 0.8])
+      await run(ctx, ids[0]!, 'match')
+      await run(ctx, ids[2]!, 'match')
+      expect(ctx.photos.stored.has(key)).toBe(true)
+
+      await confirmItem(ctx, scanId, ids[1]!)
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('stays held until the LAST of two waiting items is confirmed', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.3, 0.4, 0.9])
+
+      await confirmItem(ctx, scanId, ids[0]!)
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+
+      await confirmItem(ctx, scanId, ids[1]!)
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is released after a failed placeholder holds nothing: a photo the model gave no usable answer for', async () => {
+      const ctx = setup()
+      ctx.recognizer.failNextWith(new AnthropicRequestError('Claude returned text that is not valid JSON'))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const key = shelfKey(scanId, (await photoRow(ctx, scanId)).id)
+
+      await expect(run(ctx, itemId, 'recognise')).rejects.toBeInstanceOf(PermanentJobError)
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'unavailable' })
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('is cleared from its row when the image was already missing and the placeholder failed as photo-missing', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await shelfScan(ctx)
+      ctx.photos.stored.clear()
+
+      await run(ctx, itemId, 'recognise')
+
+      expect(await stateOf(ctx, scanId, itemId)).toEqual({ state: 'failed', reason: 'photo-missing' })
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('stays held while its placeholder is still recognising', async () => {
+      const ctx = setup()
+      const { scanId } = await shelfScan(ctx)
+
+      const photo = await photoRow(ctx, scanId)
+      expect(ctx.photos.stored.has(shelfKey(scanId, photo.id))).toBe(true)
+      expect(photo.photoKey).toBe(shelfKey(scanId, photo.id))
+    })
+
+    it('releases one photo without touching another that is still held', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('Only', 0.9)]))
+      const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [first, second] = await ctx.repository.photosOf(scanId)
+
+      await run(ctx, itemIds[0]!, 'recognise')
+
+      expect(ctx.photos.stored.has(shelfKey(scanId, first!.id))).toBe(false)
+      expect((await photoRow(ctx, scanId, 0)).photoKey).toBeNull()
+      expect(ctx.photos.stored.has(shelfKey(scanId, second!.id))).toBe(true)
+      expect((await photoRow(ctx, scanId, 1)).photoKey).toBe(shelfKey(scanId, second!.id))
+    })
+
+    it('does not undo or fail the confirmation when the bucket refuses the delete; the photo keeps its key', async () => {
+      const ctx = setup()
+      const { scanId, ids, key } = await readShelf(ctx, [0.9, 0.3])
+      bucketDown(ctx)
+      const logged = silenced()
+
+      await expect(confirmItem(ctx, scanId, ids[1]!)).resolves.toMatchObject({ id: ids[1], state: 'matching' })
+
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      expect((await photoRow(ctx, scanId)).photoKey).toBe(key)
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', scanId }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
+  })
+
+  describe('the reaper sweeps the keys that were missed', () => {
+    it('releases a product photo a refused delete left behind, and leaves the item as it was', async () => {
+      const ctx = setup()
+      const { scanId, itemId } = await scanOne(ctx)
+      const down = bucketDown(ctx)
+      silenced()
+      await run(ctx, itemId, 'recognise')
+      down.mockRestore()
+      const before = await ctx.repository.findItem(itemId)
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(scanId, itemId))).toBe(false)
+      expect(await keyOnRow(ctx, itemId)).toBeNull()
+      expect(await ctx.repository.findItem(itemId)).toEqual({ ...before, photoKey: null })
+    })
+
+    it('releases a shelf photo a refused delete left behind', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.8)]))
+      const { scanId, itemId } = await shelfScan(ctx)
+      const key = shelfKey(scanId, (await photoRow(ctx, scanId)).id)
+      const down = bucketDown(ctx)
+      silenced()
+      await run(ctx, itemId, 'recognise')
+      expect(ctx.photos.stored.has(key)).toBe(true)
+      down.mockRestore()
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(key)).toBe(false)
+      expect((await photoRow(ctx, scanId)).photoKey).toBeNull()
+    })
+
+    it('does not touch a photo that is still held: an item recognising or waiting for a confirmation, product or shelf', async () => {
+      const ctx = setup()
+      const recognising = await scanOne(ctx)
+      const waiting = await reach(ctx, 'needs-confirmation')
+      answerShelf(ctx, shelfRead([shelfProduct('A', 0.9), shelfProduct('B', 0.3)]))
+      const shelf = await shelfScan(ctx, [markedJpeg(5)])
+      await run(ctx, shelf.itemId, 'recognise')
+      const shelfStored = shelfKey(shelf.scanId, (await photoRow(ctx, shelf.scanId)).id)
+
+      await reap(ctx)
+
+      expect(ctx.photos.stored.has(photoKey(recognising.scanId, recognising.itemId))).toBe(true)
+      expect(ctx.photos.stored.has(photoKey(waiting.scanId, waiting.itemId))).toBe(true)
+      expect(await keyOnRow(ctx, recognising.itemId)).toBe(photoKey(recognising.scanId, recognising.itemId))
+      expect(await keyOnRow(ctx, waiting.itemId)).toBe(photoKey(waiting.scanId, waiting.itemId))
+      expect(ctx.photos.stored.has(shelfStored)).toBe(true)
+      expect((await photoRow(ctx, shelf.scanId)).photoKey).toBe(shelfStored)
+    })
+
+    it('releases at most 100 keys in one sweep and the rest in the next', async () => {
+      const ctx = setup({ policy: { maxPhotosPerScan: 101, dailyPhotosPerUser: 1000, dailyPhotosPerIp: 1000 } })
+      const scan = await create(ctx, Array.from({ length: 101 }, (_, i) => markedJpeg(i)))
+      const down = bucketDown(ctx)
+      silenced()
+      for (const item of scan.items) await run(ctx, item.id, 'recognise')
+      expect(ctx.photos.stored.size).toBe(101)
+      down.mockRestore()
+
+      await reap(ctx)
+      expect(ctx.photos.stored.size).toBe(1)
+      expect((await ctx.repository.itemsOf(scan.id)).filter((i) => i.photoKey !== null)).toHaveLength(1)
+
+      await reap(ctx)
+      expect(ctx.photos.stored.size).toBe(0)
+      expect((await ctx.repository.itemsOf(scan.id)).filter((i) => i.photoKey !== null)).toHaveLength(0)
+    })
+
+    it('logs the item whose delete fails and carries on with the rest, leaving the failed key for the next sweep', async () => {
+      const ctx = setup()
+      const scan = await create(ctx, [markedJpeg(1), markedJpeg(2)])
+      const [stuck, other] = scan.items
+      const down = bucketDown(ctx)
+      const logged = silenced()
+      for (const item of scan.items) await run(ctx, item.id, 'recognise')
+      down.mockRestore()
+      const stuckKey = photoKey(scan.id, stuck.id)
+      const realDelete = ctx.photos.delete.bind(ctx.photos)
+      vi.spyOn(ctx.photos, 'delete').mockImplementation(async (key) => {
+        if (key === stuckKey) throw new Error('r2 down')
+        return realDelete(key)
+      })
+      logged.mockClear()
+
+      await expect(reap(ctx)).resolves.toBeDefined()
+
+      expect(ctx.photos.stored.has(photoKey(scan.id, other.id))).toBe(false)
+      expect(await keyOnRow(ctx, other.id)).toBeNull()
+      expect(ctx.photos.stored.has(stuckKey)).toBe(true)
+      expect(await keyOnRow(ctx, stuck.id)).toBe(stuckKey)
+      expect(logged).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'photo-release-failed', itemId: stuck.id }))
+      expect(JSON.stringify(logged.mock.calls)).not.toContain('photos/test')
+    })
+  })
+})
+
+// ---- shelf scans: the scan's kind and photos, and the photo events (#74, part 5) ----
+
+/** The scan as a client is shown it, once it is JSON: what the routes, the snapshot and the events all say. */
+const asWire = (value: unknown) => JSON.parse(JSON.stringify(value))
+
+describe('ScanService.getScan: kind and photos', () => {
+  it('shows a shelf scan as kind shelf with its photos in position order, each recognising with nothing skipped, and each item pointing at its photo', async () => {
+    const ctx = setup()
+    const created = await createShelf(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    const scan = await getScan(ctx, created.id)
+
+    const stored = await ctx.repository.photosOf(created.id)
+    expect(scan.kind).toBe('shelf')
+    expect(scan.photos).toEqual(
+      stored.map((p, position) => ({ id: p.id, position, state: 'recognising', skipped: { notBeauty: 0, unreadable: 0, overLimit: 0, dailyLimit: 0 } })),
+    )
+    expect(scan.items.map((i: { photoId: string }) => i.photoId)).toEqual(stored.map((p) => p.id))
+  })
+
+  it('shows a product scan as kind product with one photo per item, in order, each item\'s photoId matching its photo', async () => {
+    const ctx = setup()
+    const created = await create(ctx, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    const scan = await getScan(ctx, created.id)
+
+    expect(scan.kind).toBe('product')
+    expect(scan.photos.map((p: { position: number }) => p.position)).toEqual([0, 1, 2])
+    expect(new Set(scan.photos.map((p: { id: string }) => p.id)).size).toBe(3)
+    expect(scan.items.map((i: { photoId: string }) => i.photoId)).toEqual(scan.photos.map((p: { id: string }) => p.id))
+  })
+
+  it('shows a read shelf photo as recognised with the counts of what was left out, and every item of it with that photo\'s id', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(7), { excluded: { otherProducts: 2, unreadable: 3 } }))
+    const { scanId, itemId } = await shelfScan(ctx)
+    await run(ctx, itemId, 'recognise')
+
+    const scan = await getScan(ctx, scanId)
+
+    expect(scan.photos).toEqual([{ id: (await photoRow(ctx, scanId)).id, position: 0, state: 'recognised', skipped: { notBeauty: 2, unreadable: 3, overLimit: 2, dailyLimit: 0 } }])
+    expect(scan.items).toHaveLength(5)
+    expect(new Set(scan.items.map((i: { photoId: string }) => i.photoId))).toEqual(new Set([scan.photos[0].id]))
+  })
+
+  it('shows a shelf photo with nothing readable as rejected, with what was left out', async () => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ('other-product', { otherProducts: 2, unreadable: 0 }))
+    const { scanId, itemId } = await shelfScan(ctx)
+    await run(ctx, itemId, 'recognise')
+
+    const scan = await getScan(ctx, scanId)
+
+    expect(scan.photos).toEqual([{ id: expect.any(String), position: 0, state: 'rejected', skipped: { notBeauty: 2, unreadable: 0, overLimit: 0, dailyLimit: 0 } }])
+  })
+
+  it('keeps a scan\'s items in position order, flat, whichever photo they came from', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(2)))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+    await run(ctx, itemIds[1]!, 'recognise')
+    await run(ctx, itemIds[0]!, 'recognise')
+
+    const scan = await getScan(ctx, scanId)
+
+    expect(scan.items.map((i: { position: number }) => i.position)).toEqual([0, 1, 5, 6])
+    const [first, second] = scan.photos
+    expect(scan.items.map((i: { photoId: string }) => i.photoId)).toEqual([first.id, first.id, second.id, second.id])
+  })
+})
+
+describe('ScanService: the photo event of a shelf photo', () => {
+  const photoEvents = (ctx: Ctx, scanId: string) => ctx.events.eventsFor(scanId).flatMap((e) => (e.type === ('photo' as string) ? [(e as unknown as { photo: unknown }).photo] : []))
+
+  it('publishes one photo event, recognised with the counts, BEFORE the item events of that photo', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(7), { excluded: { otherProducts: 2, unreadable: 3 } }))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    const types = ctx.events.eventsFor(scanId).map((e) => e.type as string)
+    expect(types).toEqual(['photo', 'item', 'item', 'item', 'item', 'item'])
+    expect(photoEvents(ctx, scanId)).toEqual([
+      { id: (await photoRow(ctx, scanId)).id, position: 0, state: 'recognised', skipped: { notBeauty: 2, unreadable: 3, overLimit: 2, dailyLimit: 0 } },
+    ])
+  })
+
+  it('publishes the photo exactly as the scan response shows it, and its items with their photoId', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(2)))
+    const { scanId, itemId } = await shelfScan(ctx)
+    await run(ctx, itemId, 'recognise')
+    const shown = asWire(toScanResponse(await getScan(ctx, scanId)))
+
+    expect(asWire(photoEvents(ctx, scanId))).toEqual(shown.photos)
+    const items = ctx.events.eventsFor(scanId).flatMap((e) => (e.type === 'item' ? [e.item] : []))
+    expect(items.map((i) => i.photoId)).toEqual([shown.photos[0].id, shown.photos[0].id])
+  })
+
+  it('publishes a photo event for each photo read, each carrying its own position and counts', async () => {
+    const ctx = setup()
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+    answerShelf(ctx, shelfRead(shelfList(1), { excluded: { otherProducts: 1, unreadable: 0 } }))
+    await run(ctx, itemIds[0]!, 'recognise')
+    answerShelf(ctx, shelfRead(shelfList(1), { excluded: { otherProducts: 0, unreadable: 4 } }))
+    await run(ctx, itemIds[1]!, 'recognise')
+
+    expect(photoEvents(ctx, scanId)).toMatchObject([
+      { position: 0, state: 'recognised', skipped: { notBeauty: 1, unreadable: 0 } },
+      { position: 1, state: 'recognised', skipped: { notBeauty: 0, unreadable: 4 } },
+    ])
+  })
+
+  it('publishes a photo event for a rejected shelf photo, before its item and the done', async () => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ('other-product', { otherProducts: 2, unreadable: 0 }))
+    const { scanId, itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(ctx.events.eventsFor(scanId).map((e) => e.type as string)).toEqual(['photo', 'item', 'done'])
+    expect(photoEvents(ctx, scanId)).toEqual([
+      { id: (await photoRow(ctx, scanId)).id, position: 0, state: 'rejected', skipped: { notBeauty: 2, unreadable: 0, overLimit: 0, dailyLimit: 0 } },
+    ])
+  })
+
+  it('publishes no photo event for a product scan, whose photos do not change as its items are read', async () => {
+    const ctx = setup()
+    await catalogued(ctx)
+    const scan = await create(ctx)
+
+    await run(ctx, scan.items[0].id, 'recognise')
+    await run(ctx, scan.items[0].id, 'match')
+
+    expect(photoEvents(ctx, scan.id)).toEqual([])
+  })
+})
+
+describe('ScanService.watch: a shelf scan', () => {
+  const watch = (ctx: Ctx, scanId: string) => asUser(() => ctx.service.watch(scanId))
+
+  /** Like the Durable Object around a connecting client: what is published before `subscribe` returns reaches no one, so it is not recorded. */
+  class RacyEvents extends MemoryScanEvents {
+    meanwhile: (() => Promise<void>) | undefined
+    private connecting = false
+    override async publish(scanId: string, event: Parameters<MemoryScanEvents['publish']>[1]): Promise<void> {
+      if (this.connecting) return
+      return super.publish(scanId, event)
+    }
+    override async subscribe(scanId: string, snapshot: Parameters<MemoryScanEvents['subscribe']>[1]): Promise<Response> {
+      this.connecting = true
+      try {
+        await this.meanwhile?.()
+      } finally {
+        this.connecting = false
+      }
+      return super.subscribe(scanId, snapshot)
+    }
+  }
+  const racy = () => {
+    let events!: RacyEvents
+    const ctx = setup({ events: () => (events = new RacyEvents()) })
+    return { ctx, events }
+  }
+
+  it('opens the stream on the scan with its kind and photos, exactly as getScan shows it, once it is JSON', async () => {
+    const ctx = setup()
+    answerShelf(ctx, shelfRead(shelfList(3), { excluded: { otherProducts: 1, unreadable: 0 } }))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+    await run(ctx, itemIds[0]!, 'recognise')
+
+    await watch(ctx, scanId)
+
+    const snapshot = asWire(ctx.events.subscribed[0]!.snapshot)
+    expect(snapshot).toEqual(asWire(toScanResponse(await getScan(ctx, scanId))))
+    expect(snapshot.kind).toBe('shelf')
+    expect(snapshot.photos.map((p: { state: string }) => p.state)).toEqual(['recognised', 'recognising'])
+  })
+
+  it('sends the photo that changed while the stream was opening as a photo event, before its items, and the photo that did not change not at all', async () => {
+    const { ctx, events } = racy()
+    answerShelf(ctx, shelfRead(shelfList(2), { excluded: { otherProducts: 1, unreadable: 0 } }))
+    const { scanId, itemIds } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+    events.meanwhile = () => run(ctx, itemIds[0]!, 'recognise')
+
+    await watch(ctx, scanId)
+
+    const sent = ctx.events.eventsFor(scanId)
+    expect(sent.map((e) => e.type as string)).toEqual(['photo', 'item', 'item'])
+    expect((sent[0] as unknown as { photo: unknown }).photo).toEqual({
+      id: (await photoRow(ctx, scanId, 0)).id,
+      position: 0,
+      state: 'recognised',
+      skipped: { notBeauty: 1, unreadable: 0, overLimit: 0, dailyLimit: 0 },
+    })
+  })
+
+  it('sends a rejected photo that was read while the stream opened as a photo event, then its item, then done', async () => {
+    const { ctx, events } = racy()
+    answerShelf(ctx, NOTHING_READ('face-or-person'))
+    const { scanId, itemId } = await shelfScan(ctx)
+    events.meanwhile = () => run(ctx, itemId, 'recognise')
+
+    await watch(ctx, scanId)
+
+    expect(ctx.events.eventsFor(scanId).map((e) => e.type as string)).toEqual(['photo', 'item', 'done'])
+  })
+
+  it('sends no photo event for a stream opened on a scan nothing changed in', async () => {
+    const { ctx } = racy()
+    const { scanId } = await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    await watch(ctx, scanId)
+
+    expect(ctx.events.eventsFor(scanId)).toEqual([])
   })
 })

@@ -20,6 +20,18 @@ describe('MemoryScanEvents', () => {
     expect(events.published[0]).toEqual({ scanId: 'scan-1', event: DONE })
   })
 
+  it('records a photo event with its photo, in order among the other events', async () => {
+    const events = new MemoryScanEvents()
+    const photo = { id: 'photo-1', position: 0, state: 'recognised', skipped: { notBeauty: 0, unreadable: 0, overLimit: 0, dailyLimit: 0 } }
+    const photoEvent = { type: 'photo', photo } as unknown as ScanEvent
+
+    await events.publish('scan-1', photoEvent)
+    await events.publish('scan-1', DONE)
+
+    expect(events.published[0]).toEqual({ scanId: 'scan-1', event: { type: 'photo', photo } })
+    expect(events.eventsFor('scan-1')).toEqual([photoEvent, DONE])
+  })
+
   it('lists the events of one scan only', async () => {
     const events = new MemoryScanEvents()
     await events.publish('scan-1', DONE)

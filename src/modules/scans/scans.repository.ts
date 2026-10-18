@@ -1,13 +1,14 @@
-import { and, asc, count, eq, exists, gte, inArray, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
+import { and, asc, count, eq, exists, gte, inArray, isNotNull, isNull, lt, min, notExists, notInArray, or, sql } from 'drizzle-orm'
 import type { SQL } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profiles } from '../profiles/profiles.table'
-import { scanBackPhotos, scanItems, scanRetakes, scans } from './scans.table'
-import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem } from './scans.types'
+import { scanBackPhotos, scanItems, scanPhotos, scanRetakes, scans } from './scans.table'
+import { PHOTO_HELD_STATES } from './scans.types'
+import type { ItemPatch, ItemState, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto } from './scans.types'
 
-export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, Scan, ScanItem }
+export type { ItemPatch, NewBackPhoto, NewRetake, NewScan, NewScanItem, NewScanPhoto, NewSibling, PhotoPatch, Scan, ScanItem, ScanPhoto }
 
 // D1 allows 100 bound parameters per statement; this many ids leave headroom.
 const ID_CHUNK = 90
@@ -18,6 +19,9 @@ const chunks = <T>(items: T[]): T[][] => {
   return out
 }
 
+/** A scan row as a Scan: rows from before `kind` existed hold NULL, and are product scans. */
+const asScan = (row: typeof scans.$inferSelect): Scan => ({ ...row, kind: row.kind ?? 'product' })
+
 /** The earlier of two possibly-missing times. */
 const earlier = (a: Date | null, b: Date | null): Date | null => (a && b ? (a < b ? a : b) : (a ?? b))
 
@@ -25,13 +29,15 @@ export class D1ScansRepository {
   constructor(private readonly db: Db) {}
 
   /**
-   * Stores the scan and all its items, or nothing (one batch). Every item starts `recognising` with no reason,
-   * recognised fields, product or back photo, and `updatedAt` equal to `createdAt`; the scan starts with no done time.
-   * Rejects if any id is taken. One INSERT per item keeps each statement under D1's bound-parameter limit.
+   * Stores the scan, its photos and all its items, or nothing (one batch). Every photo starts `recognising` with no recognition
+   * and nothing skipped; every item starts `recognising` with no reason, recognised fields, product or back photo; both have
+   * `updatedAt` equal to `createdAt`, and the scan starts with no done time. Rejects if any id is taken or two photos share a
+   * position. One INSERT per row keeps each statement under D1's bound-parameter limit.
    */
-  async createScan(scan: NewScan, items: NewScanItem[]): Promise<void> {
+  async createScan(scan: NewScan, photos: NewScanPhoto[], items: NewScanItem[]): Promise<void> {
     const statements: BatchItem<'sqlite'>[] = [
       this.db.insert(scans).values({ ...scan, doneAt: null }),
+      ...photos.map((photo) => this.db.insert(scanPhotos).values({ ...photo, updatedAt: photo.createdAt })),
       ...items.map((item) => this.db.insert(scanItems).values({ ...item, updatedAt: item.createdAt })),
     ]
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
@@ -39,6 +45,16 @@ export class D1ScansRepository {
 
   async findScan(scanId: string): Promise<Scan | null> {
     const [row] = await this.db.select().from(scans).where(eq(scans.id, scanId))
+    return row ? asScan(row) : null
+  }
+
+  /** The scan's photos in position order. */
+  async photosOf(scanId: string): Promise<ScanPhoto[]> {
+    return this.db.select().from(scanPhotos).where(eq(scanPhotos.scanId, scanId)).orderBy(asc(scanPhotos.position))
+  }
+
+  async findPhoto(photoId: string): Promise<ScanPhoto | null> {
+    const [row] = await this.db.select().from(scanPhotos).where(eq(scanPhotos.id, photoId))
     return row ?? null
   }
 
@@ -77,6 +93,49 @@ export class D1ScansRepository {
     return (results[results.length - 1] as { id: string }[]).length === 1
   }
 
+  /**
+   * Stores the model's answer on the photo (one conditional UPDATE) and says whether it did. It applies only while the photo is
+   * `recognising` and holds no answer, so of any number of callers exactly one wins and the stored answer is never replaced.
+   */
+  async storeRecognition(photoId: string, recognition: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(scanPhotos)
+      .set({ recognition, updatedAt: at })
+      .where(and(eq(scanPhotos.id, photoId), eq(scanPhotos.state, 'recognising'), isNull(scanPhotos.recognition)))
+      .returning({ id: scanPhotos.id })
+    return rows.length === 1
+  }
+
+  /**
+   * Files what reading a shelf photo found, in one batch (all or nothing): the photo's patch, the new items, and the placeholder's move.
+   * Safe to repeat, so a retried read cannot duplicate or lose a product.
+   *
+   * - The photo's patch applies only while the photo is `recognising`; a photo already read keeps its first answer.
+   * - Each sibling is stored only while the scan holds fewer than `maxItems` items (counted as the statement runs, so the first in the
+   *   list wins) and only if no item holds its position, which is no error: a repeat adds nothing. An id that is taken fails the whole batch.
+   *   One statement per sibling keeps each under D1's bound-parameter limit.
+   * - The placeholder moves out of `from` as `updateItem` does, whatever became of the siblings; the result says whether it did.
+   */
+  async fanOut(input: {
+    photo: { id: string; patch: PhotoPatch }
+    placeholder: { id: string; from: ItemState; patch: ItemPatch }
+    siblings: NewSibling[]
+    maxItems: number
+  }): Promise<{ placeholderMoved: boolean }> {
+    const { photo, placeholder, siblings, maxItems } = input
+    const statements: BatchItem<'sqlite'>[] = [
+      this.db.update(scanPhotos).set(photo.patch).where(and(eq(scanPhotos.id, photo.id), eq(scanPhotos.state, 'recognising'))),
+      ...siblings.map((sibling) => this.db.insert(scanItems).select(this.siblingIfRoom(sibling, maxItems)).onConflictDoNothing({ target: [scanItems.scanId, scanItems.position] })),
+      this.db
+        .update(scanItems)
+        .set(placeholder.patch)
+        .where(and(eq(scanItems.id, placeholder.id), eq(scanItems.state, placeholder.from)))
+        .returning({ id: scanItems.id }),
+    ]
+    const results = await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+    return { placeholderMoved: (results[results.length - 1] as { id: string }[]).length === 1 }
+  }
+
   /** Sets the scan's done time unless it has one (one conditional UPDATE), and says whether it did: of any number of callers exactly one gets true. */
   async markScanDone(scanId: string, at: Date): Promise<boolean> {
     const rows = await this.db
@@ -112,6 +171,61 @@ export class D1ScansRepository {
   }
 
   /**
+   * Items that still hold a front photo key although their state no longer needs the photo (anything but `recognising` and
+   * `needs-confirmation`), oldest `updated_at` first, at most `limit`. These are the keys a release missed. Read through the partial
+   * index on `updated_at` for items with a key, so it never reads the items whose photo is already gone.
+   */
+  async itemsWithReleasablePhoto(limit: number): Promise<ScanItem[]> {
+    return this.db
+      .select()
+      .from(scanItems)
+      .where(and(isNotNull(scanItems.photoKey), notInArray(scanItems.state, [...PHOTO_HELD_STATES])))
+      .orderBy(asc(scanItems.updatedAt))
+      .limit(limit)
+  }
+
+  /**
+   * Clears the item's front photo key only while it is still `key` (one conditional UPDATE), and says whether it did. Nothing else
+   * changes, `updated_at` included: this is bookkeeping, not a move, and must not look like one to the stale-item sweep or to `watch`.
+   */
+  async clearItemPhotoKey(itemId: string, key: string): Promise<boolean> {
+    const rows = await this.db
+      .update(scanItems)
+      .set({ photoKey: null })
+      .where(and(eq(scanItems.id, itemId), eq(scanItems.photoKey, key)))
+      .returning({ id: scanItems.id })
+    return rows.length === 1
+  }
+
+  /**
+   * Photos that still hold a key although none of their items needs it: no item with `photo_id` = the photo is `recognising` or
+   * `needs-confirmation`. Oldest `updated_at` first, at most `limit`. Read through the partial index on `updated_at` for photos with
+   * a key; the items of each are found through `(scan_id, position)`, at most a scan's cap of them.
+   */
+  async shelfPhotosToRelease(limit: number): Promise<ScanPhoto[]> {
+    const holding = this.db
+      .select({ one: sql`1` })
+      .from(scanItems)
+      .where(and(eq(scanItems.scanId, scanPhotos.scanId), eq(scanItems.photoId, scanPhotos.id), inArray(scanItems.state, [...PHOTO_HELD_STATES])))
+    return this.db
+      .select()
+      .from(scanPhotos)
+      .where(and(isNotNull(scanPhotos.photoKey), notExists(holding)))
+      .orderBy(asc(scanPhotos.updatedAt))
+      .limit(limit)
+  }
+
+  /** The same for a scan photo's key. */
+  async clearShelfPhotoKey(photoId: string, key: string): Promise<boolean> {
+    const rows = await this.db
+      .update(scanPhotos)
+      .set({ photoKey: null })
+      .where(and(eq(scanPhotos.id, photoId), eq(scanPhotos.photoKey, key)))
+      .returning({ id: scanPhotos.id })
+    return rows.length === 1
+  }
+
+  /**
    * Scans with no done time, created at or after `createdSince`, whose items are all in one of `states` and were all last
    * updated before `before` (not at it), oldest scan first, at most `limit`. A scan with no items is never listed. These
    * are the scans whose `done` was lost. `createdSince` keeps the read to recent scans, through the partial index on
@@ -124,12 +238,13 @@ export class D1ScansRepository {
         .select({ one: sql`1` })
         .from(scanItems)
         .where(and(eq(scanItems.scanId, scans.id), ...conditions))
-    return this.db
+    const rows = await this.db
       .select()
       .from(scans)
       .where(and(isNull(scans.doneAt), gte(scans.createdAt, createdSince), exists(itemsOfScan()), notExists(itemsOfScan(or(notInArray(scanItems.state, states), gte(scanItems.updatedAt, before))))))
       .orderBy(asc(scans.createdAt))
       .limit(limit)
+    return rows.map(asScan)
   }
 
   /**
@@ -165,7 +280,7 @@ export class D1ScansRepository {
     return row?.count ?? 0
   }
 
-  /** Every photo key and back-photo key still stored for these users' items (nulls left out). */
+  /** Every photo key and back-photo key still stored for these users' items, and every key on their scan photos (nulls left out). */
   async photoKeysForUsers(userIds: string[]): Promise<string[]> {
     const keys: string[] = []
     for (const ids of chunks(userIds)) {
@@ -176,6 +291,10 @@ export class D1ScansRepository {
       for (const row of rows) {
         if (row.photoKey !== null) keys.push(row.photoKey)
         if (row.backPhotoKey !== null) keys.push(row.backPhotoKey)
+      }
+      const shelfPhotos = await this.db.select({ photoKey: scanPhotos.photoKey }).from(scanPhotos).where(inArray(scanPhotos.userId, ids))
+      for (const row of shelfPhotos) {
+        if (row.photoKey !== null) keys.push(row.photoKey)
       }
     }
     return keys
@@ -207,13 +326,14 @@ export class D1ScansRepository {
     return rows.length
   }
 
-  /** Deletes the users' back-photo and retake records, items and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
+  /** Deletes the users' back-photo and retake records, items, scan photos and scans in one batch. Safe to repeat; an empty list or unknown users delete nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
     const statements: BatchItem<'sqlite'>[] = chunks(userIds).flatMap((ids) => [
       this.db.delete(scanBackPhotos).where(inArray(scanBackPhotos.userId, ids)),
       this.db.delete(scanRetakes).where(inArray(scanRetakes.userId, ids)),
       this.db.delete(scanItems).where(inArray(scanItems.userId, ids)),
+      this.db.delete(scanPhotos).where(inArray(scanPhotos.userId, ids)),
       this.db.delete(scans).where(inArray(scans.userId, ids)),
     ])
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
@@ -223,6 +343,14 @@ export class D1ScansRepository {
   private uploadIfStill(upload: NewBackPhoto | NewRetake, expected: ItemState) {
     return sql`select ${upload.id}, ${upload.itemId}, ${upload.userId}, ${upload.ipHash}, ${upload.uploadedAt.getTime()}
         where exists (select 1 from ${scanItems} where ${scanItems.id} = ${upload.itemId} and ${scanItems.state} = ${expected})`
+  }
+
+  /** The sibling as a SELECT that yields it only while its scan holds fewer than `maxItems` items, for an INSERT ... SELECT (one value per column, in the table's order). */
+  private siblingIfRoom(s: NewSibling, maxItems: number) {
+    return sql`select ${s.id}, ${s.scanId}, ${s.userId}, ${s.position}, ${s.photoId}, ${s.state}, null, ${s.photoKey}, null,
+        ${s.recognisedBrand}, ${s.recognisedName}, ${s.recognisedVariant}, ${s.recognisedForm}, ${s.recognisedCategory}, ${s.recognisedConfidence},
+        null, null, null, null, null, null, ${s.createdAt.getTime()}, ${s.createdAt.getTime()}
+        where (select count(*) from ${scanItems} where ${scanItems.scanId} = ${s.scanId}) < ${maxItems}`
   }
 
   private async photoCounts(

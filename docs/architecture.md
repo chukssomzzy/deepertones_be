@@ -754,7 +754,7 @@ reads as a diff of prose, not of TypeScript. They are not beside their adapters 
 there), and a dependency-cruiser rule is never loosened to make code fit.
 
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
-  `product-recognizer.recognize.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
+  `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
@@ -846,13 +846,13 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   them, and product details are passed as JSON, not spliced into prose.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
-  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `recognizeShelf(image)` (job `recognize-shelf`, prompt `product-recognizer.recognize-shelf.md`) lists every readable beauty or personal-care product on a shelf photo as a `ShelfRecognition`: `products` (brand, name, optional variant and form, category, confidence; at most 5, most confident first, equal confidences in the model's order), `excluded` counts (`otherProducts` and `unreadable`, each floored and clamped to 0 to 50; people and faces are never counted) and a `classification` (`beauty-product` exactly when a product survives, else `other-product`, `face-or-person` or `unreadable`). Each product follows the same text rules as `recognize`; one that fails them is dropped and counted `unreadable`, and the limit of 5 is applied after, so products cut for the limit are counted nowhere. Nothing calls it yet. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory, and also the brand, name, variant
   and category (one of the five) when the label prints them, never guessed; it reads no form. Only the ingredient list decides whether the reading is
   readable: a bad entry (over 120 characters, a hidden character, a link or markup), an empty list or more than 150 entries is
   `{ readable: false }`, while each of brand, name and variant that is empty or fails the same checks, and a category outside the five
-  (the request advertises the five, but the parse is lenient so it cannot fail the list), is dropped on its own and the rest is kept. Both run on the vision
-  model (`ANTHROPIC_MODEL_VISION`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
+  (the request advertises the five, but the parse is lenient so it cannot fail the list), is dropped on its own and the rest is kept. `recognize` and `read-label` both run on the vision
+  model (`ANTHROPIC_MODEL_VISION`; `recognizeShelf` has its own, `ANTHROPIC_MODEL_RECOGNIZE_SHELF`), send the photo first, use structured outputs and `max_tokens` 4096, and treat the photo
   as user-supplied data. The model is not trusted: a brand, name, variant or ingredient over 120 characters (after
   trimming), with a link, markup or a hidden character (a control character, `\p{Cc}`, or an invisible format character
   such as a right-to-left override or a zero-width space, `\p{Cf}`), or a list of more than 150 entries, becomes
@@ -920,9 +920,9 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name) and `_VISION`
-  (image-check, recognize and read-label). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
-  (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `read-label` and `split-name` serve the
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name), `_VISION`
+  (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
+  (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
@@ -1242,7 +1242,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   the seed list is `'partial'`, a result with no concerns is "nothing in the checks we run", never an all-clear, and
   clients must say so. An unknown formulation is `NotFoundError('PRODUCT_NOT_FOUND')`; `research` and
   `addLabelIngredients` on an unknown product are the same, `analyse` on an unknown formulation is
-  `FORMULATION_NOT_FOUND`.
+  `FORMULATION_NOT_FOUND`. Scans do not use the view: a scan item carries `productSummary(formulationId)`, the same
+  `product` part, read through the formulation (so an item follows a list a named label adopted) and with no concerns.
 
 ### Scan module
 `modules/scans` owns the product scan (#20): the photos a user takes and how each one gets to a result. `ScanService`
@@ -1258,7 +1259,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   guest cleanup need no join; an item is owned through its scan, not through this column), `position` (unique within the scan), `state`, `reason`, `photo_key`, `back_photo_key` (null
   once that photo is deleted), `recognised_brand` / `_name` / `_variant` / `_form` / `_category` / `_confidence`, `product_id` and
   `formulation_id` (plain text, no foreign key: the catalog is not this module's; `product_id` may name an unnamed product that adoption has since deleted, so read the product through `formulation_id`), `no_label_source` / `_purpose` / `_used_for` / `_description` (migration 0019: nullable text, set together only by the move to `unidentified`; the three answers are enums in `scans.vocabulary.ts`, the description is free text of at most 200 characters), `created_at`, `updated_at`; indexed by
-  `(scan_id, position)` (unique), `(user_id, created_at)` and `(state, updated_at)` (the reaper). `scan_back_photos`, one row
+  `(scan_id, position)` (unique), `(user_id, created_at)`, `(state, updated_at)` (the reaper) and `updated_at` where `photo_key IS NOT NULL` (migration 0021, a partial index for the reaper's photo sweep, so it holds only the items still holding a key). `scan_photos` has the same partial index. `scan_back_photos`, one row
   per back photo ever uploaded: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own),
   `uploaded_at`; indexed by `(user_id, uploaded_at)` and `(ip_hash, uploaded_at)`. The row outlives the photo. `scan_retakes` (migration 0013) is the same for
   retaken front photos: id, `item_id` (references scan_items, cascade), `user_id`, `ip_hash` (the uploader's own), `uploaded_at`, with the same two indexes. A retake
@@ -1295,10 +1296,28 @@ notifications never imports scans) to tell the person when a scan needs them or 
   `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (no longer set: a daily budget or the spend cap used to stop the work, and now they only alert; the value stays in the schema for items that already have it, so the API does not change) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
   when the last back photo could not be read, was refused by the model, or is gone.
-- **What the app is shown** (`ScanItemView`): id, position, state, reason, `retakesLeft` (only in `needs-retake`: 2, then 1; the key is absent in every
-  other state, not undefined or null), `recognised` (once read), `product` (a
-  `ProductView`, only when ready), `noLabel` (only when `unidentified`: `{ source, purpose, usedFor, description?, concerns, rulesVersion }`; the key is absent in every other state, and `description` is absent when none was given) and `image`: the product's stock image, else the user's own photo through a signed link
-  (`/api/v1/scans/products/photos/<token>`), else `null` (the photo of a rejected item, or one waiting for a retake or identification, is deleted). The stream's events carry the same item.
+- **What the app is shown** (`ScanItemView`): id, position, state, reason, `retakesLeft` (only in `needs-retake`: 2, then 1; the key is
+  absent in every other state, not undefined or null), `recognised` (once read), `product` (a `ProductSummary`: id, kind,
+  brand, name, variant, form, category and `imageUrl`, only when ready; never the ingredients, the concerns or the reference
+  coverage), `noLabel` (only when `unidentified`: `{ source, purpose, usedFor, description?, concerns, rulesVersion }`; the
+  key is absent in every other state, and `description` is absent when none was given) and `image` (decision C): the product's stock
+  image if it has one, else the user's own photo through a signed link (`/api/v1/scans/products/photos/<token>`) while it is still
+  stored (the item's own `photo_key`, else its shelf photo's), else `null`. Because a photo is released once no item needs it (below), a
+  user's photo is shown while it is still stored, which is in practice only while the item is `recognising` or `needs-confirmation`; **a product scan that is `ready` with no stock image
+  therefore shows `image: null`** (it showed the user's photo before #74), and the app shows the brand and name. `scanView` reads the scan's
+  photos once, not once per item. The stream's events carry the same item, and an event for a moved item never links the photo that move released.
+- **Front photo lifecycle** (#74, decision C). A front photo is **held** only while an item using it may still be shown it for a decision: the
+  item is `recognising` or `needs-confirmation` (`PHOTO_HELD_STATES`). A product item's own `scan_items.photo_key` (a retake's included) is released
+  when the item leaves them. A shelf photo's `scan_photos.photo_key` is released when **no item of that photo** (`photo_id`) is in a held state; a
+  failed placeholder holds nothing, so a photo whose read failed (an unusable answer, a missing image) is released too. **Release** deletes the object
+  from the bucket FIRST, then clears the key with a guarded update (`clearItemPhotoKey(itemId, key)` / `clearShelfPhotoKey(photoId, key)`:
+  `SET photo_key = NULL WHERE id = ? AND photo_key = ?`, true if it changed, and it never touches `updated_at`, so a release is not a move to
+  `watch` or the stale sweep). A key therefore never points at nothing, and a failure between the two leaves the key for the reaper. A bucket
+  or database failure is logged `{ outcome: 'photo-release-failed', scanId, itemId }` (ids, never the key) and never fails or undoes the step.
+  `ScanService.releasePhotos(item)` (the item's own key, then its shelf photo) runs after every applied `transition`, after its next step is queued (a
+  move that is undone must still have its photo) and before its item event is published; the shelf path runs it after `fanOut`, before the
+  placeholder's `match` is queued, and `confirm` is a transition. A shelf placeholder whose read was stored and whose image was then released
+  still goes on from the stored answer (`recognise` takes the shelf path when the photo holds a key or a recognition).
 - **create.** Every photo is checked before any is stored, and one bad photo refuses the whole scan: 1 to 10 photos
   (`NO_IMAGES`, `TOO_MANY_IMAGES`), at most 2,000,000 bytes and 1600 pixels on the longest side (`IMAGE_TOO_LARGE`), JPEG
   or WebP (`UNSUPPORTED_IMAGE`). The type is read from the bytes with `readImageHeader`, never from what the caller
@@ -1306,6 +1325,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
   (one `db.batch`: the scan and one INSERT per item, under D1's bound-parameter limit), so a saved item never points at a
   missing photo; if saving fails they are deleted again. One `recognise` job is queued per item; an item whose job cannot
   be queued is marked `failed` / `unavailable` rather than left recognising for ever.
+- **createShelf** (#74; `POST /api/v1/scans/products/shelf`, below). A shelf scan is `scans.kind = 'shelf'`: 1 to `SCAN_POLICY.maxShelfPhotos` (3) photos, checked, quota-ed and stored by the same private
+  helper as `create`. Each photo gets a `scan_photos` row that holds its image, under `photos/<env>/<user>/<scan>/<photo id>.<jpg|webp>`, and ONE placeholder item
+  (`recognising`, `photo_key` null) at position `photo position * 5`: a photo owns the slots `p * 5` to `p * 5 + 4` (decision D), so the position of an item is the same on every
+  retry and two photos read at once cannot collide. The quota counts one per photo here; the products found are counted as items when they are made. One `recognise` job per placeholder.
 - **Photo keys.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, and for the back of the pack
   `<item id>-back.<jpg|webp>` (see "Private photos"). A retaken front photo uses the front photo's own key: the photo it replaces was deleted when it
   failed, and a concurrent loser never removes a key the winner wrote.
@@ -1324,6 +1347,12 @@ notifications never imports scans) to tell the person when a scan needs them or 
   `ip_hash` to the back-photo and retake rows with that `ip_hash`, so a back photo or retake is counted against the address that uploaded it,
   which may not be the scan's. The per-IP query reads only scans made in the window, through `(ip_hash, created_at)`, however long the
   address's history.
+- **fanOut.** `ScansRepository.fanOut({ photo: { id, patch }, placeholder: { id, from, patch }, siblings, maxItems })` files a shelf photo's read in ONE `db.batch`, all or nothing
+  (a taken item id fails the whole batch), and returns `{ placeholderMoved }`. The photo's patch applies only while the photo is `recognising`, so a repeat leaves the first answer.
+  Each sibling is its own `INSERT ... SELECT ... WHERE (SELECT count(*) FROM scan_items WHERE scan_id = ?) < maxItems ON CONFLICT (scan_id, position) DO NOTHING` (the cap guard
+  counts as the batch runs, so the first in the list wins; a position already held is skipped, which is what makes a retry idempotent (SQLite checks that conflict target before the primary key, so a sibling clashing on both is skipped, and the fake does the same); one statement each keeps D1's bound-parameter
+  limit). A scan already at the cap stores none, yet the photo and placeholder still move. The placeholder's move is a guarded UPDATE ... RETURNING, whose applied-ness is the result.
+  The fake mirrors it, checking the whole call before changing anything.
 - **IP hashing.** `ip_hash` is HMAC-SHA-256 of the address under a key derived from `DEVICE_ID_KEY`
   (`HMAC(DEVICE_ID_KEY, "deepertones/ip-hash/v1")`), so it is unrelated to how device ids are hashed with the same secret and
   a leaked table cannot be reversed by hashing every address. The raw IP is never stored or logged; the route hands it to
@@ -1338,14 +1367,31 @@ notifications never imports scans) to tell the person when a scan needs them or 
   late or repeated message):
   - `recognise` (`recognising`): reads the stored photo with the recognizer. A beauty product goes to `matching`
     (queues `match`), or to `needs-confirmation` below confidence 0.6. `face-or-person` and `other-product` are rejected. A photo that is
-    `unreadable`, `label-not-visible` or refused by the model (treated as `unreadable`) is a failed front photo. Whatever the result, the photo is deleted at
-    once (before the row is updated, so a failure is retried while the item is still recognising) and `photo_key` is cleared. The item has had
+    `unreadable`, `label-not-visible` or refused by the model (treated as `unreadable`) is a failed front photo. A photo that is not used (a rejection, a failed photo) is deleted at
+    once (before the row is updated, so a failure is retried while the item is still recognising) and `photo_key` is cleared; one that is read is released as above (at `matching`, or on confirmation). The item has had
     `tries = 1 + countRetakes(itemId)` front photos (every retake is a `scan_retakes` row, kept after its photo goes). Below
     `SCAN_POLICY.maxFrontPhotos` (3) tries it goes to `needs-retake`, with the reason the recognizer gave; at 3 it goes to `needs-identification`,
     keeping the 3rd photo's reason. Neither queues anything. A face or a non-beauty product is still rejected at once on any try. A missing photo fails the
     item. **An earlier answer is reused:** if the item already holds recognised fields and a confidence (a previous attempt's
     answer survived a failed enqueue, which the undo does not clear), the recognizer is not called again, and the stored
     confidence decides `matching` or `needs-confirmation`.
+  - `recognise` on a **shelf placeholder** (the item has no `photo_key` and its photo holds one, or holds a stored recognition): the shelf path, `ScanService.recogniseShelf`. The photo's answer is
+    `scan_photos.recognition` if an earlier attempt stored it (no second model call), else `recognizer.recognizeShelf` on the photo's image. **One answer per photo:** a fresh
+    answer is stored at once with `ScansRepository.storeRecognition(photoId, json, at)` (guarded `WHERE state = 'recognising' AND recognition IS NULL`, so the first writer wins) and the
+    photo is read back, so every retry and every concurrent delivery goes on with the same, stored answer (a rejection whose `fanOut` failed after the image was deleted retries into the
+    same rejection, not `photo-missing`; two deliveries cannot file siblings from different answers). Errors are today's, on the
+    placeholder only (Claude refusing our account waits like any step, unusable answer `unavailable` + `PermanentJobError`, a refusal is an `unreadable` answer, a missing image `photo-missing`).
+    - **Faces are never counted** (decision E): `skipped_*` never includes a person or a face.
+    - **No product** (decision A): the image is deleted first, then `fanOut` with no siblings rejects the photo (counts and answer recorded, `photo_key` null) and the placeholder
+      (`not-a-beauty-product`, `face-or-person` or `unreadable`). Never `needs-retake` or `needs-identification`.
+    - **Products:** identical ones (brand, name, variant, form, ignoring case and spacing) collapse, keeping the first. The placeholder becomes product #1 and the rest become
+      items at `photo position * 5 + rank`, each `matching` or, below `confirmBelowConfidence`, `needs-confirmation`. Then the limits cut from the tail (the recognizer lists the most
+      confident first): 5 per photo and `maxItemsPerScan` (20, counting the items the scan already holds) are `skipped_over_limit`; the day's allowance, the smaller of the user's
+      and the scan's `ip_hash` remaining with the placeholder already counted, is `skipped_daily_limit`. The allowance is read, not reserved, so it is racy across concurrent photos (it may be exceeded by up to 4 extras per concurrent photo, the same accepted race as `create`'s quota),
+      and a sibling that the SQL cap guard drops because another photo filled the scan first is not counted in `skipped_over_limit`. The recognizer's own counts are `skipped_not_beauty` / `skipped_unreadable`.
+    - **After `fanOut`**, only if the placeholder moved (a repeat does nothing): its `match` is queued first (if that fails the placeholder goes back to `recognising` and the error is
+      rethrown, as `transition` does; the retry reuses the stored answer), then each `matching` item's in rank order (a failure logs ids only and leaves it to the reaper), one
+      `scanNeedsYou('confirm')` for the photo, then the item events. The placeholder's `match` is stamped with this attempt's time (its move stored it); each new item's with its own stored `updatedAt`, which on a retry is the first attempt's (the key the reaper reuses). Model text is never logged.
   - `match` (`matching`): `catalog.resolve`. `ready` makes the item ready; `needs-analysis` goes to `analysing`;
     `needs-research` to `researching`; `analysis-failed` fails the item. Missing recognised fields fail the item as `unavailable`.
   - `research` (`researching`): `catalog.research`. Found goes to `analysing`. Not found shows the earlier analysed formulation as
@@ -1362,7 +1408,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
 
     The limit is the first `SCAN_POLICY.maxBackPhotos` (3) back photos: the item is allowed 3, counted
     from its `scan_back_photos` rows (`countBackPhotos`), and when the 3rd cannot be read either the item ends `failed` with
-    `label-unreadable` (front photo kept, back photo key cleared, nothing queued), so no 4th is asked for and `back-photo`
+    `label-unreadable` (the front photo was already released at `matching`, back photo key cleared, nothing queued), so no 4th is asked for and `back-photo`
     answers 409 `ITEM_NOT_AWAITING_BACK_PHOTO`. A list that is stored moves the item on (to `analysing` and queues `analyse`, or straight to `ready` when `fromLabel` said it is analysed) with `back_photo_key` cleared, and then
     the back photo is deleted from the bucket; the delete comes after the move so an undone move still has its photo, and a
     delete that fails is logged (`photo-cleanup-failed`, ids) and does not fail the step (the object stays in the bucket
@@ -1470,7 +1516,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   matters to a connected client, a connection lasts 10 minutes at most, and `watch` sends `done` to any client that connects
   later. If the publish throws after the time was set, the time is cleared again (`clearScanDone`, which applies only while
   the time is still the one this call set), so the next sweep tries again. A failure there is logged
-  `{ outcome: 'reap-done-failed', scanId }`. Each sweep also gives the scans that have no profile their owner's default (`adoptOrphanScans`, see "Profiles" → Rollout). `reap` still answers `{ requeued, failed }`. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
+  `{ outcome: 'reap-done-failed', scanId }`. Each sweep also gives the scans that have no profile their owner's default (`adoptOrphanScans`, see "Profiles" → Rollout). `reap` still answers `{ requeued, failed }`. It also **sweeps the photos a release missed**: `itemsWithReleasablePhoto(100)` (items with a `photo_key` in any state but `recognising` and `needs-confirmation`) and `shelfPhotosToRelease(100)` (photos with a key and no item of theirs in a held state, a NOT EXISTS over `(scan_id, position)`), each its own budget and oldest `updated_at` first through the partial indexes, releasing each as above; a failure is logged by id and skipped. Before #74 part 4 these rows (a `ready` item with its photo) are swept the same way. `wrangler.jsonc` has two crons in all three blocks, `17 3 * * *` (guest cleanup) and
   `*/10 * * * *` (reaper); `scheduled` is `createScheduledRouter` (`src/jobs/scheduled.ts`), which runs the job of
   `controller.cron` and, for any other, logs `unknown-cron` and throws, so Cloudflare records the run as failed (a cron in `wrangler.jsonc` this file does not know is a config mistake) and the nightly cleanup does not run every 10 minutes. The reaper
   reads no request context, so it runs without `runAs`; the cleanup handler it routes to stays in `dispatcher.ts` with its `runAs`.
@@ -1484,10 +1530,22 @@ notifications never imports scans) to tell the person when a scan needs them or 
   is `ScanEvents` (`publish` and `subscribe`); `DurableObjectScanEvents` is the production adapter (see "Live updates"),
   and `MemoryScanEvents` records events and subscriptions for tests. The event's item is the service's `ScanItemView`; once
   serialised it is byte for byte the item `GET /api/v1/scans/products/{scanId}` presents (`Date`s become the same ISO strings the presenter writes).
+- **Scan photos and kind** (migration 0020, #74). `scan_photos` records every photo uploaded to a scan, whatever it shows: id, `scan_id`
+  (references scans, cascade), `user_id` (the scan's owner, copied for the cleanup), `position` (unique within the scan), `state`
+  (`recognising` / `recognised` / `rejected`), `photo_key` (null for a product photo, whose image stays on its one item's
+  `scan_items.photo_key`; set for a shelf photo, which holds its own image), `recognition` (the recognizer's whole answer as JSON, null until written),
+  `skipped_not_beauty` / `_unreadable` / `_over_limit` / `_daily_limit` (counts, default 0), `created_at`, `updated_at`; indexed by `(scan_id, position)` (unique) and `user_id`.
+  `scans.kind` (`product` or `shelf`) says what the scan is of, and `scan_items.photo_id` names the `scan_photos` row an item was made from. Both are
+  nullable text with no SQL default, and `photo_id` has no foreign key, for the reason `profile_id` has none: adding a NOT NULL or REFERENCES
+  column to `scans` or `scan_items` (both parents) makes drizzle rebuild the table, which can cascade-delete the rows below it. The migration is therefore
+  two `ALTER TABLE ... ADD` statements plus `CREATE TABLE scan_photos`, with no rebuild. Code always sets both; rows from before read NULL, and
+  `ScansRepository` reads a NULL `kind` as `product`, so `Scan.kind` is never null. `ScanService.create` makes a `product` scan with one photo row per uploaded
+  photo (position = index, no key) and points each item at its photo. `createScan(scan, photos, items)` writes all three in one batch;
+  `photosOf` and `findPhoto` read the photos; `photoKeysForUsers` includes the photo keys and `deleteForUsers` deletes `scan_photos` before `scans`.
 - **Guest cleanup.** The container registers a cleaner `{ name: 'scans', deleteFor }` with the users service, backed by
   `ScanDataCleaner` (`scans.cleaner.ts`), which depends only on the repository and the photo store, so the cleanup does not
-  build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos and back
-  photos from the bucket first, then their back-photo and retake rows, items and scans, so a bucket failure leaves the rows (and so
+  build the catalog and the model clients (nor need their settings). `deleteForUsers` deletes the users' photos, back
+  photos and shelf photos from the bucket first, then their back-photo and retake rows, items, scan photos and scans, so a bucket failure leaves the rows (and so
   the keys) for the next run; both halves are safe to repeat, and the repository chunks the ids under D1's bound-parameter limit.
 - **Public signed photo links.** `photoForLink(token)` takes no user and reads no request context: an app image component
   cannot send an Authorization header, so the link is the capability. The token is the signed, 5-minute photo link from
@@ -1532,9 +1590,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
     `requireUser` is still the guard. The user limiter needs a user, so it follows. `bodyLimit` comes last: with a
     `Content-Length` over the limit it answers 413 from the header alone, and without one it counts the stream and cuts it
     off, so an oversized upload is never buffered whole. The limit is 10 x 2,000,000 bytes plus 1,000,000 for the multipart
-    framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
+    framing (21,000,000) on `POST /api/v1/scans/products`, 3 x 2,000,000 plus the same framing (7,000,000) on `POST /api/v1/scans/products/shelf`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
+    `SCAN_SHELF_IP_LIMITER` (20) and `SCAN_SHELF_USER_LIMITER` (10) on the shelf scan (the same numbers as create, a counter of its own, so neither route spends the other's allowance),
     `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake, `SCAN_IDENTIFY_IP_LIMITER` (20) and `SCAN_IDENTIFY_USER_LIMITER` (10) on the identification (each may cost a model call), `SCAN_NO_LABEL_IP_LIMITER` (20) and `SCAN_NO_LABEL_USER_LIMITER` (10) on the no-label answer (no model, but a write each); 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
     read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
     do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
@@ -1593,6 +1652,14 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `event: snapshot` first (the scan as `GET /api/v1/scans/products/{scanId}` shows it), then `event: item` per change (data: the item as that
   response shows it) and `event: done` with data `{}` when every item is final (`ready`, `rejected`, `failed` or `unidentified`), after which the object closes every stream of the scan.
   Photo links inside `image.url` are minted per view, so two views of the same item differ in that token only.
+- **Shelf scans: `kind`, `photos`, `photoId`, `photo`.** Every scan response (and the snapshot) carries `kind` (`product` or `shelf`) and `photos[]`,
+  `{ id, position, state: recognising|recognised|rejected, skipped: { notBeauty, unreadable, overLimit, dailyLimit } }` in photo order, built by
+  `ScanService` (`ScanPhotoView`; the presenter names every field). Every item carries `photoId`, the photo it was read from (null only for an item from before
+  the column). `POST /api/v1/scans/products/shelf` (`createShelfScan`, 1 to 3 `photos`, 202) calls `ScanService.createShelf`; it is declared
+  before `GET /{scanId}` and has the same middleware order as create, with the shelf limiters. The stream adds `event: photo` (data: the photo as
+  the scan response shows it), published when a shelf photo has been read (`recognised` or `rejected`, with its counts), after the `fanOut` batch and BEFORE the
+  `item` events of that photo's items. A product scan's photos never change, so it never sends one. `ScanStream.publish` frames by event type (`photo`, `item`, `done`).
+  `watch`'s catch-up compares each photo (state and counts) to the snapshot's and sends the ones that differ, before the items.
 - **Snapshot on reconnect.** There is no replay and no event ids: a client that reconnects gets a fresh snapshot, which is
   the whole state.
 - **Catching up after the snapshot.** The service reads the scan, then `subscribe`s, and a change stored in between was
@@ -1653,6 +1720,16 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   codes. A research result's `detail` (the host of the source page, never its path or query, and the ingredient list the
   model returned) goes to the JSON report only, so a fixture can be checked against what the model said. Exit 0 when every case passed, 1 when one failed, 2 when it could not start. The CI job is
   `continue-on-error`, so a failure never blocks a merge; read it as a trend, not a gate.
+
+### Shelf eval
+`npm run eval:shelf` (`scripts/eval/shelf.ts`) runs `recognizeShelf` on the owner's own photos and prints, per photo, the products found, missing and extra
+(brand and name only) and the micro-averaged recall and precision (`scripts/eval/shelf-score.ts`, tested). A found product matches an expected one when
+brand and name both agree, ignoring case and runs of spaces; each expected product matches at most once.
+
+- **Photos.** Put them in `eval-photos/shelf/` with `expected.json`, `{ "<file>": [{ "brand": "...", "name": "..." }] }`. The folder is git-ignored: the photos are the
+  owner's and are never committed.
+- **Run.** Needs `ANTHROPIC_API_KEY` (environment, else `.dev.vars`) and makes real, billed calls, capped by `--max-usd` (default 2). `--model recognize-shelf=MODEL`
+  tries another model, `--limit N` runs the first N photos. Report-only: never part of `npm test` or CI, and it prints no model text beyond the brand and name of found products.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent

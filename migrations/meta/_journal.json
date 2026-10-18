@@ -148,6 +148,20 @@
       "when": 1792342957329,
       "tag": "0020_many_eternity",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "6",
+      "when": 1792346871691,
+      "tag": "0021_outgoing_snowbird",
+      "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1792347350490,
+      "tag": "0022_curvy_gorilla_man",
+      "breakpoints": true
     }
   ]
 }
