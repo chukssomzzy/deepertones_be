@@ -31,6 +31,7 @@
     // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
     "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+    "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
     // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
@@ -209,6 +210,7 @@
         // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
         "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
         // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
@@ -351,6 +353,7 @@
         // The Claude model per job: a cheap model for the internal steps (research, reading images, judging two listings), a better one for the analysis text users read.
         "ANTHROPIC_MODEL_RESEARCH": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
+        "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
         // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.

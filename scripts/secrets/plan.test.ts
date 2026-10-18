@@ -178,7 +178,7 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
     })
   })
 
-  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS'])(
+  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_RECOGNIZE_SHELF', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS'])(
     'lists %s as config, so it is never pushed as a secret',
     (name) => {
       expect(NOT_SECRETS).toHaveProperty(name)

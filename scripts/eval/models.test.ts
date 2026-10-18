@@ -7,13 +7,14 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; judge covers same-product and split-name.
+// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product and split-name.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
   'same-product': 'ANTHROPIC_MODEL_JUDGE',
   'image-check': 'ANTHROPIC_MODEL_VISION',
   recognize: 'ANTHROPIC_MODEL_VISION',
+  'recognize-shelf': 'ANTHROPIC_MODEL_RECOGNIZE_SHELF',
   'read-label': 'ANTHROPIC_MODEL_VISION',
   'split-name': 'ANTHROPIC_MODEL_JUDGE',
 }
@@ -26,6 +27,11 @@ describe('the eval default models', () => {
   it('run the typed-name split on the cheap judge model', () => {
     expect(AI_JOBS).toContain('split-name')
     expect(DEFAULT_MODELS['split-name']).toBe('claude-haiku-5-5')
+  })
+
+  it('run the shelf recognizer on the cheap model by default, like recognize', () => {
+    expect(DEFAULT_MODELS['recognize-shelf']).toBe('claude-haiku-5-5')
+    expect(DEFAULT_MODELS['recognize-shelf']).toBe(DEFAULT_MODELS.recognize)
   })
 
   it('cover exactly the jobs there are', () => {

@@ -53,6 +53,10 @@ describe('wrangler.jsonc product catalog config', () => {
     expect(block?.vars?.ANTHROPIC_MODEL_ANALYSIS).toBe('claude-sonnet-5-5')
   })
 
+  it.each(blocks)('%s sets its own cheap model for the shelf recognizer, so the eval can move it alone', (_, block) => {
+    expect(block?.vars?.ANTHROPIC_MODEL_RECOGNIZE_SHELF).toBe('claude-haiku-5-5')
+  })
+
   it.each(blocks)('%s no longer sets the single ANTHROPIC_MODEL', (_, block) => {
     expect(block?.vars).not.toHaveProperty('ANTHROPIC_MODEL')
   })

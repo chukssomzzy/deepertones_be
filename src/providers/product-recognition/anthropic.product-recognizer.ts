@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { base64Of } from '../../lib/base64'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
-import { productRecognizerRecognizePrompt } from '../../prompts/prompts.generated'
+import { productRecognizerRecognizePrompt, productRecognizerRecognizeShelfPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
 import { PRODUCT_FORMS, type ProductCategory, type ProductForm } from '../product-research/product-researcher.provider'
-import type { ProductRecognizer, Recognition } from './product-recognizer.provider'
+import type { ProductRecognizer, Recognition, ShelfProduct, ShelfRecognition } from './product-recognizer.provider'
 
 type Answer = {
   classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable' | 'label-not-visible'
@@ -15,6 +15,12 @@ type Answer = {
   form: ProductForm | 'unknown'
   category: ProductCategory
   confidence: number
+}
+
+type ShelfAnswer = {
+  classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable'
+  products: Omit<Answer, 'classification'>[]
+  excluded: { otherProducts: number; unreadable: number }
 }
 
 /** Names the product in a photo with Claude. The model is not trusted: anything out of bounds is `unreadable`. */
@@ -41,6 +47,27 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     form: z.preprocess((value) => value ?? 'unknown', z.enum(AnthropicProductRecognizer.FORMS)),
     category: z.enum(AnthropicProductRecognizer.CATEGORIES),
     confidence: z.number().describe('From 0 to 1'),
+  })
+
+  private static readonly SHELF_MAX_PRODUCTS = 5
+  private static readonly SHELF_MAX_COUNT = 50
+
+  private static readonly SHELF_SCHEMA = z.object({
+    classification: z.enum(['beauty-product', 'other-product', 'face-or-person', 'unreadable']),
+    products: z.array(
+      z.object({
+        brand: AnthropicProductRecognizer.orEmpty(z.string()),
+        name: AnthropicProductRecognizer.orEmpty(z.string()),
+        variant: AnthropicProductRecognizer.orEmpty(z.string().describe('Empty when the packaging prints no variant')),
+        form: z.preprocess((value) => value ?? 'unknown', z.enum(AnthropicProductRecognizer.FORMS)),
+        category: z.enum(AnthropicProductRecognizer.CATEGORIES),
+        confidence: z.number().describe('From 0 to 1'),
+      }),
+    ),
+    excluded: z.object({
+      otherProducts: z.number().describe('Products that are not beauty or personal care'),
+      unreadable: z.number().describe('Beauty or personal-care products whose brand or name cannot be read'),
+    }),
   })
 
   private readonly client: AnthropicClient
@@ -70,6 +97,27 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     return AnthropicProductRecognizer.accept(answer)
   }
 
+  async recognizeShelf(image: ProductImage): Promise<ShelfRecognition> {
+    const answer = await this.client.structured(
+      {
+        max_tokens: AnthropicProductRecognizer.MAX_TOKENS,
+        system: productRecognizerRecognizeShelfPrompt.text,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: base64Of(image.bytes) } },
+              { type: 'text', text: 'Which products are on this shelf?' },
+            ],
+          },
+        ],
+      },
+      AnthropicProductRecognizer.SHELF_SCHEMA,
+      { job: productRecognizerRecognizeShelfPrompt.job },
+    )
+    return AnthropicProductRecognizer.acceptShelf(answer)
+  }
+
   private static orEmpty<T extends z.ZodType<string>>(schema: T) {
     return z.preprocess((value) => value ?? '', schema)
   }
@@ -84,13 +132,17 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
 
   private static accept(answer: Answer): Recognition {
     if (answer.classification !== 'beauty-product') return { classification: answer.classification }
+    const product = AnthropicProductRecognizer.acceptProduct(answer)
+    return product ? { classification: 'beauty-product', ...product } : AnthropicProductRecognizer.UNREADABLE
+  }
 
+  /** The product with clean text and a clamped confidence, or undefined when any text field is out of bounds. */
+  private static acceptProduct(answer: Omit<Answer, 'classification'>): ShelfProduct | undefined {
     const brand = AnthropicProductRecognizer.cleanText(answer.brand)
     const name = AnthropicProductRecognizer.cleanText(answer.name)
     const variant = AnthropicProductRecognizer.cleanText(answer.variant)
-    if (!brand || !name || variant === undefined || Number.isNaN(answer.confidence)) return AnthropicProductRecognizer.UNREADABLE
+    if (!brand || !name || variant === undefined || Number.isNaN(answer.confidence)) return undefined
     return {
-      classification: 'beauty-product',
       brand,
       name,
       ...(variant === '' ? {} : { variant }),
@@ -98,5 +150,23 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
       category: answer.category,
       confidence: Math.min(1, Math.max(0, answer.confidence)),
     }
+  }
+
+  private static clampCount(value: number): number {
+    return Math.min(AnthropicProductRecognizer.SHELF_MAX_COUNT, Math.max(0, Math.floor(value)))
+  }
+
+  /** Bad products are dropped and counted unreadable; the limit is applied after, so a dropped one takes no place. Cut products are counted nowhere. */
+  private static acceptShelf(answer: ShelfAnswer): ShelfRecognition {
+    const accepted = answer.products.flatMap((item) => AnthropicProductRecognizer.acceptProduct(item) ?? [])
+    const dropped = answer.products.length - accepted.length
+    // Array.prototype.sort is stable, so equal confidences keep the model's order.
+    const products = accepted.sort((a, b) => b.confidence - a.confidence).slice(0, AnthropicProductRecognizer.SHELF_MAX_PRODUCTS)
+    const excluded = {
+      otherProducts: AnthropicProductRecognizer.clampCount(answer.excluded.otherProducts),
+      unreadable: AnthropicProductRecognizer.clampCount(AnthropicProductRecognizer.clampCount(answer.excluded.unreadable) + dropped),
+    }
+    if (products.length > 0) return { classification: 'beauty-product', products, excluded }
+    return { classification: answer.classification === 'beauty-product' ? 'unreadable' : answer.classification, products, excluded }
   }
 }

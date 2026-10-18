@@ -91,6 +91,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'same-product': env.ANTHROPIC_MODEL_JUDGE,
         'image-check': env.ANTHROPIC_MODEL_VISION,
         recognize: env.ANTHROPIC_MODEL_VISION,
+        'recognize-shelf': env.ANTHROPIC_MODEL_RECOGNIZE_SHELF,
         'read-label': env.ANTHROPIC_MODEL_VISION,
         'split-name': env.ANTHROPIC_MODEL_JUDGE,
       },

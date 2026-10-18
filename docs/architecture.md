@@ -740,7 +740,7 @@ reads as a diff of prose, not of TypeScript. They are not beside their adapters 
 there), and a dependency-cruiser rule is never loosened to make code fit.
 
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
-  `product-recognizer.recognize.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
+  `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
@@ -832,7 +832,7 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   them, and product details are passed as JSON, not spliced into prose.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
-  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `recognizeShelf(image)` (job `recognize-shelf`, prompt `product-recognizer.recognize-shelf.md`) lists every readable beauty or personal-care product on a shelf photo as a `ShelfRecognition`: `products` (brand, name, optional variant and form, category, confidence; at most 5, most confident first, equal confidences in the model's order), `excluded` counts (`otherProducts` and `unreadable`, each floored and clamped to 0 to 50; people and faces are never counted) and a `classification` (`beauty-product` exactly when a product survives, else `other-product`, `face-or-person` or `unreadable`). Each product follows the same text rules as `recognize`; one that fails them is dropped and counted `unreadable`, and the limit of 5 is applied after, so products cut for the limit are counted nowhere. Nothing calls it yet. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory, and also the brand, name, variant
   and category (one of the five) when the label prints them, never guessed; it reads no form. Only the ingredient list decides whether the reading is
   readable: a bad entry (over 120 characters, a hidden character, a link or markup), an empty list or more than 150 entries is
@@ -904,9 +904,9 @@ there is no Console spend limit behind it, so the code is the backstop.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name) and `_VISION`
-  (image-check, recognize and read-label). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
-  (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `read-label` and `split-name` serve the
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product and split-name), `_VISION`
+  (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
+  (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
@@ -1623,6 +1623,16 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   codes. A research result's `detail` (the host of the source page, never its path or query, and the ingredient list the
   model returned) goes to the JSON report only, so a fixture can be checked against what the model said. Exit 0 when every case passed, 1 when one failed, 2 when it could not start. The CI job is
   `continue-on-error`, so a failure never blocks a merge; read it as a trend, not a gate.
+
+### Shelf eval
+`npm run eval:shelf` (`scripts/eval/shelf.ts`) runs `recognizeShelf` on the owner's own photos and prints, per photo, the products found, missing and extra
+(brand and name only) and the micro-averaged recall and precision (`scripts/eval/shelf-score.ts`, tested). A found product matches an expected one when
+brand and name both agree, ignoring case and runs of spaces; each expected product matches at most once.
+
+- **Photos.** Put them in `eval-photos/shelf/` with `expected.json`, `{ "<file>": [{ "brand": "...", "name": "..." }] }`. The folder is git-ignored: the photos are the
+  owner's and are never committed.
+- **Run.** Needs `ANTHROPIC_API_KEY` (environment, else `.dev.vars`) and makes real, billed calls, capped by `--max-usd` (default 2). `--model recognize-shelf=MODEL`
+  tries another model, `--limit N` runs the first N photos. Report-only: never part of `npm test` or CI, and it prints no model text beyond the brand and name of found products.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent
