@@ -22,8 +22,8 @@ import { AnthropicGoalReader } from './anthropic.goal-reader'
 const ROUTED_TO = 'claude-haiku-5-5'
 const TYPED = 'make my face clear'
 const NO_GOAL = { goal: null, wantsLighter: false }
-// Written out, not read from GOALS: the five goals the app offers, in the order of the chips.
-const FIVE_GOALS = ['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow']
+// Written out, not read from GOALS: the six goals the app offers, in the order of the chips.
+const SIX_GOALS = ['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair']
 
 /** The structured answer the model gives; a test overrides only what it is about. */
 const reply = (overrides: Record<string, unknown> = {}) => ({ goal: 'clear-skin', wantsLighter: false, ...overrides })
@@ -104,7 +104,7 @@ describe('AnthropicGoalReader request', () => {
     expect('tool_choice' in calls[0]!.body).toBe(false)
   })
 
-  it('asks for one closed json_schema object with a required goal (the five goals or "none") and a required boolean wantsLighter', async () => {
+  it('asks for one closed json_schema object with a required goal (the six goals or "none") and a required boolean wantsLighter', async () => {
     const { calls, reader } = readerOver(structured(reply()))
 
     await reader.read(TYPED)
@@ -116,7 +116,7 @@ describe('AnthropicGoalReader request', () => {
     assertApiSafe(schema)
     expect(Object.keys(schema.properties).sort()).toEqual(['goal', 'wantsLighter'])
     expect([...schema.required].sort()).toEqual(['goal', 'wantsLighter'])
-    expect([...schema.properties.goal.enum].sort()).toEqual([...FIVE_GOALS, 'none'].sort())
+    expect([...schema.properties.goal.enum].sort()).toEqual([...SIX_GOALS, 'none'].sort())
     expect(schema.properties.wantsLighter.type).toBe('boolean')
   })
 
@@ -150,6 +150,14 @@ describe('the read-goal prompt wording', () => {
   it('says that lightening spots or marks is not wanting to be lighter', () => {
     // "lighten", not "fade": the goal's own name, fade-dark-marks, would satisfy a check for fading marks.
     expect(prompt).toMatch(/lighten[^.]{0,80}(spots?|marks?)|(spots?|marks?)[^.]{0,80}lighten/i)
+  })
+
+  it('names the calm-repair goal, for skin damaged or made reactive by a lightening, bleaching, toning or steroid cream', () => {
+    expect(prompt).toContain('calm-repair')
+  })
+
+  it('says blackheads, whiteheads and the like are clear-skin even when oily skin is mentioned', () => {
+    expect(prompt).toMatch(/blackheads/i)
   })
 
   it('does not tell the model to pick the goal that "fits best", which pushes it to guess a goal for words that fit none', () => {
@@ -203,7 +211,7 @@ describe('AnthropicGoalReader job routing and cost', () => {
 })
 
 describe('AnthropicGoalReader answers', () => {
-  it.each(FIVE_GOALS)('returns the goal %s as it is when the user did not ask to be lighter', async (goal) => {
+  it.each(SIX_GOALS)('returns the goal %s as it is when the user did not ask to be lighter', async (goal) => {
     await expect(answering(reply({ goal })).read(TYPED)).resolves.toStrictEqual({ goal, wantsLighter: false })
   })
 
@@ -211,12 +219,12 @@ describe('AnthropicGoalReader answers', () => {
     await expect(answering(reply({ goal: 'none', wantsLighter: false })).read('what is the capital of France')).resolves.toStrictEqual(NO_GOAL)
   })
 
-  it.each([...FIVE_GOALS, 'none'])('always returns brighter, with wantsLighter, when the model says the user wants to be lighter, whatever goal it gave (%s)', async (goal) => {
+  it.each([...SIX_GOALS, 'none'])('always returns brighter, with wantsLighter, when the model says the user wants to be lighter, whatever goal it gave (%s)', async (goal) => {
     await expect(answering(reply({ goal, wantsLighter: true })).read('I want to be fairer')).resolves.toStrictEqual({ goal: 'brighter', wantsLighter: true })
   })
 
   it.each([
-    ['a goal outside the five', { goal: 'darker' }],
+    ['a goal outside the six', { goal: 'darker' }],
     ['a goal in other letters than the list\'s', { goal: 'Clear-Skin' }],
     ['a goal with spaces in place of the hyphen', { goal: 'clear skin' }],
     ['an empty goal', { goal: '' }],

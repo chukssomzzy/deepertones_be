@@ -139,8 +139,16 @@ describe('GOAL_CASES', () => {
     ['which toning cream can make me yellow', 'brighter', true],
     ['I want lighter skin', 'brighter', true],
     ['bleach my skin', 'brighter', true],
-    ['repair my skin from bleaching', 'clear-skin', false],
-    ['I stopped using toning cream and my face is bad', 'clear-skin', false],
+    ['repair my skin from bleaching', 'calm-repair', false],
+    ['I stopped using toning cream and my face is bad', 'calm-repair', false],
+    ['my skin burns since I used that cream', 'calm-repair', false],
+    ['my face is thin and red', 'calm-repair', false],
+    ['steroid cream damaged my face', 'calm-repair', false],
+    ['my skin is very sensitive, everything stings', 'calm-repair', false],
+    ['I want my skin to heal after bleaching', 'calm-repair', false],
+    ['I want to bleach again, my skin is getting dark', 'brighter', true],
+    ['my skin looks tired, I want it radiant', 'brighter', false],
+    ['oily T-zone and blackheads', 'clear-skin', false],
     ['fix dark knuckles from bleach', 'fade-dark-marks', false],
     ['lighten my dark spots', 'fade-dark-marks', false],
     ['make my scars lighter', 'fade-dark-marks', false],
@@ -158,6 +166,10 @@ describe('GOAL_CASES', () => {
 
     expect(ids.every((id) => id.trim() !== '')).toBe(true)
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('has at least 5 calm-repair cases, for the primary user\'s skin damaged by a lightening, toning or steroid cream', () => {
+    expect(GOAL_CASES.filter((c) => c.expect.goal === 'calm-repair').length).toBeGreaterThanOrEqual(5)
   })
 
   it('has at least 25 cases', () => {

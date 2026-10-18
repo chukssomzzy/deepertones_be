@@ -14,7 +14,7 @@ const setGoal = defineRoute({
   summary: 'Say what you want your skin to look like',
   description:
     'Guests included. Send `{ goal }` (a chip) or `{ text }` (the user\'s own words), not both. A chip answers with the honest answer for that goal. ' +
-    'Typed words are read by a small model and sorted into one of the five goals, and the answer for that goal comes back. Words that ask to be lighter, fairer or whiter are sorted as `brighter` with `wantsLighter` true, and the answer adds a plain note on what a routine cannot change. ' +
+    'Typed words are read by a small model and sorted into one of the six goals, and the answer for that goal comes back. Words that ask to be lighter, fairer or whiter are sorted as `brighter` with `wantsLighter` true, and the answer adds a plain note on what a routine cannot change. ' +
     'Words the model finds no goal in, or that it cannot read right now, are saved with no goal and no answer (still 200), so the app shows the chips; a chip picked next keeps those words. ' +
     'Every change is kept with its date, and the newest is the current goal. Words with a link, markup or an invisible character are 400 `INVALID_GOAL_TEXT`, and no model is called for them. ' +
     'Each change counts against a per-address and a per-user limit, chips included: 429 `RATE_LIMITED` with `Retry-After`.',

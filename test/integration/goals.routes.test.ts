@@ -555,7 +555,7 @@ describe('PUT /api/v1/me/goal validation', () => {
   it.each([
     ['both a goal and words', { goal: 'glow', text: 'make my face clear' }],
     ['neither a goal nor words', {}],
-    ['a goal that is not one of the five', { goal: 'darker' }],
+    ['a goal that is not one of the six', { goal: 'darker' }],
     ['a goal that is not a string', { goal: 4 }],
     ['words that are not a string', { text: 42 }],
     ['empty words', { text: '' }],

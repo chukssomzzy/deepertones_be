@@ -736,21 +736,24 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 ### Goals (onboarding)
 `modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `onboarding`).
 It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
-is built in four pull requests; this is the second (the five chips, and typed words read by the goal reader).
+is built in four pull requests; this is the second (the six chips, and typed words read by the goal reader).
 
 - **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
   `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the five goals or null, `text` is the user's own
   words or null, `wants_lighter` and `answers_version` are always written. Rows go with their profile, so guest cleanup needs no cleaner of its own,
   and a guest who signs up keeps the goal (promotion keeps the profile).
-- **The five goals are the catalog's.** `GOALS` (`goals.vocabulary.ts`) is the catalog's `goal:` traits without the prefix, in the same order, so a
-  user can pick no goal a product cannot be tagged with. A test pins that the two lists match.
+- **The six goals are the catalog's.** `GOALS` (`goals.vocabulary.ts`) is the catalog's `goal:` traits without the prefix, in the same order, so a
+  user can pick no goal a product cannot be tagged with. A test pins that the two lists match. `calm-repair` is last, added after the first five: it is for skin made thin, red or reactive by a lightening,
+  toning or steroid cream, the product's primary user (CONTEXT.md). Its answer says up front that a flare is expected, and plans a dated step-down on
+  anything harmful rather than telling the user to stop it. `ANALYSIS_VERSION` was not bumped for the new trait (an owner decision), so analyses made
+  before it lack `goal:calm-repair` until they are next re-analysed.
 - **The answer is not stored.** `answerFor(goal, wantsLighter)` (`goals.answers.ts`) is a fixed copy table: a title, `howLong`, `helps`, `inTheWay` per
   goal, plus one colour `note` that only a row with `wants_lighter` gets (the same note whichever goal it was sorted into; the plan itself does not
   change). The view is built when a row is read, so a new version of the copy reaches goals saved earlier. `GOAL_ANSWERS_VERSION` is bumped whenever
   the meaning of any text changes; the view always carries the current one, and each row records the version it was saved under. The copy is a DRAFT that
   needs owner and qualified review before launch.
 - **Typed words are read by the goal reader.** `{ text }` is trimmed (1 to 200 characters, by the schema) and checked, then `GoalReader.read` (see
-  "Claude (Anthropic) providers") sorts it into one of the five goals and the service saves `goal` and `wants_lighter` with the words. When the
+  "Claude (Anthropic) providers") sorts it into one of the six goals and the service saves `goal` and `wants_lighter` with the words. When the
   reader finds no goal the words are saved with `goal` null and no answer. **`wantsLighter` always means `brighter`:** words that ask to be lighter,
   fairer or whiter are saved as `brighter` with `wants_lighter` true, and the answer adds the colour note. That is a sorted request, never a refusal.
   **A reader that cannot read is not an error for the user.** `AiBudgetExceededError`, `AnthropicUnavailableError`, `AnthropicRequestError` and
@@ -911,9 +914,9 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   must each keep at least one character after normalising. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable
   model and an unusable answer are thrown as the client's errors; `ScanService.identifyByName` decides what each means.
 - **`AnthropicGoalReader`** (`read-goal`, port `GoalReader`, in `providers/goal-reading/`; `MemoryGoalReader` is the fake) sorts the words a user
-  typed as their goal: `read(text)` answers `{ goal, wantsLighter }`, `goal` one of the five or null. The trimmed text is the only thing in the user
+  typed as their goal: `read(text)` answers `{ goal, wantsLighter }`, `goal` one of the six or null. The trimmed text is the only thing in the user
   message (no lead-in, and the system prompt never carries it), and the prompt tells the model it is user-supplied data whose instructions are
-  ignored. The schema is one closed object with a required `goal` (the five goals or `none`, rather than a nullable goal) and a required boolean
+  ignored. The schema is one closed object with a required `goal` (the six goals or `none`, rather than a nullable goal) and a required boolean
   `wantsLighter`; the schema sent carries no `default` (a root `catch` would add one), so the leniency is in the parse alone: each field `catch`es to absent and a reply that is
   not an object reads as an empty one, so any reply off the schema is `{ goal: null, wantsLighter: false }`, never a failed call.
   **`wantsLighter: true` is always `{ goal: 'brighter', wantsLighter: true }`**, whatever goal the model gave: asking to be lighter is a real goal that

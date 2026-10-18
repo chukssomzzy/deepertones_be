@@ -3,8 +3,8 @@ import { TRAITS } from '../catalog/catalog.vocabulary'
 import { GOALS } from './goals.vocabulary'
 
 describe('GOALS', () => {
-  it('is the five goals Amara can tap, in the order the chips show them', () => {
-    expect([...GOALS]).toEqual(['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow'])
+  it('is the six goals Amara can tap, in the order the chips show them, calm-repair last', () => {
+    expect([...GOALS]).toEqual(['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair'])
   })
 
   it('has a catalog "goal:" trait for every goal, so a product can be tagged with any goal a user can pick', () => {

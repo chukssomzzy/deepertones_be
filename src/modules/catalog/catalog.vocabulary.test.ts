@@ -49,6 +49,7 @@ describe('catalog vocabulary', () => {
       'goal:fade-dark-marks',
       'goal:brighter',
       'goal:glow',
+      'goal:calm-repair',
     ])
   })
 

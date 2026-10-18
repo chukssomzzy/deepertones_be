@@ -121,7 +121,7 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
    the ids to route the tap.
 7. **For onboarding**, before anything else: `PUT /api/v1/me/goal` with `{ goal }` (one of `clear-skin`, `even-tone`, `fade-dark-marks`,
-   `brighter`, `glow`) or `{ text }` (the user's own words, 1 to 200 characters; not both) and the bearer token, guests included. It answers
+   `brighter`, `glow`, `calm-repair`, the last for skin made thin, red or reactive by a strong cream) or `{ text }` (the user's own words, 1 to 200 characters; not both) and the bearer token, guests included. It answers
    `{ goal, wantsLighter, text, answer, answersVersion, updatedAt }`, where `answer` is `{ title, howLong, helps, inTheWay, note }` (all
    draft copy for now). Typed words are read by a small model and sorted into a goal; words that ask to be lighter or fairer come back as `brighter` with `wantsLighter` true (and a plain note in `answer`). When no goal is found, or the model is unavailable, the words are saved with `goal` and `answer` null and the answer is still 200, so show the chips; a chip picked next keeps the words. The route is rate limited (10 changes a minute per user, 20 per address, chips included): 429 `RATE_LIMITED`, wait `Retry-After` seconds.
    `GET /api/v1/me/goal` returns the same view (404 `GOAL_NOT_SET` before anything was saved), and `GET /api/v1/me/onboarding` returns
