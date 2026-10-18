@@ -1282,7 +1282,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   (one `db.batch`: the scan and one INSERT per item, under D1's bound-parameter limit), so a saved item never points at a
   missing photo; if saving fails they are deleted again. One `recognise` job is queued per item; an item whose job cannot
   be queued is marked `failed` / `unavailable` rather than left recognising for ever.
-- **createShelf** (#74, no route yet). A shelf scan is `scans.kind = 'shelf'`: 1 to `SCAN_POLICY.maxShelfPhotos` (3) photos, checked, quota-ed and stored by the same private
+- **createShelf** (#74; `POST /api/v1/scans/products/shelf`, below). A shelf scan is `scans.kind = 'shelf'`: 1 to `SCAN_POLICY.maxShelfPhotos` (3) photos, checked, quota-ed and stored by the same private
   helper as `create`. Each photo gets a `scan_photos` row that holds its image, under `photos/<env>/<user>/<scan>/<photo id>.<jpg|webp>`, and ONE placeholder item
   (`recognising`, `photo_key` null) at position `photo position * 5`: a photo owns the slots `p * 5` to `p * 5 + 4` (decision D), so the position of an item is the same on every
   retry and two photos read at once cannot collide. The quota counts one per photo here; the products found are counted as items when they are made. One `recognise` job per placeholder.
@@ -1544,9 +1544,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
     `requireUser` is still the guard. The user limiter needs a user, so it follows. `bodyLimit` comes last: with a
     `Content-Length` over the limit it answers 413 from the header alone, and without one it counts the stream and cuts it
     off, so an oversized upload is never buffered whole. The limit is 10 x 2,000,000 bytes plus 1,000,000 for the multipart
-    framing (21,000,000) on `POST /api/v1/scans/products`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
+    framing (21,000,000) on `POST /api/v1/scans/products`, 3 x 2,000,000 plus the same framing (7,000,000) on `POST /api/v1/scans/products/shelf`, one photo plus the same framing on the back photo and the retake. Over it is 413 `HTTP_413` in
     the standard error envelope.
   - **Limits.** `SCAN_CREATE_IP_LIMITER` (20) and `SCAN_CREATE_USER_LIMITER` (10) on create, `SCAN_BACK_PHOTO_IP_LIMITER` (20) and
+    `SCAN_SHELF_IP_LIMITER` (20) and `SCAN_SHELF_USER_LIMITER` (10) on the shelf scan (the same numbers as create, a counter of its own, so neither route spends the other's allowance),
     `SCAN_BACK_PHOTO_USER_LIMITER` (10) on the back photo, `SCAN_RETAKE_IP_LIMITER` (20) and `SCAN_RETAKE_USER_LIMITER` (10) on the retake, `SCAN_IDENTIFY_IP_LIMITER` (20) and `SCAN_IDENTIFY_USER_LIMITER` (10) on the identification (each may cost a model call), `SCAN_NO_LABEL_IP_LIMITER` (20) and `SCAN_NO_LABEL_USER_LIMITER` (10) on the no-label answer (no model, but a write each); 429 `RATE_LIMITED` with `Retry-After: 60`, counted before the body is
     read or the scan looked up. The back photo has its own address limiter, not the create one, so photos sent for a scan
     do not use up the address's budget for starting scans. They bound bursts; the daily photo quotas (429 `SCAN_DAILY_LIMIT`) stand
@@ -1605,6 +1606,14 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `event: snapshot` first (the scan as `GET /api/v1/scans/products/{scanId}` shows it), then `event: item` per change (data: the item as that
   response shows it) and `event: done` with data `{}` when every item is final (`ready`, `rejected`, `failed` or `unidentified`), after which the object closes every stream of the scan.
   Photo links inside `image.url` are minted per view, so two views of the same item differ in that token only.
+- **Shelf scans: `kind`, `photos`, `photoId`, `photo`.** Every scan response (and the snapshot) carries `kind` (`product` or `shelf`) and `photos[]`,
+  `{ id, position, state: recognising|recognised|rejected, skipped: { notBeauty, unreadable, overLimit, dailyLimit } }` in photo order, built by
+  `ScanService` (`ScanPhotoView`; the presenter names every field). Every item carries `photoId`, the photo it was read from (null only for an item from before
+  the column). `POST /api/v1/scans/products/shelf` (`createShelfScan`, 1 to 3 `photos`, 202) calls `ScanService.createShelf`; it is declared
+  before `GET /{scanId}` and has the same middleware order as create, with the shelf limiters. The stream adds `event: photo` (data: the photo as
+  the scan response shows it), published when a shelf photo has been read (`recognised` or `rejected`, with its counts), after the `fanOut` batch and BEFORE the
+  `item` events of that photo's items. A product scan's photos never change, so it never sends one. `ScanStream.publish` frames by event type (`photo`, `item`, `done`).
+  `watch`'s catch-up compares each photo (state and counts) to the snapshot's and sends the ones that differ, before the items.
 - **Snapshot on reconnect.** There is no replay and no event ids: a client that reconnects gets a fresh snapshot, which is
   the whole state.
 - **Catching up after the snapshot.** The service reads the scan, then `subscribe`s, and a change stored in between was

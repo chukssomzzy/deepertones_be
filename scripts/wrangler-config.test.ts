@@ -161,6 +161,9 @@ describe('wrangler.jsonc scan and product search route rate limits', () => {
   const limiters: [string, number][] = [
     ['SCAN_CREATE_IP_LIMITER', 20],
     ['SCAN_CREATE_USER_LIMITER', 10],
+    // The shelf route reads up to 5 products per photo, so it costs what the product route does: the same numbers, a counter of its own.
+    ['SCAN_SHELF_IP_LIMITER', 20],
+    ['SCAN_SHELF_USER_LIMITER', 10],
     ['SCAN_BACK_PHOTO_USER_LIMITER', 10],
     ['SCAN_BACK_PHOTO_IP_LIMITER', 20],
     ['SCAN_RETAKE_IP_LIMITER', 20],

@@ -120,6 +120,10 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
    a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
    the ids to route the tap.
+7. **For shelf scans**, `POST /api/v1/scans/products/shelf` takes 1 to 3 `photos` (multipart) and answers 202 with the scan. Every scan
+   response and the stream's `snapshot` now carry `kind` (`product` or `shelf`) and `photos[]` (`id`, `position`, `state`, and the
+   `skipped` counts), and each item has a `photoId`. On a shelf scan the stream sends an `event: photo` when a photo has been read, before
+   the `item` events of its products. A photo yields up to 5 products and a scan holds at most 20 items; each product counts against the daily limit.
 
 `deviceId` must be at least 16 characters (a UUID is fine), and a verification code is exactly 6 digits; anything
 else is a 400 `VALIDATION_FAILED` and costs no attempt.

@@ -19,22 +19,21 @@ const PhotoFile = z.instanceof(File).openapi({ type: 'string', format: 'binary',
 // service's to judge (NO_IMAGES, TOO_MANY_IMAGES), so the app gets a code it can act on rather than a generic VALIDATION_FAILED.
 const asList = (photos: File | File[]) => (Array.isArray(photos) ? photos : [photos])
 
+const photosField = (maxItems: number, description: string) =>
+  z
+    .union([z.instanceof(File), z.array(z.instanceof(File))])
+    .transform(asList)
+    .pipe(z.array(PhotoFile))
+    // The union and the transform are opaque to the generator, so the field is described by hand.
+    .openapi({ type: 'array', items: { type: 'string', format: 'binary' }, minItems: 1, maxItems, description })
+
 export const CreateScanBody = z
-  .object({
-    photos: z
-      .union([z.instanceof(File), z.array(z.instanceof(File))])
-      .transform(asList)
-      .pipe(z.array(PhotoFile))
-      // The union and the transform are opaque to the generator, so the field is described by hand.
-      .openapi({
-        type: 'array',
-        items: { type: 'string', format: 'binary' },
-        minItems: 1,
-        maxItems: SCAN_POLICY.maxPhotosPerScan,
-        description: 'One `photos` part per photo, in the order the items should appear.',
-      }),
-  })
+  .object({ photos: photosField(SCAN_POLICY.maxPhotosPerScan, 'One `photos` part per photo, in the order the items should appear.') })
   .openapi('CreateScanBody')
+
+export const CreateShelfScanBody = z
+  .object({ photos: photosField(SCAN_POLICY.maxShelfPhotos, 'One `photos` part per photo of a shelf, in the order the photos should appear. Each photo can show up to 5 products.') })
+  .openapi('CreateShelfScanBody')
 
 export const BackPhotoBody = z.object({ photo: PhotoFile }).openapi('BackPhotoBody')
 
@@ -101,7 +100,8 @@ const ProductSummary = z
 export const ScanItemResponse = z
   .object({
     id: z.string(),
-    position: z.number().int().openapi({ description: 'The photo\'s place in the upload, from 0.' }),
+    photoId: z.string().nullable().openapi({ description: 'The photo in the scan\'s `photos` this item was read from. Null only for an item from before photos were listed.' }),
+    position: z.number().int().openapi({ description: 'The item\'s place in the scan, from 0. On a shelf scan the positions of one photo\'s items are not consecutive across photos; sort by them, do not index by them.' }),
     state: z
       .enum(['recognising', 'needs-confirmation', 'matching', 'researching', 'needs-back-photo', 'reading-label', 'analysing', 'ready', 'rejected', 'failed', 'needs-retake', 'needs-identification', 'unidentified'])
       .openapi({
@@ -145,10 +145,30 @@ export const ScanItemResponse = z
   })
   .openapi('ScanItem')
 
+export const ScanPhotoResponse = z
+  .object({
+    id: z.string(),
+    position: z.number().int().openapi({ description: 'The photo\'s place in the upload, from 0.' }),
+    state: z.enum(['recognising', 'recognised', 'rejected']).openapi({
+      description: '`recognising` until the photo has been read; `recognised` once its products are items; `rejected` when no product could be read in it (its one item is `rejected` too). A product scan\'s photos stay `recognising`: their items carry the outcome.',
+    }),
+    skipped: z
+      .object({
+        notBeauty: z.number().int().openapi({ description: 'Products in view that are not skincare, hair, body or makeup.' }),
+        unreadable: z.number().int().openapi({ description: 'Products in view that could not be read.' }),
+        overLimit: z.number().int().openapi({ description: 'Products read but left out: more than 5 on the photo, or the scan already holds 20 items.' }),
+        dailyLimit: z.number().int().openapi({ description: 'Products read but left out because the daily limit was reached.' }),
+      })
+      .openapi({ description: 'What the photo showed that did not become an item. All zero until the photo is read, and on a product scan.' }),
+  })
+  .openapi('ScanPhoto')
+
 export const ScanResponse = z
   .object({
     id: z.string(),
     createdAt: z.iso.datetime(),
-    items: z.array(ScanItemResponse).openapi({ description: 'One per photo, in photo order.' }),
+    kind: z.enum(['product', 'shelf']).openapi({ description: '`product` when each photo is one product; `shelf` when each photo is read for up to 5.' }),
+    photos: z.array(ScanPhotoResponse).openapi({ description: 'The uploaded photos, in upload order.' }),
+    items: z.array(ScanItemResponse).openapi({ description: 'One per product, in position order. A product scan has one per photo; a shelf scan starts with one per photo and gains the others as each photo is read.' }),
   })
   .openapi('Scan')

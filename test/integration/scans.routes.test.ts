@@ -32,6 +32,8 @@ const SCAN_QUEUE = 'deepertones-scan-items-development'
 const MAX_PHOTO_BYTES = 2_000_000
 /** One byte over what POST /api/v1/scans/products accepts: 10 photos plus 1,000,000 of multipart framing. */
 const OVER_SCAN_BODY_BYTES = 10 * MAX_PHOTO_BYTES + 1_000_000 + 1
+/** One byte over what POST /api/v1/scans/products/shelf accepts: 3 photos plus 1,000,000 of multipart framing. */
+const OVER_SHELF_BODY_BYTES = 3 * MAX_PHOTO_BYTES + 1_000_000 + 1
 
 const queued: unknown[] = []
 const WORKER_ENV = {
@@ -65,6 +67,7 @@ type Envelope<T> = { success: true; status: number; message: string; data: T } |
 type Reply = { json(): Promise<unknown>; status: number; headers: Headers }
 type ItemView = {
   id: string
+  photoId: string | null
   position: number
   state: string
   reason: string | null
@@ -81,7 +84,8 @@ type ItemView = {
   }
   product?: { id: string; kind: string; brand: string; name: string; variant: string | null; category: string; imageUrl: string | null }
 }
-type ScanView = { id: string; createdAt: string; items: ItemView[] }
+type PhotoView = { id: string; position: number; state: string; skipped: { notBeauty: number; unreadable: number; overLimit: number; dailyLimit: number } }
+type ScanView = { id: string; createdAt: string; kind: string; photos: PhotoView[]; items: ItemView[] }
 
 const read = async <T>(res: Reply) => (await res.json()) as Envelope<T>
 const dataOf = async <T>(res: Reply): Promise<T> => {
@@ -120,6 +124,10 @@ const fileOf = (photo: ProductImage, name = 'photo', mediaType: string = photo.m
 const createScan = (guest: Guest, photos: File[], from?: string) => scansApi.$post({ form: { photos } }, { headers: guest.headers(from) })
 const createdScan = async (guest: Guest, photos: ProductImage[] = [markedJpeg(1)]) =>
   dataOf<ScanView>(await createScan(guest, photos.map((p, i) => fileOf(p, `p${i}`))))
+// Until the shelf route is mounted in AppType this is the one line that fails to compile.
+const createShelfScan = (guest: Guest, photos: File[], from?: string) => scansApi.shelf.$post({ form: { photos } }, { headers: guest.headers(from) })
+const createdShelf = async (guest: Guest, photos: ProductImage[] = [markedJpeg(1)]) =>
+  dataOf<ScanView>(await createShelfScan(guest, photos.map((p, i) => fileOf(p, `s${i}`))))
 const getScan = (guest: Guest, scanId: string) => scansApi[':scanId'].$get({ param: { scanId } }, { headers: guest.headers() })
 const confirm = (guest: Guest, scanId: string, itemId: string, body: Record<string, string> = { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' }) =>
   scansApi[':scanId'].items[':itemId'].confirmation.$post({ param: { scanId, itemId }, json: body as never }, { headers: guest.headers() })
@@ -499,6 +507,218 @@ describe('POST /api/v1/scans/products', () => {
   })
 })
 
+describe('POST /api/v1/scans/products/shelf', () => {
+  const NOTHING_SKIPPED = { notBeauty: 0, unreadable: 0, overLimit: 0, dailyLimit: 0 }
+
+  it('accepts one photo with 202 and a scan of kind shelf: one photo recognising with nothing skipped, and one recognising item that points at it', async () => {
+    const guest = await newGuest()
+
+    const res = await createShelfScan(guest, [fileOf(markedJpeg(7))])
+
+    expect(res.status).toBe(202)
+    const scan = await dataOf<ScanView>(res)
+    expect(scan.kind).toBe('shelf')
+    expect(scan.photos).toEqual([{ id: expect.any(String), position: 0, state: 'recognising', skipped: NOTHING_SKIPPED }])
+    expect(scan.items).toHaveLength(1)
+    expect(scan.items[0]).toMatchObject({ position: 0, state: 'recognising', reason: null, photoId: scan.photos[0]!.id })
+    expect(Math.abs(new Date(scan.createdAt).getTime() - NOW)).toBeLessThan(5 * MINUTE)
+  })
+
+  it.each([1, 2, 3])('accepts %i photos, shows them in the order sent, and one placeholder item for each', async (count) => {
+    const guest = await newGuest()
+
+    const scan = await createdShelf(guest, Array.from({ length: count }, (_, i) => markedJpeg(i + 1)))
+
+    expect(scan.photos.map((p) => p.position)).toEqual(Array.from({ length: count }, (_, i) => i))
+    expect(new Set(scan.photos.map((p) => p.id)).size).toBe(count)
+    expect(scan.items.map((i) => i.photoId)).toEqual(scan.photos.map((p) => p.id))
+    expect(scan.items.every((i) => i.state === 'recognising')).toBe(true)
+  })
+
+  it('puts one recognise job on the scan queue per photo', async () => {
+    const guest = await newGuest()
+
+    const scan = await createdShelf(guest, [markedJpeg(1), markedJpeg(2)])
+
+    expect(queued).toEqual(scan.items.map((i) => ({ itemId: i.id, step: 'recognise', at: expect.any(Number) })))
+  })
+
+  it('shows the scan afterwards, from GET, with its kind, its photos and the photo of each item', async () => {
+    const guest = await newGuest()
+    const created = await createdShelf(guest, [markedJpeg(1), markedJpeg(2)])
+
+    const shown = await dataOf<ScanView>(await getScan(guest, created.id))
+
+    expect(shown.kind).toBe('shelf')
+    expect(shown.photos).toEqual(created.photos)
+    expect(shown.items.map((i) => i.photoId)).toEqual(created.photos.map((p) => p.id))
+  })
+
+  describe('what it refuses', () => {
+    it('refuses 4 photos with 400 TOO_MANY_IMAGES, naming 3', async () => {
+      const guest = await newGuest()
+
+      const res = await createShelfScan(guest, Array.from({ length: 4 }, (_, i) => fileOf(markedJpeg(i), `p${i}`)))
+
+      expect(res.status).toBe(400)
+      const body = await read<unknown>(res)
+      expect(body).toMatchObject({ success: false, message: expect.stringContaining('3'), error: { code: 'TOO_MANY_IMAGES' } })
+    })
+
+    // As on the product route: a multipart body with no `photos` part leaves the field missing, and the schema answers before the service can say NO_IMAGES.
+    it('refuses a scan with no photo with 400 VALIDATION_FAILED, as the product route does', async () => {
+      const res = await createShelfScan(await newGuest(), [])
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    })
+
+    it('refuses a JSON body with 415', async () => {
+      const guest = await newGuest()
+
+      const res = await plainPost('/api/v1/scans/products/shelf', JSON.stringify({ photos: [] }), { ...guest.headers(), 'Content-Type': 'application/json' })
+
+      expect(res.status).toBe(415)
+      expect(await errorCodeOf(res)).toBe('HTTP_415')
+    })
+
+    it.each([
+      ['a PNG', () => fileOf(pngPhoto(), 'shot', 'image/png')],
+      ['bytes that are not an image', () => fileOf(garbagePhoto())],
+    ])('refuses the whole scan, queuing nothing, when one photo is %s: 400 UNSUPPORTED_IMAGE', async (_label, make) => {
+      const guest = await newGuest()
+
+      const res = await createShelfScan(guest, [fileOf(markedJpeg(1)), make()])
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('UNSUPPORTED_IMAGE')
+      expect(queued).toEqual([])
+    })
+
+    it('accepts 3 photos of 2,000,000 bytes each, a body of about 6 MB', async () => {
+      const guest = await newGuest()
+      const big = Array.from({ length: 3 }, (_, i) => fileOf(jpegPhoto({ size: MAX_PHOTO_BYTES }), `big${i}`))
+
+      const res = await createShelfScan(guest, big)
+
+      expect(res.status).toBe(202)
+      expect((await dataOf<ScanView>(res)).photos).toHaveLength(3)
+    })
+
+    it('answers 413 to a body of 4 photos of 2,000,000 bytes, before reading it as a scan', async () => {
+      const guest = await newGuest()
+      const photos = Array.from({ length: 4 }, (_, i) => fileOf(jpegPhoto({ size: MAX_PHOTO_BYTES }), `big${i}`))
+
+      const res = await createShelfScan(guest, photos)
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+
+    it('answers 413 on a Content-Length one byte over the limit, without reading the body', async () => {
+      const guest = await newGuest()
+
+      const res = await plainPost('/api/v1/scans/products/shelf', new FormData(), { ...guest.headers(), 'Content-Length': String(OVER_SHELF_BODY_BYTES) })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+  })
+
+  describe('daily quota', () => {
+    // Product scans fill the day first, so the shelf route is reached with the quota nearly spent without 11 requests tripping its burst limiter.
+    const usePhotosOfTheDay = async (guest: Guest, count: number) => {
+      for (let left = count; left > 0; left -= 10) {
+        const photos = Array.from({ length: Math.min(10, left) }, (_, i) => fileOf(markedJpeg(i), `q${i}`))
+        expect((await createScan(guest, photos, freshIp())).status).toBe(202)
+      }
+    }
+
+    it('counts each photo: the 30th of the day is accepted and the 31st answers 429 SCAN_DAILY_LIMIT with Retry-After', async () => {
+      const guest = await newGuest()
+      await usePhotosOfTheDay(guest, 27)
+
+      const last = await createShelfScan(guest, Array.from({ length: 3 }, (_, i) => fileOf(markedJpeg(i), `p${i}`)), freshIp())
+      const over = await createShelfScan(guest, [fileOf(markedJpeg(1))], freshIp())
+
+      expect(last.status).toBe(202)
+      expect(over.status).toBe(429)
+      expect(await errorCodeOf(over)).toBe('SCAN_DAILY_LIMIT')
+      expect(retryAfterOf(over)).toBeGreaterThan(0)
+      expect(retryAfterOf(over)).toBeLessThanOrEqual(DAY_SECONDS + 1)
+    })
+
+    it('refuses a scan whose photos would pass the day\'s limit as a whole, then accepts one that fits', async () => {
+      const guest = await newGuest()
+      await usePhotosOfTheDay(guest, 29)
+
+      const two = await createShelfScan(guest, [fileOf(markedJpeg(1)), fileOf(markedJpeg(2))], freshIp())
+      const one = await createShelfScan(guest, [fileOf(markedJpeg(3))], freshIp())
+
+      expect(two.status).toBe(429)
+      expect(await errorCodeOf(two)).toBe('SCAN_DAILY_LIMIT')
+      expect(one.status).toBe(202)
+    })
+  })
+
+  describe('rate limits', () => {
+    it('answers 429 RATE_LIMITED with Retry-After to the 21st shelf scan from one address in a minute, whoever sends it', async () => {
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const shared = freshIp()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof createShelfScan>> | undefined
+        for (let i = 0; i < 21; i++) {
+          const res = await createShelfScan(await newGuest(), [fileOf(markedJpeg(i))], shared)
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
+
+      expect(statuses.slice(0, 20)).toEqual(Array(20).fill(202))
+      expect(statuses[20]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    }, RATE_TEST_TIMEOUT_MS)
+
+    it('answers 429 RATE_LIMITED to the 11th shelf scan of one user in a minute, from any address', async () => {
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const guest = await newGuest()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof createShelfScan>> | undefined
+        for (let i = 0; i < 11; i++) {
+          const res = await createShelfScan(guest, [fileOf(markedJpeg(i))], freshIp())
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: BURST_NEEDS_MS })
+
+      expect(statuses.slice(0, 10)).toEqual(Array(10).fill(202))
+      expect(statuses[10]).toBe(429)
+      expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
+      expect(retryAfterOf(limited!)).toBeGreaterThan(0)
+    }, RATE_TEST_TIMEOUT_MS)
+
+    it('keeps the shelf route\'s limits apart from the product route\'s: ten product scans do not use up a user\'s shelf scans, nor the reverse', async () => {
+      const { productStatuses, shelfStatuses, afterShelf } = await inOneRateWindow(async () => {
+        const guest = await newGuest()
+        const productStatuses: number[] = []
+        for (let i = 0; i < 10; i++) productStatuses.push((await createScan(guest, [fileOf(markedJpeg(i))], freshIp())).status)
+        const shelfStatuses: number[] = []
+        for (let i = 0; i < 10; i++) shelfStatuses.push((await createShelfScan(guest, [fileOf(markedJpeg(i))], freshIp())).status)
+        const afterShelf = (await createScan(guest, [fileOf(markedJpeg(1))], freshIp())).status
+        return { productStatuses, shelfStatuses, afterShelf }
+      }, { needMs: BURST_NEEDS_MS })
+
+      expect(productStatuses).toEqual(Array(10).fill(202))
+      expect(shelfStatuses).toEqual(Array(10).fill(202))
+      // The 11th product scan of the minute is the product limiter's.
+      expect(afterShelf).toBe(429)
+    }, RATE_TEST_TIMEOUT_MS)
+  })
+})
+
 describe('GET /api/v1/scans/products/{scanId}', () => {
   it('shows the owner their scan: its id and items in photo order', async () => {
     const guest = await newGuest()
@@ -510,6 +730,20 @@ describe('GET /api/v1/scans/products/{scanId}', () => {
     const scan = await dataOf<ScanView>(res)
     expect(scan.id).toBe(created.id)
     expect(scan.items.map((i) => [i.id, i.position, i.state])).toEqual(created.items.map((i) => [i.id, i.position, i.state]))
+  })
+
+  it('shows a product scan as kind product, with one photo per item in order and each item\'s photoId naming its photo', async () => {
+    const guest = await newGuest()
+    const created = await createdScan(guest, [markedJpeg(1), markedJpeg(2), markedJpeg(3)])
+
+    const scan = await dataOf<ScanView>(await getScan(guest, created.id))
+
+    expect(scan.kind).toBe('product')
+    expect(scan.photos.map((p) => p.position)).toEqual([0, 1, 2])
+    expect(scan.photos.every((p) => JSON.stringify(p.skipped) === JSON.stringify({ notBeauty: 0, unreadable: 0, overLimit: 0, dailyLimit: 0 }))).toBe(true)
+    expect(scan.items.map((i) => i.photoId)).toEqual(scan.photos.map((p) => p.id))
+    expect(created.kind).toBe('product')
+    expect(created.photos).toEqual(scan.photos)
   })
 
   it('shows what the recognizer read once it has read it', async () => {
@@ -1885,6 +2119,7 @@ describe('signing in', () => {
   // (The two upload routes answer 401 first, whatever the body; see "on the upload routes" below.)
   const bearerRoutes: [string, (headers: Record<string, string>) => Promise<Reply>][] = [
     ['POST /api/v1/scans/products', (headers) => scansApi.$post({ form: { photos: [fileOf(markedJpeg(1))] } }, { headers })],
+    ['POST /api/v1/scans/products/shelf', (headers) => scansApi.shelf.$post({ form: { photos: [fileOf(markedJpeg(1))] } }, { headers })],
     ['GET /api/v1/scans/products/{scanId}', (headers) => scansApi[':scanId'].$get({ param: { scanId: crypto.randomUUID() } }, { headers })],
     ['POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation', (headers) =>
       scansApi[':scanId'].items[':itemId'].confirmation.$post({ ...ids(), json: { brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin' } as never }, { headers })],
@@ -1920,6 +2155,7 @@ describe('signing in', () => {
     const retakePath = () => `/api/v1/scans/products/${crypto.randomUUID()}/items/${crypto.randomUUID()}/retake`
     const uploads: [string, () => string, number][] = [
       ['POST /api/v1/scans/products', () => '/api/v1/scans/products', OVER_SCAN_BODY_BYTES],
+      ['POST /api/v1/scans/products/shelf', () => '/api/v1/scans/products/shelf', OVER_SHELF_BODY_BYTES],
       ['POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo', itemPath, MAX_PHOTO_BYTES + 1_000_000 + 1],
       ['POST /api/v1/scans/products/{scanId}/items/{itemId}/retake', retakePath, MAX_PHOTO_BYTES + 1_000_000 + 1],
     ]
@@ -2042,6 +2278,87 @@ describe('OpenAPI', () => {
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/retake', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '413', '415', '429']))
     expect(statuses('/api/v1/scans/products/{scanId}/items/{itemId}/identification', 'post')).toEqual(expect.arrayContaining(['202', '400', '401', '404', '409', '429', '503']))
     expect(statuses('/api/v1/scans/products/photos/{token}', 'get')).toEqual(expect.arrayContaining(['200', '404']))
+  })
+
+  describe('the shelf route and the shape of a scan', () => {
+    const SHELF = '/api/v1/scans/products/shelf'
+    type Doc = { paths: Record<string, Record<string, Operation & { operationId?: string; tags?: string[]; description?: string }>>; components: { schemas: Record<string, any> } }
+    const fullDocument = async () => {
+      const res = await fetchWorker('http://deepertones.test/openapi.json')
+      expect(res.status).toBe(200)
+      return (await res.json()) as Doc
+    }
+    const deref = (doc: Doc, node: any): any => (node?.$ref ? deref(doc, doc.components.schemas[String(node.$ref).split('/').pop()!]) : node)
+
+    it('documents POST /api/v1/scans/products/shelf as createShelfScan, in the Product scans tag, taking multipart and needing the bearer token', async () => {
+      const { paths } = await fullDocument()
+
+      const operation = paths[SHELF]?.post
+      expect(operation).toBeDefined()
+      expect(operation?.operationId).toBe('createShelfScan')
+      expect(operation?.tags).toEqual(['Product scans'])
+      expect(usesBearer(operation)).toBe(true)
+      expect(operation?.requestBody).toMatchObject({ required: true, content: { 'multipart/form-data': expect.anything() } })
+    })
+
+    it('lists the statuses the shelf route can answer with', async () => {
+      const { paths } = await fullDocument()
+
+      expect(Object.keys(paths[SHELF]!.post!.responses)).toEqual(expect.arrayContaining(['202', '400', '401', '413', '415', '429']))
+    })
+
+    it('describes the route: up to 5 products read from each photo, at most 20 items in a scan, each product counting against the daily limit', async () => {
+      const { paths } = await fullDocument()
+
+      const description = paths[SHELF]?.post?.description ?? ''
+      expect(description).toContain('5 products')
+      expect(description).toContain('20 items')
+      expect(description).toMatch(/daily limit/i)
+    })
+
+    it('documents the shelf upload as 1 to 3 photos', async () => {
+      const doc = await fullDocument()
+
+      const body = deref(doc, (doc.paths[SHELF]?.post?.requestBody?.content['multipart/form-data'] as { schema?: unknown } | undefined)?.schema as any)
+      const photos = deref(doc, body.properties.photos)
+
+      expect(photos).toMatchObject({ type: 'array', minItems: 1, maxItems: 3 })
+    })
+
+    it('documents the scan\'s kind as product or shelf, required', async () => {
+      const doc = await fullDocument()
+
+      const scan = doc.components.schemas.Scan
+      expect([...deref(doc, scan.properties.kind).enum].sort()).toEqual(['product', 'shelf'])
+      expect(scan.required).toContain('kind')
+    })
+
+    it('documents the scan\'s photos as a required list whose entries have an id, a position, a state and the four skipped counts', async () => {
+      const doc = await fullDocument()
+
+      const scan = doc.components.schemas.Scan
+      const photos = deref(doc, scan.properties.photos)
+      const photo = deref(doc, photos.items)
+      const skipped = deref(doc, photo.properties.skipped)
+      expect(scan.required).toContain('photos')
+      expect(photos.type).toBe('array')
+      expect(Object.keys(photo.properties).sort()).toEqual(['id', 'position', 'skipped', 'state'])
+      expect([...photo.required].sort()).toEqual(['id', 'position', 'skipped', 'state'])
+      expect([...deref(doc, photo.properties.state).enum].sort()).toEqual(['recognised', 'recognising', 'rejected'])
+      expect(Object.keys(skipped.properties).sort()).toEqual(['dailyLimit', 'notBeauty', 'overLimit', 'unreadable'])
+      expect([...skipped.required].sort()).toEqual(['dailyLimit', 'notBeauty', 'overLimit', 'unreadable'])
+    })
+
+    it('documents an item\'s photoId as a required string that can be null', async () => {
+      const doc = await fullDocument()
+
+      const item = doc.components.schemas.ScanItem
+      const photoId = deref(doc, item.properties.photoId)
+      expect(item.required).toContain('photoId')
+      const types = [photoId.type, ...(photoId.anyOf ?? []).map((t: { type?: string }) => t.type), ...(Array.isArray(photoId.type) ? photoId.type : [])].flat()
+      expect(types).toEqual(expect.arrayContaining(['string']))
+      expect(JSON.stringify(photoId)).toMatch(/null/)
+    })
   })
 
   describe('the no-label route', () => {

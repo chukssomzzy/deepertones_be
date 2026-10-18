@@ -68,6 +68,8 @@ export const SCAN_POLICY: ScanPolicy = {
 /** What the app shows for one item. Built by the service so a presenter, the stream and the events all say the same thing. */
 export type ScanItemView = {
   id: string
+  /** The scan photo the item was read from; null only for an item from before the column. */
+  photoId: string | null
   position: number
   state: ItemState
   reason: ItemReason | null
@@ -83,7 +85,15 @@ export type ScanItemView = {
   image: { kind: 'stock' | 'user'; url: string } | null
 }
 
-export type ScanView = { id: string; createdAt: Date; items: ScanItemView[] }
+/** One uploaded photo of a scan, and how its reading went. `skipped` counts what a shelf photo showed that did not become an item; all zero on a product scan. */
+export type ScanPhotoView = {
+  id: string
+  position: number
+  state: ScanPhoto['state']
+  skipped: { notBeauty: number; unreadable: number; overLimit: number; dailyLimit: number }
+}
+
+export type ScanView = { id: string; createdAt: Date; kind: ScanKind; photos: ScanPhotoView[]; items: ScanItemView[] }
 
 export type ConfirmedProduct = { brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory }
 
@@ -281,7 +291,7 @@ export class ScanService {
           .catch(() => console.error({ outcome: 'mark-failed-failed', scanId, itemId: item.id }))
       }
     }
-    return this.scanView({ id: scanId, createdAt: now }, await this.repository.itemsOf(scanId), now)
+    return this.scanView({ id: scanId, createdAt: now, kind }, await this.repository.itemsOf(scanId), now)
   }
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is SCAN_NOT_FOUND, with no hint that it exists. */
@@ -296,15 +306,16 @@ export class ScanService {
    *
    * The snapshot is read before the stream opens, and a change stored in between would reach no one: it was published
    * while nobody listened, and the snapshot predates it. So once the stream is open the items are read again, each one
-   * that differs from the snapshot (in state or time) is sent as an `item`, and if every item is final the scan is marked
+   * that differs from the snapshot (in state or time) is sent as an `item` (a shelf photo whose state or counts differ, as a `photo`, before the items), and if every item is final the scan is marked
    * done (if it was not) and `done` is sent, which also ends the stream. `done` is sent whenever all are final, even for a
    * scan already marked: this client has not had it. That covers a scan finished before the client came, and a `done` lost
    * while nobody was connected. A failure to send any of this is logged and never fails the stream.
    */
   async watch(scanId: string): Promise<Response> {
     const { scan, items } = await this.ownedScan(scanId)
-    const stream = await this.events.subscribe(scanId, await this.scanView(scan, items, this.now()))
-    await this.catchUp(scanId, items)
+    const view = await this.scanView(scan, items, this.now())
+    const stream = await this.events.subscribe(scanId, view)
+    await this.catchUp(scanId, items, view.photos)
     return stream
   }
 
@@ -317,7 +328,7 @@ export class ScanService {
   }
 
   /** What `watch` owes a client that opened its stream on `snapshot`: every change stored since, then `done` if the scan is over. */
-  private async catchUp(scanId: string, snapshot: ScanItem[]): Promise<void> {
+  private async catchUp(scanId: string, snapshot: ScanItem[], snapshotPhotos: ScanPhotoView[]): Promise<void> {
     let items: ScanItem[]
     let photos: ScanPhoto[]
     try {
@@ -325,6 +336,15 @@ export class ScanService {
     } catch {
       console.error({ outcome: 'publish-failed', scanId })
       return
+    }
+    const shownPhotos = new Map(snapshotPhotos.map((photo) => [photo.id, JSON.stringify(photo)]))
+    for (const photo of photos.map(ScanService.photoView)) {
+      if (shownPhotos.get(photo.id) === JSON.stringify(photo)) continue
+      try {
+        await this.events.publish(scanId, { type: 'photo', photo })
+      } catch {
+        console.error({ outcome: 'publish-failed', scanId, photoId: photo.id })
+      }
     }
     const seen = new Map(snapshot.map((item) => [item.id, item]))
     for (const item of items) {
@@ -938,6 +958,7 @@ export class ScanService {
     if (!placeholderMoved) return
     // Normally a no-op, the photo's key was cleared by the same batch; it matters when the photo had already been read and kept its key.
     await this.releasePhotos({ ...item, state: 'rejected' })
+    await this.publishPhoto(item.scanId, photo.id)
     await this.publish(item.scanId, item.id)
   }
 
@@ -966,6 +987,7 @@ export class ScanService {
     }
     const waiting = mine.find((candidate) => candidate.state === 'needs-confirmation')
     if (waiting) await this.notifyNeedsYou(waiting, 'confirm')
+    await this.publishPhoto(item.scanId, photo.id)
     for (const published of mine) await this.publish(item.scanId, published.id)
   }
 
@@ -1345,6 +1367,16 @@ export class ScanService {
     }
   }
 
+  /** Sends the shelf photo as it now is, before the events of its items. A failure is logged, never thrown: the change is already stored. */
+  private async publishPhoto(scanId: string, photoId: string): Promise<void> {
+    try {
+      const photo = await this.repository.findPhoto(photoId)
+      if (photo) await this.events.publish(scanId, { type: 'photo', photo: ScanService.photoView(photo) })
+    } catch {
+      console.error({ outcome: 'publish-failed', scanId, photoId })
+    }
+  }
+
   /** An item is owned through its scan: the scan's profile decides, not the item's own user_id, which only feeds the quotas. */
   private async ownedItem(scanId: string, itemId: string): Promise<ScanItem> {
     const { items } = await this.ownedScan(scanId)
@@ -1359,9 +1391,18 @@ export class ScanService {
     return this.itemView(item, this.now())
   }
 
-  private async scanView(scan: Pick<Scan, 'id' | 'createdAt'>, items: ScanItem[], now: Date): Promise<ScanView> {
+  private static photoView(photo: ScanPhoto): ScanPhotoView {
+    return {
+      id: photo.id,
+      position: photo.position,
+      state: photo.state,
+      skipped: { notBeauty: photo.skippedNotBeauty, unreadable: photo.skippedUnreadable, overLimit: photo.skippedOverLimit, dailyLimit: photo.skippedDailyLimit },
+    }
+  }
+
+  private async scanView(scan: Pick<Scan, 'id' | 'createdAt' | 'kind'>, items: ScanItem[], now: Date): Promise<ScanView> {
     const photos = await this.repository.photosOf(scan.id)
-    return { id: scan.id, createdAt: scan.createdAt, items: await Promise.all(items.map((item) => this.itemView(item, now, photos))) }
+    return { id: scan.id, createdAt: scan.createdAt, kind: scan.kind, photos: photos.map(ScanService.photoView), items: await Promise.all(items.map((item) => this.itemView(item, now, photos))) }
   }
 
   /** `photos` is the scan's photos when the caller already has them; without them a shelf item's photo is read for itself. */
@@ -1385,6 +1426,7 @@ export class ScanService {
     const retakesLeft = item.state === 'needs-retake' ? Math.max(0, this.policy.maxFrontPhotos - 1 - (await this.repository.countRetakes(item.id))) : undefined
     return {
       id: item.id,
+      photoId: item.photoId,
       position: item.position,
       state: item.state,
       reason: item.reason,
