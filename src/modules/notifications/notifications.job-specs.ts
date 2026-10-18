@@ -19,7 +19,7 @@ const scanNeedsYouBody = z.object({
   profileId: z.string(),
   scanId: z.string(),
   itemId: z.string(),
-  need: z.enum(['back-photo', 'confirm']),
+  need: z.enum(['back-photo', 'confirm', 'identify']),
   /** Which time this item asks again after an unreadable back photo; absent or 0 is the first ask. */
   ask: z.number().int().min(0).optional(),
 })

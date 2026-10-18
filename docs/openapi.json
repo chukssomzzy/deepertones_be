@@ -396,7 +396,7 @@
           },
           "scanNeedsYou": {
             "type": "boolean",
-            "description": "Tell me when a scan needs a photo or a confirmation from me."
+            "description": "Tell me when a scan needs something from me: a photo, a confirmation, or the name of a product it could not read."
           }
         }
       },
@@ -423,6 +423,27 @@
                     "null"
                   ]
                 },
+                "form": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "spray",
+                    "roll-on",
+                    "stick",
+                    "cream",
+                    "lotion",
+                    "gel",
+                    "oil",
+                    "serum",
+                    "liquid",
+                    "bar",
+                    "powder",
+                    "balm",
+                    null
+                  ]
+                },
                 "category": {
                   "type": "string",
                   "enum": [
@@ -446,6 +467,7 @@
                 "brand",
                 "name",
                 "variant",
+                "form",
                 "category",
                 "imageUrl"
               ]
