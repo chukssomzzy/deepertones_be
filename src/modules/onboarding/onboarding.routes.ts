@@ -1,5 +1,6 @@
 import { defineRoute, ok, openapiApp, success } from '../../lib/openapi'
 import { contentFor } from './onboarding.content'
+import { toOnboardingContentResponse } from './onboarding.presenter'
 import { OnboardingContentQuery, OnboardingContentResponse } from './onboarding.schemas'
 
 // Five minutes keeps a copy deploy reaching the apps quickly; stale-while-revalidate lets an app or the edge show the old text for up to a day
@@ -41,5 +42,5 @@ export const onboardingRoutes = openapiApp().openapi(getOnboardingContent, async
   c.header('ETag', etag)
   c.header('Cache-Control', CACHE_CONTROL)
   if (matches(c.req.header('If-None-Match'), etag)) return c.body(null, 304)
-  return ok(c, content, 'Onboarding content')
+  return ok(c, toOnboardingContentResponse(content), 'Onboarding content')
 })

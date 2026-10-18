@@ -298,6 +298,30 @@ describe('caching of GET /api/v1/onboarding/content', () => {
     expect(res.status).toBe(200)
     expect((await dataOf<Content>(res)).locale).toBe('en')
   })
+
+  // What a browser, an app's HTTP cache or the edge sends back is not always the bare tag: a weak copy of it (a proxy may weaken an ETag), a
+  // list of tags it holds, or `*`. All of them mean "I have the current version".
+  it.each([
+    ['the weak form of the ETag', (etag: string) => `W/${etag}`],
+    ['a list that holds the ETag after another tag', (etag: string) => `"zzz", ${etag}`],
+    ['a weak list that holds the ETag', (etag: string) => `W/"zzz",W/${etag}`],
+    ['*', () => '*'],
+  ])('answers 304 with no body when If-None-Match is %s', async (_name, validatorFor) => {
+    const etag = (await getContent()).headers.get('etag')
+    expect(etag).toMatch(/^"[^"]+"$/)
+
+    const res = await getContent({ headers: { 'If-None-Match': validatorFor(etag!) } })
+
+    expect(res.status).toBe(304)
+    expect(await res.text()).toBe('')
+  })
+
+  it('answers 200 with the whole content when If-None-Match is a list that does not hold the current ETag', async () => {
+    const res = await getContent({ headers: { 'If-None-Match': '"zzz", W/"yyy"' } })
+
+    expect(res.status).toBe(200)
+    expect((await dataOf<Content>(res)).locale).toBe('en')
+  })
 })
 
 describe('the locale of GET /api/v1/onboarding/content', () => {
@@ -322,6 +346,13 @@ describe('the locale of GET /api/v1/onboarding/content', () => {
 
     expect(english.headers.get('etag')).toMatch(/^"[^"]+"$/)
     expect(fallback.headers.get('etag')).toBe(english.headers.get('etag'))
+  })
+
+  it.each(['?locale=fr&locale=en', '?locale=en&locale=fr'])('is en with a 200 when the locale is given twice, as %s', async (query) => {
+    const res = await getContent({ query })
+
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ success: true, status: 200, data: { locale: 'en' } })
   })
 
   it('falls back to en for an empty locale', async () => {

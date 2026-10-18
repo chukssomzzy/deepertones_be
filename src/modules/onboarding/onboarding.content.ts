@@ -10,7 +10,7 @@ import { SAFETY_CHOICES, type SafetyChoice } from '../safety/safety.vocabulary'
 // always one the API accepts, and the answer words have one source.
 
 type Field = { label: string; hint?: string }
-type Choice = { id: string; label: string; field?: Field }
+type Choice = { id: SafetyChoice; label: string; field?: Field }
 
 export type OnboardingContent = {
   locale: Locale
@@ -35,14 +35,22 @@ export type OnboardingContent = {
 const LOCALES = ['en'] as const
 type Locale = (typeof LOCALES)[number]
 
-// DRAFT copy: the sixth chip needs owner review before launch (issue #82). Its label is not the calm-repair answer's title, which says "again".
+// DRAFT copy: new words nobody has reviewed yet (issue #82): the sixth chip, and the label and hint of the field under the reaction choice. The
+// chip's label is not the calm-repair answer's title, which says "again". DRAFT_COPY lists them for the owner to find before launch; approving a
+// string means removing it from that list and its DRAFT comment.
+const DRAFT_CHIP_LABEL = 'Calm, healthy skin' // DRAFT
+const DRAFT_REACTION_FIELD_LABEL = 'Which product? (optional)' // DRAFT
+const DRAFT_REACTION_FIELD_HINT = 'Add the ingredient too if you know it.' // DRAFT
+
+export const DRAFT_COPY: readonly string[] = [DRAFT_CHIP_LABEL, DRAFT_REACTION_FIELD_LABEL, DRAFT_REACTION_FIELD_HINT]
+
 const CHIP_LABELS: Record<Goal, string> = {
   'clear-skin': 'Clear skin',
   'even-tone': 'Even tone',
   'fade-dark-marks': 'Fade dark marks',
   brighter: 'Brighter, more even',
   glow: 'A glow',
-  'calm-repair': 'Calm, healthy skin', // DRAFT
+  'calm-repair': DRAFT_CHIP_LABEL,
 }
 
 // A field is a text box under the choice; only the two that take words have one.
@@ -51,8 +59,7 @@ const CHOICES: Record<SafetyChoice, { label: string; field?: Field }> = {
   breastfeeding: { label: 'Breastfeeding' },
   reaction: {
     label: 'A product gave me a reaction',
-    // DRAFT copy: this field needs owner review before launch (issue #82).
-    field: { label: 'Which product? (optional)', hint: 'Add the ingredient too if you know it.' },
+    field: { label: DRAFT_REACTION_FIELD_LABEL, hint: DRAFT_REACTION_FIELD_HINT },
   },
   prescription: { label: 'Using a prescription cream or tablets', field: { label: 'What is it? (optional)', hint: 'Product names help us check.' } },
   none: { label: 'None of these' },
@@ -102,7 +109,9 @@ const withoutVersion = (locale: Locale): Omit<OnboardingContent, 'contentVersion
 const stableJson = (value: unknown): string => {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
   if (value !== null && typeof value === 'object') {
+    // A key set to undefined is left out, as JSON.stringify leaves it out, so it hashes the same as a key that is not there.
     return `{${Object.entries(value)
+      .filter(([, item]) => item !== undefined)
       .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
       .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
       .join(',')}}`
@@ -110,9 +119,13 @@ const stableJson = (value: unknown): string => {
   return JSON.stringify(value)
 }
 
+// Bump this when the SHAPE of the response changes without any copy changing (a field added, renamed or moved). The version is a hash of the
+// content, so a new shape with the same words would keep the old ETag, and apps holding it would go on getting 304 and the old shape.
+export const CONTENT_SHAPE_VERSION = 1
+
 /** A hash of the content, locale included and chip and choice order included: any changed word, id or position is a new version. 16 hex digits are plenty for an ETag. */
-export const contentVersionOf = async (content: Omit<OnboardingContent, 'contentVersion'>): Promise<string> =>
-  (await sha256Hex(stableJson(content))).slice(0, 16)
+export const contentVersionOf = async (content: Omit<OnboardingContent, 'contentVersion'>, shapeVersion = CONTENT_SHAPE_VERSION): Promise<string> =>
+  (await sha256Hex(stableJson({ shapeVersion, content }))).slice(0, 16)
 
 // Built once per isolate: the content cannot change without a deploy, so hashing it on every request would be wasted work.
 const build = (locale: Locale) =>

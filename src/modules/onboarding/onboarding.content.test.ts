@@ -2,8 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { answerFor } from '../goals/goals.answers'
 import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { SAFETY_CHOICES } from '../safety/safety.vocabulary'
-import { contentFor, contentVersionOf } from './onboarding.content'
-import source from './onboarding.content.ts?raw'
+import { CONTENT_SHAPE_VERSION, contentFor, contentVersionOf, DRAFT_COPY } from './onboarding.content'
 
 // The copy of onboarding screens 1.2 to 1.5, as a pure value. The exact strings are pinned through the route (onboarding.content.test.ts in
 // test/integration); these tests pin what the module itself promises: its ids are the API's own vocabularies, its answers have one source, and
@@ -134,31 +133,59 @@ describe('contentVersionOf', () => {
   it('changes when a choice is added, so a new choice is a new version', async () => {
     const base = await baseOf()
     const grown = structuredClone(base)
-    grown.safetyScreen.choices.push({ id: 'new-choice', label: 'Something else' })
+    grown.safetyScreen.choices.push({ id: 'new-choice', label: 'Something else' } as never)
 
     expect(await contentVersionOf(grown)).not.toBe(await contentVersionOf(base))
   })
-})
 
-// The sixth chip and the field under the reaction choice are new words nobody has reviewed yet (issue #82). A DRAFT marker beside them in the
-// source is how the owner finds them before launch, and the reason a later reader does not mistake them for approved copy.
-describe('the source of the content', () => {
-  const DRAFT_STRINGS = ['Calm, healthy skin', 'Which product? (optional)', 'Add the ingredient too if you know it.']
-
-  /** The line a quoted string is on and the line above it, where a DRAFT comment sits. */
-  const contextOf = (text: string) => {
-    const quoted = new RegExp(`['"\`]${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}['"\`]`)
-    const at = source.search(quoted)
-    if (at === -1) return null
-    const lineStart = source.lastIndexOf('\n', at)
-    const aboveStart = source.lastIndexOf('\n', lineStart - 1)
-    return source.slice(aboveStart + 1, source.indexOf('\n', at))
+  /** The same value with the keys of every object written in the opposite order. */
+  const reversed = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(reversed)
+    if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).reverse().map(([key, item]) => [key, reversed(item)]))
+    return value
   }
 
-  it.each(DRAFT_STRINGS)('marks "%s" as DRAFT, on its line or the line above', (text) => {
-    const context = contextOf(text)
+  it('does not depend on the order the keys of the content are written in', async () => {
+    const base = await baseOf()
+    const flipped = reversed(base) as typeof base
+    expect(Object.keys(flipped)).toEqual(Object.keys(base).reverse())
 
-    expect(context, `"${text}" is written out as one string in the source`).not.toBeNull()
-    expect(context).toMatch(/DRAFT/)
+    expect(await contentVersionOf(flipped)).toBe(await contentVersionOf(base))
+  })
+
+  it('treats a key set to undefined as a key that is not there, since JSON leaves it out', async () => {
+    expect(await contentVersionOf({ a: 1, b: undefined } as never)).toBe(await contentVersionOf({ a: 1 } as never))
+  })
+
+  it('is a positive whole number, CONTENT_SHAPE_VERSION, that the owner bumps when the shape of the response changes', () => {
+    expect(Number.isInteger(CONTENT_SHAPE_VERSION)).toBe(true)
+    expect(CONTENT_SHAPE_VERSION).toBeGreaterThan(0)
+  })
+
+  it('hashes the shape version in, so a new shape is a new version even when every word is the same', async () => {
+    const base = await baseOf()
+
+    expect(await contentVersionOf(base, CONTENT_SHAPE_VERSION + 1)).not.toBe(await contentVersionOf(base, CONTENT_SHAPE_VERSION))
+  })
+
+  it('uses CONTENT_SHAPE_VERSION when no shape version is given', async () => {
+    const base = await baseOf()
+
+    expect(await contentVersionOf(base)).toBe(await contentVersionOf(base, CONTENT_SHAPE_VERSION))
+  })
+})
+
+// The sixth chip and the field under the reaction choice are new words nobody has reviewed yet (issue #82). DRAFT_COPY lists the copy still in
+// draft, so the owner finds it before launch and a later reader does not mistake it for approved copy. Removing a string from it is the act of
+// approving that string.
+describe('DRAFT_COPY', () => {
+  it('lists exactly the strings still in draft', () => {
+    expect([...DRAFT_COPY].sort()).toEqual(['Add the ingredient too if you know it.', 'Calm, healthy skin', 'Which product? (optional)'])
+  })
+
+  it('lists only words the content actually shows, so the list cannot name copy that has gone', async () => {
+    const content = JSON.stringify(await contentFor('en'))
+
+    for (const text of DRAFT_COPY) expect(content, text).toContain(JSON.stringify(text))
   })
 })
