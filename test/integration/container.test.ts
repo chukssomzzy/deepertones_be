@@ -10,7 +10,6 @@ import { OtpService } from '../../src/modules/otp/otp.service'
 import { jpegPhoto } from '../../src/modules/scans/scans.photos.fake'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
-import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 
 describe('buildContainer', () => {
   it('builds the OTP service from the environment bindings', () => {
@@ -31,21 +30,14 @@ describe('buildContainer', () => {
     expect(buildContainer(env).aiUsage).toBeInstanceOf(AiUsageService)
   })
 
-  it('caps the day\'s AI spend at AI_DAILY_BUDGET_USD dollars: one dollar is 1000000 micros', async () => {
+  it('does not refuse a reservation past AI_DAILY_BUDGET_USD: the cap only alerts', async () => {
     const { aiUsage } = buildContainer({ ...env, AI_DAILY_BUDGET_USD: '1' })
-    const request = (estimateMicros: number) => ({ job: 'research' as const, model: 'claude-sonnet-5-5', estimateMicros })
 
-    await expect(aiUsage.reserve(request(1_000_001))).rejects.toBeInstanceOf(AiBudgetExceededError)
-
-    // Exactly the cap is allowed; give it back so the real day's spend in this database stays clean.
-    const id = await aiUsage.reserve(request(1_000_000))
+    // One micro over a dollar, in an environment whose cap is a dollar. Give it back so the real day's spend in this database stays clean.
+    const id = await aiUsage.reserve({ job: 'research', model: 'claude-sonnet-5-5', estimateMicros: 1_000_001 })
     await aiUsage.release(id)
-  })
 
-  it('reads a fractional AI_DAILY_BUDGET_USD: half a dollar is 500000 micros', async () => {
-    const { aiUsage } = buildContainer({ ...env, AI_DAILY_BUDGET_USD: '0.5' })
-
-    await expect(aiUsage.reserve({ job: 'research', model: 'claude-sonnet-5-5', estimateMicros: 500_001 })).rejects.toBeInstanceOf(AiBudgetExceededError)
+    expect(id).toEqual(expect.any(String))
   })
 
   it('builds the token service from JWT_SECRET, accepting tokens signed with JWT_SECRET_PREVIOUS', async () => {

@@ -33,8 +33,10 @@
     "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
-    // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+    // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
     "AI_DAILY_BUDGET_USD": "1",
+    // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
+    "OPS_ALERT_EMAIL": "",
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
     "CATALOG_IMAGES_PUBLIC_URL": ""
   },
@@ -57,6 +59,8 @@
   //   npx wrangler queues create deepertones-push-receipts-dlq-development
   //   npx wrangler queues create deepertones-parse-safety-development
   //   npx wrangler queues create deepertones-parse-safety-dlq-development
+  //   npx wrangler queues create deepertones-email-development
+  //   npx wrangler queues create deepertones-email-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
     "producers": [
@@ -64,7 +68,8 @@
       { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-development" },
       { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-development" },
       { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-development" },
-      { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" }
+      { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" },
+      { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-development" }
     ],
     "consumers": [
       {
@@ -114,7 +119,16 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-parse-safety-dlq-development"
       },
-      { "queue": "deepertones-parse-safety-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-parse-safety-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-email-development",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        // 5 attempts in total; then the message moves to the dead-letter queue.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-email-dlq-development"
+      },
+      { "queue": "deepertones-email-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -224,8 +238,10 @@
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
-        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
         "AI_DAILY_BUDGET_USD": "5",
+        // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
+        "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
@@ -247,6 +263,8 @@
       //   npx wrangler queues create deepertones-push-receipts-dlq-staging
       //   npx wrangler queues create deepertones-parse-safety-staging
       //   npx wrangler queues create deepertones-parse-safety-dlq-staging
+      //   npx wrangler queues create deepertones-email-staging
+      //   npx wrangler queues create deepertones-email-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -254,7 +272,8 @@
           { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-staging" },
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-staging" },
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-staging" },
-          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" }
+          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" },
+          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-staging" }
         ],
         "consumers": [
           {
@@ -304,7 +323,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-parse-safety-dlq-staging"
           },
-          { "queue": "deepertones-parse-safety-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-parse-safety-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-email-staging",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            // 5 attempts in total; then the message moves to the dead-letter queue.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-email-dlq-staging"
+          },
+          { "queue": "deepertones-email-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -379,8 +407,10 @@
         "ANTHROPIC_MODEL_VISION": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
-        // Daily cap on AI spend in USD, per UTC day. The app's only spend cap: every request reserves its worst case against it before it is sent. There is no Console backstop, by the owner's decision.
+        // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
         "AI_DAILY_BUDGET_USD": "30",
+        // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
+        "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
       },
@@ -402,6 +432,8 @@
       //   npx wrangler queues create deepertones-push-receipts-dlq-production
       //   npx wrangler queues create deepertones-parse-safety-production
       //   npx wrangler queues create deepertones-parse-safety-dlq-production
+      //   npx wrangler queues create deepertones-email-production
+      //   npx wrangler queues create deepertones-email-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -409,7 +441,8 @@
           { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-production" },
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-production" },
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-production" },
-          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" }
+          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" },
+          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-production" }
         ],
         "consumers": [
           {
@@ -459,7 +492,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-parse-safety-dlq-production"
           },
-          { "queue": "deepertones-parse-safety-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-parse-safety-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-email-production",
+            "max_batch_size": 10,
+            "max_batch_timeout": 5,
+            // 5 attempts in total; then the message moves to the dead-letter queue.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-email-dlq-production"
+          },
+          { "queue": "deepertones-email-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that

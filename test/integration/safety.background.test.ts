@@ -9,12 +9,20 @@ import { runAs } from '../../src/lib/context'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
+import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
 import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { json, messageResponse, searchCall, searchResults, textBlock } from '../../src/providers/anthropic/messages-api.fake'
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
+import { MemoryEmailSender } from '../../src/providers/email/memory.email'
+import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+
+/** An alerting service that goes nowhere: these tests are not about ops alerts. */
+const quietOpsAlerts = () =>
+  new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test' })
 
 // The parse of the reaction and prescription words, driven through the Worker's real queue handler against local D1, with only the
 // outbound Anthropic call stubbed at fetch (the mention reader, and the researcher's web search). Answers are saved through the real
@@ -82,6 +90,7 @@ const catalogued = async (brand: string) => {
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
     imageKeyPrefix: 'catalog/test',
+    opsAlerts: quietOpsAlerts(),
   })
   const resolved = await catalog.resolve({ brand, name: brand, category: 'skin' })
   if (resolved.kind !== 'needs-research') throw new Error(`expected needs-research, got ${resolved.kind}`)

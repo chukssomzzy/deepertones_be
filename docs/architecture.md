@@ -115,11 +115,24 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   (`job-registry-only-in-entry`) and passes it to `createQueueHandler`, the Worker's `queue` export.
   `job-handlers-only-in-registry` lets only the registry import a `*.jobs.ts`, and
   `job-specs-no-container` stops a `*.job-specs.ts` importing `container.ts`.
-- **One queue and one dead-letter queue per job per environment**: `deepertones-<queue>-<env>` and
-  `deepertones-<queue>-dlq-<env>` (`queueNames`). A backlog in one job never delays another, and
-  environments never share a queue. Queues must exist before a deploy that binds them.
-- **Dispatcher flow, per message**: find the job by queue name (unknown queue: log an error and
-  retry the whole batch, so nothing is lost while misconfigured) → validate the body against the
+- **One queue and one dead-letter queue per queue per environment**: `deepertones-<queue>-<env>` and
+  `deepertones-<queue>-dlq-<env>` (`queueNames`). Environments never share a queue. Queues must exist before a deploy that
+  binds them. Most jobs have a queue of their own, so a backlog in one never delays another; the `email` queue is **shared**.
+- **A queue may carry several jobs (`shared: true` on the spec).** The `email` queue (`send-ops-alert` today, every later
+  email kind after it) is meant to carry many jobs, because an email job is small and a queue per kind is more to create and
+  watch than it is worth. (`deliver-otp` stays on its own `otp-delivery` queue: it sends WhatsApp too.) A message on a shared
+  queue names its job: `{ job: '<name>', body }`, and nothing else. `CloudflareQueuesJobQueue.enqueue` writes that envelope for
+  a spec marked `shared`, after validating the body against the spec's schema; every other spec still sends the bare body.
+  The dispatcher routes a message to the job it names, and a dead letter the same way (its `onDeadLetter` hook). Idempotency
+  keys stay per job (`job_runs` is keyed by job and key). The registry test requires every job name to be unique, every
+  queue to have its own dead-letter queue, and the jobs of a queue to be all `shared` or none (and `shared` when there are several).
+  **What the dispatcher does with a message it cannot attribute:** a queue that carries ONE job still accepts a bare body (what
+  the last deploy sent, still in flight when a queue is first shared) as well as an envelope naming that job. Anything else (an
+  envelope naming a job the queue does not carry, or a bare body on a queue of several) can never succeed, so it is logged
+  `{ queue, attempt, outcome: 'unknown-job', named }` (only the claimed job name, truncated; never the body) and acked, not
+  retried: a retry would only repeat the same log line until the message expires.
+- **Dispatcher flow, per message**: find the queue's jobs by queue name (unknown queue: log an error and
+  retry the whole batch, so nothing is lost while misconfigured) → pick the job (above) → validate the body against the
   schema (invalid: ack, since a retry cannot fix it) → claim the idempotency key → run `handle`
   inside `runAs({ kind: 'system', job })` → ack or retry. Each message is handled on its own. After
   the batch, `job_runs` rows older than 7 days are purged, so no cron is needed. Every run logs
@@ -171,7 +184,7 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   the text is in the queue, and the key is `parse-safety:<safetyId>`. Nobody waits for it, so it lets the defaults batch it, keeps the standard 5 attempts (`max_retries` 4) and
   retries like the receipt check (30 s x3 up to 600 s); `onDeadLetter` is `markParseFailed`.
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body, { delaySeconds? })`, typed by the job's
-  schema; the delay holds the message back, for a wait that must not use up retries), with a Cloudflare Queues adapter and an in-memory fake. Services never see bindings.
+  schema; the delay holds the message back, for a wait that must not use up retries), with a Cloudflare Queues adapter and an in-memory fake (which records the job name and the bare body, whatever the queue). Services never see bindings.
 - **`buildJobRuntime(env)`** in `container.ts` returns `{ services, jobRuns }` for the dispatcher.
   The dispatcher cannot import the concrete `D1JobRunsRepository` itself
   (`concrete-classes-only-in-container`), and `jobRuns` is kept out of the services `Container` so a
@@ -662,9 +675,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
-  `back-photo` or `confirm`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
+  `back-photo`, `confirm` or `identify`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
-  `scan-needs-you:<scanId>:<need>` (ten items needing a back photo are ONE notification, linking to the first item that asked);
+  `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
   first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
@@ -675,8 +688,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | Where | When | Call | Key |
   | --- | --- | --- | --- |
   | `recognise` | the item moved to `needs-confirmation` | `scanNeedsYou({ need: 'confirm' })` | `scan-needs-you:<scanId>:confirm` |
+  | `recognise` | the 3rd front photo could not be read and the item moved to `needs-identification` (not for the first two, which ask for a retake, nor for a rejected photo) | `scanNeedsYou({ need: 'identify' })` | `scan-needs-you:<scanId>:identify` |
   | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
-  | `labelUnreadable` | the item moved back to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo', ask: n })`, `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
+  | `labelUnreadable` | the item moved back to `needs-identification` when it has no product, else to `needs-back-photo` | `scanNeedsYou({ need: 'identify' \| 'back-photo', ask: n })` (`identify` when it has no product), `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
   | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
 
@@ -740,7 +754,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   up to 600 s.
 
 ### Goals (onboarding)
-`modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `requireGoal`, `onboarding`).
+`modules/goals` holds `profile_goals` (migration 0021), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `requireGoal`, `onboarding`).
 It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
 is built in four pull requests; the goal is the first two (the six chips, and typed words read by the goal reader), the safety answers are the third, and the parse of their reaction and prescription words is the fourth (see "Safety facts (onboarding)").
 
@@ -792,7 +806,7 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Still to come.** Pull request 4 reads the products and ingredients named in reaction and prescription text in the background.
 
 ### Safety facts (onboarding)
-`modules/safety` holds `profile_safety` (migration 0021) and `safety_mentions` (migration 0022), `D1SafetyRepository` (`append`, `find`, `current`, `history`,
+`modules/safety` holds `profile_safety` (migration 0022) and `safety_mentions` (migration 0023), `D1SafetyRepository` (`append`, `find`, `current`, `history`,
 `setParseState`, `appendMentions`, `mentions`, `resolveMention`) and `SafetyService` (`set`, `current`, `currentOrNull`, `currentMentions`, `requireAnswered`, and for the
 queue `parse` and `markParseFailed`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", the third pull request of issue #82; the parse of the
 two texts is the fourth.
@@ -819,7 +833,7 @@ two texts is the fourth.
   part of the hook. Neither guard is wired to a route yet.
 - **Parsing the two texts only ever adds caution.** What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove
   any, and nothing the model says about a product's contents is ever kept (see below). A parse that fails, or never runs, takes nothing away.
-- **The parse state** is two columns on `profile_safety` (migration 0022, additive: plain `ADD COLUMN`s, no table rebuild). `parse_state` is `none` (no words, and every
+- **The parse state** is two columns on `profile_safety` (migration 0023, additive: plain `ADD COLUMN`s, no table rebuild). `parse_state` is `none` (no words, and every
   row saved before the parse existed), `pending` (words were saved and the parse has not finished), `done` or `failed` (the dead-letter queue was reached). `parse_due_at` is
   when the parse was meant to run. `set` writes `pending` and queues one `parse-safety` message carrying the row's id for an answer with any words (one message, not two,
   for both texts); an answer without words, or "none of these", is `none` and queues nothing.
@@ -849,7 +863,7 @@ two texts is the fourth.
   `markParseFailed` (the dead-letter hook) moves a `pending` row to `failed` and leaves a `done` one alone; the words and the choices stay as they were.
 - **Ingredients never come from model memory.** The reader names only what the person wrote, and a product's ingredients come from the catalog's research alone, so
   a mention is a name the person typed and a `product_id` is a catalog product. Nothing about what is in a product is taken from the model.
-- **`safety_mentions`** (migration 0022): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction` or `prescription`),
+- **`safety_mentions`** (migration 0023): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction` or `prescription`),
   `kind` (`product` or `ingredient`), `brand`, `name`, `variant`, `category` (null for an ingredient or when unknown), `product_id` (a catalog id with no foreign key, like
   `scan_items.product_id`), `resolution` (`pending`, `resolved`, `unresolved`; null for an ingredient), `position` and `created_at`; indexed on (`safety_id`, `position`).
   `appendMentions` is one `db.batch` (all or nothing; an empty list does nothing). `currentMentions()` answers the current row's mentions in order for the services that
@@ -1013,8 +1027,10 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   unavailable model and a rejected request are thrown as the client's errors; `SafetyService.parse` decides what each means.
 
 ### AI cost tracking
-Every Claude request is counted against a daily dollar cap. This is the app's only spend cap: by the owner's decision
-there is no Console spend limit behind it, so the code is the backstop.
+Every Claude request is reserved and settled in a ledger, and counted against a daily dollar figure. **The figure only
+alerts** (owner's decision, 2026-10-18): the first call past it emails the owner once that UTC day, and no call is ever
+refused, so an environment-wide limit can never leave a user's scan stuck. There is still no Console spend limit behind it.
+Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-usd` really stops spending.
 
 - **Prices** are a table in `anthropic.provider.ts` (`priceOf`, `costMicros`, `estimateMicros`, `estimateInputTokens`),
   from https://platform.claude.com/docs/en/about-claude/pricing, fetched 2026-10-15. Rates are whole numbers in
@@ -1039,20 +1055,20 @@ there is no Console spend limit behind it, so the code is the backstop.
     because the API may have done the work: what cannot be measured is counted high.
   - **Only a clear "not processed" is released**: any 4xx (429 included) and 529 (overloaded).
   - A ledger that cannot be reached for the reservation fails closed: nothing is sent and the call throws
-    `AnthropicUnavailableError` (retryable) with no detail in the message. A spent cap is `AiBudgetExceededError`, passed
-    through as it is.
+    `AnthropicUnavailableError` (retryable) with no detail in the message. `AiBudgetExceededError` (only the eval's ledger
+    throws it) is passed through as it is.
   - Failing to settle or release never changes the call's result or error and is logged as
     `{ outcome: 'ai-ledger-failed' }`, nothing more.
-- **The cap is per UTC day.** `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (1 locally, 5 on staging, 30 on production).
-  `AiUsageService` (an `AiSpendLedger`) sums settled costs plus open reservations' estimates for requests made since
-  00:00 UTC; a call belongs to the day it was reserved, whenever it settles. A request that would pass the cap throws
-  `AiBudgetExceededError`, which the catalog service maps (see "Product catalog service"). A reservation that is never
-  settled or released (a crash) keeps counting its estimate for that day, which errs on the safe side. The container
-  throws a clear error when the variable is not a positive number.
-- **The check and the insert are one statement.** `D1AiUsageRepository.insertReservation` is a single conditional
-  `INSERT ... SELECT` (the sum since midnight plus this estimate must fit under the cap), so simultaneous requests
-  cannot both take the last of the budget, which a read followed by a write would allow. The repository contract pins
-  an eight-way race to exactly the number that fit.
+- **The figure is per UTC day.** `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (1 locally, 5 on staging, 30 on production).
+  `AiUsageService` (an `AiSpendLedger`) stores every reservation, sums settled costs plus open reservations' estimates for
+  requests made since 00:00 UTC (a call belongs to the day it was reserved, whenever it settles), and when that sum passes the
+  figure it raises the `ai-spend-cap` ops alert (see "Ops alerts"; once per UTC day, however many calls pass it). It never
+  throws for the figure. A reservation that is never settled or released (a crash) keeps counting its estimate for that day.
+  The container throws a clear error when the variable is not a positive number.
+- **The insert and the sum are one batch.** `D1AiUsageRepository.insertReservation` always inserts the row and answers
+  `{ overCap }` from the sum since midnight, this reservation included, in one `db.batch` (a transaction on D1), so the
+  answer is not made stale by a call that lands between them. The repository contract pins an eight-way race: every row is
+  stored and at least those past the figure are flagged.
 - **`ai_usage`** (`modules/ai-usage`, migration 0008) has one row per request: id, job, model, status (`reserved`,
   `settled`, `released`), the estimate, and once settled the cost in micros, the five usage counts and the time.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
@@ -1071,6 +1087,33 @@ there is no Console spend limit behind it, so the code is the backstop.
   reads `ai_usage` through `wrangler d1 execute` and prints today, the last 7 days and the last N days in dollars (settled
   cost only), a line "held by unsettled reservations" with the estimates still reserved and how many, then each job and
   model. It is read-only. The catalog eval reports its own cost (see "Catalog eval").
+
+### Ops alerts
+`modules/ops-alerts` (`OpsAlertsService`) emails the owner when an environment-wide problem needs them. Nothing here is shown to a
+user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue #91): the limits only make noise.
+
+| Kind              | Raised when                                                                                  | At most one email per |
+| ----------------- | -------------------------------------------------------------------------------------------- | --------------------- |
+| `ai-account`      | Claude refuses our account: any `AnthropicConfigError` (401, 402 `billing_error`, 403)       | hour                  |
+| `ai-spend-cap`    | A call takes the UTC day's AI spend past `AI_DAILY_BUDGET_USD`                               | UTC day               |
+| `research-budget` | A research attempt is made when the day's count has reached `dailyResearchBudget` (200)      | UTC day               |
+| `analysis-budget` | An analysis attempt is made when the day's count has reached `dailyAnalysisBudget` (300)     | UTC day               |
+
+- **`raise(kind)` never throws.** It is called from the paths that hit the problem (the ledger's `reserve`, the catalog's
+  `research` and `analyse`, the scan service), and an alert that cannot be raised must never cost them their work. A failure
+  is logged `{ outcome: 'ops-alert-failed', kind, error }` with the error's name only.
+- **One claim per kind and window, then a job.** `OpsAlertsRepository.claim(kind, windowStart)` is ONE guarded upsert on
+  `ops_alert_claims` (one row per kind, replaced only by a newer window), so however many callers hit the problem in a window
+  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`)
+  or UTC day (the rest). The repository does not know how long a window is. *Trade-off:* the window is claimed before the job is
+  queued, so a queue outage loses that window's email (the next window sends); queueing first would send one email per caller.
+- **`send-ops-alert` is the first job on the shared `email` queue** (see "Background jobs"), keyed `kind:windowStart`, so a
+  redelivery is one email. `OpsAlertsService.send` renders the `ops-alert` template and sends it with the shared `EmailSender` to
+  `OPS_ALERT_EMAIL`. The text is fixed per kind and carries the environment and the kind and no data. A provider failure is thrown,
+  for the queue to retry (5 attempts); an empty or invalid address is logged `{ outcome: 'ops-alert-no-recipient', kind }` and
+  acked, because retrying a missing setting cannot help.
+- **Config.** `OPS_ALERT_EMAIL` is a `var` (not a secret; listed in `NOT_SECRETS`), empty in `wrangler.jsonc` until the owner
+  fills it in. The queue pair `deepertones-email-<env>` and `deepertones-email-dlq-<env>` (binding `EMAIL_QUEUE`) must exist before a deploy.
 
 ### Catalog images
 `providers/catalog-images` fetches a product's stock image and keeps it. The port is
@@ -1272,9 +1315,11 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   `FRESH_FOR_DAYS` is still fresh). It is cheaper (products nobody scans again cost nothing, and a bump does not
   trigger a burst of model calls) and the user gets the fresh answer at the time it matters. Staleness is checked
   first, so a stale formulation that was never analysed is researched again, not analysed.
-- **A spend-cap refusal while asking "same product?"** (`AiBudgetExceededError` from `sameProduct` inside `resolve`)
-  becomes `CatalogBusyError`. The answer is unknown: merging would guess, and creating the product would risk a duplicate
-  of one that exists, so the scan waits and asks again later.
+- **A spend-cap refusal while asking "same product?"** (`AiBudgetExceededError` from `sameProduct` inside `resolve`, which
+  only the eval's ledger throws now) becomes `CatalogBusyError`. The answer is unknown: merging would guess, and creating the product
+  would risk a duplicate of one that exists, so the caller waits and asks again later. In production this does not happen: the real ledger does not refuse.
+  The same goes for every other `AiBudgetExceededError` / `CatalogBusyError` below; they stay only so the eval's `--max-usd` works.
+  Claude refusing our account (`AnthropicConfigError`) is not handled by the catalog: it reaches the scan module (see "Scan module").
 - **Alias guard.** A near miss is put to the model only if it has the same category as the scanned label and its
   variant does not conflict, and it has the identical form (none counts as a value, so a formless product and its spray are never put to the model): two non-empty variants that differ (compared normalised, so case and spacing do not matter)
   are different products (a night cream is not its day cream), while a missing variant on either side still compares. This
@@ -1283,17 +1328,18 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
 - **Research accounting.** An attempt is written as `started` BEFORE the researcher is called and settled to `found`,
   `not-found` or `failed` after, so a crash in between still counts. `found` is settled only AFTER the formulation is
   stored, so until then the `started` row keeps shielding the product from a concurrent call; if the store fails the
-  attempt is settled `failed` and the error is rethrown. `started`, `found` and `not-found` count against
+  attempt is settled `failed` and the error is rethrown. `started`, `found` and `not-found` count toward
   `dailyResearchBudget` (200 per rolling 24 hours; an attempt exactly 24 hours old still counts); `failed` does not,
-  because an outage costs nothing. If the `started` row cannot be written, the researcher is not called. If settling
+  because an outage costs nothing. **The budget is alert-only:** an attempt made when the count has reached it raises the
+  `research-budget` ops alert (once per UTC day) and goes ahead; research is never refused for it. If the `started` row cannot be written, the researcher is not called. If settling
   fails, the researcher's result or error is returned unchanged and the log line is `{ outcome: 'attempt-bookkeeping-failed' }`,
-  nothing more. Refusals record nothing: a spent budget, a negative-cache hit and an idempotent no-op are all free.
-  If the AI spend cap stops the researcher (`AiBudgetExceededError`, see "AI cost tracking"), the attempt is settled as
+  nothing more. Refusals record nothing: a negative-cache hit and an idempotent no-op are free.
+  If the eval's spend cap stops the researcher (`AiBudgetExceededError`, see "AI cost tracking"), the attempt is settled as
   `failed` (so it neither counts against the budget nor is cached as `not-found`) and the answer is `budget-exhausted`, with
   the same stale fallback.
 - **Negative cache.** A product whose last attempt was `not-found` less than 7 days ago answers `not-found` without
   calling the researcher, so a product nobody can find is not paid for on every scan. A failure is never cached.
-- **Stale fallback.** When the new research is refused or finds nothing, `not-found` and `budget-exhausted` carry
+- **Stale fallback.** When the new research is refused (the negative cache, or the eval's cap) or finds nothing, `not-found` and `budget-exhausted` carry
   `fallbackFormulationId`: the product's stale formulation, but only if it was analysed by the current analysis and
   reference versions. The scan can then show the old, still valid answer instead of failing.
 - **The free-text gate.** Text that came from a web page or the model is shown to users, so it is checked on the way in.
@@ -1339,14 +1385,12 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   at the same two versions make the third throw `PermanentJobError` (the job runner does not retry it), a fourth call
   throws it without calling the model, and `resolve` answers `analysis-failed` instead of `needs-analysis`. A change of
   either version makes the count start again, so a fixed prompt or reference list gets a fresh chance. A call the AI spend
-  cap refuses is settled as `failed` and is not a rejection: `analyse` throws `CatalogBusyError`.
-- **Daily analysis budget.** `started`, `ok` and `rejected` attempts count against `dailyAnalysisBudget` (300 per rolling 24
+  cap (the eval's) refuses is settled as `failed` and is not a rejection: `analyse` throws `CatalogBusyError`.
+- **Daily analysis budget.** `started`, `ok` and `rejected` attempts count toward `dailyAnalysisBudget` (300 per rolling 24
   hours, an attempt exactly 24 hours old still counting); `failed` ones do not, because the model never answered
-  (an outage, or a call the AI spend cap refused), so nothing was paid for. An analysis the model did answer counts as `ok`,
-  even if storing it failed. Rejections still count towards the three strikes. Once the budget is spent, `analyse` throws `CatalogBusyError` (an
-  `UnavailableError`, code `CATALOG_BUSY`) without calling the model; unlike research, which can answer
-  `budget-exhausted`, analysis has no useful result to hand back, so the caller decides what to do (the scan module fails the item as
-  `research-busy`).
+  (an outage, or a call the eval's spend cap refused), so nothing was paid for. An analysis the model did answer counts as `ok`,
+  even if storing it failed. Rejections still count towards the three strikes. **The budget is alert-only:** an attempt made when
+  the count has reached it raises the `analysis-budget` ops alert (once per UTC day) and goes ahead; `analyse` is never refused for it.
 - **The product view carries reference coverage.** `productView(formulationId)` returns the product (with its public
   image URL, or `null`), the formulation with its source, the concerns, and `reference: { version, coverage }`. While
   the seed list is `'partial'`, a result with no concerns is "nothing in the checks we run", never an all-clear, and
@@ -1402,8 +1446,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   `needs-retake` and `needs-identification` wait for the user and are not final: an item in
   either keeps its scan from being done. An `unidentified` item has no reason (the move clears it), no photo and no product, and nothing moves it again: the reaper and the dead-letter hook ignore it, since it is not a working state. **Reasons**: rejected is `face-or-person` or `not-a-beauty-product`;
   `needs-retake` and `needs-identification` carry `unreadable` or `label-not-visible`, the reason of the latest photo; failed is `photo-missing` (the stored photo is gone), `analysis-failed` (the catalog gave up),
-  `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (a daily budget or the AI spend cap stopped the work; the photo is kept, and the user may try again
-  later) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
+  `label-unreadable` (the 3rd back photo could not be read either), `research-busy` (no longer set: a daily budget or the spend cap used to stop the work, and now they only alert; the value stays in the schema for items that already have it, so the API does not change) or `unavailable` (the step ran out of retries, the model's answer could not be used, the item lacked the
   product or formulation its step needs, or it was stuck for over 2 hours); `needs-back-photo` carries `label-unreadable`
   when the last back photo could not be read, was refused by the model, or is gone.
 - **What the app is shown** (`ScanItemView`): id, position, state, reason, `retakesLeft` (only in `needs-retake`: 2, then 1; the key is absent in every
@@ -1458,11 +1501,10 @@ notifications never imports scans) to tell the person when a scan needs them or 
     answer survived a failed enqueue, which the undo does not clear), the recognizer is not called again, and the stored
     confidence decides `matching` or `needs-confirmation`.
   - `match` (`matching`): `catalog.resolve`. `ready` makes the item ready; `needs-analysis` goes to `analysing`;
-    `needs-research` to `researching`; `analysis-failed` fails the item; a busy catalog (`CatalogBusyError`) fails it as
-    `research-busy` without throwing. Missing recognised fields fail the item as `unavailable`.
-  - `research` (`researching`): `catalog.research`. Found goes to `analysing`. Not found, or refused by the budget or spend cap,
-    shows the earlier analysed formulation as `ready` when there is one; otherwise not-found asks for the back photo
-    (`needs-back-photo`) and a refusal fails the item as `research-busy`.
+    `needs-research` to `researching`; `analysis-failed` fails the item. Missing recognised fields fail the item as `unavailable`.
+  - `research` (`researching`): `catalog.research`. Found goes to `analysing`. Not found shows the earlier analysed formulation as
+    `ready` when there is one; otherwise it asks for the back photo (`needs-back-photo`). (The eval's `budget-exhausted` answer cannot
+    happen in production; the step would throw it as `CatalogBusyError` for the queue to retry.)
   - `read-label` (`reading-label`): reads the back photo. A list the reader cannot read, or that the catalog refuses (`LABEL_UNREADABLE`:
     empty, too long, a link or markup), deletes the back photo and asks again; so does a back photo that is missing (ask again, rather than
     fail). What follows depends on the item:
@@ -1470,8 +1512,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
       `analysing`; unreadable, it goes back to `needs-back-photo` with `label-unreadable`, or to `failed` after the 3rd back photo.
     - **An item without one** (it came from `needs-identification`) files the list with `catalog.fromLabel`, sets `recognised` only when the label
       printed a brand and a name, and goes to `ready` when the list is already analysed at the current versions, else to `analysing`; unreadable, it
-      goes back to `needs-identification` with `label-unreadable`, or to `failed` after the 3rd back photo. `CatalogBusyError` (the spend cap stopped a
-      same-product question) fails it as `research-busy` and keeps the back photo.
+      goes back to `needs-identification` with `label-unreadable`, or to `failed` after the 3rd back photo.
 
     The limit is the first `SCAN_POLICY.maxBackPhotos` (3) back photos: the item is allowed 3, counted
     from its `scan_back_photos` rows (`countBackPhotos`), and when the 3rd cannot be read either the item ends `failed` with
@@ -1480,18 +1521,23 @@ notifications never imports scans) to tell the person when a scan needs them or 
     the back photo is deleted from the bucket; the delete comes after the move so an undone move still has its photo, and a
     delete that fails is logged (`photo-cleanup-failed`, ids) and does not fail the step (the object stays in the bucket
     with no row pointing at it). The upload's `scan_back_photos` row stays, so it still counts toward the quota.
-  - `analyse` (`analysing`): `catalog.analyse`, then `ready`. `CatalogBusyError` fails the item as `research-busy` without
-    throwing; the catalog's `PermanentJobError` (the third rejection) fails it as `analysis-failed` and is rethrown so the
+  - `analyse` (`analysing`): `catalog.analyse`, then `ready`. The catalog's `PermanentJobError` (the third rejection) fails it as `analysis-failed` and is rethrown so the
     job runner records the run as failed; any other error is rethrown and the item waits for the retry.
   - **A step that needs an id the item lacks** (`research` without a `productId`, `analyse` without a
     `formulationId`; `read-label` needs none, an item without a product is identified by it) fails the item as `unavailable`, as `match` does, instead of returning silently and leaving it for ever.
   - **What the model can do to a photo.** Imports are of the `*.provider.ts` ports only. `recognise`: `AnthropicRefusalError`
     counts as an `unreadable` photo (a retake, or identification on the 3rd, with the photo deleted); `AnthropicRequestError` (not JSON, cut off
     at `max_tokens`: the same photo would get the same answer) fails it as `unavailable` and throws `PermanentJobError`, so the run is
-    recorded failed and there is no paid retry; `AiBudgetExceededError` fails it as `research-busy`, keeping the photo, without
-    throwing, which is what `research-busy` means everywhere else. `read-label`: refusal and unusable answer are the same as
-    an unreadable label (back to `needs-back-photo` / `label-unreadable`, or `failed` / `label-unreadable` after the 3rd back photo; back photo deleted, no throw); the spend cap fails the
-    item as `research-busy` and keeps the photo. Any other error (`AnthropicUnavailableError`, a bug) is thrown and retried.
+    recorded failed and there is no paid retry. `read-label`: refusal and unusable answer are the same as
+    an unreadable label (back to `needs-back-photo` / `label-unreadable`, or `failed` / `label-unreadable` after the 3rd back photo; back photo deleted, no throw).
+    Any other error (`AnthropicUnavailableError`, a bug) is thrown and retried.
+  - **Claude refuses our account** (`AnthropicConfigError`: a 401, a 402 `billing_error`, which is how no credit shows up, or a 403).
+    `advance` catches it from ANY step (the recognizer, the label reader, the catalog's same-product judge, the researcher, the
+    analyst). It is ours to fix, never the user's, so the item waits: it stays in its working state, the same step is queued again
+    with `at` = now and `delaySeconds: 300` (5 minutes, under a key of its own, so no retry of the message is used), nothing is
+    published, and `updatedAt` is untouched, so the reaper's 2 hour limit still bounds the wait (an item that waits that long
+    ends `failed` / `unavailable`). The `ai-account` ops alert is raised (at most one email an hour however many items wait). The
+    alert never costs the item its wait (`raise` does not throw); a wait that cannot be queued is thrown, for the queue to retry the step.
   - **Waiting for work in progress.** When the catalog says another call is already researching the product
     (`ResearchInProgressError`) or analysing the formulation (`AnalysisInProgressError`), the step leaves the item as it
     is, queues the same step again with `at` = now and `delaySeconds: 30` and returns, so the wait uses none of the
@@ -1516,12 +1562,12 @@ notifications never imports scans) to tell the person when a scan needs them or 
   - **`{ productId }`** (a result of search, no model call): `catalog.choose` says what the product needs, and the item moves through the same
     handling as the `match` step (`moveOn`): `ready`, `analysing` (queues `analyse`), `researching` (queues `research`), or `failed` /
     `analysis-failed` for a product whose analysis was rejected the maximum number of times. `recognised` is set from the chosen product
-    (`catalog.namedProduct`). An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`, the item unchanged.
+    (`catalog.namedProduct`), `recognised.form` included (the product's own form, or `null`). An unknown or unnamed product is 404 `PRODUCT_NOT_FOUND`, the item unchanged.
   - **`{ text }`**: one `NameSplitter.split` call, which has its own `AnthropicClient` with a 15 s timeout (the shared one waits 60 s; the split runs in the request), then the item goes to `matching` with the split's brand, name, variant and category as
     `recognised` and `match` is queued, exactly as a confirmation does; the catalog lookup and any research happen in the queue, not in the request.
-    `not-a-product`, or a refusal, is 400 `NOT_A_PRODUCT_NAME`; `AiBudgetExceededError` is `CatalogBusyError` (503 `CATALOG_BUSY`);
-    `AnthropicUnavailableError` (down, overloaded or timed out) and `AnthropicRequestError` (an unusable answer) are `UnavailableError` (503 `AI_UNAVAILABLE`,
-    "Couldn't read that name right now. Try again in a moment.": it blames no limit) and are logged `{ outcome: 'split-name-failed', error }` with the error name only. In each the item stays where it was, nothing is queued and the user may try again (the one
+    `not-a-product`, or a refusal, is 400 `NOT_A_PRODUCT_NAME`;
+    `AnthropicUnavailableError` (down, overloaded or timed out), `AnthropicRequestError` (an unusable answer) and `AnthropicConfigError` (our account, which also raises the `ai-account` ops alert) are `UnavailableError` (503 `AI_UNAVAILABLE`,
+    "Couldn't read that name right now. Try again in a moment.": it blames no limit and says nothing of our account) and are logged `{ outcome: 'split-name-failed', error }` with the error name only. In each the item stays where it was, nothing is queued and the user may try again (the one
     split is paid for, which the rate limits bound).
   - The move is a guarded `transition` from the state read, so of two simultaneous calls one wins and the other is 409; if the next step cannot be
     queued, the move is undone and the fields it set (`recognised*`, `productId`, `formulationId`) are cleared again.
@@ -1616,7 +1662,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/confirmation` | bearer; JSON `{ brand, name, variant?, form?, category }` | 202 the item, now `matching`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_CONFIRMATION` | none |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/back-photo` | bearer; multipart, one `photo` part | 202 the item, now `reading-label`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_BACK_PHOTO`, 413, 415, 429 | 20 per IP, 10 per user |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/retake` | bearer; multipart, one `photo` part | 202 the item, now `recognising`; 400, 401, 404, 409 `ITEM_NOT_AWAITING_RETAKE`, 413, 415, 429 | 20 per IP, 10 per user |
-  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/identification` | bearer; JSON, exactly one of `{ productId }` or `{ text }` | 202 the item (`matching`, `ready`, `analysing`, `researching` or `failed`); 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`, `NOT_A_PRODUCT_NAME`), 401, 404 `SCAN_NOT_FOUND` or `PRODUCT_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_IDENTIFICATION`, 415, 429, 503 `CATALOG_BUSY` or `AI_UNAVAILABLE` | 20 per IP, 10 per user |
+  | `POST /api/v1/scans/products/{scanId}/items/{itemId}/identification` | bearer; JSON, exactly one of `{ productId }` or `{ text }` | 202 the item (`matching`, `ready`, `analysing`, `researching` or `failed`); 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`, `NOT_A_PRODUCT_NAME`), 401, 404 `SCAN_NOT_FOUND` or `PRODUCT_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_IDENTIFICATION`, 415, 429, 503 `AI_UNAVAILABLE` | 20 per IP, 10 per user |
   | `POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label` | bearer; JSON `{ source, purpose, usedFor, description? }` (fixed words; see `scans.vocabulary.ts`) | 202 the item, now `unidentified` with `noLabel`; 400 (`VALIDATION_FAILED`, `INVALID_PRODUCT_TEXT`), 401, 404 `SCAN_NOT_FOUND`, 409 `ITEM_NOT_AWAITING_NO_LABEL`, 415, 429 | 20 per IP, 10 per user |
   | `GET /api/v1/scans/products/{scanId}/events` | bearer | 200 `text/event-stream` (see "Live updates"); 401, 404 `SCAN_NOT_FOUND` | none |
   | `GET /api/v1/scans/products/photos/{token}` | public (`security: []`): the signed link is the credential | 200 the image bytes; 404 `PHOTO_NOT_FOUND` | none |
@@ -1665,7 +1711,7 @@ notifications never imports scans) to tell the person when a scan needs them or 
 `GET /api/v1/products/search?q=` (`modules/catalog/catalog.routes.ts`, operation `searchProducts`, tag "Products", mounted at `/api/v1/products`) finds
 named products as the user types, so an item that could not be photographed can be identified by picking one
 (`POST .../items/{itemId}/identification` with its `productId`; see "Scan module"). It calls `ProductCatalogService.search`; the response is
-`data: { products: [{ id, brand, name, variant, category, imageUrl }] }`, at most 10, shaped by `catalog.presenter.ts`. It makes no model or web call.
+`data: { products: [{ id, brand, name, variant, form, category, imageUrl }] }` (`form` is one of `PRODUCT_FORMS` or `null`, always present, so a spray and a roll-on of one line are told apart), at most 10, shaped by `catalog.presenter.ts`. It makes no model or web call.
 
 - **Query.** `q` is trimmed, then 2 to 80 characters (`VALIDATION_FAILED` otherwise). The service normalises it with `normaliseText`, so case, accents
   and punctuation do not matter; a query under 2 characters once normalised (`!!`, `a!`) finds nothing, never everything, and the service does not query for it (the route's bound

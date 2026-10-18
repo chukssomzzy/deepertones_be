@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a1b7e2c1-8fd5-4adb-8c35-8179d78c853f",
-  "prevId": "947cd0c0-3f50-4a18-a85c-134ddbb083e3",
+  "id": "6e81ad31-1302-49fe-9904-f96eb3b63b42",
+  "prevId": "e8d25a90-2cba-4b53-8cbd-70e02c61a363",
   "tables": {
     "job_runs": {
       "name": "job_runs",
@@ -999,6 +999,30 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "ops_alert_claims": {
+      "name": "ops_alert_claims",
+      "columns": {
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "window_start": {
+          "name": "window_start",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "otp_challenges": {
       "name": "otp_challenges",
       "columns": {
@@ -1161,81 +1185,6 @@
           "tableTo": "users",
           "columnsFrom": [
             "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "profile_safety": {
-      "name": "profile_safety",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "profile_id": {
-          "name": "profile_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "choices": {
-          "name": "choices",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "reaction_text": {
-          "name": "reaction_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "prescription_text": {
-          "name": "prescription_text",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        }
-      },
-      "indexes": {
-        "profile_safety_profile_id_created_at_idx": {
-          "name": "profile_safety_profile_id_created_at_idx",
-          "columns": [
-            "profile_id",
-            "created_at"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {
-        "profile_safety_profile_id_profiles_id_fk": {
-          "name": "profile_safety_profile_id_profiles_id_fk",
-          "tableFrom": "profile_safety",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
           ],
           "columnsTo": [
             "id"
