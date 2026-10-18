@@ -212,7 +212,7 @@ It prints today, the last 7 days and the last N days in dollars, then each job a
 `ANTHROPIC_MODEL_RESEARCH`, `_VISION`, `_JUDGE` (Haiku) and `_ANALYSIS` (Sonnet) in the same file. Design in "AI cost
 tracking" in `docs/architecture.md`.
 
-To measure the research, analysis and goal-reading steps against fixed cases, run `npm run eval:catalog` (the default `--mode all` includes the goal reader; `-- --mode goals` runs only that, about 40 Haiku calls and a few cents; it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
+To measure the research, analysis, goal-reading and mention-reading steps against fixed cases, run `npm run eval:catalog` (the default `--mode all` includes the goal and mention readers; `-- --mode goals` runs only the first, about 40 Haiku calls and a few cents, and `-- --mode mentions` only the second, about 22 Haiku calls and a few cents; it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
 
 ## ZeptoMail setup
 
@@ -406,7 +406,7 @@ stopped using it.
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
 3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery,
-   the scan items, push delivery and push receipts). A deploy that binds a missing queue fails:
+   the scan items, push delivery, push receipts and the parse of the safety answers). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
@@ -425,6 +425,10 @@ stopped using it.
    npx wrangler queues create deepertones-push-receipts-dlq-staging
    npx wrangler queues create deepertones-push-receipts-production
    npx wrangler queues create deepertones-push-receipts-dlq-production
+   npx wrangler queues create deepertones-parse-safety-staging
+   npx wrangler queues create deepertones-parse-safety-dlq-staging
+   npx wrangler queues create deepertones-parse-safety-production
+   npx wrangler queues create deepertones-parse-safety-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

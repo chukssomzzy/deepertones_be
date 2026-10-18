@@ -30,6 +30,7 @@ import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
 import { AnthropicGoalReader } from './providers/goal-reading/anthropic.goal-reader'
 import { CloudflareQueuesJobQueue } from './providers/job-queue/cloudflare-queues.job-queue'
 import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-reader'
+import { AnthropicMentionReader } from './providers/mention-reading/anthropic.mention-reader'
 import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
 import type { PhotoEnvironment } from './providers/photo-store/photo-store.provider'
@@ -99,6 +100,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'read-label': env.ANTHROPIC_MODEL_VISION,
         'split-name': env.ANTHROPIC_MODEL_JUDGE,
         'read-goal': env.ANTHROPIC_MODEL_JUDGE,
+        'read-mentions': env.ANTHROPIC_MODEL_JUDGE,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })
@@ -110,6 +112,10 @@ export const buildContainer = (env: CloudflareBindings) => {
   // A typed goal is on the first screen and a failure only means the app shows the chips, so the read gives up sooner than the split does.
   const GOAL_READ_TIMEOUT_MS = 8_000
   const goalReaderAnthropic = once(() => newAnthropic(GOAL_READ_TIMEOUT_MS))
+  // The parse of a typed reaction or prescription runs on the queue and nobody waits for it, but one read is one short call: it gives up after
+  // 30 s so a stuck request frees the consumer for the retry, which is billed afresh, rather than holding it for the 60 s a web search turn can take.
+  const MENTION_READ_TIMEOUT_MS = 30_000
+  const mentionReaderAnthropic = once(() => newAnthropic(MENTION_READ_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -137,6 +143,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'scan-items': env.SCAN_ITEMS_QUEUE,
         'push-delivery': env.PUSH_DELIVERY_QUEUE,
         'push-receipts': env.PUSH_RECEIPTS_QUEUE,
+        'parse-safety': env.PARSE_SAFETY_QUEUE,
       }),
   )
 
@@ -214,6 +221,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     () =>
       new SafetyService({
         repository: new D1SafetyRepository(db()),
+        reader: new AnthropicMentionReader(mentionReaderAnthropic()),
+        catalog: catalog(),
+        jobs: jobQueue(),
         now: () => new Date(),
         newId: () => crypto.randomUUID(),
       }),

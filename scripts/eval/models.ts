@@ -12,5 +12,6 @@ export const DEFAULT_MODELS: Record<AiJob, string> = {
   'read-label': 'claude-haiku-5-5',
   'split-name': 'claude-haiku-5-5',
   'read-goal': 'claude-haiku-5-5',
+  'read-mentions': 'claude-haiku-5-5',
   analysis: 'claude-sonnet-5-5',
 }

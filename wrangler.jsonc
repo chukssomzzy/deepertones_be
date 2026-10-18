@@ -55,13 +55,16 @@
   //   npx wrangler queues create deepertones-push-delivery-dlq-development
   //   npx wrangler queues create deepertones-push-receipts-development
   //   npx wrangler queues create deepertones-push-receipts-dlq-development
+  //   npx wrangler queues create deepertones-parse-safety-development
+  //   npx wrangler queues create deepertones-parse-safety-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
     "producers": [
       { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-development" },
       { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-development" },
       { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-development" },
-      { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-development" }
+      { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-development" },
+      { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" }
     ],
     "consumers": [
       {
@@ -103,7 +106,15 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-push-receipts-dlq-development"
       },
-      { "queue": "deepertones-push-receipts-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-push-receipts-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-parse-safety-development",
+        // Nobody waits for a parse, so batching is left to the defaults.
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-parse-safety-dlq-development"
+      },
+      { "queue": "deepertones-parse-safety-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -234,13 +245,16 @@
       //   npx wrangler queues create deepertones-push-delivery-dlq-staging
       //   npx wrangler queues create deepertones-push-receipts-staging
       //   npx wrangler queues create deepertones-push-receipts-dlq-staging
+      //   npx wrangler queues create deepertones-parse-safety-staging
+      //   npx wrangler queues create deepertones-parse-safety-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
           { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-staging" },
           { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-staging" },
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-staging" },
-          { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-staging" }
+          { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-staging" },
+          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" }
         ],
         "consumers": [
           {
@@ -282,7 +296,15 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-push-receipts-dlq-staging"
           },
-          { "queue": "deepertones-push-receipts-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-push-receipts-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-parse-safety-staging",
+            // Nobody waits for a parse, so batching is left to the defaults.
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-parse-safety-dlq-staging"
+          },
+          { "queue": "deepertones-parse-safety-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -378,13 +400,16 @@
       //   npx wrangler queues create deepertones-push-delivery-dlq-production
       //   npx wrangler queues create deepertones-push-receipts-production
       //   npx wrangler queues create deepertones-push-receipts-dlq-production
+      //   npx wrangler queues create deepertones-parse-safety-production
+      //   npx wrangler queues create deepertones-parse-safety-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
           { "binding": "OTP_DELIVERY_QUEUE", "queue": "deepertones-otp-delivery-production" },
           { "binding": "SCAN_ITEMS_QUEUE", "queue": "deepertones-scan-items-production" },
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-production" },
-          { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-production" }
+          { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-production" },
+          { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" }
         ],
         "consumers": [
           {
@@ -426,7 +451,15 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-push-receipts-dlq-production"
           },
-          { "queue": "deepertones-push-receipts-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-push-receipts-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-parse-safety-production",
+            // Nobody waits for a parse, so batching is left to the defaults.
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the parse failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-parse-safety-dlq-production"
+          },
+          { "queue": "deepertones-parse-safety-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that

@@ -165,6 +165,11 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   attempt recorded one), so the cause survives.
 - **Bookkeeping failures** (D1 down, a hook that throws) are logged as `dispatcher-error` and the
   message is retried with backoff; they do not lose it. The purge failing is logged only.
+- **The `parse-safety` job** (`modules/safety`: `safety.job-specs.ts`, `safety.jobs.ts`; logic in `SafetyService.parse`) reads the words a user typed beside "a product gave
+  me a reaction" and "I use a prescription" (see "Safety facts (onboarding)"). It is on its own `parse-safety` queue and dead-letter queue in all three `wrangler.jsonc` blocks
+  (binding `PARSE_SAFETY_QUEUE`; created before the first deploy that binds them, README "Before the first deploy"). The body is `{ safetyId }` and nothing else, so no word of
+  the text is in the queue, and the key is `parse-safety:<safetyId>`. Nobody waits for it, so it lets the defaults batch it, keeps the standard 5 attempts (`max_retries` 4) and
+  retries like the receipt check (30 s x3 up to 600 s); `onDeadLetter` is `markParseFailed`.
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body, { delaySeconds? })`, typed by the job's
   schema; the delay holds the message back, for a wait that must not use up retries), with a Cloudflare Queues adapter and an in-memory fake. Services never see bindings.
 - **`buildJobRuntime(env)`** in `container.ts` returns `{ services, jobRuns }` for the dispatcher.
@@ -737,7 +742,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 ### Goals (onboarding)
 `modules/goals` holds `profile_goals` (migration 0020), `D1GoalsRepository` (`append`, `current`, `history`) and `GoalsService` (`set`, `current`, `requireGoal`, `onboarding`).
 It is the first step of the first run: a guest says what they want their skin to look like and gets the app's honest answer straight away. Issue #82
-is built in four pull requests; the goal is the first two (the six chips, and typed words read by the goal reader), and the safety answers are the third (see "Safety facts (onboarding)").
+is built in four pull requests; the goal is the first two (the six chips, and typed words read by the goal reader), the safety answers are the third, and the parse of their reaction and prescription words is the fourth (see "Safety facts (onboarding)").
 
 - **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
   `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the six goals or null, `text` is the user's own
@@ -787,8 +792,10 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Still to come.** Pull request 4 reads the products and ingredients named in reaction and prescription text in the background.
 
 ### Safety facts (onboarding)
-`modules/safety` holds `profile_safety` (migration 0021), `D1SafetyRepository` (`append`, `current`, `history`) and `SafetyService` (`set`, `current`,
-`currentOrNull`, `requireAnswered`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", and the third pull request of issue #82.
+`modules/safety` holds `profile_safety` (migration 0021) and `safety_mentions` (migration 0022), `D1SafetyRepository` (`append`, `find`, `current`, `history`,
+`setParseState`, `appendMentions`, `mentions`, `resolveMention`) and `SafetyService` (`set`, `current`, `currentOrNull`, `currentMentions`, `requireAnswered`, and for the
+queue `parse` and `markParseFailed`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", the third pull request of issue #82; the parse of the
+two texts is the fourth.
 
 - **The choices.** `SAFETY_CHOICES` (`safety.vocabulary.ts`) is `pregnant`, `breastfeeding`, `reaction` ("a product gave me a reaction"), `prescription` and
   `none`, in the order the app shows them. The service stores and returns the ticked choices once each, in that order, whatever order or repeats were sent.
@@ -810,11 +817,47 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **The guard.** `requireAnswered()` answers the current view, or 409 `SAFETY_ANSWERS_REQUIRED` for a profile that has not answered ("none" is an answer). With
   `GoalsService.requireGoal()` it is what the verdict and the routine will call, so no routine rests on a missing answer. Scans need neither, so the shelf photo stays
   part of the hook. Neither guard is wired to a route yet.
-- **Parsing is the next pull request, and it only ever adds caution.** The next pull request reads the products and ingredients named in `reactionText` and
-  `prescriptionText` in the background. What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove any.
-- **Logs never carry the text.** The service logs nothing; tests spy on the console to keep it so. The words are user input and may be personal.
+- **Parsing the two texts only ever adds caution.** What the user typed, and the tick itself, always count; whatever is parsed from it can only add caution, never remove
+  any, and nothing the model says about a product's contents is ever kept (see below). A parse that fails, or never runs, takes nothing away.
+- **The parse state** is two columns on `profile_safety` (migration 0022, additive: plain `ADD COLUMN`s, no table rebuild). `parse_state` is `none` (no words, and every
+  row saved before the parse existed), `pending` (words were saved and the parse has not finished), `done` or `failed` (the dead-letter queue was reached). `parse_due_at` is
+  when the parse was meant to run. `set` writes `pending` and queues one `parse-safety` message carrying the row's id for an answer with any words (one message, not two,
+  for both texts); an answer without words, or "none of these", is `none` and queues nothing.
+- **At most one parse per profile per hour.** The message is held back (`delaySeconds`) until an hour after the newest earlier answer of the same profile that had
+  words, counted from when that answer was saved and whatever became of its parse (answers without words do not count), and `parse_due_at` is the time it was held to.
+  An hour or more later it is not held. The limit is the service's own: the saves are not rate limited, only the parse is.
+- **A queue that is down never fails the save.** The enqueue error is logged as `{ outcome: 'parse-enqueue-failed', safetyId }` (no message, no words) and swallowed; the
+  row stays `pending`.
+- **Repair on read.** `current()` (so `GET /safety`) queues the parse again, with no delay, when the current row is still `pending` more than 10 minutes after
+  `parse_due_at` (a lost message, or the queue was down at the save). The row's key makes a repeat one run. It looks only at the current row, answers the same view, and a
+  queue that is down is logged and never fails the read.
+- **`parse(safetyId)`** runs as the system actor, so it never calls `requireUser`, and is safe to run again. A row that does not exist, or is not `pending`, is left alone;
+  one that a newer answer of its profile has replaced is marked `done` with no call (the newer one has its own job). Otherwise:
+  1. If nothing is stored for the row yet, it reads the reaction text and then the prescription text with the `MentionReader`, and only when BOTH reads have finished
+     stores every mention in ONE `appendMentions` batch, numbered in the order read (the numbering goes on through the second text). A retry after a read failed
+     therefore reads again and cannot lose what the second text names; once mentions are stored, a retry does not read again. A refusal or a rejected request leaves that
+     text with no mentions (the words still count) and the parse goes on; the AI budget, an outage and a config error throw, and the job retries.
+  2. A product is stored `unresolved` at once when it has no brand or no category (the catalog needs both; the reader leaves a brand null for "the white tub from the
+     market"), and so is every product past the first three that could be looked up in the answer (counted across both texts, in order). The rest are `pending`.
+     An ingredient has no resolution and is never sent to the catalog.
+  3. Each `pending` product is looked up with the same two catalog calls a typed name gets, with no scan item: `resolve({ brand, name, category, variant? })`, and for
+     `needs-research` `research(productId)`. `ready`, `needs-analysis`, `analysis-failed` and a `found` research are `resolved` with the catalog's `productId`; `not-found` is
+     `unresolved` with the `productId` kept, even when the catalog offers a stale formulation (never taken as an answer). `budget-exhausted` throws `CatalogBusyError`,
+     and `ResearchInProgressError` and `CatalogBusyError` from the catalog pass through, each leaving that product `pending` for the retry. Each outcome is stored as soon
+     as it is known, so a retry asks the catalog only about the products still `pending`. The parse does not analyse a formulation: that stays the scan's business.
+  4. The row is marked `done`.
+  `markParseFailed` (the dead-letter hook) moves a `pending` row to `failed` and leaves a `done` one alone; the words and the choices stay as they were.
+- **Ingredients never come from model memory.** The reader names only what the person wrote, and a product's ingredients come from the catalog's research alone, so
+  a mention is a name the person typed and a `product_id` is a catalog product. Nothing about what is in a product is taken from the model.
+- **`safety_mentions`** (migration 0022): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction` or `prescription`),
+  `kind` (`product` or `ingredient`), `brand`, `name`, `variant`, `category` (null for an ingredient or when unknown), `product_id` (a catalog id with no foreign key, like
+  `scan_items.product_id`), `resolution` (`pending`, `resolved`, `unresolved`; null for an ingredient), `position` and `created_at`; indexed on (`safety_id`, `position`).
+  `appendMentions` is one `db.batch` (all or nothing; an empty list does nothing). `currentMentions()` answers the current row's mentions in order for the services that
+  will use them; no route exposes them yet, and the `SafetyView` and the API stay exactly as they were.
+- **Logs carry ids and outcomes only**, never the words, a brand or a name, and a successful parse logs nothing of its own (the dispatcher logs `{ job, key, attempt, outcome }`).
+  Tests spy on the console to keep it so. The words are user input and may be personal.
 - **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. They have no rate limit of their own:
-  a save is one row and calls no model.
+  a save is one row, queues a parse when it has words, and calls no model itself.
 
 ### Prompts
 
@@ -826,7 +869,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`. The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -955,6 +998,19 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   **`wantsLighter: true` is always `{ goal: 'brighter', wantsLighter: true }`**, whatever goal the model gave: asking to be lighter is a real goal that
   gets a real answer, not a refusal. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an unavailable model and a
   rejected request are thrown as the client's errors; `GoalsService` decides what each means.
+- **`AnthropicMentionReader`** (`read-mentions`, port `MentionReader`, in `providers/mention-reading/`; `MemoryMentionReader` is the fake, with `calls`, `respondWith` and
+  `failNextWith`) lists the products and ingredients named in the words typed beside "a product gave me a reaction" and "I use a prescription": `read(text)` answers
+  `Mention[]`, a `{ kind: 'product', brand | null, name, variant?, category | null }` or an `{ kind: 'ingredient', name }`. The text is the only thing in the user message
+  (no lead-in, and the system prompt never carries it), and the prompt tells the model it is user-supplied data whose instructions are ignored, to copy the person's words,
+  never to list a product's ingredients from memory, and that a thing with no name is a product with no brand. The schema is one closed object with a required `mentions`
+  list of closed items, every one of `kind` (product or ingredient), `brand`, `name`, `variant` and `category` (the five, or `none`) required, with no `default`, `minItems`
+  or `maxItems`; the leniency is in the parse alone. A reply that is not an object, or whose `mentions` is not a list, is no mentions; an item off the schema is dropped on
+  its own; a category outside the five is null and the mention is kept. Bounds, as for the splitter: a trimmed field is at most 120 characters, with no link, markup or hidden
+  character (`\p{Cc}`, `\p{Cf}`), and a product or ingredient needs a name. **Provenance**, the splitter's rule: every brand, name, variant and ingredient name must be, after
+  `normaliseText` and with the spaces removed, a stretch of the typed text, or the same words in another order as a run of typed words that sit together ("White Caro" typed, "Caro White" read); a mention that fails is dropped whole (so
+  an ingredient the model supplied from what it knows never gets through), the category is exempt, and a product with no brand needs no brand check. An ingredient is
+  returned as its name alone. At most 10 mentions are kept, counted after dropping. Runs on the judge model (`ANTHROPIC_MODEL_JUDGE`) with `max_tokens` 4096. A refusal, an
+  unavailable model and a rejected request are thrown as the client's errors; `SafetyService.parse` decides what each means.
 
 ### AI cost tracking
 Every Claude request is counted against a daily dollar cap. This is the app's only spend cap: by the owner's decision
@@ -1002,10 +1058,10 @@ there is no Console spend limit behind it, so the code is the backstop.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `read-label`, `split-name`, `read-goal`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name and read-goal) and `_VISION`
+  `recognize`, `read-label`, `split-name`, `read-goal`, `read-mentions`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions) and `_VISION`
   (image-check, recognize and read-label). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `read-label` and `split-name` serve the
-  scan flow (see "Scan module"); `read-goal` serves onboarding (see "Goals (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
+  scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
   by the eval's research mode (`npm run eval:catalog -- --mode research`), and the Models API field
@@ -1679,7 +1735,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   `abortAllDurableObjects()` after cancelling its streams.
 
 ### Catalog eval
-`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the model-backed catalog steps, and the goal reader, against fixed cases in
+`npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the model-backed catalog steps, and the goal and mention readers, against fixed cases in
 `scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested.
 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
@@ -1693,8 +1749,15 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   each case expects (`scoreGoalReading`; problem codes `goal:<expected>-got-<actual>`, `wantsLighter:<expected>-got-<actual>` and `error:<name>`).
   The cases turn on one distinction: `wantsLighter` is true only for someone who asks to be lighter, never for one who mentions a lightening product they
   used, who lightens spots, or who refuses it. It is part of `--mode all`; `--mode goals` runs it alone (about 40 Haiku calls, a few cents).
+- **Mentions mode** runs `AnthropicMentionReader` on `MENTION_CASES` (22 cases of typed reaction and prescription words, Nigerian English and Pidgin, injections
+  included) and scores what it found against what each case names (`scoreMentions`). A product is found when the words of its brand and name together are the expected
+  ones (case, accents and punctuation ignored, `&` as "and", and the generic words cream, lotion, soap, gel, serum, oil and jelly left out) and it has a brand exactly when
+  the expected one does; an ingredient is found when its name is the expected one with case, punctuation and spacing ignored; category and variant are not scored. A reader
+  that invents a mention, or lists a product's ingredients from memory, fails as much as one that misses: problem codes are `missing-product:<name>`,
+  `missing-ingredient:<name>`, `extra-products:<n>`, `extra-ingredients:<n>` (counted, never named, so no model word is in a problem) and `error:<name>`. A product with no brand
+  that a case does not expect is not counted. It is part of `--mode all`; `--mode mentions` runs it alone (about 22 Haiku calls, a few cents).
 - **Cost.** One analysis call per analysis case (6), one web-search research turn per research case (7, up to 5
-  searches each) and one Haiku call per goal case, run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
+  searches each) and one Haiku call per goal case and per mention case, run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
   The run is capped in dollars too: the client gets a `MemoryAiSpendLedger` capped at `--max-usd` (default 2), so it
   cannot bill more, and once the cap is reached the remaining cases fail as `AiBudgetExceededError` without a call. The
   console table has a cost column per case and the total in USD; the report carries `costMicros` per case and in `summary`.
