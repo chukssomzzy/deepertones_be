@@ -739,7 +739,7 @@ It is the first step of the first run: a guest says what they want their skin to
 is built in four pull requests; this is the second (the six chips, and typed words read by the goal reader).
 
 - **History, not a single value.** `profile_goals` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by
-  `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the five goals or null, `text` is the user's own
+  `created_at` is the current goal, read through the `(profile_id, created_at)` index. Rows that share a `created_at` are ordered by `rowid`, so the one appended later is the current goal. `goal` is one of the six goals or null, `text` is the user's own
   words or null, `wants_lighter` and `answers_version` are always written. Rows go with their profile, so guest cleanup needs no cleaner of its own,
   and a guest who signs up keeps the goal (promotion keeps the profile).
 - **The six goals are the catalog's.** `GOALS` (`goals.vocabulary.ts`) is the catalog's `goal:` traits without the prefix, in the same order, so a
