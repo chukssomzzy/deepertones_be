@@ -186,9 +186,15 @@ no bucket, domain or secret to create. Keep it private: never attach a custom do
 
 ### AI spend cap
 
-Every Claude request is counted against a daily dollar cap, `AI_DAILY_BUDGET_USD` in `wrangler.jsonc` (a `var` in each
-environment: `1` locally, `5` on staging, `30` on production; it must be a positive number). It resets at 00:00 UTC. It is
-the app's only spend cap: there is no Console limit behind it, by decision, so change it in the config. The
+Every Claude request is reserved and settled in the ledger and counted against a daily dollar figure, `AI_DAILY_BUDGET_USD` in
+`wrangler.jsonc` (a `var` in each environment: `1` locally, `5` on staging, `30` on production; it must be a positive
+number). It resets at 00:00 UTC. **It only alerts**: the first call past it emails `OPS_ALERT_EMAIL` (once that UTC day) and
+no call is ever refused, so it can never leave a user's scan stuck. There is no Console limit behind it, by decision, so
+change it in the config. The catalog's daily research (200) and analysis (300) budgets are alert-only in the same way, and
+so is Claude refusing our account (no credit, a bad key, permissions): the scan item waits and asks again every 5 minutes,
+and the alert email goes out at most once an hour. Set `OPS_ALERT_EMAIL` (a `var` in each environment, empty until you
+fill it in; an empty one logs and drops the alert) to the address that should get them; see "Ops alerts" in
+`docs/architecture.md`. The
 `ai_usage` table (migration 0008) holds the record, so run the migrations on an environment before deploying to it. To see
 what has been spent:
 
@@ -393,8 +399,9 @@ stopped using it.
    | `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account the Workers live in.                                                        |
    | `RELEASE_PLEASE_TOKEN`  | Fine-grained PAT on this repo with Contents and Pull requests: read and write.                    |
 
-3. Create the job queues (two per job per environment: the job's queue and its dead-letter queue; OTP delivery,
-   the scan items, push delivery and push receipts). A deploy that binds a missing queue fails:
+3. Create the job queues (two per queue per environment: the queue and its dead-letter queue; OTP delivery,
+   the scan items, push delivery, push receipts and the shared `email` queue, which carries the ops alert emails and any
+   later email job). A deploy that binds a missing queue fails:
 
    ```sh
    npx wrangler queues create deepertones-otp-delivery-staging
@@ -413,6 +420,10 @@ stopped using it.
    npx wrangler queues create deepertones-push-receipts-dlq-staging
    npx wrangler queues create deepertones-push-receipts-production
    npx wrangler queues create deepertones-push-receipts-dlq-production
+   npx wrangler queues create deepertones-email-staging
+   npx wrangler queues create deepertones-email-dlq-staging
+   npx wrangler queues create deepertones-email-production
+   npx wrangler queues create deepertones-email-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
