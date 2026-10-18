@@ -9,6 +9,7 @@ import { ProductCatalogService } from '../../src/modules/catalog/catalog.service
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
+import { inOneRateWindow, RATE_TEST_TIMEOUT_MS, SEARCH_BURST_NEEDS_MS } from './rate-window'
 import type { ProductForm } from '../../src/providers/product-research/product-researcher.provider'
 import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
@@ -266,39 +267,45 @@ describe('GET /api/v1/products/search', () => {
 
   describe('rate limits', () => {
     it('answers 429 RATE_LIMITED to the 61st search of one user in a minute, from any address', async () => {
-      const guest = await newGuest()
-      const statuses: number[] = []
-      let limited: Awaited<ReturnType<typeof search>> | undefined
-      for (let i = 0; i < 61; i++) {
-        const res = await search(guest, 'serum', freshIp())
-        statuses.push(res.status)
-        if (res.status === 429) limited = res
-      }
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const guest = await newGuest()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof search>> | undefined
+        for (let i = 0; i < 61; i++) {
+          const res = await search(guest, 'serum', freshIp())
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: SEARCH_BURST_NEEDS_MS })
 
       expect(statuses.slice(0, 60)).not.toContain(429)
       expect(statuses[60]).toBe(429)
       expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
       expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-    })
+    }, RATE_TEST_TIMEOUT_MS)
 
     it('answers 429 RATE_LIMITED to the 121st search from one address in a minute, whoever sends it', async () => {
-      const shared = freshIp()
-      const statuses: number[] = []
-      let limited: Awaited<ReturnType<typeof search>> | undefined
-      // Each user stays well under its own limit; only the shared address adds up.
-      let guest = await newGuest()
-      for (let i = 0; i < 121; i++) {
-        if (i % 40 === 0) guest = await newGuest()
-        const res = await search(guest, 'serum', shared)
-        statuses.push(res.status)
-        if (res.status === 429) limited = res
-      }
+      const { statuses, limited } = await inOneRateWindow(async () => {
+        const shared = freshIp()
+        const statuses: number[] = []
+        let limited: Awaited<ReturnType<typeof search>> | undefined
+        // Each user stays well under its own limit; only the shared address adds up.
+        let guest = await newGuest()
+        for (let i = 0; i < 121; i++) {
+          if (i % 40 === 0) guest = await newGuest()
+          const res = await search(guest, 'serum', shared)
+          statuses.push(res.status)
+          if (res.status === 429) limited = res
+        }
+        return { statuses, limited }
+      }, { needMs: SEARCH_BURST_NEEDS_MS })
 
       expect(statuses.slice(0, 120)).not.toContain(429)
       expect(statuses[120]).toBe(429)
       expect(await errorCodeOf(limited!)).toBe('RATE_LIMITED')
       expect(retryAfterOf(limited!)).toBeGreaterThan(0)
-    })
+    }, RATE_TEST_TIMEOUT_MS)
   })
 })
 

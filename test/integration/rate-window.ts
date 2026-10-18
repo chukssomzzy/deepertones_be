@@ -8,6 +8,8 @@ export const RATE_WINDOW_MS = 60 * 1000
 export const SAFE_WINDOW_MS = 20 * 1000
 /** A burst of up to ~21 requests needs this much of a window left; generous, as the full suite runs the bursts slowly. */
 export const BURST_NEEDS_MS = 30 * 1000
+/** The 121-request product search burst (a sign-in every 40 searches); measured at about 2 s locally; 15 s is a wide margin for a slow runner without waiting out most of a window. */
+export const SEARCH_BURST_NEEDS_MS = 15 * 1000
 /** Worst case: a wait for the next window (<= 60 s), a burst that straddles it, another wait, and a second burst. */
 export const RATE_TEST_TIMEOUT_MS = 2 * RATE_WINDOW_MS + 60 * 1000
 
