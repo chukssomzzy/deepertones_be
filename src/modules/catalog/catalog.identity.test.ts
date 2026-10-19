@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brandFirstWord, brandKey, identityKey, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
 
 // stripSizes may leave a space where the token was; the identity key is what trims it.
 const tidy = (s: string) => s.replace(/\s+/g, ' ').trim()
@@ -244,7 +244,7 @@ describe('nearMissCandidates', () => {
   const plusInVariant = product('b', 'Hydrating Facial Cleanser', 'Plus') // 4/5 = 0.8
   const shorter = product('d', 'Hydrating Cleanser') // 3/4 = 0.75
   const atThreshold = product('c', 'Hydrating Facial Cleanser for Normal') // 4/6 = 0.667
-  const belowThreshold = product('e', 'Hydrating Facial Cleanser for Normal Dry') // 4/7 = 0.571
+  const belowThreshold = product('e', 'Hydrating Foaming Cleanser for Normal Dry') // 3/8 = 0.375, and the target's words are not all inside it
   const otherBrand = product('f', 'Hydrating Facial Cleanser Plus', undefined, 'Nivea')
   const unrelated = product('g', 'Foaming Body Wash')
 
@@ -272,12 +272,12 @@ describe('nearMissCandidates', () => {
   })
 
   it('includes a product whose combined brand, name and variant words are at exactly the default threshold of 0.6', () => {
-    // {acme, serum, glow} against {acme, serum, glow, night, oil}: 3/5.
-    const atBoundary = product('at', 'Serum Glow Night Oil', undefined, 'Acme')
-    // {acme, serum, glow} against {acme, serum, glow, night, oil, mask}: 3/6.
-    const justUnder = product('under', 'Serum Glow Night Oil Mask', undefined, 'Acme')
+    // {acme, serum, glow, night} against {acme, serum, glow, oil}: 3/5. Each lacks a word of the other, so neither is a containment.
+    const atBoundary = product('at', 'Serum Glow Oil', undefined, 'Acme')
+    // {acme, serum, glow, night} against {acme, serum, glow, oil, mask}: 3/6.
+    const justUnder = product('under', 'Serum Glow Oil Mask', undefined, 'Acme')
 
-    expect(ids(nearMissCandidates({ brand: 'Acme', name: 'Serum Glow' }, [atBoundary, justUnder]))).toEqual(['at'])
+    expect(ids(nearMissCandidates({ brand: 'Acme', name: 'Serum Glow Night' }, [atBoundary, justUnder]))).toEqual(['at'])
   })
 
   it('returns at most 3 by default', () => {
@@ -289,10 +289,17 @@ describe('nearMissCandidates', () => {
   })
 
   it('honours a custom threshold', () => {
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.65, limit: 10 }))).toEqual(['a', 'b', 'd', 'c'])
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.7, limit: 10 }))).toEqual(['a', 'b', 'd'])
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.75, limit: 10 }))).toEqual(['a', 'b', 'd'])
-    expect(ids(nearMissCandidates(target, all, { threshold: 0.76, limit: 10 }))).toEqual(['a', 'b'])
+    // Containment bypasses the threshold, so these are all partial overlaps: {cerave, hydrating, facial, cleanser, gentle, foaming} against each.
+    const base = { brand: 'CeraVe', name: 'Hydrating Facial Cleanser Gentle Foaming' }
+    const five = product('x1', 'Hydrating Facial Cleanser Gentle Plus') // 5 shared of 7: 0.714
+    const withExtras = product('x3', 'Hydrating Facial Cleanser Gentle Plus Night') // 5 of 8: 0.625
+    const four = product('x2', 'Hydrating Facial Cleanser Plus Night') // 4 of 8: 0.5
+    const list = [four, withExtras, five]
+
+    expect(ids(nearMissCandidates(base, list, { threshold: 0.5, limit: 10 }))).toEqual(['x1', 'x3', 'x2'])
+    expect(ids(nearMissCandidates(base, list, { threshold: 0.6, limit: 10 }))).toEqual(['x1', 'x3'])
+    expect(ids(nearMissCandidates(base, list, { threshold: 0.7, limit: 10 }))).toEqual(['x1'])
+    expect(ids(nearMissCandidates(base, list, { threshold: 0.72, limit: 10 }))).toEqual([])
   })
 
   it('matches the brand by its normalised key', () => {
@@ -340,5 +347,116 @@ describe('nearMissCandidates', () => {
 
   it('returns nothing when there are no products', () => {
     expect(nearMissCandidates(target, [])).toEqual([])
+  })
+
+  // A reading whose words are all inside another's is a candidate however low the Jaccard ratio falls; the same-product judge is the gate.
+  describe('by containment', () => {
+    it.each([
+      ['NIVEA "soft" inside "Soft Light Moisturiser"', { brand: 'NIVEA', name: 'soft' }, { brand: 'NIVEA', name: 'Soft Light Moisturiser' }],
+      ["Palmer's formula inside the same with Daily Body Lotion", { brand: "Palmer's", name: 'Cocoa Butter Formula' }, { brand: "Palmer's", name: 'Cocoa Butter Formula Daily Body Lotion' }],
+      ["Palmer's formula inside the same with Vitamin E", { brand: "Palmer's", name: 'Cocoa Butter Formula' }, { brand: "Palmer's", name: 'Cocoa Butter Formula with Vitamin E' }],
+      ['Cetaphil with no variant inside Cetaphil with one', { brand: 'Cetaphil', name: 'Gentle Skin Cleanser' }, { brand: 'Cetaphil', name: 'Gentle Skin Cleanser', variant: 'For all skin types' }],
+    ])('returns a stored product when %s (scanned is the shorter)', (_label, scanned, stored) => {
+      expect(ids(nearMissCandidates(scanned, [{ id: 'stored', ...stored }]))).toEqual(['stored'])
+    })
+
+    it.each([
+      ['NIVEA "Soft Light Moisturiser" scanned, "soft" stored', { brand: 'NIVEA', name: 'Soft Light Moisturiser' }, { brand: 'NIVEA', name: 'soft' }],
+      ['Cetaphil with a variant scanned, none stored', { brand: 'Cetaphil', name: 'Gentle Skin Cleanser', variant: 'For all skin types' }, { brand: 'Cetaphil', name: 'Gentle Skin Cleanser' }],
+    ])('returns a stored product when %s (stored is the shorter)', (_label, scanned, stored) => {
+      expect(ids(nearMissCandidates(scanned, [{ id: 'stored', ...stored }]))).toEqual(['stored'])
+    })
+
+    it('finds the containment where the Jaccard ratio alone is under the threshold', () => {
+      // {nivea, soft} against {nivea, soft, light, moisturiser}: 2/4 = 0.5.
+      const found = nearMissCandidates({ brand: 'NIVEA', name: 'soft' }, [{ id: 'x', brand: 'NIVEA', name: 'Soft Light Moisturiser' }])
+      expect(ids(found)).toEqual(['x'])
+    })
+
+    it('does not make a candidate of a reading that only overlaps without being contained', () => {
+      // "Moisturizing Cream" is not inside "Soft Light Moisturiser", and 2/6 is under the threshold.
+      const found = nearMissCandidates({ brand: 'NIVEA', name: 'Soft Moisturizing Cream' }, [{ id: 'x', brand: 'NIVEA', name: 'Soft Light Moisturiser' }])
+      expect(found).toEqual([])
+    })
+
+    it.each([
+      ['Vaseline Cocoa Radiant and Aloe Soothe', { brand: 'Vaseline', name: 'Cocoa Radiant' }, { brand: 'Vaseline', name: 'Aloe Soothe' }],
+      ['Cantu Leave-In and Curling Cream', { brand: 'Cantu', name: 'Leave-In Conditioning Repair Cream' }, { brand: 'Cantu', name: 'Curling Cream' }],
+      ['The Ordinary Niacinamide 10% + Zinc 1% and Hyaluronic Acid 2% + B5', { brand: 'The Ordinary', name: 'Niacinamide 10% + Zinc 1%' }, { brand: 'The Ordinary', name: 'Hyaluronic Acid 2% + B5' }],
+      ['NIVEA Soft and Creme', { brand: 'NIVEA', name: 'Soft' }, { brand: 'NIVEA', name: 'Creme' }],
+    ])('keeps look-alikes apart: %s are not candidates of each other', (_label, a, b) => {
+      expect(nearMissCandidates(a, [{ id: 'b', ...b }])).toEqual([])
+      expect(nearMissCandidates(b, [{ id: 'a', ...a }])).toEqual([])
+    })
+
+    it('leaves AM and PM lotions to the Jaccard rule as before: still candidates, never merged without the judge', () => {
+      // {cerave, am, facial, moisturizing, lotion} against the PM one: 4/6, as before the containment rule.
+      const found = nearMissCandidates({ brand: 'CeraVe', name: 'AM Facial Moisturizing Lotion' }, [{ id: 'pm', brand: 'CeraVe', name: 'PM Facial Moisturizing Lotion' }])
+      expect(ids(found)).toEqual(['pm'])
+    })
+
+    it('never makes a candidate of a reading that is only the brand, which every product of the brand contains', () => {
+      const brandOnly = nearMissCandidates({ brand: 'NIVEA', name: '' }, [
+        { id: 'a', brand: 'NIVEA', name: 'Soft Light Moisturiser' },
+        { id: 'b', brand: 'NIVEA', name: 'Creme' },
+      ])
+      const brandAsName = nearMissCandidates({ brand: 'NIVEA', name: 'Nivea' }, [{ id: 'a', brand: 'NIVEA', name: 'Soft Light Moisturiser' }])
+
+      expect(brandOnly).toEqual([])
+      expect(brandAsName).toEqual([])
+    })
+
+    it('does not make a stored brand-only product a candidate of every reading either', () => {
+      expect(nearMissCandidates({ brand: 'NIVEA', name: 'Soft Light Moisturiser' }, [{ id: 'bare', brand: 'NIVEA', name: '' }])).toEqual([])
+    })
+
+    it('does not pool a pack size into the containment: a size-only difference is the same key, not a candidate', () => {
+      expect(nearMissCandidates({ brand: 'NIVEA', name: 'Soft 200ml' }, [{ id: 'same', brand: 'NIVEA', name: 'Soft' }])).toEqual([])
+    })
+
+    it('still leaves out another brand family, however fully contained', () => {
+      expect(nearMissCandidates({ brand: 'NIVEA', name: 'Soft' }, [{ id: 'o', brand: 'Dove', name: 'Soft Light Moisturiser' }])).toEqual([])
+    })
+
+    it('still leaves out a product with the target\'s identity key', () => {
+      expect(nearMissCandidates({ brand: 'NIVEA', name: 'Soft' }, [{ id: 'same', brand: ' nivea ', name: 'SOFT' }])).toEqual([])
+    })
+
+    it('keeps "NIVEA soft" a containment of "NIVEA Soft Light Moisturiser": soft is neither the brand nor a generic word', () => {
+      expect(ids(nearMissCandidates({ brand: 'NIVEA', name: 'soft' }, [{ id: 'x', brand: 'NIVEA', name: 'Soft Light Moisturiser' }]))).toEqual(['x'])
+    })
+
+    it.each([
+      ['Body Wash in Go Fresh Body Wash', { brand: 'Dove', name: 'Body Wash' }, { brand: 'Dove', name: 'Go Fresh Body Wash' }],
+      ['Daily Lotion in Daily Body Lotion Radiant', { brand: 'Vaseline', name: 'Daily Lotion' }, { brand: 'Vaseline', name: 'Daily Body Lotion Radiant' }],
+      ['Original Soap in Original Black Soap', { brand: 'Dudu', name: 'Original Soap' }, { brand: 'Dudu', name: 'Original Black Soap' }],
+    ])('is not a containment when the shorter side has only brand and generic words: %s', (_label, scanned, stored) => {
+      expect(nearMissCandidates(scanned, [{ id: 'stored', ...stored }], { threshold: 0.99 })).toEqual([])
+    })
+
+    it('leaves the generic-only reading to the Jaccard rule, where it can still be a candidate', () => {
+      // {dove, body, wash} against {dove, go, fresh, body, wash}: 3/5 = 0.6.
+      expect(ids(nearMissCandidates({ brand: 'Dove', name: 'Body Wash' }, [{ id: 'g', brand: 'Dove', name: 'Go Fresh Body Wash' }]))).toEqual(['g'])
+    })
+
+    it('ranks a containment candidate by similarity with the rest, and the limit still applies', () => {
+      const scanned = { brand: 'Palmer\'s', name: 'Cocoa Butter Formula' } // {palmers, cocoa, butter, formula}
+      const close = { id: 'close', brand: "Palmer's", name: 'Cocoa Butter Formula Lotion' } // 4/5 by Jaccard, and contained
+      const wider = { id: 'wider', brand: "Palmer's", name: 'Cocoa Butter Formula Daily Body Lotion' } // 4/7, contained only
+      const nearer = { id: 'nearer', brand: "Palmer's", name: 'Cocoa Butter Formula Daily Lotion' } // 4/6, contained and at the threshold
+      const widest = { id: 'widest', brand: "Palmer's", name: 'Cocoa Butter Formula with Vitamin E Daily Lotion' } // 4/8, contained only
+
+      expect(ids(nearMissCandidates(scanned, [widest, wider, nearer, close], { limit: 10 }))).toEqual(['close', 'nearer', 'wider', 'widest'])
+      expect(ids(nearMissCandidates(scanned, [widest, wider, nearer, close]))).toEqual(['close', 'nearer', 'wider'])
+    })
+  })
+})
+
+describe('lessSpecific', () => {
+  it('is true for a strict subset of the pooled words, false for equal, superset and unrelated words', () => {
+    expect(lessSpecific({ brand: 'Dove', name: 'Body Wash' }, { brand: 'Dove', name: 'Deeply Nourishing Body Wash' })).toBe(true)
+    expect(lessSpecific({ brand: 'Dove', name: 'Body Wash' }, { brand: 'Dove', name: 'wash body' })).toBe(false)
+    expect(lessSpecific({ brand: 'Dove', name: 'Deeply Nourishing Body Wash' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
+    expect(lessSpecific({ brand: 'Dove', name: 'Go Fresh' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
   })
 })

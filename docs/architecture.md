@@ -1015,7 +1015,7 @@ answer shapes and send the system prompts. The prompts are Markdown files in `sr
   a provider importing anything else from a module, so keeping to vocabulary files is a convention that review holds.
 - **Scan providers read photos.** `AnthropicProductRecognizer` (`recognize`, port `ProductRecognizer`) names the product
   in a photo: a beauty or personal-care product (with brand, name, optional variant, optional form, category and a 0 to 1 confidence),
-  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the variant is only a printed shade, scent or skin type. `recognizeShelf(image)` (job `recognize-shelf`, prompt `product-recognizer.recognize-shelf.md`) lists every readable beauty or personal-care product on a shelf photo as a `ShelfRecognition`: `products` (brand, name, optional variant and form, category, confidence; at most 5, most confident first, equal confidences in the model's order), `excluded` counts (`otherProducts` and `unreadable`, each floored and clamped to 0 to 50; people and faces are never counted) and a `classification` (`beauty-product` exactly when a product survives, else `other-product`, `face-or-person` or `unreadable`). Each product follows the same text rules as `recognize`; one that fails them is dropped and counted `unreadable`, and the limit of 5 is applied after, so products cut for the limit are counted nowhere. Nothing calls it yet. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
+  `other-product`, `face-or-person`, `label-not-visible` (a beauty product is in view but its label is turned away, covered or out of frame, so there is nothing to read; the prompt says so) or `unreadable`. The brand is the maker's name only (NIVEA, not NIVEA MEN); a sub-line or range printed with it goes at the start of the name, and the name is the product's own front-label name in English, without claims, benefit lines, ingredient call-outs, sizes or translations, and the variant is only what tells editions apart (a shade, scent, strength or SPF number, or a skin-type edition that is part of the name block), never a suitability line, claim or size. `recognizeShelf(image)` (job `recognize-shelf`, prompt `product-recognizer.recognize-shelf.md`) lists every readable beauty or personal-care product on a shelf photo as a `ShelfRecognition`: `products` (brand, name, optional variant and form, category, confidence; at most 5, most confident first, equal confidences in the model's order), `excluded` counts (`otherProducts` and `unreadable`, each floored and clamped to 0 to 50; people and faces are never counted) and a `classification` (`beauty-product` exactly when a product survives, else `other-product`, `face-or-person` or `unreadable`). Each product follows the same text rules as `recognize`; one that fails them is dropped and counted `unreadable`, and the limit of 5 is applied after, so products cut for the limit are counted nowhere. Nothing calls it yet. `AnthropicLabelReader` (`read-label`, port `LabelReader`) copies the
   ingredient list off a label photo, in label order and as printed, never completed from memory, and also the brand, name, variant
   and category (one of the five) when the label prints them, never guessed; it reads no form. Only the ingredient list decides whether the reading is
   readable: a bad entry (over 120 characters, a hidden character, a link or markup), an empty list or more than 150 entries is
@@ -1253,7 +1253,16 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   size rule. A dot survives only between two digits ("2.5"). **Brand spellings are not merged yet**: two spellings of
   one brand make two brand keys, so a product under the other spelling is not found as a near miss.
 - **Near-miss candidates** are products of the same brand family with a different identity key whose words overlap
-  (Jaccard similarity, default threshold 0.6, at most 3). The family is the first word of the normalised brand
+  (Jaccard similarity, default threshold 0.6) or **where one reading's words are all inside the other's** ("NIVEA soft" in
+  "NIVEA Soft Light Moisturiser", "Cocoa Butter Formula" in "Cocoa Butter Formula Daily Body Lotion"), because the recognizer
+  adds and drops descriptors from scan to scan and Jaccard punishes that. Containment needs a word beyond the brand on both
+  sides, so a reading that is only the brand (contained in every product of it) is never a candidate. **Generic-word guard:** the
+  shorter side must also have a word that is neither its brand's nor in a small stoplist of form, category and generic words
+  (lotion, cream, gel, oil, wash, cleanser, soap, body, face, hand, hair, skin, men, women, sun, original, classic, care, daily ...;
+  `GENERIC_WORDS` in `catalog.identity.ts`). "NIVEA soft" in "NIVEA Soft Light Moisturiser" is a containment; "Dove Body Wash" in
+  "Dove Go Fresh Body Wash" is not (it may still be a Jaccard candidate). The word relations (equal, subset, superset) behind
+  containment and `lessSpecific` come from one private helper. Best first by
+  similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
   looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
@@ -1360,11 +1369,26 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   would risk a duplicate of one that exists, so the caller waits and asks again later. In production this does not happen: the real ledger does not refuse.
   The same goes for every other `AiBudgetExceededError` / `CatalogBusyError` below; they stay only so the eval's `--max-usd` works.
   Claude refusing our account (`AnthropicConfigError`) is not handled by the catalog: it reaches the scan module (see "Scan module").
-- **Alias guard.** A near miss is put to the model only if it has the same category as the scanned label and its
-  variant does not conflict, and it has the identical form (none counts as a value, so a formless product and its spray are never put to the model): two non-empty variants that differ (compared normalised, so case and spacing do not matter)
-  are different products (a night cream is not its day cream), while a missing variant on either side still compares. This
-  keeps a shampoo from being merged into its conditioner on the model's word alone. `CATALOG_POLICY` sets the rest: the
-  brand's newest 50 products, similarity 0.6, at most 3 asks; the first "same" is remembered as an alias.
+- **Alias guard.** A near miss is put to the model only if it has the same category as the scanned label, its forms are
+  compatible and its variant does not conflict. A form missing on either side is compatible (a label may not print it); two
+  different known forms are different products (a spray is not its roll-on). Variants conflict only on numbers: when both
+  have numbers and they differ (SPF 30 and SPF 50, 2% and 5%) the products are different and the model is never asked;
+  any other difference in variant wording ("For normal to dry skin" against "Normal to Dry Skin", or one side empty) is left to the
+  model. The identity key still includes the exact form and variant. This keeps a shampoo from being merged into its conditioner on
+  the model's word alone, and the model remains the only gate to a merge. `CATALOG_POLICY` sets the rest: the
+  brand's newest 50 products, similarity 0.6, at most 3 asks; the first "same" is remembered as an alias, except when the scanned reading is less specific than that product (its pooled words
+  are a strict subset of the product's: "Hydro Boost" for "Hydro Boost Water Gel"). That scan still resolves to the product the model
+  chose, but no alias is saved, because it would send the next vague reading, possibly of the Gel-Cream, to the Water Gel by exact key
+  without the model; the vague reading goes to the model each time.
+  **No alias is recorded when either side is strictly less specific** than the other: the reading's words a strict subset of the
+  candidate's, or the candidate's a strict subset of the reading's (a vague stored row must not collect specific aliases), or the
+  reading prints no form where the candidate has one. The scan still resolves to the product the model chose. Only a reading of
+  equal specificity (the same words in another order, spelling or case, or a different variant wording over the same words) is remembered.
+  **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
+  "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
+  as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
+  (a product line, range or bare descriptor against a specific product).
 - **Research accounting.** An attempt is written as `started` BEFORE the researcher is called and settled to `found`,
   `not-found` or `failed` after, so a crash in between still counts. `found` is settled only AFTER the formulation is
   stored, so until then the `started` row keeps shielding the product from a concurrent call; if the store fails the

@@ -22,7 +22,7 @@ import type { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.s
 import { SCAN_POLICY } from '../../src/modules/scans/scans.service'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 import { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
-import { AnthropicConfigError, AnthropicRefusalError } from '../../src/providers/anthropic/anthropic.provider'
+import { AnthropicConfigError, AnthropicRefusalError, AnthropicUnavailableError } from '../../src/providers/anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
 import { R2CatalogImageStore } from '../../src/providers/catalog-images/r2.catalog-image-store'
 import type { ProductAnalyst, ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
@@ -75,6 +75,21 @@ class SetupError extends Error {}
 const usd = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
 const percent = (ratio: number): string => `${Math.round(ratio * 100)}%`
 const errorName = (error: unknown): string => (error instanceof Error ? error.name : 'UnknownError')
+/**
+ * A model that is briefly down (overloaded, rate-limited) is retried, as the Worker's queue retries a step, so an outage does not
+ * read as a pipeline error. Up to 2 retries, 3 and then 10 seconds apart; anything else, or a third failure, is thrown.
+ */
+const withRetries = async <T>(call: () => Promise<T>): Promise<T> => {
+  for (const waitMs of [3_000, 10_000]) {
+    try {
+      return await call()
+    } catch (error) {
+      if (!(error instanceof AnthropicUnavailableError)) throw error
+      await new Promise((resolve) => setTimeout(resolve, waitMs))
+    }
+  }
+  return call()
+}
 const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex')
 const escapeHtml = (value: string): string => value.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`)
 const dataUri = (mediaType: string, bytes: Uint8Array): string => `data:${mediaType};base64,${Buffer.from(bytes).toString('base64')}`
@@ -136,7 +151,7 @@ const recogniseOnce = async (recognizer: AnthropicProductRecognizer, products: S
     for (const photo of product.photos) {
       let seen: Recognition
       try {
-        seen = await recognizer.recognize(readPhoto(photo))
+        seen = await withRetries(() => recognizer.recognize(readPhoto(photo)))
       } catch (error) {
         if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
         if (error instanceof AiBudgetExceededError) throw new SetupError('The spend cap was reached while reading photos; raise --max-usd.')
@@ -225,7 +240,7 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
     let resolved
     try {
       // Production would ask for confirmation below the threshold; the eval resolves regardless and records the confidence.
-      resolved = await service.resolve(identity)
+      resolved = await withRetries(() => service.resolve(identity))
     } catch (error) {
       if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
       if (errorName(error) === 'CatalogBusyError') throw new SetupError('The spend cap was reached while matching; raise --max-usd.')
@@ -326,7 +341,7 @@ const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, re
       try {
         // A fresh catalog holds nothing, so this creates the product from its true label without asking the judge.
         const { productId } = await service.resolve(identityOfLabel(product))
-        const result = await service.research(productId)
+        const result = await withRetries(() => service.research(productId))
         if (result.kind === 'not-found') return { folder, stage: 'no-source-page' }
         if (result.kind === 'budget-exhausted') return { folder, stage: 'budget-exhausted' }
         if (result.image === 'error') return budgetHit ? { folder, stage: 'budget-exhausted' } : { folder, stage: 'error', error: checkError ?? 'ImageStageError' }
