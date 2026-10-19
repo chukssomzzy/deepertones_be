@@ -1401,6 +1401,9 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   or the bucket throws, the research still reports the ingredients as found, nothing is marked (so the next
   research retries), and the log line is `{ outcome: 'image-import-failed', productId }`, never a URL, because the
   URL came from a web page.
+  The import reports what it did as `image` on the `found` result (`StockImageOutcome`: `stored`, `already-has-image`,
+  `checked-recently`, `no-page-image`, `download-failed`, `not-this-product` or `error`). It is informational only, so
+  research never fails because of the image, and it is absent when research did not run (a fresh formulation already stored).
 - **Analysis validation** (`checkAnalysis`) treats the model as untrusted and stores nothing unless all of it holds.
   *Vocabulary*: kind, severity and every trait must be in the fixed lists (matched ignoring case, stored in canonical
   form); one unknown value rejects the whole analysis. *Ingredient mapping*: each ingredient a concern names is

@@ -90,11 +90,30 @@ export type ResolveResult =
   | { kind: 'needs-research'; productId: string }
 
 /**
+ * What the stock image import did on one research run. Research never fails because of the image; this only says what happened.
+ * - `stored`: the image downloaded, the model said it shows this product, and it was put and recorded.
+ * - `already-has-image`: the product already had an image; nothing was looked up.
+ * - `checked-recently`: an image was looked for within FRESH_FOR_DAYS; nothing was looked up.
+ * - `no-page-image`: the source page gave no image URL.
+ * - `download-failed`: the image URL gave nothing safe to download (bad URL, type or size).
+ * - `not-this-product`: the model said the image does not show this product.
+ * - `error`: something in the import threw; swallowed, and only the product id is logged.
+ */
+export type StockImageOutcome =
+  | 'stored'
+  | 'already-has-image'
+  | 'checked-recently'
+  | 'no-page-image'
+  | 'download-failed'
+  | 'not-this-product'
+  | 'error'
+
+/**
  * `fallbackFormulationId` is the product's stale formulation, when it was analysed by the current versions, so a
  * caller that cannot get fresh ingredients can still show an answer.
  */
 export type ResearchResult =
-  | { kind: 'found'; formulationId: string }
+  | { kind: 'found'; formulationId: string; image?: StockImageOutcome }
   | { kind: 'not-found'; fallbackFormulationId?: string }
   | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
@@ -361,8 +380,8 @@ export class ProductCatalogService {
     }
     await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    await this.importStockImage(product, result.sourceUrl, now)
-    return { kind: 'found', formulationId }
+    const image = await this.importStockImage(product, result.sourceUrl, now)
+    return { kind: 'found', formulationId, image }
   }
 
   /** Stores the ingredient list read from a back-label photo; an identical list the product already has is reused. */
@@ -700,18 +719,22 @@ export class ProductCatalogService {
    * Gives the product a stock image, once, when none is stored and none was looked for in the last FRESH_FOR_DAYS.
    * The image is stored only after it downloads safely AND the model says it shows this product. Nothing in here
    * may fail the research: the ingredients are already stored, and a missing image is normal. The log carries the
-   * product id only, never a URL, which came from a web page.
+   * product id only, never a URL, which came from a web page. Says what happened, for the caller to report.
    */
-  private async importStockImage(product: Product, sourceUrl: string, now: Date): Promise<void> {
+  private async importStockImage(product: Product, sourceUrl: string, now: Date): Promise<StockImageOutcome> {
     const checkedAt = product.imageCheckedAt
-    if (product.imageKey !== null || (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.DAY))
-      return
+    if (product.imageKey !== null) return 'already-has-image'
+    if (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.DAY) return 'checked-recently'
     try {
       const imageUrl = await this.images.pageImageUrl(sourceUrl)
       const image = imageUrl ? await this.images.fetchImage(imageUrl) : null
-      if (!imageUrl || !image || !(await this.analyst.imageShowsProduct(image, ProductCatalogService.identityOf(product)))) {
+      if (!imageUrl || !image) {
         await this.repository.markImageChecked(product.id, now)
-        return
+        return imageUrl ? 'download-failed' : 'no-page-image'
+      }
+      if (!(await this.analyst.imageShowsProduct(image, ProductCatalogService.identityOf(product)))) {
+        await this.repository.markImageChecked(product.id, now)
+        return 'not-this-product'
       }
       const key = `${this.imageKeyPrefix}/products/${product.id}.${ProductCatalogService.IMAGE_EXTENSIONS[image.mediaType]}`
       await this.images.put(key, image)
@@ -720,8 +743,10 @@ export class ProductCatalogService {
         sourceUrl: imageUrl,
         checkedAt: now,
       })
+      return 'stored'
     } catch {
       console.error({ outcome: 'image-import-failed', productId: product.id })
+      return 'error'
     }
   }
 }

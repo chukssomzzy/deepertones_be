@@ -23,6 +23,7 @@
     "assets:sync": "tsx scripts/sync-assets.ts",
     "eval:catalog": "tsx scripts/eval-catalog.ts",
     "eval:shelf": "tsx scripts/eval/shelf.ts",
+    "eval:matching": "tsx scripts/eval/matching.ts",
     "ai:spend": "tsx scripts/ai-spend.ts",
     "secrets:push": "tsx scripts/push-secrets.ts",
     "openapi:lint": "REDOCLY_TELEMETRY=off redocly lint docs/openapi.json",
