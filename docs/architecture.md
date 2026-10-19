@@ -1374,7 +1374,8 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   compatible, its variant does not conflict, and it has a variant whenever the label names one (a row made when the scent went unread
   is not every scent of the line). The model treats a variant or form missing from one listing as unread, not as a difference, and
   says no when one name is just a range holding several products; extra marketing words (Specialist, Advanced) are not a difference,
-  but sunscreen or SPF, night or day, AM or PM, and the area a product is for (face, body, hands, lips, eyes) are. A form missing on either side is compatible (a label may not print it); two
+  but sunscreen or SPF, night or day, and AM or PM on one listing only (name or variant) are, as are two different areas a product is for (face against body; an area
+  named on one side only is not). A form missing on either side is compatible (a label may not print it); two
   different known forms are different products (a spray is not its roll-on). Variants conflict only on numbers: when both
   have numbers and they differ (SPF 30 and SPF 50, 2% and 5%) the products are different and the model is never asked;
   any other difference in variant wording ("For normal to dry skin" against "Normal to Dry Skin", or a label that shows none) is left to the
