@@ -15,6 +15,7 @@ import { brandKey, identityKey } from './catalog.identity'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import { FakeCatalogRepository } from './catalog.repository.fake'
 import { AnalysisRejectedError, CATALOG_POLICY, CatalogBusyError, ProductCatalogService } from './catalog.service'
+import type { StockImageOutcome } from './catalog.service'
 import type { DraftConcernRow } from './catalog.types'
 import { ANALYSIS_VERSION, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
@@ -395,7 +396,7 @@ describe('ProductCatalogService.research', () => {
 
     const result = await ctx.service.research(productId)
 
-    expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+    expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
     const formulationId = (result as { formulationId: string }).formulationId
     expect(await ctx.repository.findFormulation(formulationId)).toMatchObject({
       productId,
@@ -418,7 +419,7 @@ describe('ProductCatalogService.research', () => {
 
     const again = await ctx.service.research(first.productId)
 
-    expect(again).toEqual({ kind: 'found', formulationId: first.formulationId })
+    expect(again).toEqual({ kind: 'found', formulationId: first.formulationId, image: expect.any(String) })
     expect((await ctx.repository.findFormulation(first.formulationId))!.foundAt).toEqual(new Date(T0.getTime() + FRESH_FOR_DAYS * DAY + 1))
     expect((await ctx.repository.latestFormulation(first.productId))!.id).toBe(first.formulationId)
     // Fresh again, and still analysed: nothing was replaced.
@@ -494,7 +495,7 @@ describe('ProductCatalogService.research', () => {
       await ctx.service.research(productId)
       ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
 
-      expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
     })
 
     it('still rethrows every other error from the researcher', async () => {
@@ -536,7 +537,7 @@ describe('ProductCatalogService.research', () => {
 
       const result = await ctx.service.research(second!)
 
-      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
       expect(await ctx.repository.latestFormulation(second!)).toMatchObject({ ingredients: CLEAN })
       expect(ctx.alerts()).toEqual(ALERT)
     })
@@ -798,9 +799,100 @@ describe('ProductCatalogService.research', () => {
 
       const result = await ctx.service.research(productId)
 
-      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'error' })
       expect((await ctx.repository.latestFormulation(productId))!.id).toBe((result as { formulationId: string }).formulationId)
       expect((await ctx.repository.findProductById(productId))!.imageKey).toBeNull()
+    })
+    describe('outcome reported on the found result', () => {
+      const found = (image: StockImageOutcome) => ({ kind: 'found', formulationId: expect.any(String), image })
+
+      it('reports stored when the image downloaded, the model said it shows the product, and it was put and recorded', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, JPEG)
+        ctx.analyst.imageShowsProductWith(() => true)
+        withImage(ctx)
+
+        expect(await ctx.service.research(productId)).toEqual(found('stored'))
+      })
+
+      it('reports already-has-image when the product already had an image, and looks nothing up', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, JPEG)
+        ctx.analyst.imageShowsProductWith(() => true)
+        withImage(ctx)
+        await ctx.service.research(productId)
+        ctx.advance(FRESH_FOR_DAYS * DAY + 1)
+
+        expect(await ctx.service.research(productId)).toEqual(found('already-has-image'))
+        expect(ctx.images.pageLookups).toHaveLength(1)
+      })
+
+      it('reports checked-recently when an image was looked for within FRESH_FOR_DAYS, and looks nothing up', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY))
+        withImage(ctx)
+
+        expect(await ctx.service.research(productId)).toEqual(found('checked-recently'))
+        expect(ctx.images.pageLookups).toHaveLength(0)
+      })
+
+      it('reports no-page-image when the source page gives no image url', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        withImage(ctx, null)
+
+        expect(await ctx.service.research(productId)).toEqual(found('no-page-image'))
+      })
+
+      it('reports download-failed when the image url gives nothing safe to download', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, null)
+        withImage(ctx)
+
+        expect(await ctx.service.research(productId)).toEqual(found('download-failed'))
+      })
+
+      it('reports not-this-product when the model says the image does not show the product, and still marks it checked', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, JPEG)
+        ctx.analyst.imageShowsProductWith(() => false)
+        withImage(ctx)
+
+        expect(await ctx.service.research(productId)).toEqual(found('not-this-product'))
+        expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageCheckedAt: T0 })
+      })
+
+      it('reports error, with the formulation stored, when the import throws', async () => {
+        const ctx = setup({ images: new PutThrows() })
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, JPEG)
+        ctx.analyst.imageShowsProductWith(() => true)
+        withImage(ctx)
+
+        const result = await ctx.service.research(productId)
+
+        expect(result).toEqual(found('error'))
+        expect((await ctx.repository.latestFormulation(productId))!.id).toBe((result as { formulationId: string }).formulationId)
+      })
+
+      it('carries no image on the found result of a still-fresh formulation, where the researcher did not run', async () => {
+        const ctx = setup()
+        const productId = await productFor(ctx)
+        ctx.images.respondTo(IMAGE_URL, JPEG)
+        ctx.analyst.imageShowsProductWith(() => true)
+        withImage(ctx)
+        await ctx.service.research(productId)
+
+        const again = await ctx.service.research(productId)
+
+        expect(again).toEqual({ kind: 'found', formulationId: expect.any(String) })
+        expect(again).not.toHaveProperty('image')
+      })
     })
   })
 })
@@ -1241,7 +1333,7 @@ describe('ProductCatalogService.research without asking the researcher', () => {
 
     const [a, b] = await Promise.all([ctx.service.research(productId), ctx.service.research(productId)])
 
-    expect(a).toEqual({ kind: 'found', formulationId: expect.any(String) })
+    expect(a).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
     expect(b).toEqual(a)
     // A duplicate stored second would be the latest, so the latest being the shared one means there is only one.
     expect((await ctx.repository.latestFormulation(productId))!.id).toBe((a as { formulationId: string }).formulationId)
@@ -1342,7 +1434,7 @@ describe('ProductCatalogService.research attempt accounting', () => {
         throw new Error('settle is down')
       }
 
-      expect(await ctx.service.research(repository.watched)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(await ctx.service.research(repository.watched)).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
 
       expect(log).toHaveBeenCalledWith({ outcome: 'attempt-bookkeeping-failed' })
       log.mockRestore()
@@ -1386,7 +1478,7 @@ describe('ProductCatalogService.research negative cache', () => {
     ctx.advance(WEEK + 1)
     ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
 
-    expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+    expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
     expect(ctx.researcher.calls).toHaveLength(2)
   })
 
@@ -1408,7 +1500,7 @@ describe('ProductCatalogService.research negative cache', () => {
     await ctx.service.research(productId).catch(() => undefined)
     ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
 
-    expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String) })
+    expect(await ctx.service.research(productId)).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
   })
 })
 
@@ -1444,7 +1536,7 @@ describe('ProductCatalogService.research of text that came from the web', () => 
 
       const result = await ctx.service.research(productId)
 
-      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
       expect((await ctx.repository.latestFormulation(productId))!.ingredients).toEqual(['Aqua', ingredient, 'Glycerin'])
     },
   )
@@ -1476,7 +1568,7 @@ describe('ProductCatalogService.research of a stale product', () => {
 
     const result = await ctx.service.research(stale.productId)
 
-    expect(result).toEqual({ kind: 'found', formulationId: expect.not.stringMatching(stale.formulationId) })
+    expect(result).toEqual({ kind: 'found', formulationId: expect.not.stringMatching(stale.formulationId), image: expect.any(String) })
     expect(ctx.researcher.calls).toHaveLength(callsBefore + 1)
     expect(ctx.alerts()).toHaveLength(1)
   })
@@ -2309,7 +2401,7 @@ describe('ProductCatalogService in-flight sharing', () => {
       expect(error).toBeInstanceOf(UnavailableError)
       expect(error.code).toBe('RESEARCH_IN_PROGRESS')
       researcher.gate.release()
-      expect(await first).toEqual({ kind: 'found', formulationId: expect.any(String) })
+      expect(await first).toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
       expect(researcher.calls).toHaveLength(1)
     })
 
@@ -2322,7 +2414,7 @@ describe('ProductCatalogService in-flight sharing', () => {
       const first = ctx.service.research(productId)
       await researcher.gate.started
 
-      await expect(ctx.service.research(other.productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+      await expect(ctx.service.research(other.productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
 
       researcher.gate.release()
       await first
@@ -2347,7 +2439,7 @@ describe('ProductCatalogService in-flight sharing', () => {
         await expect(attempt).rejects.toMatchObject({ code: 'RESEARCH_IN_PROGRESS' })
         expect(ctx.researcher.calls).toHaveLength(0)
       } else {
-        await expect(attempt).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+        await expect(attempt).resolves.toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
         expect(ctx.researcher.calls).toHaveLength(1)
       }
       log.mockRestore()
@@ -2360,7 +2452,7 @@ describe('ProductCatalogService in-flight sharing', () => {
       await ctx.service.research(productId).catch(() => undefined)
       ctx.researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
 
-      await expect(ctx.service.research(productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String) })
+      await expect(ctx.service.research(productId)).resolves.toEqual({ kind: 'found', formulationId: expect.any(String), image: expect.any(String) })
     })
   })
 
