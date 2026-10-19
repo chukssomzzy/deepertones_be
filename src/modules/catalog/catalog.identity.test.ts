@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
 
 // stripSizes may leave a space where the token was; the identity key is what trims it.
 const tidy = (s: string) => s.replace(/\s+/g, ' ').trim()
@@ -458,5 +458,25 @@ describe('lessSpecific', () => {
     expect(lessSpecific({ brand: 'Dove', name: 'Body Wash' }, { brand: 'Dove', name: 'wash body' })).toBe(false)
     expect(lessSpecific({ brand: 'Dove', name: 'Deeply Nourishing Body Wash' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
     expect(lessSpecific({ brand: 'Dove', name: 'Go Fresh' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
+  })
+})
+
+describe('namesAnotherEdition', () => {
+  it('is true when the label names a variant word the variantless product does not hold', () => {
+    expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash', variant: 'Shea Butter' }, { brand: 'Dove', name: 'Body Wash' })).toBe(true)
+  })
+
+  it('is false when the variant words are already in the product, split differently', () => {
+    expect(namesAnotherEdition({ brand: 'NIVEA', name: 'MEN', variant: 'Dry Impact' }, { brand: 'NIVEA MEN', name: 'DRY IMPACT' })).toBe(false)
+  })
+
+  it('is false when the product has a variant of its own, or the label has none', () => {
+    expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash', variant: 'Shea Butter' }, { brand: 'Dove', name: 'Body Wash', variant: 'Cucumber' })).toBe(false)
+    expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
+    expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash', variant: '' }, { brand: 'Dove', name: 'Body Wash', variant: null })).toBe(false)
+  })
+
+  it('ignores pack sizes in the variant', () => {
+    expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash', variant: '250 ml' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
   })
 })

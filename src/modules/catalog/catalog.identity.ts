@@ -57,6 +57,17 @@ const relation = (a: Set<string>, b: Set<string>): WordRelation => {
 export const lessSpecific = (reading: Named, product: Named): boolean => relation(words(reading), words(product)) === 'subset'
 
 /**
+ * Whether the label names an edition the product, whose variant went unread, does not: a variant word ("Shea Butter") found nowhere in
+ * the product's brand and name. A variant whose words the product already holds is the same words split differently ("NIVEA | MEN",
+ * variant "Dry Impact", against "NIVEA MEN | DRY IMPACT"), not another edition.
+ */
+export const namesAnotherEdition = (label: Named, product: Named): boolean => {
+  if (product.variant) return false
+  const held = words(product)
+  return comparable(label.variant).split(' ').some((w) => w !== '' && !held.has(w))
+}
+
+/**
  * Form, category and generic descriptors that many products of one brand share ("Body Wash", "Daily Lotion"). A containment resting on
  * these alone ("Dove Body Wash" in "Dove Go Fresh Body Wash") would name every sibling, so it needs a word beyond them and the brand.
  */

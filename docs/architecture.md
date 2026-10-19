@@ -1371,12 +1371,13 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   Claude refusing our account (`AnthropicConfigError`) is not handled by the catalog: it reaches the scan module (see "Scan module").
 - **Alias guard.** A near miss is put to the model only if its category is compatible with the scanned label's (the same, or skin
   care and body care, which a soap, lotion or oil is read as on different photos; hair, makeup and other stay apart), its forms are
-  compatible and its variant does not conflict. The model treats a variant or form missing from one listing as unread, not as a
-  difference, and says no only when one name is just a range holding several products; extra descriptive words (Specialist, With
-  Sunscreen) are not a difference. A form missing on either side is compatible (a label may not print it); two
+  compatible, its variant does not conflict, and it has a variant whenever the label names one (a row made when the scent went unread
+  is not every scent of the line). The model treats a variant or form missing from one listing as unread, not as a difference, and
+  says no when one name is just a range holding several products; extra marketing words (Specialist, Advanced) are not a difference,
+  but sunscreen or SPF, night or day, AM or PM, and the area a product is for (face, body, hands, lips, eyes) are. A form missing on either side is compatible (a label may not print it); two
   different known forms are different products (a spray is not its roll-on). Variants conflict only on numbers: when both
   have numbers and they differ (SPF 30 and SPF 50, 2% and 5%) the products are different and the model is never asked;
-  any other difference in variant wording ("For normal to dry skin" against "Normal to Dry Skin", or one side empty) is left to the
+  any other difference in variant wording ("For normal to dry skin" against "Normal to Dry Skin", or a label that shows none) is left to the
   model. The identity key still includes the exact form and variant. This keeps a shampoo from being merged into its conditioner on
   the model's word alone, and the model remains the only gate to a merge. `CATALOG_POLICY` sets the rest: the
   brand's newest 50 products, similarity 0.6, at most 3 asks; the first "same" is remembered as an alias, except when the scanned reading is less specific than that product (its pooled words

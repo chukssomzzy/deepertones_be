@@ -7,7 +7,7 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, nearMissCandidates, normaliseText } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -197,15 +197,16 @@ export class ProductCatalogService {
   /** A form missing on either side is compatible (the label may simply not print it); two different known forms are different products. */
   private static formsCompatible = (a: string | null | undefined, b: string | null | undefined): boolean => !a || !b || a === b
 
-  /** Only numbers set variants apart for good (SPF 30 and 50, 2% and 5%); any other difference is the judge's to weigh. */
+  private static readonly SKIN_OR_BODY: ReadonlySet<ProductCategory> = new Set<ProductCategory>(['skin', 'body'])
+
   /**
    * Whether a near miss of one category may be put to the judge for a label of another. The same, or skin care and body care: a soap,
    * a lotion or an oil is read as one on one photo and the other on the next. Hair, makeup and other stay apart from everything else.
    */
   private static categoriesCompatible = (a: ProductCategory, b: ProductCategory): boolean =>
     a === b || (ProductCatalogService.SKIN_OR_BODY.has(a) && ProductCatalogService.SKIN_OR_BODY.has(b))
-  private static readonly SKIN_OR_BODY: ReadonlySet<ProductCategory> = new Set<ProductCategory>(['skin', 'body'])
 
+  /** Only numbers set variants apart for good (SPF 30 and 50, 2% and 5%); any other difference is the judge's to weigh. */
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
     const [x, y] = [normaliseText(a ?? '').match(/\d+(?:\.\d+)?/g), normaliseText(b ?? '').match(/\d+(?:\.\d+)?/g)]
     return x !== null && y !== null && x.join(' ') !== y.join(' ')
@@ -297,6 +298,8 @@ export class ProductCatalogService {
       (p) =>
         (identity.category === undefined || ProductCatalogService.categoriesCompatible(p.category, identity.category)) &&
         ProductCatalogService.formsCompatible(p.form, identity.form) &&
+        // A row whose scent went unread is not every scent of the line; a label that shows no variant is still the judge's to weigh.
+        !namesAnotherEdition(identity, p) &&
         !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
