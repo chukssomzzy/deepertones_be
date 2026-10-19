@@ -295,10 +295,14 @@ export class ProductCatalogService {
       threshold: this.policy.nearMissThreshold,
       limit: this.policy.nearMissLimit,
     })
-    for (const candidate of candidates) {
+    // A reading that says less than two or more candidates ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either: a duplicate is safer than a wrong merge.
+    const ambiguous = candidates.filter((c) => lessSpecific(identity, c)).length >= 2
+    for (const candidate of ambiguous ? [] : candidates) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
-        // A vague reading ("Hydro Boost") that the judge matched to one product would, as an alias, also claim its look-alike's next vague reading by exact key.
-        if (!lessSpecific(identity, candidate)) await this.repository.addAlias(key, candidate.id)
+        // A reading that says less than the product ("Hydro Boost"), or more than a vague row, or prints no form where the product does, would as an alias claim a
+        // look-alike's next reading by exact key; only a reading of equal specificity is remembered.
+        const unequal = lessSpecific(identity, candidate) || lessSpecific(candidate, identity) || (!identity.form && !!candidate.form)
+        if (!unequal) await this.repository.addAlias(key, candidate.id)
         return candidate
       }
     }

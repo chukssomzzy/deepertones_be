@@ -1917,7 +1917,8 @@ describe('ProductCatalogService.resolve brand families', () => {
     }
     const before = ctx.analyst.calls.sameProduct.length
 
-    const result = await ctx.service.resolve(NIVEA_NAME)
+    // Not a subset of any stored name (that would trip the ambiguity guard), but near all ten.
+    const result = await ctx.service.resolve(identity({ brand: 'NIVEA', name: 'MEN DRY IMPACT Frost', category: 'body', form: 'spray' }))
 
     expect(ctx.analyst.calls.sameProduct.length - before).toBe(CATALOG_POLICY.nearMissLimit)
     expect(ids).not.toContain(result.productId)
@@ -2924,8 +2925,10 @@ describe('ProductCatalogService.fromLabel: an ingredient list with a brand and n
       const known = await ctx.service.resolve(KNOWN)
       ctx.analyst.sameProductWith(() => true)
 
-      const first = await ctx.service.fromLabel(LABEL)
-      const second = await ctx.service.fromLabel(LABEL)
+      // The same words in another order: equal specificity, so the spelling is remembered (a longer label would not be).
+      const reordered = { ...LABEL, name: 'Vitamin Glow Radiance Serum' }
+      const first = await ctx.service.fromLabel(reordered)
+      const second = await ctx.service.fromLabel(reordered)
 
       expect(first.productId).toBe(known.productId)
       expect(second.productId).toBe(known.productId)
@@ -3173,9 +3176,10 @@ describe('ProductCatalogService.fromLabel: a named label that prints no category
     const ctx = setup()
     const known = await ctx.service.resolve(KNOWN)
     ctx.analyst.sameProductWith(() => true)
-    await ctx.service.fromLabel(LABEL)
+    const reordered = { ...LABEL, name: 'Vitamin Glow Radiance Serum' }
+    await ctx.service.fromLabel(reordered)
 
-    const again = await ctx.service.fromLabel(LABEL)
+    const again = await ctx.service.fromLabel(reordered)
 
     expect(again.productId).toBe(known.productId)
     expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
@@ -3793,7 +3797,7 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
     expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
   })
 
-  it('asks the judge when only the suitability wording of the variant differs, and a "yes" lands on the stored product', async () => {
+  it('asks the judge when only the suitability wording of the variant differs, and a "yes" lands on the stored product, with no alias for the more specific wording', async () => {
     const ctx = setup()
     const stored = await ctx.service.resolve(identity({ ...CERAVE_CLEANSER, variant: 'Normal to Dry Skin' }))
     ctx.analyst.sameProductWith(() => true)
@@ -3803,6 +3807,18 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
 
     expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
     expect(result).toEqual({ kind: 'needs-research', productId: stored.productId })
+    expect(await ctx.repository.findProductByKey(identityKey(scanned))).toBeNull()
+  })
+
+  it('records the alias on a "yes" when the differing variant wording has the same words as the stored one', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ ...CERAVE_CLEANSER, variant: 'Normal to Dry Skin' }))
+    ctx.analyst.sameProductWith(() => true)
+    const scanned = identity({ ...CERAVE_CLEANSER, variant: 'dry TO normal skin' })
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(result.productId).toBe(stored.productId)
     expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: stored.productId })
   })
 
@@ -3857,7 +3873,7 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
     expect(ctx.analyst.calls.sameProduct).toHaveLength(2)
   })
 
-  it('still records the alias on a "yes" for a differing reading with extra words', async () => {
+  it('records NO alias on a "yes" for a reading with extra words: a vague stored row must not collect specific aliases', async () => {
     const ctx = setup()
     const stored = await ctx.service.resolve(identity({ brand: 'Neutrogena', name: 'Hydro Boost', category: 'skin' }))
     ctx.analyst.sameProductWith(() => true)
@@ -3866,7 +3882,59 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
     const result = await ctx.service.resolve(specific)
 
     expect(result.productId).toBe(stored.productId)
-    expect(await ctx.repository.findProductByKey(identityKey(specific))).toMatchObject({ id: stored.productId })
+    expect(await ctx.repository.findProductByKey(identityKey(specific))).toBeNull()
+  })
+
+  it('records the alias on a "yes" for a reading with the same words in another order', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ brand: 'Neutrogena', name: 'Water Gel Hydro Boost', category: 'skin' }))
+    ctx.analyst.sameProductWith(() => true)
+    const reordered = identity({ brand: 'Neutrogena', name: 'Hydro Boost Water Gel', category: 'skin' })
+
+    const result = await ctx.service.resolve(reordered)
+
+    expect(result.productId).toBe(stored.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(reordered))).toMatchObject({ id: stored.productId })
+  })
+
+  it('records no alias for a reading with no form matched to a product that has one, but resolves to it', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ brand: 'Cetaphil', name: 'Gentle Skin Cleanser', form: 'cream' }))
+    ctx.analyst.sameProductWith(() => true)
+    const scanned = identity({ brand: 'Cetaphil', name: 'Gentle Skin Cleanser' })
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(result.productId).toBe(stored.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(scanned))).toBeNull()
+  })
+
+  describe('ambiguity guard', () => {
+    const DEEPLY = { brand: 'Dove', name: 'Deeply Nourishing Body Wash', category: 'body' } as const
+    const GO_FRESH = { brand: 'Dove', name: 'Go Fresh Body Wash', category: 'body' } as const
+
+    it('never asks the judge, and makes a new product, when the reading is less specific than two candidates', async () => {
+      const ctx = setup()
+      const deeply = await ctx.service.resolve(identity(DEEPLY))
+      const goFresh = await ctx.service.resolve(identity(GO_FRESH))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity({ brand: 'Dove', name: 'Body Wash', category: 'body' }))
+
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+      expect([deeply.productId, goFresh.productId]).not.toContain(result.productId)
+    })
+
+    it('still asks the judge when the reading is less specific than only one candidate', async () => {
+      const ctx = setup()
+      const deeply = await ctx.service.resolve(identity(DEEPLY))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity({ brand: 'Dove', name: 'Body Wash', category: 'body' }))
+
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+      expect(result.productId).toBe(deeply.productId)
+    })
   })
 
   it('does not merge a contained reading when the judge says no', async () => {

@@ -1256,7 +1256,12 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   (Jaccard similarity, default threshold 0.6) or **where one reading's words are all inside the other's** ("NIVEA soft" in
   "NIVEA Soft Light Moisturiser", "Cocoa Butter Formula" in "Cocoa Butter Formula Daily Body Lotion"), because the recognizer
   adds and drops descriptors from scan to scan and Jaccard punishes that. Containment needs a word beyond the brand on both
-  sides, so a reading that is only the brand (contained in every product of it) is never a candidate. Best first by
+  sides, so a reading that is only the brand (contained in every product of it) is never a candidate. **Generic-word guard:** the
+  shorter side must also have a word that is neither its brand's nor in a small stoplist of form, category and generic words
+  (lotion, cream, gel, oil, wash, cleanser, soap, body, face, hand, hair, skin, men, women, sun, original, classic, care, daily ...;
+  `GENERIC_WORDS` in `catalog.identity.ts`). "NIVEA soft" in "NIVEA Soft Light Moisturiser" is a containment; "Dove Body Wash" in
+  "Dove Go Fresh Body Wash" is not (it may still be a Jaccard candidate). The word relations (equal, subset, superset) behind
+  containment and `lessSpecific` come from one private helper. Best first by
   similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
@@ -1375,6 +1380,15 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   are a strict subset of the product's: "Hydro Boost" for "Hydro Boost Water Gel"). That scan still resolves to the product the model
   chose, but no alias is saved, because it would send the next vague reading, possibly of the Gel-Cream, to the Water Gel by exact key
   without the model; the vague reading goes to the model each time.
+  **No alias is recorded when either side is strictly less specific** than the other: the reading's words a strict subset of the
+  candidate's, or the candidate's a strict subset of the reading's (a vague stored row must not collect specific aliases), or the
+  reading prints no form where the candidate has one. The scan still resolves to the product the model chose. Only a reading of
+  equal specificity (the same words in another order, spelling or case, or a different variant wording over the same words) is remembered.
+  **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
+  "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
+  as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
+  (a product line, range or bare descriptor against a specific product).
 - **Research accounting.** An attempt is written as `started` BEFORE the researcher is called and settled to `found`,
   `not-found` or `failed` after, so a crash in between still counts. `found` is settled only AFTER the formulation is
   stored, so until then the `started` row keeps shielding the product from a concurrent call; if the store fails the

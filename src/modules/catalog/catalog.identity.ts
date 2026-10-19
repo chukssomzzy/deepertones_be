@@ -42,26 +42,43 @@ export const nameSimilarity = (a: Named, b: Named): number => {
   return union === 0 ? 0 : shared / union
 }
 
-/** Whether the reading's words are a strict subset of the product's: it says less than the product does ("Hydro Boost" for "Hydro Boost Water Gel"). */
-export const lessSpecific = (reading: Named, product: Named): boolean => {
-  const [wr, wp] = [words(reading), words(product)]
-  return wr.size < wp.size && [...wr].every((w) => wp.has(w))
+type WordRelation = 'equal' | 'subset' | 'superset' | 'other'
+
+/** How the words of `a` stand to the words of `b`: the same, all inside, all containing, or neither. */
+const relation = (a: Set<string>, b: Set<string>): WordRelation => {
+  const aInB = [...a].every((w) => b.has(w))
+  const bInA = [...b].every((w) => a.has(w))
+  if (aInB && bInA) return 'equal'
+  if (aInB) return 'subset'
+  return bInA ? 'superset' : 'other'
 }
+
+/** Whether the reading's words are a strict subset of the product's: it says less than the product does ("Hydro Boost" for "Hydro Boost Water Gel"). */
+export const lessSpecific = (reading: Named, product: Named): boolean => relation(words(reading), words(product)) === 'subset'
+
+/**
+ * Form, category and generic descriptors that many products of one brand share ("Body Wash", "Daily Lotion"). A containment resting on
+ * these alone ("Dove Body Wash" in "Dove Go Fresh Body Wash") would name every sibling, so it needs a word beyond them and the brand.
+ */
+const GENERIC_WORDS = new Set([
+  'lotion', 'cream', 'creme', 'gel', 'oil', 'serum', 'wash', 'cleanser', 'soap', 'bar', 'balm', 'spray', 'stick', 'shampoo', 'conditioner', 'moisturiser', 'moisturizer', 'moisturizing',
+  'body', 'face', 'facial', 'hand', 'hair', 'skin', 'men', 'women', 'sun', 'original', 'classic', 'care', 'daily',
+])
 
 /**
  * Whether every word of the shorter reading is in the longer one ("NIVEA soft" in "NIVEA Soft Light Moisturiser"): the recognizer
  * often adds or drops descriptors, which Jaccard punishes. A reading with no word beyond its brand is contained in every product of
- * the brand, so on either side it is never a containment.
+ * the brand, so on either side it is never a containment; nor is one whose only words beyond the brand are generic.
  */
 const contains = (a: Branded, b: Branded): boolean => {
   const [wa, wb] = [words(a), words(b)]
-  const [short, long] = wa.size <= wb.size ? [wa, wb] : [wb, wa]
-  const beyondBrand = (p: Branded, w: Set<string>): boolean => {
+  const beyond = (p: Branded, w: Set<string>, ignore: Set<string> = new Set()): boolean => {
     const brand = new Set(comparable(p.brand).split(' '))
-    return [...w].some((x) => !brand.has(x))
+    return !['subset', 'equal'].includes(relation(w, new Set([...brand, ...ignore])))
   }
-  if (!beyondBrand(a, wa) || !beyondBrand(b, wb)) return false
-  return [...short].every((w) => long.has(w))
+  if (!beyond(a, wa) || !beyond(b, wb)) return false
+  const [short, shortProduct, long] = wa.size <= wb.size ? [wa, a, wb] : [wb, b, wa]
+  return ['subset', 'equal'].includes(relation(short, long)) && beyond(shortProduct, short, GENERIC_WORDS)
 }
 
 /**
