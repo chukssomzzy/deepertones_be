@@ -137,6 +137,15 @@ describe('loadPhotoSet', () => {
     await expect(loadPhotoSet(root)).rejects.toThrow(/serum.*lookalike.*ghost.*unknown|serum.*unknown.*ghost/i)
   })
 
+  it('rejects a product that lists its own folder as a look-alike', async () => {
+    await writeLabels({ serum: LABEL({ lookalikes: ['serum'] }), cream: LABEL({ name: 'Soft Cream' }) })
+    await writePhotos('serum', ['a.jpg', 'b.jpg'])
+    await writePhotos('cream', ['1.png', '2.webp'])
+
+    await expect(loadPhotoSet(root)).rejects.toThrow(PhotoSetError)
+    await expect(loadPhotoSet(root)).rejects.toThrow(/serum/)
+  })
+
   it('rejects look-alikes declared on only one side', async () => {
     await validSet()
     await writeLabels({ serum: LABEL({ lookalikes: ['cream'] }), cream: LABEL() })
@@ -201,15 +210,24 @@ describe('loadVerdicts', () => {
 })
 
 describe('parseVerdictFlag', () => {
+  const HASH = 'a'.repeat(63) + '0'
+
   it('splits hash=verdict', () => {
-    expect(parseVerdictFlag('abc123=right')).toEqual(['abc123', 'right'])
-    expect(parseVerdictFlag('abc123=wrong')).toEqual(['abc123', 'wrong'])
+    expect(parseVerdictFlag(`${HASH}=right`)).toEqual([HASH, 'right'])
+    expect(parseVerdictFlag(`${HASH}=wrong`)).toEqual([HASH, 'wrong'])
   })
 
   it('rejects a flag with no verdict, an unknown verdict, or no hash', () => {
-    expect(() => parseVerdictFlag('abc123')).toThrow(VerdictsError)
-    expect(() => parseVerdictFlag('abc123=maybe')).toThrow(VerdictsError)
+    expect(() => parseVerdictFlag(HASH)).toThrow(VerdictsError)
+    expect(() => parseVerdictFlag(`${HASH}=maybe`)).toThrow(VerdictsError)
     expect(() => parseVerdictFlag('=right')).toThrow(VerdictsError)
+  })
+
+  it('rejects a hash that is not 64 lowercase hex characters', () => {
+    expect(() => parseVerdictFlag('abc123=right')).toThrow(VerdictsError)
+    expect(() => parseVerdictFlag(`${HASH.toUpperCase()}=right`)).toThrow(VerdictsError)
+    expect(() => parseVerdictFlag(`${HASH}0=right`)).toThrow(VerdictsError)
+    expect(() => parseVerdictFlag(`${'g'.repeat(64)}=right`)).toThrow(VerdictsError)
   })
 })
 

@@ -35,6 +35,7 @@ const MEDIA_TYPES: Record<string, SetPhoto['mediaType']> = { '.jpg': 'image/jpeg
 const LABELS_FILE = 'labels.json'
 const VERDICTS_FILE = 'verdicts.json'
 const MIN_PHOTOS = 2
+const SHA256_HEX = /^[0-9a-f]{64}$/
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
 
@@ -117,6 +118,7 @@ export const loadPhotoSet = async (directory: string): Promise<PhotoSet> => {
   const labels = new Map(folders.map((folder) => [folder, toLabel(folder, rawLabels[folder] as Record<string, unknown>)]))
   for (const [folder, label] of labels) {
     for (const other of label.lookalikes ?? []) {
+      if (other === folder) throw new PhotoSetError(`${folder}: a product cannot be its own lookalike.`)
       const theirs = labels.get(other)
       if (!theirs) throw new PhotoSetError(`${folder}: lookalike "${other}" is an unknown folder.`)
       if (!theirs.lookalikes?.includes(folder)) throw new PhotoSetError(`${folder} lists ${other} as a lookalike but ${other} does not list ${folder}: lookalikes must be symmetric.`)
@@ -161,7 +163,7 @@ export const parseVerdictFlag = (flag: string): [string, Verdict] => {
   const at = flag.indexOf('=')
   const hash = flag.slice(0, at)
   const verdict = flag.slice(at + 1)
-  if (at === -1 || hash === '' || (verdict !== 'right' && verdict !== 'wrong')) throw new VerdictsError('--verdict must be HASH=right or HASH=wrong.')
+  if (at === -1 || !SHA256_HEX.test(hash) || (verdict !== 'right' && verdict !== 'wrong')) throw new VerdictsError('--verdict must be HASH=right or HASH=wrong, where HASH is the 64-character lowercase hex hash from the contact sheet.')
   return [hash, verdict]
 }
 

@@ -161,7 +161,7 @@ export const USAGE =
   `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */
-export const parseArgs = (argv: string[]): Args => {
+export const parseArgs = (argv: string[], usage: string = USAGE): Args => {
   let mode: Mode = 'all'
   let limit: number | undefined
   let maxUsd = DEFAULT_MAX_USD
@@ -171,28 +171,28 @@ export const parseArgs = (argv: string[]): Args => {
     const equals = arg.startsWith('--') ? arg.indexOf('=') : -1
     const flag = equals === -1 ? arg : arg.slice(0, equals)
     if (flag !== '--mode' && flag !== '--limit' && flag !== '--model' && flag !== '--max-usd') {
-      throw new Error(`Unrecognised argument "${arg}". ${USAGE}`)
+      throw new Error(`Unrecognised argument "${arg}". ${usage}`)
     }
 
     const value = equals === -1 ? argv[++i] : arg.slice(equals + 1)
-    if (value === undefined || value === '' || value.startsWith('-')) throw new Error(`${flag} needs a value. ${USAGE}`)
+    if (value === undefined || value === '' || value.startsWith('-')) throw new Error(`${flag} needs a value. ${usage}`)
 
     if (flag === '--mode') {
-      if (!MODES.includes(value as Mode)) throw new Error(`Unknown mode "${value}". ${USAGE}`)
+      if (!MODES.includes(value as Mode)) throw new Error(`Unknown mode "${value}". ${usage}`)
       mode = value as Mode
     } else if (flag === '--limit') {
-      if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error(`--limit must be a whole number of at least 1. ${USAGE}`)
+      if (!/^\d+$/.test(value) || Number(value) < 1) throw new Error(`--limit must be a whole number of at least 1. ${usage}`)
       limit = Number(value)
     } else if (flag === '--max-usd') {
       if (!/^\d+(\.\d+)?$/.test(value) || !(Number(value) > 0) || !Number.isFinite(Number(value))) {
-        throw new Error(`--max-usd must be a number of dollars above 0. ${USAGE}`)
+        throw new Error(`--max-usd must be a number of dollars above 0. ${usage}`)
       }
       maxUsd = Number(value)
     } else {
       const split = value.indexOf('=')
       const job = value.slice(0, split)
       const model = value.slice(split + 1)
-      if (split === -1 || !JOBS.includes(job as AiJob) || model === '') throw new Error(`--model must be JOB=MODEL with a known job. ${USAGE}`)
+      if (split === -1 || !JOBS.includes(job as AiJob) || model === '') throw new Error(`--model must be JOB=MODEL with a known job. ${usage}`)
       models[job as AiJob] = model
     }
   }

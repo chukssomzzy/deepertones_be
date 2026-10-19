@@ -22,7 +22,7 @@ import type { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.s
 import { SCAN_POLICY } from '../../src/modules/scans/scans.service'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 import { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
-import { AnthropicConfigError } from '../../src/providers/anthropic/anthropic.provider'
+import { AnthropicConfigError, AnthropicRefusalError } from '../../src/providers/anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
 import { R2CatalogImageStore } from '../../src/providers/catalog-images/r2.catalog-image-store'
 import type { ProductAnalyst, ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
@@ -33,8 +33,10 @@ import { AnthropicProductResearcher } from '../../src/providers/product-research
 import type { ProductIdentity } from '../../src/providers/product-research/product-researcher.provider'
 import { DEFAULT_MODELS } from './models'
 import {
+  ANALYSIS_COST_USD,
   duplicateCost,
   DUPLICATE_COST_USD,
+  duplicateUnitCost,
   exitCode,
   type ImageOutcome,
   type ImageStage,
@@ -106,14 +108,27 @@ const identityOfLabel = (product: SetProduct): ProductIdentity => {
   return { brand, name, category, ...(variant ? { variant } : {}), ...(form ? { form } : {}) }
 }
 
+/** A ledger that remembers having refused a reservation: the run then stopped short of what it was asked to measure. */
+class WatchedLedger extends MemoryAiSpendLedger {
+  refused = false
+  override async reserve(input: Parameters<MemoryAiSpendLedger['reserve']>[0]): Promise<string> {
+    try {
+      return await super.reserve(input)
+    } catch (error) {
+      if (error instanceof AiBudgetExceededError) this.refused = true
+      throw error
+    }
+  }
+}
+
 /** The service needs an alerts service; the eval has nobody to email, and it raises nothing below 200 researches. */
 const NO_ALERTS = { raise: async () => undefined } as unknown as OpsAlertsService
 
 // ---- matching ----
 
 type Read = { identity: ProductIdentity; confidence: number }
-/** What recognising a photo gave: a readable beauty product, or nothing to match (the classification is a fixed code). */
-type Recognised = { photo: SetPhoto; folder: string; read: Read } | { photo: SetPhoto; folder: string; unreadable: string }
+/** What recognising a photo gave: a readable beauty product, nothing to match (a fixed classification code or a refusal), or a failure. */
+type Recognised = { photo: SetPhoto; folder: string; read: Read } | { photo: SetPhoto; folder: string; unreadable: string } | { photo: SetPhoto; folder: string; error: string }
 
 const recogniseOnce = async (recognizer: AnthropicProductRecognizer, products: SetProduct[]): Promise<Recognised[]> => {
   const out: Recognised[] = []
@@ -125,7 +140,8 @@ const recogniseOnce = async (recognizer: AnthropicProductRecognizer, products: S
       } catch (error) {
         if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
         if (error instanceof AiBudgetExceededError) throw new SetupError('The spend cap was reached while reading photos; raise --max-usd.')
-        out.push({ photo, folder: product.folder, unreadable: errorName(error) })
+        if (error instanceof AnthropicRefusalError) out.push({ photo, folder: product.folder, unreadable: errorName(error) })
+        else out.push({ photo, folder: product.folder, error: errorName(error) })
         continue
       }
       if (seen.classification !== 'beauty-product') {
@@ -140,18 +156,12 @@ const recogniseOnce = async (recognizer: AnthropicProductRecognizer, products: S
 }
 
 type JudgeAnswer = { candidateRowId: string; same: boolean }
-type Trace = { foundByKey: boolean; created: boolean; questions: JudgeAnswer[] }
+type Trace = { created: boolean; questions: JudgeAnswer[] }
 
-/** The in-memory repository, watched: what resolve found by key, what it created, and which rows it offered the judge. Behaviour is unchanged. */
+/** The in-memory repository, watched: what resolve created and which rows it offered the judge. Behaviour is unchanged. */
 class ObservedRepository extends FakeCatalogRepository {
-  trace: Trace = { foundByKey: false, created: false, questions: [] }
+  trace: Trace = { created: false, questions: [] }
   offered: Product[] = []
-
-  override async findProductByKey(key: string): Promise<Product | null> {
-    const found = await super.findProductByKey(key)
-    if (found) this.trace.foundByKey = true
-    return found
-  }
 
   override async productsByBrandFamily(firstWord: string, limit: number): Promise<Product[]> {
     this.offered = await super.productsByBrandFamily(firstWord, limit)
@@ -202,12 +212,16 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
   const records: PhotoRecord[] = []
   for (const item of seededShuffle(recognised, seed)) {
     const { folder, photo } = item
+    if ('error' in item) {
+      records.push({ folder, photo: photo.name, error: item.error })
+      continue
+    }
     if (!('read' in item)) {
       records.push({ folder, photo: photo.name, unreadable: true, reason: item.unreadable })
       continue
     }
     const { identity, confidence } = item.read
-    repository.trace = { foundByKey: false, created: false, questions: [] }
+    repository.trace = { created: false, questions: [] }
     let resolved
     try {
       // Production would ask for confirmation below the threshold; the eval resolves regardless and records the confidence.
@@ -215,7 +229,7 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
     } catch (error) {
       if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
       if (errorName(error) === 'CatalogBusyError') throw new SetupError('The spend cap was reached while matching; raise --max-usd.')
-      records.push({ folder, photo: photo.name, unreadable: true, reason: errorName(error) })
+      records.push({ folder, photo: photo.name, error: errorName(error) })
       continue
     }
     const { questions, created } = repository.trace
@@ -225,6 +239,7 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
       folder,
       photo: photo.name,
       rowId: resolved.productId,
+      // An alias the catalog remembered from an earlier judge-same answers by key without asking again, so it reads as exact-key here.
       how: created ? 'new-row' : questions.some((q) => q.same) ? 'judge-same' : 'exact-key',
       judged: questions,
       differs: first ? differing(first, identity) : [],
@@ -236,9 +251,14 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
   return records
 }
 
-const printMatching = (score: MatchingScore, orders: { seed: number; photos: PhotoRecord[] }[]) => {
+const unitDescription = (unit: { source: 'measured' | 'constant' }): string =>
+  unit.source === 'measured'
+    ? `mean settled research cost of this run + $${ANALYSIS_COST_USD} analysis, a documented constant: analysis never runs here`
+    : `one research + one analysis, a documented constant of $${DUPLICATE_COST_USD}: this run settled no research`
+
+const printMatching = (score: MatchingScore, orders: { seed: number; photos: PhotoRecord[] }[], unit: ReturnType<typeof duplicateUnitCost>) => {
   for (const order of score.orders) {
-    console.log(`\nMatching, order seed ${order.seed}: repeat-hit ${percent(order.repeatHit)} (${order.hits}/${order.repeats}), ${order.duplicates} duplicates, ${order.unreadable} unreadable`)
+    console.log(`\nMatching, order seed ${order.seed}: repeat-hit ${percent(order.repeatHit)} (${order.hits}/${order.repeats}), ${order.duplicates} duplicates, ${order.unreadable} unreadable, ${order.errors} errored`)
     const width = Math.max('folder'.length, ...order.products.map((p) => p.folder.length))
     console.log(`${'folder'.padEnd(width)}  photos  rows  hits  consistency  causes`)
     for (const p of order.products) {
@@ -250,7 +270,8 @@ const printMatching = (score: MatchingScore, orders: { seed: number; photos: Pho
   const tally = orders.flatMap((o) => o.photos).filter((p): p is PhotoRecord & { how: string } => 'how' in p)
   console.log(`\nMatching overall: worst repeat-hit ${percent(score.worstRepeatHit)}, average ${percent(score.averageRepeatHit)}, ${score.wrongMerges} wrong merges, ${score.duplicates} duplicates`)
   console.log(`  how photos resolved: exact-key ${tally.filter((p) => p.how === 'exact-key').length}, judge-same ${tally.filter((p) => p.how === 'judge-same').length}, new-row ${tally.filter((p) => p.how === 'new-row').length}`)
-  console.log(`  duplicate cost estimate: ${score.duplicates} x $${DUPLICATE_COST_USD} (one research + one analysis, a documented constant: this part calls neither) = $${duplicateCost(score.duplicates).toFixed(2)}`)
+  if (score.errors > 0) console.log(`  ERRORED photos: ${score.errors} (${score.errorNames.join(', ')}); they fail the run`)
+  console.log(`  duplicate cost estimate: ${score.duplicates} x $${unit.each.toFixed(4)} = $${duplicateCost(score.duplicates, unit.each).toFixed(2)} (${unitDescription(unit)})`)
 }
 
 // ---- images ----
@@ -271,9 +292,25 @@ class MemoryBucket {
 
 type ImageDetail = ImageOutcome & { stored?: StoredObject }
 
-const runImages = async (products: SetProduct[], analyst: ProductAnalyst, researcher: AnthropicProductResearcher): Promise<ImageDetail[]> => {
+const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, researcher: AnthropicProductResearcher): Promise<ImageDetail[]> => {
   const details: ImageDetail[] = []
   for (const product of products) {
+    // The catalog turns a failed image check into an `error` stage; watch it so a spent cap is not read as a broken check.
+    let budgetHit = false
+    let checkError: string | undefined
+    const analyst: ProductAnalyst = {
+      analyse: (...args) => realAnalyst.analyse(...args),
+      sameProduct: (...args) => realAnalyst.sameProduct(...args),
+      async imageShowsProduct(...args) {
+        try {
+          return await realAnalyst.imageShowsProduct(...args)
+        } catch (error) {
+          if (error instanceof AiBudgetExceededError) budgetHit = true
+          checkError = errorName(error)
+          throw error
+        }
+      },
+    }
     const repository = new FakeCatalogRepository()
     const bucket = new MemoryBucket()
     const service = new ProductCatalogService({
@@ -292,13 +329,15 @@ const runImages = async (products: SetProduct[], analyst: ProductAnalyst, resear
         const result = await service.research(productId)
         if (result.kind === 'not-found') return { folder, stage: 'no-source-page' }
         if (result.kind === 'budget-exhausted') return { folder, stage: 'budget-exhausted' }
-        if (result.image !== 'stored') return { folder, stage: result.image ?? 'error' }
+        if (result.image === 'error') return budgetHit ? { folder, stage: 'budget-exhausted' } : { folder, stage: 'error', error: checkError ?? 'ImageStageError' }
+        if (result.image !== 'stored') return { folder, stage: result.image ?? 'error', ...(result.image ? {} : { error: 'NoImageOutcome' }) }
         const key = (await repository.findProductById(productId))?.imageKey
         const stored = key ? bucket.objects.get(key) : undefined
-        return stored ? { folder, stage: 'stored', hash: sha256(stored.bytes), stored } : { folder, stage: 'error' }
+        return stored ? { folder, stage: 'stored', hash: sha256(stored.bytes), stored } : { folder, stage: 'error', error: 'StoredImageMissing' }
       } catch (error) {
         if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
-        return { folder, stage: 'error' }
+        if (error instanceof AiBudgetExceededError || budgetHit) return { folder, stage: 'budget-exhausted' }
+        return { folder, stage: 'error', error: errorName(error) }
       }
     }
     details.push(await stage())
@@ -335,6 +374,7 @@ const printImages = (score: ReturnType<typeof scoreImages>) => {
   console.log(`${'folder'.padEnd(width)}  stage             verdict`)
   for (const p of score.perProduct) console.log(`${p.folder.padEnd(width)}  ${p.stage.padEnd(16)}  ${p.verdict ?? ''}${p.hash ? `  ${p.hash.slice(0, 12)}` : ''}`)
   const counts = Object.entries(score.stages).filter(([, count]) => count > 0).map(([stage, count]) => `${stage} ${count}`)
+  if (score.errorNames.length > 0) console.log(`  errored images: ${score.errorNames.join(', ')}`)
   console.log(`${score.stored}/${score.products} stored (coverage ${percent(score.coverage)}): ${counts.join(', ')}; ${score.right} right, ${score.wrong} wrong, ${score.unjudged} unjudged`)
 }
 
@@ -350,17 +390,18 @@ const main = async (): Promise<number> => {
       console.log(`Recorded ${split.verdicts.length} verdicts in ${DIRECTORY}/verdicts.json (${Object.keys(recorded).length} in the file). Nothing was spent.`)
       return 0
     }
-    args = parseArgs(split.rest)
-    env = await loadEnv()
+    args = parseArgs(split.rest, USAGE)
+    // The set and verdicts first: a missing photo set must be the message, not a missing key.
     set = await loadPhotoSet(DIRECTORY)
     verdicts = await loadVerdicts(DIRECTORY)
+    env = await loadEnv()
   } catch (error) {
     console.error((error as Error).message)
     return 2
   }
   const maxUsd = split.maxUsdGiven ? args.maxUsd : DEFAULT_MAX_USD
   const models = { ...DEFAULT_MODELS, ...args.models }
-  const ledger = new MemoryAiSpendLedger({ capMicros: Math.round(maxUsd * 1_000_000) })
+  const ledger = new WatchedLedger({ capMicros: Math.round(maxUsd * 1_000_000) })
   const client = new AnthropicClient({ apiKey: env.apiKey, models, ledger })
   const analyst = new AnthropicProductAnalyst(client)
 
@@ -379,19 +420,22 @@ const main = async (): Promise<number> => {
       const recognised = await recogniseOnce(new AnthropicProductRecognizer(client), products)
       orders = []
       for (const seed of SEEDS) orders.push({ seed, photos: await runOrder(seed, recognised, analyst) })
-      matching = scoreMatching(orders as { seed: number; photos: PhotoOutcome[] }[], labels)
-      printMatching(matching, orders)
+      matching = scoreMatching(orders, labels)
     }
     if (split.part !== 'matching') {
       imageDetails = await runImages(products, analyst, new AnthropicProductResearcher(client))
       images = scoreImages(imageDetails, verdicts)
-      printImages(images)
     }
   } catch (error) {
     if (!(error instanceof SetupError)) throw error
     console.error(error.message)
     return 2
   }
+
+  // After the images part, so its settled research calls can price a duplicate.
+  const unit = duplicateUnitCost(images ? ledger.entries : [])
+  if (matching) printMatching(matching, orders, unit)
+  if (images) printImages(images)
 
   const verdict = judge({ matching, images })
   console.log(`\n${verdict.summary}`)
@@ -406,9 +450,10 @@ const main = async (): Promise<number> => {
     maxUsd,
     models,
     spentMicros: ledger.spentMicros(),
-    duplicateCostUsdEach: DUPLICATE_COST_USD,
+    duplicateCost: { eachUsd: unit.each, source: unit.source, description: unitDescription(unit), documentedConstantUsd: DUPLICATE_COST_USD },
+    spendCapReached: ledger.refused,
     matching: matching && { score: matching, photos: orders },
-    images: images && { score: images, hashes: imageDetails.map(({ folder: name, stage, hash }) => ({ folder: name, stage, hash })) },
+    images: images && { score: images, hashes: imageDetails.map(({ folder: name, stage, hash, error }) => ({ folder: name, stage, hash, error })) },
     verdict,
   }
   writeFileSync(join(folder, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
@@ -417,6 +462,10 @@ const main = async (): Promise<number> => {
     writeFileSync(join(folder, 'contact-sheet.html'), contactSheet(products, imageDetails, images))
     console.log(`Contact sheet: ${join(folder, 'contact-sheet.html')}`)
     for (const p of images.perProduct.filter((x) => x.verdict === 'unjudged')) console.log(`  judge ${p.folder}: npm run eval:matching -- --verdict ${p.hash}=right|wrong`)
+  }
+  if (ledger.refused) {
+    console.error(`\nSPEND CAP REACHED: results incomplete. The ${usd(ledger.capMicros)} cap refused a call, so the numbers above are not the whole picture; raise --max-usd and run again.`)
+    return 2
   }
   return exitCode(verdict)
 }

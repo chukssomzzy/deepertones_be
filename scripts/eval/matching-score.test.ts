@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
   DUPLICATE_COST_USD,
+  ANALYSIS_COST_USD,
   duplicateCost,
+  duplicateUnitCost,
   exitCode,
   judge,
   scoreImages,
@@ -13,16 +15,20 @@ import {
 
 // Photo outcomes are listed in the order the photos were processed. A row id is just an opaque label for "the catalog row this photo landed on".
 
+let photoCounter = 0
+const photoName = (folder: string): string => `${folder}-${++photoCounter}.jpg`
+
 const read = (folder: string, rowId: string, how: 'exact-key' | 'judge-same' | 'new-row', extra: Partial<Extract<PhotoOutcome, { rowId: string }>> = {}): PhotoOutcome => ({
   folder,
-  photo: `${folder}-${Math.random().toString(36).slice(2)}.jpg`,
+  photo: photoName(folder),
   rowId,
   how,
   judged: [],
   differs: [],
   ...extra,
 })
-const unreadable = (folder: string): PhotoOutcome => ({ folder, photo: `${folder}-${Math.random().toString(36).slice(2)}.jpg`, unreadable: true })
+const unreadable = (folder: string): PhotoOutcome => ({ folder, photo: photoName(folder), unreadable: true })
+const errored = (folder: string, error = 'AnthropicUnavailableError'): PhotoOutcome => ({ folder, photo: photoName(folder), error })
 
 const NO_LABELS = {}
 const order = (photos: PhotoOutcome[], seed = 1) => ({ seed, photos })
@@ -141,6 +147,13 @@ describe('scoreOrder', () => {
     expect(productOf(score, 'serum')).toMatchObject({ hits: 1, repeats: 1, repeatHit: 1, unreadable: 1 })
   })
 
+  it('counts an errored photo apart from unreadable, and does not let it count as a miss or sit on a row', () => {
+    const score = scoreOrder(order([read('serum', 'r1', 'new-row'), errored('serum'), read('serum', 'r1', 'exact-key'), unreadable('serum')]), NO_LABELS)
+
+    expect(productOf(score, 'serum')).toMatchObject({ photos: 4, unreadable: 1, errors: 1, hits: 1, repeats: 1, repeatHit: 1 })
+    expect(score).toMatchObject({ unreadable: 1, errors: 1 })
+  })
+
   it('flags a row holding photos of two products as a wrong merge that is not a declared look-alike', () => {
     const score = scoreOrder(order([read('serum', 'r1', 'new-row'), read('cream', 'r1', 'judge-same')]), NO_LABELS)
 
@@ -202,8 +215,27 @@ describe('scoreMatching', () => {
     expect(score.duplicates).toBe(1)
   })
 
-  it('scores no orders as a vacuous pass with nothing wrong', () => {
-    expect(scoreMatching([], NO_LABELS)).toMatchObject({ worstRepeatHit: 1, averageRepeatHit: 1, wrongMerges: 0, duplicates: 0 })
+  it('scores no orders as having no evidence, not as a pass', () => {
+    expect(scoreMatching([], NO_LABELS)).toMatchObject({ wrongMerges: 0, duplicates: 0, errors: 0, evidence: false })
+    expect(exitCode(judge({ matching: scoreMatching([], NO_LABELS) }))).toBe(1)
+  })
+
+  it('has evidence only when every order has a product with at least two readable photos', () => {
+    const repeated = order([read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key')], 1)
+    const single = order([read('serum', 'r1', 'new-row'), unreadable('serum')], 2)
+
+    expect(scoreMatching([repeated], NO_LABELS).evidence).toBe(true)
+    expect(scoreMatching([repeated, single], NO_LABELS).evidence).toBe(false)
+  })
+
+  it('counts errors over every order and lists the distinct error names', () => {
+    const a = order([read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key'), errored('serum', 'AnthropicRequestError')], 1)
+    const b = order([read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key'), errored('serum', 'AnthropicRequestError'), errored('cream', 'AnthropicRefusalError')], 2)
+
+    const score = scoreMatching([a, b], NO_LABELS)
+
+    expect(score.errors).toBe(3)
+    expect(score.errorNames).toEqual(['AnthropicRefusalError', 'AnthropicRequestError'])
   })
 })
 
@@ -236,6 +268,14 @@ describe('scoreImages', () => {
     const score = scoreImages([img('a', 'no-page-image')], { zzz: 'wrong' })
 
     expect(score).toMatchObject({ wrong: 0, right: 0, unjudged: 0 })
+  })
+
+  it('carries the error name of a product whose image stage errored, and lists the names', () => {
+    const score = scoreImages([{ folder: 'a', stage: 'error', error: 'AnthropicUnavailableError' }, { folder: 'b', stage: 'error', error: 'AnthropicUnavailableError' }, img('c', 'stored', 'h1')], {})
+
+    expect(score.perProduct[0]).toEqual({ folder: 'a', stage: 'error', error: 'AnthropicUnavailableError' })
+    expect(score.errorNames).toEqual(['AnthropicUnavailableError'])
+    expect(score.stages.error).toBe(2)
   })
 
   it('reports the verdict beside each product', () => {
@@ -315,7 +355,7 @@ describe('judge and exitCode', () => {
   it('exits 0 when every target of both parts is met', () => {
     const v = judge({ matching: matchingWith(10, 0), images: imagesWith(5, 5) })
 
-    expect(v.targets.map((t) => t.id).sort()).toEqual(['images-coverage', 'images-wrong', 'matching-repeat-hit', 'matching-wrong-merges'])
+    expect(v.targets.map((t) => t.id).sort()).toEqual(['images-coverage', 'images-evidence', 'images-wrong', 'matching-errors', 'matching-evidence', 'matching-repeat-hit', 'matching-wrong-merges'])
     expect(v.targets.every((t) => t.met)).toBe(true)
     expect(exitCode(v)).toBe(0)
   })
@@ -331,13 +371,48 @@ describe('judge and exitCode', () => {
   it('does not judge a part that was not run: images alone say nothing about matching', () => {
     const v = judge({ images: imagesWith(5, 5) })
 
-    expect(v.targets.map((t) => t.id).sort()).toEqual(['images-coverage', 'images-wrong'])
+    expect(v.targets.map((t) => t.id).sort()).toEqual(['images-coverage', 'images-evidence', 'images-wrong'])
   })
 
   it('does not judge matching targets when only the images part ran, even if images fail', () => {
     const v = judge({ images: imagesWith(0, 5) })
 
     expect(v.targets.some((t) => t.id.startsWith('matching-'))).toBe(false)
+  })
+
+  it('fails the run when any matching photo errored, naming the count, even with perfect repeat-hit', () => {
+    const photos = [read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key'), errored('cream'), errored('cream')]
+    const v = judge({ matching: scoreMatching([order(photos)], NO_LABELS) })
+
+    expect(target(v, 'matching-repeat-hit')).toMatchObject({ met: true })
+    expect(target(v, 'matching-errors')).toMatchObject({ met: false })
+    expect(v.summary).toContain('matching-errors: 2 photos errored (see report)')
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('does not fail on unreadable photos alone', () => {
+    const photos = [read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key'), unreadable('cream')]
+    const v = judge({ matching: scoreMatching([order(photos)], NO_LABELS) })
+
+    expect(target(v, 'matching-errors')).toMatchObject({ met: true })
+    expect(exitCode(v)).toBe(0)
+  })
+
+  it('does not meet the matching targets when no order has a repeat to measure, and says why', () => {
+    const photos = [read('serum', 'r1', 'new-row'), read('cream', 'r2', 'new-row')]
+    const v = judge({ matching: scoreMatching([order(photos)], NO_LABELS) })
+
+    expect(target(v, 'matching-evidence')).toMatchObject({ met: false })
+    expect(v.summary).toContain('no evidence')
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('does not meet the images targets when there were no products, and says why', () => {
+    const v = judge({ images: scoreImages([], {}) })
+
+    expect(target(v, 'images-evidence')).toMatchObject({ met: false })
+    expect(v.summary).toContain('no evidence')
+    expect(exitCode(v)).toBe(1)
   })
 
   it('says the verdict is provisional with the count of unjudged images, and still exits 0 when targets are met', () => {
@@ -362,7 +437,27 @@ describe('duplicateCost', () => {
     expect(duplicateCost(1)).toBe(DUPLICATE_COST_USD)
   })
 
+  it('prices each duplicate at a given unit cost when one is supplied', () => {
+    expect(duplicateCost(3, 0.5)).toBeCloseTo(1.5, 10)
+  })
+
   it('scales with the number of duplicates', () => {
     expect(duplicateCost(6)).toBeCloseTo(3 * duplicateCost(2), 10)
+  })
+})
+
+describe('duplicateUnitCost', () => {
+  const entry = (job: string, status: 'settled' | 'reserved' | 'released', costMicros: number | null) => ({ job, status, costMicros })
+
+  it('falls back to the documented constant when no research was settled', () => {
+    expect(duplicateUnitCost([])).toEqual({ each: DUPLICATE_COST_USD, source: 'constant' })
+    expect(duplicateUnitCost([entry('research', 'released', null), entry('research', 'reserved', null), entry('image-check', 'settled', 9_000_000)])).toEqual({ each: DUPLICATE_COST_USD, source: 'constant' })
+  })
+
+  it('uses the mean settled research cost plus the analysis constant, since analysis never runs here', () => {
+    const { each, source } = duplicateUnitCost([entry('research', 'settled', 40_000), entry('research', 'settled', 60_000), entry('same-product', 'settled', 1_000_000), entry('research', 'released', null)])
+
+    expect(source).toBe('measured')
+    expect(each).toBeCloseTo(0.05 + ANALYSIS_COST_USD, 10)
   })
 })
