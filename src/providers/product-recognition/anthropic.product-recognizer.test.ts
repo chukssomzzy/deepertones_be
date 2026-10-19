@@ -477,9 +477,10 @@ describe('AnthropicProductRecognizer brand and name split', () => {
     expect(prompt).toMatch(/not in the brand/i)
   })
 
-  it('tells the model the variant is only a printed shade, scent or skin type and a product line name is not a variant', async () => {
+  it('tells the model the variant is only a shade, scent, strength or SPF number or skin-type edition, never a suitability line, claim or size, and a product line name is not a variant', async () => {
     const prompt = await promptSent()
-    expect(prompt).toMatch(/variant[^.]*only[^.]*shade, scent[^.]*skin type/i)
+    expect(prompt).toMatch(/variant[^.]*only[^.]*shade, scent[^.]*SPF number[^.]*skin-type edition/i)
+    expect(prompt).toMatch(/never a suitability line[^.]*claim[^.]*size/i)
     expect(prompt).toMatch(/product line[^.]*not a variant/i)
   })
 })
@@ -495,8 +496,8 @@ Classify the photo:
 - unreadable: blurry, dark, cropped or empty, or the brand or name is not legible.
 
 For a beauty-product, give the brand, the name, the variant, the form (spray, roll-on, stick, cream, lotion, gel, oil, serum, liquid, bar, powder or balm), a category (skin, hair, body, makeup or other) and your confidence from 0 to 1. For anything else use empty strings, category other and confidence 0.
-The brand is the maker's name only, as printed, such as NIVEA, Garnier or CeraVe. A sub-line or range printed with the brand, such as MEN, SUN, Fructis or Hydro Boost, goes at the start of the name, not in the brand. Give the name as printed.
-The variant is only a shade, scent or skin type that is printed, and a product line name is not a variant.
+The brand is the maker's name only, as printed, such as NIVEA, Garnier or CeraVe. A sub-line or range printed with the brand, such as MEN, SUN, Fructis or Hydro Boost, goes at the start of the name, not in the brand. Give the name as the product's own name on the front label, in English when the pack is bilingual, without marketing claims, benefit lines, ingredient call-outs, sizes or translations, such as Soft, Cocoa Butter Formula, Gentle Skin Cleanser, PM Facial Moisturizing Lotion or Hydro Boost Water Gel (not "Soft Moisturizing Cream" or "Cocoa Butter Formula with Vitamin E, Heals & Softens").
+The variant is only what tells editions of one named product apart on the same shelf: a printed shade, scent or flavour, a strength or SPF number, or a skin-type edition that is part of the product's name block, such as Extra-Dry Skin on a Gel-Cream. It is never a suitability line ("for all skin types", "for normal to dry skin", "sensitive skin"), a claim or a size. A product line name is not a variant.
 Read the form from the printed words or from the shape of the container. For the texture forms (cream, lotion, gel, balm, serum, oil, liquid, powder) use the word printed on the pack, and if none is printed use unknown. The shape of the container alone may decide only spray (an aerosol can), roll-on (a roll-on ball), stick and bar (a bar of soap). Use unknown when you are not sure. Never guess a form from the brand alone.
 Never guess a brand or name you cannot read.
 

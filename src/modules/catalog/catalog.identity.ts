@@ -25,9 +25,6 @@ export const brandFirstWord = (brand: string): string => brandKey(brand).split('
 /** Whether two brands share a first word, so a brand/name split ("NIVEA MEN" + "DRY IMPACT" or "NIVEA" + "MEN DRY IMPACT") still meets. */
 export const sameBrandFamily = (brandA: string, brandB: string): boolean => brandFirstWord(brandA) === brandFirstWord(brandB)
 
-/** Whether two products have the same form; none counts as a value, as it does in the key. */
-export const sameForm = (a: { form?: string | null }, b: { form?: string | null }): boolean => (a.form ?? '') === (b.form ?? '')
-
 /** One product, one key: brand, name and variant normalised, with pack sizes ignored, then the form (empty for none). */
 export const identityKey = (product: Branded): string =>
   `${brandKey(product.brand)}|${comparable(product.name)}|${comparable(product.variant)}|${product.form ?? ''}`
@@ -45,9 +42,31 @@ export const nameSimilarity = (a: Named, b: Named): number => {
   return union === 0 ? 0 : shared / union
 }
 
+/** Whether the reading's words are a strict subset of the product's: it says less than the product does ("Hydro Boost" for "Hydro Boost Water Gel"). */
+export const lessSpecific = (reading: Named, product: Named): boolean => {
+  const [wr, wp] = [words(reading), words(product)]
+  return wr.size < wp.size && [...wr].every((w) => wp.has(w))
+}
+
 /**
- * Products of the same brand family (first word) whose words nearly match but whose identity key differs: the cases for the model
- * to decide (same product or not). Best first, equal similarity by id.
+ * Whether every word of the shorter reading is in the longer one ("NIVEA soft" in "NIVEA Soft Light Moisturiser"): the recognizer
+ * often adds or drops descriptors, which Jaccard punishes. A reading with no word beyond its brand is contained in every product of
+ * the brand, so on either side it is never a containment.
+ */
+const contains = (a: Branded, b: Branded): boolean => {
+  const [wa, wb] = [words(a), words(b)]
+  const [short, long] = wa.size <= wb.size ? [wa, wb] : [wb, wa]
+  const beyondBrand = (p: Branded, w: Set<string>): boolean => {
+    const brand = new Set(comparable(p.brand).split(' '))
+    return [...w].some((x) => !brand.has(x))
+  }
+  if (!beyondBrand(a, wa) || !beyondBrand(b, wb)) return false
+  return [...short].every((w) => long.has(w))
+}
+
+/**
+ * Products of the same brand family (first word) whose words nearly match (Jaccard at the threshold, or one reading's words all inside
+ * the other's) but whose identity key differs: the cases for the model to decide (same product or not). Best first, equal similarity by id.
  */
 export const nearMissCandidates = <P extends Branded & { id: string }>(
   target: Branded,
@@ -59,7 +78,7 @@ export const nearMissCandidates = <P extends Branded & { id: string }>(
   return products
     .filter((p) => sameBrandFamily(p.brand, target.brand) && identityKey(p) !== targetKey)
     .map((p) => ({ product: p, similarity: nameSimilarity(target, p) }))
-    .filter((c) => c.similarity >= threshold)
+    .filter((c) => c.similarity >= threshold || contains(target, c.product))
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))
     .slice(0, limit)
     .map((c) => c.product)

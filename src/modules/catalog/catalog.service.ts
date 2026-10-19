@@ -7,7 +7,7 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, nearMissCandidates, normaliseText, sameForm } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, nearMissCandidates, normaliseText } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -194,9 +194,13 @@ export class ProductCatalogService {
   private static searchTextOf = (product: { brand: string; name: string; variant?: string | null }): string =>
     normaliseText(`${product.brand} ${product.name} ${product.variant ?? ''}`)
 
+  /** A form missing on either side is compatible (the label may simply not print it); two different known forms are different products. */
+  private static formsCompatible = (a: string | null | undefined, b: string | null | undefined): boolean => !a || !b || a === b
+
+  /** Only numbers set variants apart for good (SPF 30 and 50, 2% and 5%); any other difference is the judge's to weigh. */
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
-    const [x, y] = [normaliseText(a ?? ''), normaliseText(b ?? '')]
-    return x !== '' && y !== '' && x !== y
+    const [x, y] = [normaliseText(a ?? '').match(/\d+(?:\.\d+)?/g), normaliseText(b ?? '').match(/\d+(?:\.\d+)?/g)]
+    return x !== null && y !== null && x.join(' ') !== y.join(' ')
   }
 
   private readonly repository: CatalogRepository
@@ -280,11 +284,11 @@ export class ProductCatalogService {
     if (known) return known
 
     const brandProducts = await this.repository.productsByBrandFamily(brandFirstWord(identity.brand), this.policy.brandScanLimit)
-    // A shampoo is not its conditioner, nor a night cream its day cream: only the model's call on the rest is worth paying for.
+    // A shampoo is not its conditioner, nor SPF 30 its SPF 50, nor a spray its roll-on: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
       (p) =>
         (identity.category === undefined || p.category === identity.category) &&
-        sameForm(p, identity) &&
+        ProductCatalogService.formsCompatible(p.form, identity.form) &&
         !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
     const candidates = nearMissCandidates(identity, comparable, {
@@ -293,7 +297,8 @@ export class ProductCatalogService {
     })
     for (const candidate of candidates) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
-        await this.repository.addAlias(key, candidate.id)
+        // A vague reading ("Hydro Boost") that the judge matched to one product would, as an alias, also claim its look-alike's next vague reading by exact key.
+        if (!lessSpecific(identity, candidate)) await this.repository.addAlias(key, candidate.id)
         return candidate
       }
     }
