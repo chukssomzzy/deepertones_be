@@ -4,7 +4,7 @@ import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { AiBudgetExceededError } from '../../providers/anthropic/ai-spend.provider'
 import type { CatalogImageStore } from '../../providers/catalog-images/catalog-image-store.provider'
 import type { ProductAnalyst } from '../../providers/product-analysis/product-analyst.provider'
-import type { ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
+import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
 import { brandFirstWord, brandKey, identityKey, lessSpecific, nearMissCandidates, normaliseText } from './catalog.identity'
@@ -198,6 +198,14 @@ export class ProductCatalogService {
   private static formsCompatible = (a: string | null | undefined, b: string | null | undefined): boolean => !a || !b || a === b
 
   /** Only numbers set variants apart for good (SPF 30 and 50, 2% and 5%); any other difference is the judge's to weigh. */
+  /**
+   * Whether a near miss of one category may be put to the judge for a label of another. The same, or skin care and body care: a soap,
+   * a lotion or an oil is read as one on one photo and the other on the next. Hair, makeup and other stay apart from everything else.
+   */
+  private static categoriesCompatible = (a: ProductCategory, b: ProductCategory): boolean =>
+    a === b || (ProductCatalogService.SKIN_OR_BODY.has(a) && ProductCatalogService.SKIN_OR_BODY.has(b))
+  private static readonly SKIN_OR_BODY: ReadonlySet<ProductCategory> = new Set<ProductCategory>(['skin', 'body'])
+
   private static variantsConflict = (a: string | null | undefined, b: string | null | undefined): boolean => {
     const [x, y] = [normaliseText(a ?? '').match(/\d+(?:\.\d+)?/g), normaliseText(b ?? '').match(/\d+(?:\.\d+)?/g)]
     return x !== null && y !== null && x.join(' ') !== y.join(' ')
@@ -287,7 +295,7 @@ export class ProductCatalogService {
     // A shampoo is not its conditioner, nor SPF 30 its SPF 50, nor a spray its roll-on: only the model's call on the rest is worth paying for.
     const comparable = brandProducts.filter(
       (p) =>
-        (identity.category === undefined || p.category === identity.category) &&
+        (identity.category === undefined || ProductCatalogService.categoriesCompatible(p.category, identity.category)) &&
         ProductCatalogService.formsCompatible(p.form, identity.form) &&
         !ProductCatalogService.variantsConflict(p.variant, identity.variant),
     )
