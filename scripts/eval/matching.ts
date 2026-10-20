@@ -342,7 +342,7 @@ const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, re
         // A fresh catalog holds nothing, so this creates the product from its true label without asking the judge.
         const { productId } = await service.resolve(identityOfLabel(product))
         const result = await withRetries(() => service.research(productId))
-        if (result.kind === 'not-found') return { folder, stage: 'no-source-page' }
+        if (result.kind === 'not-found') return { folder, stage: result.image ?? 'no-source-page' }
         if (result.kind === 'budget-exhausted') return { folder, stage: 'budget-exhausted' }
         if (result.image === 'error') return budgetHit ? { folder, stage: 'budget-exhausted' } : { folder, stage: 'error', error: checkError ?? 'ImageStageError' }
         if (result.image !== 'stored') return { folder, stage: result.image ?? 'error', ...(result.image ? {} : { error: 'NoImageOutcome' }) }

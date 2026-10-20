@@ -33,7 +33,7 @@ export class R2CatalogImageStore implements CatalogImageStore {
   private static readonly MAX_REDIRECTS = 2
   // The image meta tags live in <head>; a page is not read past this.
   private static readonly PAGE_MAX_BYTES = 512 * 1024
-  // In preference order; the first rank with a non-empty value wins.
+  // In preference order; the first value that resolves to a safe url wins, so an http og:image does not hide a good og:image:secure_url.
   private static readonly IMAGE_META_RANKS = [['og:image'], ['og:image:secure_url', 'og:image:url'], ['twitter:image']]
   // The scan is a forward-only walk, not a regex: the page is hostile and a backtracking pattern on it costs minutes of CPU.
   private static readonly MAX_META_TAGS = 200
@@ -67,10 +67,11 @@ export class R2CatalogImageStore implements CatalogImageStore {
     try {
       const response = await this.get(pageUrl, (current) => requestHeadBytes$(current, { timeoutMs, maxBytes: R2CatalogImageStore.PAGE_MAX_BYTES }))
       if (!response?.ok || !response.contentType?.toLowerCase().startsWith('text/html')) return null
-      const value = R2CatalogImageStore.imageMetaValue(new TextDecoder().decode(response.bytes))
-      if (value === null) return null
-      const resolved = new URL(value, response.url).href
-      return isSafePublicHttpsUrl(resolved) ? resolved : null
+      for (const value of R2CatalogImageStore.imageMetaValues(new TextDecoder().decode(response.bytes))) {
+        const resolved = R2CatalogImageStore.resolve(value, response.url)
+        if (resolved !== null && isSafePublicHttpsUrl(resolved)) return resolved
+      }
+      return null
     } catch {
       // Hostile input: nothing here may leak the page or its URL, so no logging either.
       return null
@@ -121,8 +122,16 @@ export class R2CatalogImageStore implements CatalogImageStore {
     return base === '' ? null : `${base}/${key.split('/').map(encodeURIComponent).join('/')}`
   }
 
-  /** The content of the best-ranked image meta tag in `html`, or null. Linear in the length of `html`. */
-  private static imageMetaValue(html: string): string | null {
+  private static resolve(value: string, base: string): string | null {
+    try {
+      return new URL(value, base).href
+    } catch {
+      return null
+    }
+  }
+
+  /** The content of every non-empty image meta tag in `html`, best-ranked first. Linear in the length of `html`. */
+  private static imageMetaValues(html: string): string[] {
     const found = new Map<string, string>()
     // Lower-cased once, same length for ASCII tag names; offsets are only used to cut the original.
     const lower = html.toLowerCase()
@@ -141,13 +150,14 @@ export class R2CatalogImageStore implements CatalogImageStore {
       const content = attributes.get('content')
       if (key && content !== undefined && !found.has(key)) found.set(key, R2CatalogImageStore.decodeEntities(content).trim())
     }
+    const values: string[] = []
     for (const rank of R2CatalogImageStore.IMAGE_META_RANKS) {
       for (const key of rank) {
         const value = found.get(key)
-        if (value) return value
+        if (value) values.push(value)
       }
     }
-    return null
+    return values
   }
 
   /** The attributes of one tag's inside, names lower-cased, first occurrence kept. One forward pass; every iteration advances. */

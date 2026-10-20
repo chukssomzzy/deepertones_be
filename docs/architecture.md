@@ -1163,15 +1163,16 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   single-label host. The adapter checks the start URL and every redirect target, resolves a relative
   `location` against the URL that sent it, and follows at most 2 redirects (3 requests), each with its
   own 10 s timeout.
-- **Image from the source page.** `pageImageUrl(pageUrl)` finds the product's image on the page the researcher
-  cited. The researcher cannot supply an image URL itself: web_search never exposes image URLs, so the model always
+- **Image from the source page.** `pageImageUrl(pageUrl)` finds the product's image on a page the researcher
+  named (a product page or the ingredient page). The researcher cannot supply an image URL itself: web_search never exposes image URLs, so the model always
   answered null. Source pages carry the packshot in `og:image`. The adapter fetches the page through the same safe path as
   `fetchImage` (safe-URL check and blocked hosts on every hop, at most 2 redirects, 10 s timeout), accepts only a 2xx
   `text/html` answer, reads at most 512 KB of it (`requestHeadBytes$` stops pulling at the cap), and scans the `<meta>`
   tags with a linear forward-only scanner, not a regex, because the page is hostile (stops at `</head>`, after 200 tags,
   skips a tag over 4 KB; `property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
-  `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. The value is resolved against the
-  page URL (the final one, after redirects) and returned only if it is a safe public https URL. Any failure is `null`; nothing from the page or its URL is logged.
+  `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. Each value in that order is resolved against the
+  page URL (the final one, after redirects) and the first that is a safe public https URL is returned, so an `http` `og:image`
+  does not hide a good `og:image:secure_url` (every Shopify store emits that pair). Any failure is `null`; nothing from the page or its URL is logged.
 - **Blocked hosts.** `blockedHostSuffixes` (default none) refuses any hop whose hostname equals a
   suffix or ends with `.`+suffix. The container passes our own zones, so a redirect cannot point the
   Worker back at us; the suffixes are not hard-coded in the adapter.
@@ -1421,18 +1422,27 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   or symbols with a space ("less than 1 ppm"). It also states a tighter length budget (`why` at most 450 characters,
   `whoShouldTakeCare` at most 200, repeated in the schema descriptions) so a slightly long answer still clears the gate.
 - **Stock image import** runs after the formulation is stored, only when the product has no image and none was looked
-  for in the last `FRESH_FOR_DAYS`. The image URL comes from `pageImageUrl(sourceUrl)` (see "Catalog images"), looked up only after the freshness and
-  has-image guard passes. Gates, in order: the image store's safe download (see "Catalog images"; `null`
-  for a bad URL, type or size), then `imageShowsProduct` (the vision match), and only then `put` to
-  `<imageKeyPrefix>/products/<productId>.<jpg|png|webp>` (for example
-  `catalog/staging/products/<productId>.jpg`) and the product's image key, source page and time. A missing URL, a failed
-  download or a "no match" only marks the image as checked. **Every error is swallowed**: if the download, the model
-  or the bucket throws, the research still reports the ingredients as found, nothing is marked (so the next
-  research retries), and the log line is `{ outcome: 'image-import-failed', productId }`, never a URL, because the
-  URL came from a web page.
-  The import reports what it did as `image` on the `found` result (`StockImageOutcome`: `stored`, `already-has-image`,
-  `checked-recently`, `no-page-image`, `download-failed`, `not-this-product` or `error`). It is informational only, so
-  research never fails because of the image, and it is absent when research did not run (a fresh formulation already stored).
+  for in the last `FRESH_FOR_DAYS`. The research answer names up to 3 `imagePages` (pages for this exact product, the
+  brand's own first, then retailers; each one the search returned, https only; see `AnthropicProductResearcher`). The
+  pages tried are `[...imagePages, sourceUrl]` with repeats dropped, at most 4, in that order. For each page, in order:
+  `pageImageUrl(page)` (see "Catalog images"; a page with no usable image is skipped), then the image store's safe
+  download (`null` for a bad URL, type or size; the page is skipped and this is not a check), then `imageShowsProduct`
+  (the vision match). The first image the match accepts is `put` to `<imageKeyPrefix>/products/<productId>.<jpg|png|webp>`
+  (for example `catalog/staging/products/<productId>.jpg`) with the product's image key, image URL and time, and the
+  import stops. An image URL already tried in this run is skipped, and at most 2 images per product go to the vision
+  match, so the cost of a product is capped. If nothing was stored the product is marked as checked and the outcome is
+  the furthest stage reached on any page: `not-this-product`, then `download-failed`, then `no-page-image` (no pages
+  at all is `no-page-image`). **A not-found research answer still gets an image attempt** when it names `imagePages`
+  (also when its list was rejected for links or markup): the attempt is settled as not-found as before, the pages are
+  tried the same way, and the result is `{ kind: 'not-found', image }`. The 7-day "do not research again" rule is
+  unchanged, and the image keeps its own `imageCheckedAt` timer, so a cached not-found result does no image work.
+  **Every error is swallowed**: if the download, the model or the bucket throws, the research still reports its
+  result, nothing is marked (so the next research retries), and the log line is `{ outcome: 'image-import-failed',
+  productId }`, never a URL, because the URLs came from web pages.
+  The import reports what it did as `image` on the `found` result and on the `not-found` result that tried pages
+  (`StockImageOutcome`: `stored`, `already-has-image`, `checked-recently`, `no-page-image`, `download-failed`,
+  `not-this-product` or `error`). It is informational only, so research never fails because of the image, and it is
+  absent when research did not run (a fresh formulation already stored).
 - **Analysis validation** (`checkAnalysis`) treats the model as untrusted and stores nothing unless all of it holds.
   *Vocabulary*: kind, severity and every trait must be in the fixed lists (matched ignoring case, stored in canonical
   form); one unknown value rejects the whole analysis. *Ingredient mapping*: each ingredient a concern names is

@@ -762,6 +762,34 @@ describe('R2CatalogImageStore.pageImageUrl', () => {
     expect(await make().pageImageUrl(PAGE)).toBeNull()
   })
 
+  it('uses og:image:secure_url when the og:image is an http url, as every Shopify store emits the pair', async () => {
+    serving(`<meta property="og:image" content="http://assets.brand.example/p.png"/><meta property="og:image:secure_url" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('uses the next safe rank when an earlier rank is unsafe, even when the safe one is twitter:image', async () => {
+    serving(
+      `<meta property="og:image" content="http://assets.brand.example/p.png"/><meta property="og:image:secure_url" content="https://127.0.0.1/p.png"/><meta name="twitter:image" content="${PACKSHOT}"/>`,
+    )
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('still prefers a safe og:image over a safe og:image:secure_url', async () => {
+    serving(`<meta property="og:image:secure_url" content="https://assets.brand.example/other.png"/><meta property="og:image" content="${PACKSHOT}"/>`)
+
+    expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+  })
+
+  it('returns null when every image meta tag is unsafe', async () => {
+    serving(
+      '<meta property="og:image" content="http://assets.brand.example/p.png"/><meta property="og:image:secure_url" content="https://localhost/p.png"/><meta name="twitter:image" content="javascript:alert(1)"/>',
+    )
+
+    expect(await make().pageImageUrl(PAGE)).toBeNull()
+  })
+
   it('follows a redirect to another public https page', async () => {
     const MOVED = 'https://www.nivea.example/new/p.html'
     stubFetch((url) => (url === PAGE ? redirect(MOVED, 301) : html(`<meta property="og:image" content="${PACKSHOT}"/>`)))

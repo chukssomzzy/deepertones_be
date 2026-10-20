@@ -13,10 +13,13 @@ export type ProductIdentity = {
 }
 
 export type ResearchResult =
-  /** `sourceUrl` is a page the search actually returned; `ingredients` are in label (INCI) order. */
-  | { found: true; ingredients: string[]; sourceUrl: string }
-  /** Nothing usable and sourced: no list, no trustworthy page, or an answer that could not be read. */
-  | { found: false }
+  /**
+   * `sourceUrl` is a page the search actually returned; `ingredients` are in label (INCI) order.
+   * `imagePages` are pages for this exact product, best first, each one the search returned: at most 3, https only, no duplicates. Omitted when there are none.
+   */
+  | { found: true; ingredients: string[]; sourceUrl: string; imagePages?: string[] }
+  /** Nothing usable and sourced: no list, no trustworthy page, or an answer that could not be read. `imagePages` as above, given even without a list. */
+  | { found: false; imagePages?: string[] }
 
 /**
  * Finds a product's official ingredient list online. Adapters throw their vendor's errors for

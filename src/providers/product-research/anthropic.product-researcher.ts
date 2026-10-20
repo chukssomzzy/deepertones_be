@@ -5,7 +5,7 @@ import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
 
 // A type outside the class cannot read its private members (TS2341), so the answer shape is spelled out beside the schema it mirrors.
-type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null }
+type Answer = { found: boolean; ingredients: string[]; sourceUrl?: string | null; productPages?: string[] | null }
 
 /** Researches a product's ingredients with Claude and its web search tool. */
 export class AnthropicProductResearcher implements ProductResearcher {
@@ -16,9 +16,11 @@ export class AnthropicProductResearcher implements ProductResearcher {
     found: z.boolean(),
     ingredients: z.array(z.string()),
     sourceUrl: z.string().nullish(),
+    productPages: z.array(z.string()).nullish(),
   })
 
   private static readonly NOT_FOUND: ResearchResult = { found: false }
+  private static readonly MAX_IMAGE_PAGES = 3
 
   // An INCI list is a few dozen entries; anything far outside this is a mangled page or an injection.
   private static readonly MAX_INGREDIENTS = 150
@@ -46,11 +48,22 @@ export class AnthropicProductResearcher implements ProductResearcher {
     // Any answer that cannot be read or checked is "not found": the caller has a fallback for that.
     const notFound = AnthropicProductResearcher.NOT_FOUND
     const answer = AnthropicProductResearcher.lastAnswerIn(textOf(message))
-    if (!answer?.found) return notFound
+    if (!answer) return notFound
+    const searched = sourceUrlsOf(message)
+    // Pages are named even when no list was found: the product can still get a picture from them.
+    const pages = AnthropicProductResearcher.imagePagesIn(answer, searched)
+    const withPages = pages.length > 0 ? { imagePages: pages } : {}
+    if (!answer.found) return { found: false, ...withPages }
     const ingredients = answer.ingredients.map((name) => name.trim()).filter((name) => name !== '')
     const { sourceUrl } = answer
-    if (!AnthropicProductResearcher.withinBounds(ingredients) || !sourceUrl || !sourceUrlsOf(message).has(sourceUrl)) return notFound
-    return { found: true, ingredients, sourceUrl }
+    if (!AnthropicProductResearcher.withinBounds(ingredients) || !sourceUrl || !searched.has(sourceUrl)) return notFound
+    return { found: true, ingredients, sourceUrl, ...withPages }
+  }
+
+  /** The pages the answer names that the search returned, https only, without repeats, best first. */
+  private static imagePagesIn(answer: Answer, searched: Set<string>): string[] {
+    const named = (answer.productPages ?? []).filter((page) => searched.has(page) && page.startsWith('https://'))
+    return [...new Set(named)].slice(0, AnthropicProductResearcher.MAX_IMAGE_PAGES)
   }
 
   private static withinBounds(ingredients: string[]): boolean {
