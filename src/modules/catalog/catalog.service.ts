@@ -7,7 +7,7 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -94,9 +94,11 @@ export type ResolveResult =
  * - `stored`: the image downloaded, the model said it shows this product, and it was put and recorded.
  * - `already-has-image`: the product already had an image; nothing was looked up.
  * - `checked-recently`: an image was looked for within FRESH_FOR_DAYS; nothing was looked up.
- * - `no-page-image`: the source page gave no image URL.
- * - `download-failed`: the image URL gave nothing safe to download (bad URL, type or size).
- * - `not-this-product`: the model said the image does not show this product.
+ * - `no-page-image`: none of the pages tried gave an image URL.
+ * - `download-failed`: a page gave an image URL, but none gave anything safe to download (bad URL, type or size).
+ * - `not-this-product`: the model said an image does not show this product, and no other page's image was accepted.
+ *
+ * With several pages tried, a failure reports the furthest stage reached on any of them: `not-this-product`, then `download-failed`, then `no-page-image`.
  * - `error`: something in the import threw; swallowed, and only the product id is logged.
  */
 export type StockImageOutcome =
@@ -114,7 +116,7 @@ export type StockImageOutcome =
  */
 export type ResearchResult =
   | { kind: 'found'; formulationId: string; image?: StockImageOutcome }
-  | { kind: 'not-found'; fallbackFormulationId?: string }
+  | { kind: 'not-found'; fallbackFormulationId?: string; image?: StockImageOutcome }
   | { kind: 'budget-exhausted'; fallbackFormulationId?: string }
 
 /** The product and formulation a label's list belongs to; `analysed` says whether that formulation is already analysed by the current versions. */
@@ -170,6 +172,9 @@ export class ProductCatalogService {
   private static readonly MAX_LABEL_INGREDIENTS = 150
   private static readonly MAX_LABEL_INGREDIENT_LENGTH = 120
   private static readonly CONTROL_CHARACTER = /\p{Cc}/u
+  // Pages tried and images sent to the model, per product: each check is a paid vision call.
+  private static readonly MAX_IMAGE_PAGES = 10
+  private static readonly MAX_IMAGE_CHECKS = 3
   private static readonly IMAGE_EXTENSIONS = {
     'image/jpeg': 'jpg',
     'image/png': 'png',
@@ -387,6 +392,11 @@ export class ProductCatalogService {
     // The list comes from a web page, so it is not stored if any entry carries a link or markup.
     if (!result.found || result.ingredients.some(hasLinkOrMarkup)) {
       await this.settleAttempt(attemptId, 'not-found')
+      // The researcher names pages even without a list, so the product can still get its picture.
+      if (result.imagePages || result.searchPages) {
+        const pages = [...(result.imagePages ?? []), ...this.rankedSearchPages(product, result.searchPages)]
+        return { kind: 'not-found', ...this.fallbackFor(latest), image: await this.importStockImage(product, pages, now) }
+      }
       return { kind: 'not-found', ...this.fallbackFor(latest) }
     }
 
@@ -400,7 +410,8 @@ export class ProductCatalogService {
     }
     await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    const image = await this.importStockImage(product, result.sourceUrl, now)
+    const pages = [...(result.imagePages ?? []), result.sourceUrl, ...this.rankedSearchPages(product, result.searchPages)]
+    const image = await this.importStockImage(product, pages, now)
     return { kind: 'found', formulationId, image }
   }
 
@@ -735,35 +746,55 @@ export class ProductCatalogService {
     return stored.id
   }
 
+  /** The search's other pages that name the product, best first, one per host (see pagesByNameMatch). */
+  private rankedSearchPages(product: Product, searchPages: string[] | undefined): string[] {
+    return pagesByNameMatch(searchPages ?? [], ProductCatalogService.identityOf(product))
+  }
+
   /**
    * Gives the product a stock image, once, when none is stored and none was looked for in the last FRESH_FOR_DAYS.
-   * The image is stored only after it downloads safely AND the model says it shows this product. Nothing in here
-   * may fail the research: the ingredients are already stored, and a missing image is normal. The log carries the
-   * product id only, never a URL, which came from a web page. Says what happened, for the caller to report.
+   * Tries the pages in order (repeats dropped, at most MAX_IMAGE_PAGES) and stops at the first image that downloads
+   * safely AND that the model says shows this product; at most MAX_IMAGE_CHECKS images go to the model, and an image
+   * that does not download is not a check. Nothing in here may fail the research: the ingredients are already stored,
+   * and a missing image is normal. The log carries the product id only, never a URL, which came from a web page.
+   * Says what happened, for the caller to report.
    */
-  private async importStockImage(product: Product, sourceUrl: string, now: Date): Promise<StockImageOutcome> {
+  private async importStockImage(product: Product, pages: string[], now: Date): Promise<StockImageOutcome> {
     const checkedAt = product.imageCheckedAt
     if (product.imageKey !== null) return 'already-has-image'
     if (checkedAt !== null && now.getTime() - checkedAt.getTime() <= FRESH_FOR_DAYS * ProductCatalogService.DAY) return 'checked-recently'
     try {
-      const imageUrl = await this.images.pageImageUrl(sourceUrl)
-      const image = imageUrl ? await this.images.fetchImage(imageUrl) : null
-      if (!imageUrl || !image) {
-        await this.repository.markImageChecked(product.id, now)
-        return imageUrl ? 'download-failed' : 'no-page-image'
+      const identity = ProductCatalogService.identityOf(product)
+      const tried = new Set<string>()
+      let checks = 0
+      let furthest: StockImageOutcome = 'no-page-image'
+      for (const page of [...new Set(pages)].slice(0, ProductCatalogService.MAX_IMAGE_PAGES)) {
+        // Before the page is fetched: once the model has been asked its last time, another page or download is spent for nothing.
+        if (checks === ProductCatalogService.MAX_IMAGE_CHECKS) break
+        const imageUrl = await this.images.pageImageUrl(page)
+        if (!imageUrl || tried.has(imageUrl)) continue
+        tried.add(imageUrl)
+        const image = await this.images.fetchImage(imageUrl)
+        if (!image) {
+          if (furthest === 'no-page-image') furthest = 'download-failed'
+          continue
+        }
+        checks++
+        if (!(await this.analyst.imageShowsProduct(image, identity))) {
+          furthest = 'not-this-product'
+          continue
+        }
+        const key = `${this.imageKeyPrefix}/products/${product.id}.${ProductCatalogService.IMAGE_EXTENSIONS[image.mediaType]}`
+        await this.images.put(key, image)
+        await this.repository.setProductImage(product.id, {
+          key,
+          sourceUrl: imageUrl,
+          checkedAt: now,
+        })
+        return 'stored'
       }
-      if (!(await this.analyst.imageShowsProduct(image, ProductCatalogService.identityOf(product)))) {
-        await this.repository.markImageChecked(product.id, now)
-        return 'not-this-product'
-      }
-      const key = `${this.imageKeyPrefix}/products/${product.id}.${ProductCatalogService.IMAGE_EXTENSIONS[image.mediaType]}`
-      await this.images.put(key, image)
-      await this.repository.setProductImage(product.id, {
-        key,
-        sourceUrl: imageUrl,
-        checkedAt: now,
-      })
-      return 'stored'
+      await this.repository.markImageChecked(product.id, now)
+      return furthest
     } catch {
       console.error({ outcome: 'image-import-failed', productId: product.id })
       return 'error'

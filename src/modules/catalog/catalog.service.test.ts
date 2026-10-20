@@ -894,6 +894,524 @@ describe('ProductCatalogService.research', () => {
         expect(again).not.toHaveProperty('image')
       })
     })
+
+    describe('from ranked product pages', () => {
+      const PAGE_1 = 'https://www.cerave.com/products/hydrating-cleanser-1'
+      const PAGE_2 = 'https://www.retailer-two.example/p/cerave-hydrating-cleanser'
+      const PAGE_3 = 'https://www.retailer-three.example/p/cerave-hydrating-cleanser'
+      const PAGE_4 = 'https://www.retailer-four.example/p/cerave-hydrating-cleanser'
+      /** The image a page names; the number is also the first byte of the image, so the analyst can tell them apart. */
+      const imageUrlOf = (n: number) => `https://images.example/${n}.jpg`
+      const imageOf = (n: number): ProductImage => ({ bytes: new Uint8Array([n]), mediaType: 'image/jpeg' })
+      /** The page names image number `n` and that image downloads. */
+      const pageShows = (ctx: Ctx, page: string, n: number) => {
+        ctx.images.respondToPage(page, imageUrlOf(n))
+        ctx.images.respondTo(imageUrlOf(n), imageOf(n))
+      }
+      /** The page names image number `n`, but the image does not download. */
+      const pageShowsUndownloadable = (ctx: Ctx, page: string, n: number) => {
+        ctx.images.respondToPage(page, imageUrlOf(n))
+        ctx.images.respondTo(imageUrlOf(n), null)
+      }
+      /** The Haiku check accepts exactly the images whose number is in `accepted`. */
+      const accepting = (ctx: Ctx, ...accepted: number[]) =>
+        ctx.analyst.imageShowsProductWith((image) => accepted.includes(image.bytes[0]!))
+      const checkedNumbers = (ctx: Ctx) => ctx.analyst.calls.imageShowsProduct.map(([image]) => image.bytes[0])
+
+      const foundWith = (ctx: Ctx, imagePages?: string[], searchPages?: string[]) =>
+        ctx.researcher.respondWith(() => ({
+          found: true,
+          ingredients: CLEAN,
+          sourceUrl: SOURCE_URL,
+          ...(imagePages ? { imagePages } : {}),
+          ...(searchPages ? { searchPages } : {}),
+        }))
+      const notFoundWith = (ctx: Ctx, imagePages?: string[], searchPages?: string[]) =>
+        ctx.researcher.respondWith(() => ({ found: false, ...(imagePages ? { imagePages } : {}), ...(searchPages ? { searchPages } : {}) }))
+
+      /**
+       * The product is CeraVe Hydrating Facial Cleanser, so "hydrating" is the one name word that is neither the brand nor generic: a
+       * search page earns its place only with it in the path. Each page has its own host, as only the best page of a host is kept.
+       */
+      const searchPage = (n: number) => `https://search-${n}.example/p/cerave-hydrating-cleanser`
+      const namedPage = (n: number) => `https://named-${n}.example/p/cerave-hydrating-cleanser`
+
+      describe('which pages are tried, and in what order', () => {
+        it('tries the pages the researcher named in order, then the page the ingredients came from', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([PAGE_1, PAGE_2, PAGE_3, SOURCE_URL])
+        })
+
+        it('tries the page of the ingredients when the researcher named no pages', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx)
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
+        })
+
+        it('looks at a page once when the ingredient page is also one of the named pages, or a named page repeats', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [SOURCE_URL, PAGE_1, PAGE_1])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([SOURCE_URL, PAGE_1])
+        })
+
+        it('tries at most 10 pages, so the ingredient page is dropped when 10 named pages come first', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          const named = Array.from({ length: 10 }, (_, i) => namedPage(i + 1))
+          foundWith(ctx, named)
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual(named)
+        })
+
+        it('counts the 10 pages after removing duplicates, so a repeat does not use up a place', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          const named = Array.from({ length: 10 }, (_, i) => namedPage(i + 1))
+          foundWith(ctx, [named[0]!, ...named])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual(named)
+        })
+
+        it('tries the named pages, then the ingredient page, then the search pages that name the product, best match first', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          const weak = 'https://weak.example/hydrating'
+          const strong = 'https://strong.example/p/cerave-hydrating-facial-cleanser'
+          foundWith(ctx, [PAGE_1], [weak, strong])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([PAGE_1, SOURCE_URL, strong, weak])
+        })
+
+        it('looks at a page once when a search page repeats a named page, the ingredient page or another search page', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1], [SOURCE_URL, PAGE_1, searchPage(1), searchPage(1)])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([PAGE_1, SOURCE_URL, searchPage(1)])
+        })
+
+        it('counts the 10 pages over the whole list, named pages and ingredient page first, so the lowest ranked search pages are dropped', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          const named = [namedPage(1), namedPage(2), namedPage(3)]
+          const search = Array.from({ length: 12 }, (_, i) => searchPage(i + 1))
+          foundWith(ctx, named, search)
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([...named, SOURCE_URL, ...search.slice(0, 6)])
+        })
+
+        it('never looks at a search page whose path names nothing of the product beyond its brand and generic words', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, undefined, ['https://shop.example/brands/cerave', 'https://shop.example/facial-cleanser', 'https://shop.example/nivea-soft-cream'])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([SOURCE_URL])
+        })
+
+        it('tries a search page for the image when the named pages and the ingredient page give none', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1], [searchPage(1)])
+          pageShows(ctx, searchPage(1), 5)
+          accepting(ctx, 5)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toMatchObject({ kind: 'found', image: 'stored' })
+          expect((await ctx.repository.findProductById(productId))?.imageSourceUrl).toBe(imageUrlOf(5))
+        })
+
+        it('stops at the first page whose image is accepted, and does not look at the pages after it', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3])
+          pageShows(ctx, PAGE_1, 1)
+          pageShows(ctx, PAGE_2, 2)
+          accepting(ctx, 1, 2)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'stored' })
+          expect(ctx.images.pageLookups).toEqual([PAGE_1])
+          expect(checkedNumbers(ctx)).toEqual([1])
+        })
+
+        it('uses the ingredient page for the image when the named pages give none', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2])
+          pageShows(ctx, SOURCE_URL, 9)
+          accepting(ctx, 9)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toMatchObject({ kind: 'found', image: 'stored' })
+          expect((await ctx.repository.findProductById(productId))?.imageSourceUrl).toBe(imageUrlOf(9))
+        })
+      })
+
+      describe('which images are checked', () => {
+        it('goes on to the next page when the image of one is not this product, and stores the first image that is accepted', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2])
+          pageShows(ctx, PAGE_1, 1)
+          pageShows(ctx, PAGE_2, 2)
+          accepting(ctx, 2)
+
+          const result = await ctx.service.research(productId)
+
+          const key = `${IMAGE_KEY_PREFIX}/products/${productId}.jpg`
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'stored' })
+          expect(ctx.images.stored.get(key)).toEqual(imageOf(2))
+          expect(ctx.images.stored.size).toBe(1)
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: key, imageSourceUrl: imageUrlOf(2), imageCheckedAt: T0 })
+        })
+
+        it('goes on to the next page when the image of one does not download', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2])
+          pageShowsUndownloadable(ctx, PAGE_1, 1)
+          pageShows(ctx, PAGE_2, 2)
+          accepting(ctx, 2)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toMatchObject({ kind: 'found', image: 'stored' })
+          expect((await ctx.repository.findProductById(productId))?.imageSourceUrl).toBe(imageUrlOf(2))
+        })
+
+        it('runs at most 3 image checks, so a fourth image that would have been accepted is never stored', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3, PAGE_4])
+          pageShows(ctx, PAGE_1, 1)
+          pageShows(ctx, PAGE_2, 2)
+          pageShows(ctx, PAGE_3, 3)
+          pageShows(ctx, PAGE_4, 4)
+          accepting(ctx, 4)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'not-this-product' })
+          expect(checkedNumbers(ctx)).toEqual([1, 2, 3])
+          // With no check left, the fourth page is not even fetched.
+          expect(ctx.images.pageLookups).not.toContain(PAGE_4)
+          expect(ctx.images.stored.size).toBe(0)
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageCheckedAt: T0 })
+        })
+
+        it('does not count an image that failed to download as a check', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3])
+          pageShowsUndownloadable(ctx, PAGE_1, 1)
+          pageShows(ctx, PAGE_2, 2)
+          pageShows(ctx, PAGE_3, 3)
+          accepting(ctx, 3)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toMatchObject({ kind: 'found', image: 'stored' })
+          expect(checkedNumbers(ctx)).toEqual([2, 3])
+        })
+
+        it('does not count a page with no image as a check', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3])
+          pageShows(ctx, PAGE_2, 2)
+          pageShows(ctx, PAGE_3, 3)
+          accepting(ctx, 3)
+
+          expect(await ctx.service.research(productId)).toMatchObject({ kind: 'found', image: 'stored' })
+          expect(checkedNumbers(ctx)).toEqual([2, 3])
+        })
+
+        it('downloads and checks an image once when two pages name the same image url', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2, PAGE_3])
+          pageShows(ctx, PAGE_1, 1)
+          ctx.images.respondToPage(PAGE_2, imageUrlOf(1))
+          pageShows(ctx, PAGE_3, 3)
+          accepting(ctx, 3)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toMatchObject({ kind: 'found', image: 'stored' })
+          expect(ctx.images.fetched).toEqual([imageUrlOf(1), imageUrlOf(3)])
+          expect(checkedNumbers(ctx)).toEqual([1, 3])
+        })
+      })
+
+      describe('when no image is stored', () => {
+        it.each([
+          ['no page names an image', [], 'no-page-image'],
+          ['one image does not download and no other page names an image', ['download-failed'], 'download-failed'],
+          ['an image does not download and a later page names none', ['download-failed', 'no-page-image'], 'download-failed'],
+          ['a page names none and a later image does not download', ['no-page-image', 'download-failed'], 'download-failed'],
+          ['an image is rejected and later pages fail earlier stages', ['not-this-product', 'download-failed', 'no-page-image'], 'not-this-product'],
+          ['an image is rejected after pages that failed earlier stages', ['no-page-image', 'download-failed', 'not-this-product'], 'not-this-product'],
+        ] as const)('reports the furthest stage reached across the pages when %s', async (_label, stages, expected) => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          const pages = [PAGE_1, PAGE_2, PAGE_3]
+          foundWith(ctx, pages.slice(0, stages.length))
+          stages.forEach((stage, index) => {
+            const page = pages[index]!
+            if (stage === 'download-failed') pageShowsUndownloadable(ctx, page, index + 1)
+            if (stage === 'not-this-product') pageShows(ctx, page, index + 1)
+          })
+          accepting(ctx)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: expected })
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageSourceUrl: null, imageCheckedAt: T0 })
+          expect(ctx.images.stored.size).toBe(0)
+        })
+      })
+
+      describe('when the product is already settled', () => {
+        it('looks at no page and reports already-has-image for a product that has an image, whatever pages are named', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          await ctx.repository.setProductImage(productId, { key: `${IMAGE_KEY_PREFIX}/products/${productId}.jpg`, sourceUrl: imageUrlOf(7), checkedAt: T0 })
+          foundWith(ctx, [PAGE_1])
+          pageShows(ctx, PAGE_1, 1)
+          accepting(ctx, 1)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'already-has-image' })
+          expect(ctx.images.pageLookups).toHaveLength(0)
+        })
+
+        it('looks at no page and reports checked-recently while an image check is still fresh, whatever pages are named', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          await ctx.repository.markImageChecked(productId, new Date(T0.getTime() - FRESH_FOR_DAYS * DAY))
+          foundWith(ctx, [PAGE_1])
+          pageShows(ctx, PAGE_1, 1)
+          accepting(ctx, 1)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'checked-recently' })
+          expect(ctx.images.pageLookups).toHaveLength(0)
+        })
+      })
+
+      describe('when the image import fails', () => {
+        it('reports error and still returns the stored ingredients when the model check throws on a named page', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          foundWith(ctx, [PAGE_1, PAGE_2])
+          pageShows(ctx, PAGE_1, 1)
+          ctx.analyst.failNextWith(new Error('model down'))
+          const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'found', formulationId: expect.any(String), image: 'error' })
+          expect((await ctx.repository.latestFormulation(productId))!.id).toBe((result as { formulationId: string }).formulationId)
+          expect(JSON.stringify(logged.mock.calls)).not.toContain(PAGE_1)
+          expect(JSON.stringify(logged.mock.calls)).not.toContain(imageUrlOf(1))
+          logged.mockRestore()
+        })
+      })
+
+      describe('when the researcher found no ingredient list', () => {
+        it('attempts the image from the named pages, reports it on the not-found result, and still records the attempt as not found', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, [PAGE_1, PAGE_2])
+          pageShows(ctx, PAGE_2, 2)
+          accepting(ctx, 2)
+
+          const result = await ctx.service.research(productId)
+
+          const key = `${IMAGE_KEY_PREFIX}/products/${productId}.jpg`
+          expect(result).toEqual({ kind: 'not-found', image: 'stored' })
+          expect(ctx.images.pageLookups).toEqual([PAGE_1, PAGE_2])
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: key, imageSourceUrl: imageUrlOf(2) })
+          expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'not-found', attemptedAt: T0 })
+          expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+        })
+
+        it('reports the furthest stage on the not-found result when no named page gives an accepted image, and marks the image checked', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, [PAGE_1, PAGE_2])
+          pageShows(ctx, PAGE_1, 1)
+          accepting(ctx)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'not-found', image: 'not-this-product' })
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageKey: null, imageCheckedAt: T0 })
+        })
+
+        it('attempts the image from the search pages alone, when the researcher named no pages of its own', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, undefined, [searchPage(1)])
+          pageShows(ctx, searchPage(1), 3)
+          accepting(ctx, 3)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'not-found', image: 'stored' })
+          expect(ctx.images.pageLookups).toEqual([searchPage(1)])
+          expect(await ctx.repository.findProductById(productId)).toMatchObject({ imageSourceUrl: imageUrlOf(3) })
+          expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'not-found', attemptedAt: T0 })
+        })
+
+        it('tries the named pages and then the ranked search pages on a not-found result', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, [PAGE_1], [searchPage(2), searchPage(1)])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([PAGE_1, searchPage(2), searchPage(1)])
+        })
+
+        it('looks at no search page on a not-found result when none of them names the product', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, undefined, ['https://shop.example/brands/cerave', 'https://shop.example/nivea-soft-cream'])
+
+          await ctx.service.research(productId)
+
+          expect(ctx.images.pageLookups).toEqual([])
+          expect(ctx.images.fetched).toEqual([])
+        })
+
+        it('attempts the image from the search pages when the ingredient list was rejected for a link, trying no ingredient page', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          ctx.researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'visit www.evil.example'], sourceUrl: SOURCE_URL, searchPages: [searchPage(1)] }))
+          pageShows(ctx, searchPage(1), 1)
+          accepting(ctx, 1)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'not-found', image: 'stored' })
+          expect(ctx.images.pageLookups).toEqual([searchPage(1)])
+        })
+
+        it('has no image on the not-found result, and looks at no page, when the researcher named none', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'not-found' })
+          expect(result).not.toHaveProperty('image')
+          expect(ctx.images.pageLookups).toHaveLength(0)
+          expect((await ctx.repository.findProductById(productId))?.imageCheckedAt).toBeNull()
+        })
+
+        it('attempts the image from the named pages when the ingredient list was rejected for a link, trying no ingredient page', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          ctx.researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'visit www.evil.example'], sourceUrl: SOURCE_URL, imagePages: [PAGE_1] }))
+          pageShows(ctx, PAGE_1, 1)
+          accepting(ctx, 1)
+
+          const result = await ctx.service.research(productId)
+
+          expect(result).toEqual({ kind: 'not-found', image: 'stored' })
+          expect(ctx.images.pageLookups).toEqual([PAGE_1])
+          expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+        })
+
+        it('reports already-has-image on the not-found result for a product that has an image already, and looks at no page', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          await ctx.repository.setProductImage(productId, { key: `${IMAGE_KEY_PREFIX}/products/${productId}.jpg`, sourceUrl: imageUrlOf(7), checkedAt: T0 })
+          notFoundWith(ctx, [PAGE_1])
+
+          expect(await ctx.service.research(productId)).toEqual({ kind: 'not-found', image: 'already-has-image' })
+          expect(ctx.images.pageLookups).toHaveLength(0)
+        })
+
+        it('reports error on the not-found result, and still records the attempt as not found, when the image import throws', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, [PAGE_1])
+          pageShows(ctx, PAGE_1, 1)
+          ctx.analyst.failNextWith(new Error('model down'))
+          const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+          const result = await ctx.service.research(productId)
+          logged.mockRestore()
+
+          expect(result).toEqual({ kind: 'not-found', image: 'error' })
+          expect(await ctx.repository.lastResearchOutcome(productId)).toEqual({ outcome: 'not-found', attemptedAt: T0 })
+        })
+
+        it('does no image work when the not-found is the cached one from the last 7 days, whatever the researcher would now name', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx)
+          await ctx.service.research(productId)
+          ctx.advance(7 * DAY - 1)
+          notFoundWith(ctx, [PAGE_1])
+          pageShows(ctx, PAGE_1, 1)
+          accepting(ctx, 1)
+
+          const again = await ctx.service.research(productId)
+
+          expect(again).toEqual({ kind: 'not-found' })
+          expect(again).not.toHaveProperty('image')
+          expect(ctx.researcher.calls).toHaveLength(1)
+          expect(ctx.images.pageLookups).toHaveLength(0)
+          expect(ctx.analyst.calls.imageShowsProduct).toHaveLength(0)
+        })
+
+        it('does not look for the image again on a later not-found research while the image check is still fresh', async () => {
+          const ctx = setup()
+          const productId = await productFor(ctx)
+          notFoundWith(ctx, [PAGE_1])
+          await ctx.service.research(productId)
+          ctx.advance(7 * DAY + 1)
+
+          // The first attempt marked the image checked, and 7 days is well inside FRESH_FOR_DAYS: no second look.
+          expect(await ctx.service.research(productId)).toEqual({ kind: 'not-found', image: 'checked-recently' })
+          expect(ctx.images.pageLookups).toEqual([PAGE_1])
+        })
+      })
+    })
   })
 })
 

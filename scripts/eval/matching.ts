@@ -342,8 +342,9 @@ const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, re
         // A fresh catalog holds nothing, so this creates the product from its true label without asking the judge.
         const { productId } = await service.resolve(identityOfLabel(product))
         const result = await withRetries(() => service.research(productId))
-        if (result.kind === 'not-found') return { folder, stage: 'no-source-page' }
+        if (result.kind === 'not-found' && result.image === undefined) return { folder, stage: 'no-source-page' }
         if (result.kind === 'budget-exhausted') return { folder, stage: 'budget-exhausted' }
+        // From here a found or a not-found research both carry the image stage; a stored image is hashed either way, to be judged.
         if (result.image === 'error') return budgetHit ? { folder, stage: 'budget-exhausted' } : { folder, stage: 'error', error: checkError ?? 'ImageStageError' }
         if (result.image !== 'stored') return { folder, stage: result.image ?? 'error', ...(result.image ? {} : { error: 'NoImageOutcome' }) }
         const key = (await repository.findProductById(productId))?.imageKey
