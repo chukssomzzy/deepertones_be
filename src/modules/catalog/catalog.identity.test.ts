@@ -490,6 +490,20 @@ describe('pagesByNameMatch', () => {
   const INCIDECODER = 'https://incidecoder.com/products/palmers-cocoa-butter-formula'
   const PALMERS_HOME = 'https://www.palmers.com/'
 
+  it('breaks a tie towards the page with fewer words beyond the product, so a sibling edition comes after it', () => {
+    const sibling = 'https://a.example/palmers-cocoa-butter-formula-men-body-lotion'
+    const exact = 'https://b.example/palmers-cocoa-butter-formula-body-lotion'
+
+    expect(pagesByNameMatch([sibling, exact], PALMERS)).toEqual([exact, sibling])
+  })
+
+  it('counts www.shop.example and shop.example as one site', () => {
+    const first = 'https://www.shop.example/palmers-cocoa-butter-formula-body-lotion'
+    const second = 'https://shop.example/palmers-cocoa-butter-formula-body-lotion-250ml'
+
+    expect(pagesByNameMatch([first, second], PALMERS)).toEqual([first])
+  })
+
   it('puts the page whose path names most of the product first', () => {
     const ranked = pagesByNameMatch([INCIDECODER, CVS, MEDINO], PALMERS)
 

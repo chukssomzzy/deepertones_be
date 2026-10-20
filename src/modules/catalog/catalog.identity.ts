@@ -91,7 +91,8 @@ const decoded = (path: string): string => {
  * The pages whose URL path names the product, best first, for finding a picture on a page the research did not name. A page's words
  * are those of its path only (not host, query or fragment). The score is how many of the product's words (brand, name, variant; one
  * letter dropped) they hold; a page needs one word that is neither the brand's nor generic, so "lotion" or the brand alone never
- * qualify. Ties keep input order; then only the first page of each host stays. A value that is not a URL is dropped.
+ * qualify. A tie goes to the page with fewer words the product does not have (a sibling edition's "men"), then to input order;
+ * then only the first page of each site stays ("www." ignored). A value that is not a URL is dropped.
  */
 export const pagesByNameMatch = (pages: string[], product: Named & { brand: string }): string[] => {
   const brand = new Set(wordsOf(product.brand))
@@ -106,11 +107,14 @@ export const pagesByNameMatch = (pages: string[], product: Named & { brand: stri
     const held = new Set(wordsOf(decoded(url.pathname)))
     const matched = [...wanted].filter((w) => held.has(w))
     if (!matched.some((w) => !brand.has(w) && !GENERIC_WORDS.has(w))) return []
-    return [{ page, host: url.host, score: matched.length, order }]
+    // Words the product does not have ("men", "spf") mark a sibling edition; on a tie the page with fewer of them goes first.
+    const extra = [...held].filter((w) => !wanted.has(w)).length
+    // "www.shop.example" and "shop.example" are one site.
+    return [{ page, host: url.hostname.replace(/^www\./, ''), score: matched.length, extra, order }]
   })
   const seen = new Set<string>()
   return scored
-    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .sort((a, b) => b.score - a.score || a.extra - b.extra || a.order - b.order)
     .filter(({ host }) => !seen.has(host) && !!seen.add(host))
     .map(({ page }) => page)
 }

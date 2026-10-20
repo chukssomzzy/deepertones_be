@@ -1434,20 +1434,23 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   (`MAX_IMAGE_PAGES`), in that order. `pagesByNameMatch` (`catalog.identity.ts`) ranks the search pages by the product's
   words in the URL path (host, query and fragment are not read; percent-escapes decoded, a bad one keeps the raw text; names
   normalised as the catalog compares them; one-letter words dropped): the score is how many of the brand, name and variant
-  words the path holds, a page needs at least one word that is neither the brand's nor in `GENERIC_WORDS`, ties keep search
-  order, and only the best page of each host is kept. A URL that does not parse is dropped. For each page, in order:
+  words the path holds, a page needs at least one word that is neither the brand's nor in `GENERIC_WORDS`, a tie goes to
+  the page with fewer words the product does not have (a sibling edition's "men"), then to search order, and only the best
+  page of each site is kept ("www." ignored). A URL that does not parse is dropped. For each page, in order:
   `pageImageUrl(page)` (see "Catalog images"; a page with no usable image is skipped), then the image store's safe
   download (`null` for a bad URL, type or size; the page is skipped and this is not a check), then `imageShowsProduct`
   (the vision match). The first image the match accepts is `put` to `<imageKeyPrefix>/products/<productId>.<jpg|png|webp>`
   (for example `catalog/staging/products/<productId>.jpg`) with the product's image key, image URL and time, and the
   import stops. An image URL already tried in this run is skipped, and at most 3 images per product go to the vision
-  match (`MAX_IMAGE_CHECKS`), so the cost of a product is capped. Pages are tried one after another, never in parallel. The
-  worst case is about 10 pages x (3 page hops + 3 image hops) = 60 fetches and 3 Haiku checks per product, inside the paid-plan
-  subrequest limit, but a slow product can take a few minutes in the queue consumer. If nothing was stored the product is marked as checked and the outcome is
-  the furthest stage reached on any page: `not-this-product`, then `download-failed`, then `no-page-image` (no pages
+  match (`MAX_IMAGE_CHECKS`), so the cost of a product is capped. Pages are tried one after another, never in parallel.
+  The worst case is about 10 pages x (3 page hops + 3 image hops) = 60 fetches and 3 Haiku checks per product: inside the
+  paid-plan subrequest limit, but with a 10-second timeout per fetch and no overall deadline, a product whose every site is
+  slow can hold the queue consumer for up to about 10 minutes. If nothing was stored, the product is marked as checked and
+  the outcome is the furthest stage reached on any page: `not-this-product`, then `download-failed`, then `no-page-image` (no pages
   at all is `no-page-image`). **A not-found research answer still gets an image attempt** when it names `imagePages` or
-  `searchPages`, even if ranking leaves no page to try (then `no-page-image` and the product is marked checked) (also when its list was rejected for links or markup): the attempt is settled as not-found as before, the pages are
-  tried the same way, and the result is `{ kind: 'not-found', image }`. The 7-day "do not research again" rule is
+  `searchPages`, and so does a found answer whose list was rejected for links or markup. Even when ranking leaves no page
+  to try, that is an attempt (`no-page-image`, and the product is marked checked). The research is settled as not-found as
+  before, the pages are tried the same way, and the result is `{ kind: 'not-found', image }`. The 7-day "do not research again" rule is
   unchanged, and the image keeps its own `imageCheckedAt` timer, so a cached not-found result does no image work.
   **Every error is swallowed**: if the download, the model or the bucket throws, the research still reports its
   result, nothing is marked (so the next research retries), and the log line is `{ outcome: 'image-import-failed',
