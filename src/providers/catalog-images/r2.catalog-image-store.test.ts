@@ -954,6 +954,19 @@ describe('R2CatalogImageStore.pageImageUrl', () => {
       expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
     })
 
+    it('finds the Product block after 150 ordinary scripts, as on a big brand page', async () => {
+      const scripts = Array.from({ length: 150 }, (_, i) => `<script>window.x${i} = ${i}</script>`).join('')
+      serving(`${ogLogo}${scripts}${ld(product(FRONT))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds the Product block on a page whose text has a letter that lower-cases to a different length (Turkish İ)', async () => {
+      serving(`${ogLogo}<p>İstanbul</p>${ld(product(FRONT))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
     it('finds a Product inside @graph', async () => {
       serving(`${ogLogo}${ld({ '@context': 'https://schema.org', '@graph': [{ '@type': 'WebSite', name: 'x' }, product(FRONT)] })}`)
 

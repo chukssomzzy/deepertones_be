@@ -1171,7 +1171,7 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   tags with a linear forward-only scanner, not a regex, because the page is hostile (stops at `</head>`, after 200 tags,
   skips a tag over 4 KB; `property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
   `og:image`. The JSON-LD is found the same way: `<script type="application/ld+json">` blocks in those 512 KB (type matched
-  case-insensitively, at most 100 scripts, a block over 100 KB skipped, invalid JSON skipped), walked with a depth cap of 8 and a
+  case-insensitively, at most 20 JSON-LD blocks however many other scripts the page has, a block over 100 KB skipped, invalid JSON skipped), walked with a depth cap of 8 and a
   2,000-node budget through arrays, `@graph`, `mainEntity` and `hasVariant` to the first `Product` or `ProductGroup` with an `image`
   (string, array, or ImageObject `url` / `contentUrl`; entities not decoded). Candidates in order: that image, then
   `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. Each value in that order is resolved against the

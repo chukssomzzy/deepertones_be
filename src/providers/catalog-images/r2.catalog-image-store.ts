@@ -38,8 +38,9 @@ export class R2CatalogImageStore implements CatalogImageStore {
   // The scan is a forward-only walk, not a regex: the page is hostile and a backtracking pattern on it costs minutes of CPU.
   private static readonly MAX_META_TAGS = 200
   private static readonly MAX_META_TAG_LENGTH = 4096
-  // JSON-LD blocks are found by the same kind of walk. A block over the size cap is skipped unparsed; the walk of a parsed one is bounded in depth and node count.
-  private static readonly MAX_SCRIPT_TAGS = 100
+  // JSON-LD blocks are found by the same kind of walk. Only JSON-LD blocks count towards the cap (a big brand page has well over 100
+  // other scripts); a block over the size cap is skipped unparsed; the walk of a parsed one is bounded in depth and node count.
+  private static readonly MAX_JSON_LD_BLOCKS = 20
   private static readonly MAX_JSON_LD_BYTES = 100 * 1024
   private static readonly MAX_JSON_LD_DEPTH = 8
   private static readonly MAX_JSON_LD_NODES = 2000
@@ -143,12 +144,12 @@ export class R2CatalogImageStore implements CatalogImageStore {
   /**
    * The image values of the first Product in the page's JSON-LD blocks, in document order; empty when there is none.
    * Forward-only scan over `<script`, so linear in the length of `html`: a tag with no closing `>` or no `</script` ends the scan.
+   * Only ASCII letters are lower-cased, so offsets into the copy are offsets into `html` whatever the page's text ("İ" grows when lower-cased).
    */
   private static jsonLdProductImages(html: string): string[] {
-    const lower = html.toLowerCase()
-    if (lower.length !== html.length) return []
+    const lower = html.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
     let position = 0
-    for (let tags = 0; tags < R2CatalogImageStore.MAX_SCRIPT_TAGS; tags++) {
+    for (let blocks = 0; blocks < R2CatalogImageStore.MAX_JSON_LD_BLOCKS; ) {
       const start = lower.indexOf('<script', position)
       if (start === -1) break
       const openEnd = lower.indexOf('>', start)
@@ -159,6 +160,7 @@ export class R2CatalogImageStore implements CatalogImageStore {
       const opening = html.slice(start + 7, openEnd)
       if (opening.length > R2CatalogImageStore.MAX_META_TAG_LENGTH || !R2CatalogImageStore.WHITESPACE.has(opening[0] ?? '')) continue
       if (R2CatalogImageStore.attributesOf(opening).get('type')?.trim().toLowerCase() !== 'application/ld+json') continue
+      blocks++
       if (closeStart - openEnd - 1 > R2CatalogImageStore.MAX_JSON_LD_BYTES) continue
       let parsed: unknown
       try {
