@@ -1620,13 +1620,20 @@ describe('ProductCatalogService.resolve alias guard', () => {
   // Every pair is similar enough in name to be a near miss; what separates them is category and variant.
   it.each<[string, ProductIdentity, ProductIdentity, number]>([
     ['never asks about a candidate of another category', identity({ brand: ACME, name: GLOW, category: 'hair' }), identity({ brand: ACME, name: GLOW_BOOSTER, category: 'skin' }), 0],
+    // A soap, a lotion or an oil is read as skin care on one photo and body care on the next: the two are compatible, the judge decides.
+    ['still asks about a skin candidate for a body label', identity({ brand: ACME, name: GLOW, category: 'skin' }), identity({ brand: ACME, name: GLOW_BOOSTER, category: 'body' }), 1],
+    ['still asks about a body candidate for a skin label', identity({ brand: ACME, name: GLOW, category: 'body' }), identity({ brand: ACME, name: GLOW_BOOSTER, category: 'skin' }), 1],
+    ['never asks about a hair candidate for a body label', identity({ brand: ACME, name: GLOW, category: 'hair' }), identity({ brand: ACME, name: GLOW_BOOSTER, category: 'body' }), 0],
+    ['never asks about a makeup candidate for a skin label', identity({ brand: ACME, name: GLOW, category: 'makeup' }), identity({ brand: ACME, name: GLOW_BOOSTER, category: 'skin' }), 0],
     ['still asks when the variants differ in words but not in numbers, because the judge decides editions', identity({ brand: ACME, name: GLOW, variant: 'Night' }), identity({ brand: ACME, name: GLOW, variant: 'Day' }), 1],
     ['never asks about a candidate whose variant has a different number (SPF 30 against SPF 50)', identity({ brand: ACME, name: GLOW, variant: 'SPF 30' }), identity({ brand: ACME, name: GLOW, variant: 'SPF 50' }), 0],
     ['never asks about a candidate whose variant has a different percentage (2% against 5%)', identity({ brand: ACME, name: GLOW, variant: '2%' }), identity({ brand: ACME, name: GLOW, variant: '5%' }), 0],
     ['still asks when the variants carry the same number and differ in the other words', identity({ brand: ACME, name: GLOW, variant: 'SPF 30 Light' }), identity({ brand: ACME, name: GLOW, variant: 'SPF 30 Fragrance Free' }), 1],
     ['still asks when only one of the variants carries a number', identity({ brand: ACME, name: GLOW, variant: 'SPF 30' }), identity({ brand: ACME, name: GLOW, variant: 'Night' }), 1],
     ['still asks when the variants differ only in case and spacing', identity({ brand: ACME, name: GLOW, variant: 'Night Repair' }), identity({ brand: ACME, name: GLOW_BOOSTER, variant: 'night  repair' }), 1],
-    ['still asks when only the scanned label has a variant', identity({ brand: ACME, name: GLOW }), identity({ brand: ACME, name: GLOW_BOOSTER, variant: 'Night' }), 1],
+    // A row made when the scent went unread is not every scent of the line: "Body Wash" must not take in Shea Butter, then Cucumber.
+    ['never asks about a candidate with no variant when the scanned label names one', identity({ brand: ACME, name: GLOW }), identity({ brand: ACME, name: GLOW_BOOSTER, variant: 'Night' }), 0],
+    ['still asks when only the candidate has a variant, because the label may not have shown it', identity({ brand: ACME, name: GLOW, variant: 'Night' }), identity({ brand: ACME, name: GLOW_BOOSTER }), 1],
     [
       'still asks about a shampoo and a conditioner of one range, which share a category and have no variant',
       identity({ brand: ACME, name: 'Argan Repair Hair Shampoo', category: 'hair' }),
