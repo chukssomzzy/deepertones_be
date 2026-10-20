@@ -76,6 +76,45 @@ const GENERIC_WORDS = new Set([
   'body', 'face', 'facial', 'hand', 'hair', 'skin', 'men', 'women', 'sun', 'original', 'classic', 'care', 'daily',
 ])
 
+const wordsOf = (text: string): string[] => normaliseText(text).split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+
+/** A percent-encoded path as the text it stands for; a bad escape leaves the raw text. */
+const decoded = (path: string): string => {
+  try {
+    return decodeURIComponent(path)
+  } catch {
+    return path
+  }
+}
+
+/**
+ * The pages whose URL path names the product, best first, for finding a picture on a page the research did not name. A page's words
+ * are those of its path only (not host, query or fragment). The score is how many of the product's words (brand, name, variant; one
+ * letter dropped) they hold; a page needs one word that is neither the brand's nor generic, so "lotion" or the brand alone never
+ * qualify. Ties keep input order; then only the first page of each host stays. A value that is not a URL is dropped.
+ */
+export const pagesByNameMatch = (pages: string[], product: Named & { brand: string }): string[] => {
+  const brand = new Set(wordsOf(product.brand))
+  const wanted = new Set([...brand, ...wordsOf(`${product.name} ${product.variant ?? ''}`)].filter((w) => w.length > 1))
+  const scored = pages.flatMap((page, order) => {
+    let url: URL
+    try {
+      url = new URL(page)
+    } catch {
+      return []
+    }
+    const held = new Set(wordsOf(decoded(url.pathname)))
+    const matched = [...wanted].filter((w) => held.has(w))
+    if (!matched.some((w) => !brand.has(w) && !GENERIC_WORDS.has(w))) return []
+    return [{ page, host: url.host, score: matched.length, order }]
+  })
+  const seen = new Set<string>()
+  return scored
+    .sort((a, b) => b.score - a.score || a.order - b.order)
+    .filter(({ host }) => !seen.has(host) && !!seen.add(host))
+    .map(({ page }) => page)
+}
+
 /**
  * Whether every word of the shorter reading is in the longer one ("NIVEA soft" in "NIVEA Soft Light Moisturiser"): the recognizer
  * often adds or drops descriptors, which Jaccard punishes. A reading with no word beyond its brand is contained in every product of

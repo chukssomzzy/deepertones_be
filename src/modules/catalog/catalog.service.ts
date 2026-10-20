@@ -7,7 +7,7 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -173,8 +173,8 @@ export class ProductCatalogService {
   private static readonly MAX_LABEL_INGREDIENT_LENGTH = 120
   private static readonly CONTROL_CHARACTER = /\p{Cc}/u
   // Pages tried and images sent to the model, per product: each check is a paid vision call.
-  private static readonly MAX_IMAGE_PAGES = 4
-  private static readonly MAX_IMAGE_CHECKS = 2
+  private static readonly MAX_IMAGE_PAGES = 10
+  private static readonly MAX_IMAGE_CHECKS = 3
   private static readonly IMAGE_EXTENSIONS = {
     'image/jpeg': 'jpg',
     'image/png': 'png',
@@ -393,7 +393,10 @@ export class ProductCatalogService {
     if (!result.found || result.ingredients.some(hasLinkOrMarkup)) {
       await this.settleAttempt(attemptId, 'not-found')
       // The researcher names pages even without a list, so the product can still get its picture.
-      if (result.imagePages) return { kind: 'not-found', ...this.fallbackFor(latest), image: await this.importStockImage(product, result.imagePages, now) }
+      if (result.imagePages || result.searchPages) {
+        const pages = [...(result.imagePages ?? []), ...this.rankedSearchPages(product, result.searchPages)]
+        return { kind: 'not-found', ...this.fallbackFor(latest), image: await this.importStockImage(product, pages, now) }
+      }
       return { kind: 'not-found', ...this.fallbackFor(latest) }
     }
 
@@ -407,7 +410,8 @@ export class ProductCatalogService {
     }
     await this.settleAttempt(attemptId, 'found')
     // After the formulation is stored, so a failing image can never lose the ingredients.
-    const image = await this.importStockImage(product, [...(result.imagePages ?? []), result.sourceUrl], now)
+    const pages = [...(result.imagePages ?? []), result.sourceUrl, ...this.rankedSearchPages(product, result.searchPages)]
+    const image = await this.importStockImage(product, pages, now)
     return { kind: 'found', formulationId, image }
   }
 
@@ -740,6 +744,11 @@ export class ProductCatalogService {
     })
     if (stored.id !== id) await this.repository.touchFormulation(stored.id, foundAt)
     return stored.id
+  }
+
+  /** The search's other pages that name the product, best first, one per host (see pagesByNameMatch). */
+  private rankedSearchPages(product: Product, searchPages: string[] | undefined): string[] {
+    return pagesByNameMatch(searchPages ?? [], ProductCatalogService.identityOf(product))
   }
 
   /**

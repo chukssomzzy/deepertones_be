@@ -136,6 +136,7 @@ describe('AnthropicProductResearcher.research', () => {
       found: true,
       ingredients: ['Aqua', 'Glycerin', 'Niacinamide'],
       sourceUrl: OFFICIAL,
+      searchPages: [RETAILER],
     })
   })
 
@@ -170,7 +171,7 @@ describe('AnthropicProductResearcher.research', () => {
   it('accepts an answer without imageUrl, since the model cannot see image urls', async () => {
     const result = await research(searched(JSON.stringify(answer())))
 
-    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
+    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, searchPages: [RETAILER] })
   })
 
   it('returns no image url even when the model volunteers one', async () => {
@@ -178,7 +179,7 @@ describe('AnthropicProductResearcher.research', () => {
 
     const result = await research(searched(JSON.stringify(volunteered)))
 
-    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
+    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, searchPages: [RETAILER] })
   })
 
   it('uses the last object that fits the answer shape, not an earlier one', async () => {
@@ -187,7 +188,7 @@ describe('AnthropicProductResearcher.research', () => {
 
     const result = await research(searched(text))
 
-    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
+    expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, searchPages: [RETAILER] })
   })
 
   it('skips a trailing object that is not an answer and uses the one before it', async () => {
@@ -244,7 +245,7 @@ describe('AnthropicProductResearcher.research', () => {
   it('reports not found when the model says it found nothing', async () => {
     const result = await research(searched(JSON.stringify({ found: false, ingredients: [], sourceUrl: null })))
 
-    expect(result).toStrictEqual({ found: false })
+    expect(result).toStrictEqual({ found: false, searchPages: [OFFICIAL, RETAILER] })
   })
 
   it('reports not found when the model says found but the source is not a page the search returned', async () => {
@@ -301,31 +302,31 @@ describe('AnthropicProductResearcher.research', () => {
     it('names the pages for this product on a found answer, best first', async () => {
       const result = await research(searched(JSON.stringify(answer({ productPages: [OFFICIAL, RETAILER] })), returned))
 
-      expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, imagePages: [OFFICIAL, RETAILER] })
+      expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, imagePages: [OFFICIAL, RETAILER], searchPages: [OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('names the pages on a readable not-found answer, so the product can still get an image', async () => {
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [OFFICIAL, RETAILER] }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER] })
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER], searchPages: [OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('drops a page the search never returned, keeping the order of the rest', async () => {
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [INVENTED, RETAILER, OFFICIAL] }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [RETAILER, OFFICIAL] })
+      expect(result).toStrictEqual({ found: false, imagePages: [RETAILER, OFFICIAL], searchPages: [OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('drops a page that is not https even when the search returned it', async () => {
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [INSECURE, OFFICIAL] }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL] })
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL], searchPages: [RETAILER, OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('names a page once however many times the model repeats it', async () => {
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [OFFICIAL, RETAILER, OFFICIAL, RETAILER] }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER] })
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER], searchPages: [OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('keeps at most the first 3 pages', async () => {
@@ -333,7 +334,7 @@ describe('AnthropicProductResearcher.research', () => {
 
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: four }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER, OTHER_RETAILER] })
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER, OTHER_RETAILER], searchPages: [THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it('counts the 3-page cap after filtering, so an invalid page does not use up a place', async () => {
@@ -341,7 +342,7 @@ describe('AnthropicProductResearcher.research', () => {
 
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: pages }), returned))
 
-      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER, OTHER_RETAILER] })
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL, RETAILER, OTHER_RETAILER], searchPages: [THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it.each([
@@ -352,7 +353,7 @@ describe('AnthropicProductResearcher.research', () => {
     ])('leaves imagePages out of a found answer whose productPages is %s', async (_label, productPages) => {
       const result = await research(searched(JSON.stringify(answer({ productPages })), returned))
 
-      expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL })
+      expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, searchPages: [RETAILER, OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it.each([
@@ -362,13 +363,13 @@ describe('AnthropicProductResearcher.research', () => {
     ])('leaves imagePages out of a not-found answer whose productPages is %s', async (_label, productPages) => {
       const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages }), returned))
 
-      expect(result).toStrictEqual({ found: false })
+      expect(result).toStrictEqual({ found: false, searchPages: [OFFICIAL, RETAILER, OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
-    it('still reads a not-found answer that has no productPages field, as plain not found', async () => {
+    it('still reads a not-found answer that has no productPages field, as a not found that still lists the search pages', async () => {
       const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), returned))
 
-      expect(result).toStrictEqual({ found: false })
+      expect(result).toStrictEqual({ found: false, searchPages: [OFFICIAL, RETAILER, OTHER_RETAILER, THIRD_RETAILER, FOURTH_RETAILER] })
     })
 
     it.each([
@@ -402,7 +403,104 @@ describe('AnthropicProductResearcher.research', () => {
         respondWith([textBlock(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [RETAILER, INVENTED] }))]),
       )
 
-      expect(await researcher.research(PRODUCT)).toStrictEqual({ found: false, imagePages: [RETAILER] })
+      expect(await researcher.research(PRODUCT)).toStrictEqual({ found: false, imagePages: [RETAILER], searchPages: [OFFICIAL] })
+    })
+  })
+
+  describe('other search pages for the stock image', () => {
+    const page = (n: number) => `https://shop${n}.example/p/cerave-hydrating-cleanser`
+    const NOT_FOUND_ANSWER = { found: false, ingredients: [], sourceUrl: null }
+
+    it('lists the other pages the search returned on a found answer, in search order, without the named pages or the ingredient page', async () => {
+      const returned = [page(1), OFFICIAL, page(2), RETAILER, page(3)]
+
+      const result = await research(searched(JSON.stringify(answer({ productPages: [RETAILER] })), returned))
+
+      expect(result).toStrictEqual({
+        found: true,
+        ingredients: ['Aqua', 'Glycerin', 'Niacinamide'],
+        sourceUrl: OFFICIAL,
+        imagePages: [RETAILER],
+        searchPages: [page(1), page(2), page(3)],
+      })
+    })
+
+    it('lists the other pages on a readable not-found answer, with the named pages kept out of the list', async () => {
+      const returned = [page(1), OFFICIAL, page(2)]
+
+      const result = await research(searched(JSON.stringify({ ...NOT_FOUND_ANSWER, productPages: [OFFICIAL] }), returned))
+
+      expect(result).toStrictEqual({ found: false, imagePages: [OFFICIAL], searchPages: [page(1), page(2)] })
+    })
+
+    it('lists the pages on a readable not-found answer that names no pages at all', async () => {
+      const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), [page(1), page(2)]))
+
+      expect(result).toStrictEqual({ found: false, searchPages: [page(1), page(2)] })
+    })
+
+    it('leaves out a page that is not https', async () => {
+      const insecure = 'http://shop.example/p/cerave-hydrating-cleanser'
+
+      const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), [insecure, page(1)]))
+
+      expect(result).toStrictEqual({ found: false, searchPages: [page(1)] })
+    })
+
+    it('lists a page once when the search returned it twice, or the answer cites it as well', async () => {
+      const citations = [citation(page(1))]
+
+      const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), [page(1), page(2), page(1)], citations))
+
+      expect(result).toStrictEqual({ found: false, searchPages: [page(1), page(2)] })
+    })
+
+    it('lists at most 30 pages, the first 30 in search order', async () => {
+      const many = Array.from({ length: 31 }, (_, i) => page(i + 1))
+
+      const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), many))
+
+      expect(result).toStrictEqual({ found: false, searchPages: many.slice(0, 30) })
+    })
+
+    it('counts the 30 after removing the named pages and the ingredient page, so they do not use up a place', async () => {
+      const many = Array.from({ length: 32 }, (_, i) => page(i + 1))
+
+      const result = await research(searched(JSON.stringify(answer({ sourceUrl: page(1), productPages: [page(2)] })), many))
+
+      expect(result).toMatchObject({ imagePages: [page(2)], searchPages: many.slice(2, 32) })
+    })
+
+    it('leaves searchPages out when every page the search returned is already named or is the ingredient page', async () => {
+      const result = await research(searched(JSON.stringify(answer({ productPages: [RETAILER] })), [OFFICIAL, RETAILER]))
+
+      expect(result).toStrictEqual({ found: true, ingredients: ['Aqua', 'Glycerin', 'Niacinamide'], sourceUrl: OFFICIAL, imagePages: [RETAILER] })
+    })
+
+    it('leaves searchPages out of a not-found answer when the search returned no https page', async () => {
+      const result = await research(searched(JSON.stringify(NOT_FOUND_ANSWER), ['http://shop.example/p/one']))
+
+      expect(result).toStrictEqual({ found: false })
+    })
+
+    it('reports plain not found, with no search pages, for a found answer whose ingredients fail the bounds', async () => {
+      const ingredients = Array.from({ length: 151 }, (_, i) => `Ingredient ${i}`)
+
+      const result = await research(searched(JSON.stringify(answer({ ingredients })), [OFFICIAL, page(1)]))
+
+      expect(result).toStrictEqual({ found: false })
+    })
+
+    it('reports plain not found, with no search pages, for a found answer whose source the search never returned', async () => {
+      const result = await research(searched(JSON.stringify(answer({ sourceUrl: INVENTED })), [OFFICIAL, page(1)]))
+
+      expect(result).toStrictEqual({ found: false })
+    })
+
+    it('reports plain not found, with no search pages, for an answer that cannot be read', async () => {
+      const result = await research(searched('I could not find a reliable ingredient list.', [OFFICIAL, page(1)]))
+
+      expect(result).toStrictEqual({ found: false })
     })
   })
 

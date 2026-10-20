@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nameSimilarity, nearMissCandidates, normaliseText, sameBrandFamily, stripSizes } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nameSimilarity, nearMissCandidates, normaliseText, pagesByNameMatch, sameBrandFamily, stripSizes } from './catalog.identity'
 
 // stripSizes may leave a space where the token was; the identity key is what trims it.
 const tidy = (s: string) => s.replace(/\s+/g, ' ').trim()
@@ -478,5 +478,122 @@ describe('namesAnotherEdition', () => {
 
   it('ignores pack sizes in the variant', () => {
     expect(namesAnotherEdition({ brand: 'Dove', name: 'Body Wash', variant: '250 ml' }, { brand: 'Dove', name: 'Body Wash' })).toBe(false)
+  })
+})
+
+describe('pagesByNameMatch', () => {
+  const PALMERS = { brand: "Palmer's", name: 'Cocoa Butter Formula Body Lotion' }
+  const CANTU = { brand: 'Cantu', name: 'Shea Butter Leave-In Conditioning Repair Cream' }
+
+  const MEDINO = 'https://www.medino.com/palmers-cocoa-butter-formula-body-lotion-400ml'
+  const CVS = 'https://www.cvs.com/shop/palmers-cocoa-butter-formula-lotion-prodid-1234'
+  const INCIDECODER = 'https://incidecoder.com/products/palmers-cocoa-butter-formula'
+  const PALMERS_HOME = 'https://www.palmers.com/'
+
+  it('puts the page whose path names most of the product first', () => {
+    const ranked = pagesByNameMatch([INCIDECODER, CVS, MEDINO], PALMERS)
+
+    expect(ranked).toEqual([MEDINO, CVS, INCIDECODER])
+  })
+
+  it('drops the brand home page, whose path names nothing of the product', () => {
+    expect(pagesByNameMatch([PALMERS_HOME, MEDINO], PALMERS)).toEqual([MEDINO])
+  })
+
+  it('drops a page that matches only the brand', () => {
+    expect(pagesByNameMatch(['https://shop.example/brands/palmers'], PALMERS)).toEqual([])
+  })
+
+  it('drops a page that matches only generic words such as lotion and body', () => {
+    expect(pagesByNameMatch(['https://shop.example/body-lotion'], PALMERS)).toEqual([])
+  })
+
+  it('drops a page that matches only the brand and generic words together', () => {
+    expect(pagesByNameMatch(['https://shop.example/palmers-body-lotion'], PALMERS)).toEqual([])
+  })
+
+  it('keeps a page that matches a single word beyond the brand and the generic words', () => {
+    expect(pagesByNameMatch(['https://shop.example/cocoa'], PALMERS)).toEqual(['https://shop.example/cocoa'])
+  })
+
+  it('ranks the exact Cantu product above another Cantu product that shares only some of its words', () => {
+    const curl = 'https://www.bswbeautyca.com/cantu-shea-butter-moisturizing-curl-activator-cream'
+    const exact = 'https://www.nattoral.com/cantu-shea-butter-leave-in-conditioning-repair-cream-16-oz'
+
+    expect(pagesByNameMatch([curl, exact], CANTU)).toEqual([exact, curl])
+  })
+
+  it('keeps the input order between pages with the same score', () => {
+    const first = 'https://one.example/cocoa-butter-lotion'
+    const second = 'https://two.example/cocoa-butter-lotion'
+    const third = 'https://three.example/cocoa-butter-lotion'
+
+    expect(pagesByNameMatch([second, third, first], PALMERS)).toEqual([second, third, first])
+  })
+
+  it('keeps only the best page of a host, taking the host from the first page of it in rank order', () => {
+    const weak = 'https://www.medino.com/cocoa-butter-hand-cream'
+    const other = 'https://www.cvs.com/shop/palmers-cocoa-butter-formula'
+
+    const ranked = pagesByNameMatch([weak, other, MEDINO], PALMERS)
+
+    expect(ranked).toEqual([MEDINO, other])
+  })
+
+  it('treats the same host as one even when the input lists its pages apart, keeping the input order among equal scores', () => {
+    const a1 = 'https://a.example/cocoa-butter'
+    const b1 = 'https://b.example/cocoa-butter'
+    const a2 = 'https://a.example/cocoa-butter-again'
+
+    expect(pagesByNameMatch([a1, b1, a2], PALMERS)).toEqual([a1, b1])
+  })
+
+  it('does not count words in the query string', () => {
+    expect(pagesByNameMatch(['https://shop.example/product?name=cocoa-butter-formula'], PALMERS)).toEqual([])
+  })
+
+  it('does not count words in the host', () => {
+    expect(pagesByNameMatch(['https://cocoa-butter-formula.example/'], PALMERS)).toEqual([])
+  })
+
+  it('does not count words in the fragment', () => {
+    expect(pagesByNameMatch(['https://shop.example/p#cocoa-butter-formula'], PALMERS)).toEqual([])
+  })
+
+  it('reads a percent-encoded path as the text it stands for', () => {
+    const encoded = 'https://shop.example/Cocoa%20Butter%20Formula%20Body%20Lotion'
+
+    expect(pagesByNameMatch([encoded], PALMERS)).toEqual([encoded])
+  })
+
+  it('reads accents in the path the way the catalog compares names', () => {
+    const accented = 'https://shop.example/p/cr%C3%A8me-de-cocoa'
+
+    expect(pagesByNameMatch([accented], { brand: 'Brand', name: 'Creme de Cocoa' })).toEqual([accented])
+  })
+
+  it('does not count a one-character product word', () => {
+    expect(pagesByNameMatch(['https://shop.example/c-shirt'], { brand: 'The Ordinary', name: 'Vitamin C Serum' })).toEqual([])
+  })
+
+  it('counts the words of the variant', () => {
+    const page = 'https://shop.example/p/lotion-coconut'
+
+    expect(pagesByNameMatch([page], { brand: 'Palmers', name: 'Body Lotion', variant: 'Coconut' })).toEqual([page])
+  })
+
+  it('does not throw on a bad percent escape, and still reads the rest of the path', () => {
+    const broken = 'https://shop.example/cocoa-butter-%E0%A4%A'
+
+    expect(() => pagesByNameMatch([broken], PALMERS)).not.toThrow()
+    expect(pagesByNameMatch([broken], PALMERS)).toEqual([broken])
+  })
+
+  it('drops a value that is not a URL, without throwing, and keeps the rest', () => {
+    expect(pagesByNameMatch(['not a url cocoa butter', '', MEDINO], PALMERS)).toEqual([MEDINO])
+  })
+
+  it('returns nothing for no pages', () => {
+    expect(pagesByNameMatch([], PALMERS)).toEqual([])
   })
 })

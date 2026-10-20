@@ -21,6 +21,7 @@ export class AnthropicProductResearcher implements ProductResearcher {
 
   private static readonly NOT_FOUND: ResearchResult = { found: false }
   private static readonly MAX_IMAGE_PAGES = 3
+  private static readonly MAX_SEARCH_PAGES = 30
 
   // An INCI list is a few dozen entries; anything far outside this is a mangled page or an injection.
   private static readonly MAX_INGREDIENTS = 150
@@ -53,17 +54,27 @@ export class AnthropicProductResearcher implements ProductResearcher {
     // Pages are named even when no list was found: the product can still get a picture from them.
     const pages = AnthropicProductResearcher.imagePagesIn(answer, searched)
     const withPages = pages.length > 0 ? { imagePages: pages } : {}
-    if (!answer.found) return { found: false, ...withPages }
+    const withSearch = (sourceUrl?: string | null) => {
+      const others = AnthropicProductResearcher.searchPagesIn(searched, [...pages, ...(sourceUrl ? [sourceUrl] : [])])
+      return others.length > 0 ? { searchPages: others } : {}
+    }
+    if (!answer.found) return { found: false, ...withPages, ...withSearch() }
     const ingredients = answer.ingredients.map((name) => name.trim()).filter((name) => name !== '')
     const { sourceUrl } = answer
     if (!AnthropicProductResearcher.withinBounds(ingredients) || !sourceUrl || !searched.has(sourceUrl)) return notFound
-    return { found: true, ingredients, sourceUrl, ...withPages }
+    return { found: true, ingredients, sourceUrl, ...withPages, ...withSearch(sourceUrl) }
   }
 
   /** The pages the answer names that the search returned, https only, without repeats, best first. */
   private static imagePagesIn(answer: Answer, searched: Set<string>): string[] {
     const named = (answer.productPages ?? []).filter((page) => searched.has(page) && page.startsWith('https://'))
     return [...new Set(named)].slice(0, AnthropicProductResearcher.MAX_IMAGE_PAGES)
+  }
+
+  /** The other pages the search returned, in search order: https only, not already named or the ingredient page, the first MAX_SEARCH_PAGES. */
+  private static searchPagesIn(searched: Set<string>, taken: string[]): string[] {
+    const others = [...searched].filter((page) => page.startsWith('https://') && !taken.includes(page))
+    return others.slice(0, AnthropicProductResearcher.MAX_SEARCH_PAGES)
   }
 
   private static withinBounds(ingredients: string[]): boolean {
