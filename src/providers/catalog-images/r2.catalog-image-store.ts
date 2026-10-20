@@ -38,6 +38,14 @@ export class R2CatalogImageStore implements CatalogImageStore {
   // The scan is a forward-only walk, not a regex: the page is hostile and a backtracking pattern on it costs minutes of CPU.
   private static readonly MAX_META_TAGS = 200
   private static readonly MAX_META_TAG_LENGTH = 4096
+  // JSON-LD blocks are found by the same kind of walk. A block over the size cap is skipped unparsed; the walk of a parsed one is bounded in depth and node count.
+  private static readonly MAX_SCRIPT_TAGS = 100
+  private static readonly MAX_JSON_LD_BYTES = 100 * 1024
+  private static readonly MAX_JSON_LD_DEPTH = 8
+  private static readonly MAX_JSON_LD_NODES = 2000
+  private static readonly MAX_JSON_LD_IMAGES = 20
+  private static readonly JSON_LD_PRODUCT_TYPES = new Set(['Product', 'ProductGroup'])
+  private static readonly JSON_LD_NESTING_KEYS = ['@graph', 'mainEntity', 'hasVariant']
   private static readonly WHITESPACE = new Set([' ', '\t', '\n', '\r', '\f'])
   private static readonly ENTITY = /&(?:#x([0-9a-f]+)|#(\d+)|(amp|quot|apos|lt|gt));/gi
   private static readonly NAMED_ENTITIES: Record<string, string> = { amp: '&', quot: '"', apos: "'", lt: '<', gt: '>' }
@@ -67,7 +75,9 @@ export class R2CatalogImageStore implements CatalogImageStore {
     try {
       const response = await this.get(pageUrl, (current) => requestHeadBytes$(current, { timeoutMs, maxBytes: R2CatalogImageStore.PAGE_MAX_BYTES }))
       if (!response?.ok || !response.contentType?.toLowerCase().startsWith('text/html')) return null
-      for (const value of R2CatalogImageStore.imageMetaValues(new TextDecoder().decode(response.bytes))) {
+      const html = new TextDecoder().decode(response.bytes)
+      // The page's own product data first: on many brand sites the og:image is a logo or a placeholder.
+      for (const value of [...R2CatalogImageStore.jsonLdProductImages(html), ...R2CatalogImageStore.imageMetaValues(html)]) {
         const resolved = R2CatalogImageStore.resolve(value, response.url)
         if (resolved !== null && isSafePublicHttpsUrl(resolved)) return resolved
       }
@@ -128,6 +138,72 @@ export class R2CatalogImageStore implements CatalogImageStore {
     } catch {
       return null
     }
+  }
+
+  /**
+   * The image values of the first Product in the page's JSON-LD blocks, in document order; empty when there is none.
+   * Forward-only scan over `<script`, so linear in the length of `html`: a tag with no closing `>` or no `</script` ends the scan.
+   */
+  private static jsonLdProductImages(html: string): string[] {
+    const lower = html.toLowerCase()
+    if (lower.length !== html.length) return []
+    let position = 0
+    for (let tags = 0; tags < R2CatalogImageStore.MAX_SCRIPT_TAGS; tags++) {
+      const start = lower.indexOf('<script', position)
+      if (start === -1) break
+      const openEnd = lower.indexOf('>', start)
+      if (openEnd === -1) break
+      const closeStart = lower.indexOf('</script', openEnd + 1)
+      if (closeStart === -1) break
+      position = closeStart + 1
+      const opening = html.slice(start + 7, openEnd)
+      if (opening.length > R2CatalogImageStore.MAX_META_TAG_LENGTH || !R2CatalogImageStore.WHITESPACE.has(opening[0] ?? '')) continue
+      if (R2CatalogImageStore.attributesOf(opening).get('type')?.trim().toLowerCase() !== 'application/ld+json') continue
+      if (closeStart - openEnd - 1 > R2CatalogImageStore.MAX_JSON_LD_BYTES) continue
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(html.slice(openEnd + 1, closeStart))
+      } catch {
+        continue
+      }
+      const images = R2CatalogImageStore.productImages(parsed, 0, { nodes: 0 })
+      if (images.length > 0) return images
+    }
+    return []
+  }
+
+  /** The image values of the first Product-typed object under `node` that has any, own image before its variants. Depth and node count are capped. */
+  private static productImages(node: unknown, depth: number, budget: { nodes: number }): string[] {
+    if (typeof node !== 'object' || node === null || depth > R2CatalogImageStore.MAX_JSON_LD_DEPTH || budget.nodes++ >= R2CatalogImageStore.MAX_JSON_LD_NODES) return []
+    if (Array.isArray(node)) {
+      for (const entry of node) {
+        const images = R2CatalogImageStore.productImages(entry, depth + 1, budget)
+        if (images.length > 0) return images
+      }
+      return []
+    }
+    const record = node as Record<string, unknown>
+    const type = record['@type']
+    const types = Array.isArray(type) ? type : [type]
+    if (types.some((t) => typeof t === 'string' && R2CatalogImageStore.JSON_LD_PRODUCT_TYPES.has(t))) {
+      const own = R2CatalogImageStore.imageValues(record['image'])
+      if (own.length > 0) return own
+    }
+    for (const key of R2CatalogImageStore.JSON_LD_NESTING_KEYS) {
+      const images = R2CatalogImageStore.productImages(record[key], depth + 1, budget)
+      if (images.length > 0) return images
+    }
+    return []
+  }
+
+  /** The url strings of a JSON-LD `image`: a string, an ImageObject (url, else contentUrl), or an array of those. */
+  private static imageValues(image: unknown): string[] {
+    const values: string[] = []
+    for (const entry of (Array.isArray(image) ? image : [image]).slice(0, R2CatalogImageStore.MAX_JSON_LD_IMAGES)) {
+      const value = typeof entry === 'object' && entry !== null ? ((entry as Record<string, unknown>)['url'] ?? (entry as Record<string, unknown>)['contentUrl']) : entry
+      if (typeof value === 'string' && value.trim() !== '') values.push(value.trim())
+    }
+    return values
   }
 
   /** The content of every non-empty image meta tag in `html`, best-ranked first. Linear in the length of `html`. */

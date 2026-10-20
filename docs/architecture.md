@@ -1165,11 +1165,15 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   own 10 s timeout.
 - **Image from the source page.** `pageImageUrl(pageUrl)` finds the product's image on a page the researcher
   named (a product page or the ingredient page). The researcher cannot supply an image URL itself: web_search never exposes image URLs, so the model always
-  answered null. Source pages carry the packshot in `og:image`. The adapter fetches the page through the same safe path as
+  answered null. Source pages carry the packshot in their JSON-LD `Product` image or in `og:image`; brand sites' `og:image` is often a logo or a placeholder, so the JSON-LD image is tried first. The adapter fetches the page through the same safe path as
   `fetchImage` (safe-URL check and blocked hosts on every hop, at most 2 redirects, 10 s timeout), accepts only a 2xx
   `text/html` answer, reads at most 512 KB of it (`requestHeadBytes$` stops pulling at the cap), and scans the `<meta>`
   tags with a linear forward-only scanner, not a regex, because the page is hostile (stops at `</head>`, after 200 tags,
   skips a tag over 4 KB; `property` or `name`, any attribute order and quote style, case-insensitive, HTML entities decoded) for
+  `og:image`. The JSON-LD is found the same way: `<script type="application/ld+json">` blocks in those 512 KB (type matched
+  case-insensitively, at most 100 scripts, a block over 100 KB skipped, invalid JSON skipped), walked with a depth cap of 8 and a
+  2,000-node budget through arrays, `@graph`, `mainEntity` and `hasVariant` to the first `Product` or `ProductGroup` with an `image`
+  (string, array, or ImageObject `url` / `contentUrl`; entities not decoded). Candidates in order: that image, then
   `og:image`, then `og:image:secure_url` / `og:image:url`, then `twitter:image`. Each value in that order is resolved against the
   page URL (the final one, after redirects) and the first that is a safe public https URL is returned, so an `http` `og:image`
   does not hide a good `og:image:secure_url` (every Shopify store emits that pair). Any failure is `null`; nothing from the page or its URL is logged.

@@ -933,4 +933,240 @@ describe('R2CatalogImageStore.pageImageUrl', () => {
     expect(await make().pageImageUrl(PAGE)).toBeNull()
     expect(stub.mock.calls.map(([input]) => String(input))).toEqual([PAGE, MID])
   })
+
+  describe('JSON-LD Product image', () => {
+    const LOGO = 'https://www.cetaphil.example/on/demandware.static/images/Cetaphil_Logo_285.png'
+    const FRONT = 'https://www.cetaphil.example/dw/image/Gentle_Skin_Cleanser_473ML_Front.png?sw=900'
+    const OTHER = 'https://assets.brand.example/media/second.png'
+    const ogLogo = `<meta property="og:image" content="${LOGO}"/>`
+    const ld = (value: unknown, type = 'application/ld+json') => `<script type="${type}">${JSON.stringify(value)}</script>`
+    const product = (image: unknown, type: string | string[] = 'Product') => ({ '@context': 'https://schema.org', '@type': type, name: 'Gentle Skin Cleanser', image })
+
+    it('prefers the JSON-LD Product image over a logo og:image', async () => {
+      serving(`${ogLogo}${ld(product(FRONT))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('prefers the JSON-LD Product image even when the script comes before the og:image', async () => {
+      serving(`${ld(product(FRONT))}${ogLogo}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a Product inside @graph', async () => {
+      serving(`${ogLogo}${ld({ '@context': 'https://schema.org', '@graph': [{ '@type': 'WebSite', name: 'x' }, product(FRONT)] })}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a Product whose @type is an array', async () => {
+      serving(`${ogLogo}${ld(product(FRONT, ['Product']))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a Product whose @type array holds other types too', async () => {
+      serving(`${ogLogo}${ld(product(FRONT, ['Thing', 'Product']))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a ProductGroup', async () => {
+      serving(`${ogLogo}${ld(product(FRONT, 'ProductGroup'))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a Product under mainEntity', async () => {
+      serving(`${ogLogo}${ld({ '@type': 'WebPage', mainEntity: product(FRONT) })}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds the image of a variant under hasVariant when the group has none', async () => {
+      serving(`${ogLogo}${ld({ '@type': 'ProductGroup', hasVariant: [{ '@type': 'Product', image: FRONT }] })}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('finds a Product in a top-level array', async () => {
+      serving(`${ogLogo}${ld([{ '@type': 'Organization', name: 'x' }, product(FRONT)])}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('reads an image given as an array, using the first entry', async () => {
+      serving(`${ogLogo}${ld(product([FRONT, OTHER]))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('uses the first usable entry of an image array, skipping an unsafe one', async () => {
+      serving(`${ogLogo}${ld(product(['http://assets.brand.example/p.png', FRONT]))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('reads an image given as an ImageObject with url', async () => {
+      serving(`${ogLogo}${ld(product({ '@type': 'ImageObject', url: FRONT }))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('reads an image given as an ImageObject with contentUrl', async () => {
+      serving(`${ogLogo}${ld(product({ '@type': 'ImageObject', contentUrl: FRONT }))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('reads an array of ImageObjects', async () => {
+      serving(`${ogLogo}${ld(product([{ '@type': 'ImageObject', url: FRONT }]))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('uses the first Product image in document order when there are several Products', async () => {
+      serving(`${ogLogo}${ld(product(FRONT))}${ld(product(OTHER))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('reads a JSON-LD script placed in the body', async () => {
+      stubFetch(() => new Response(`<html><head>${ogLogo}</head><body>${ld(product(FRONT))}</body></html>`, { headers: { 'content-type': 'text/html' } }))
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it.each([
+      ['an http image', 'http://assets.brand.example/p.png'],
+      ['a private-host image', 'https://192.168.1.10/p.png'],
+      ['a loopback image', 'https://127.0.0.1/p.png'],
+      ['a javascript url', 'javascript:alert(1)'],
+    ])('falls through to og:image when the JSON-LD image is %s', async (_label, unsafe) => {
+      serving(`<meta property="og:image" content="${PACKSHOT}"/>${ld(product(unsafe))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(PACKSHOT)
+    })
+
+    it('falls through to og:image when the JSON-LD is invalid (already passes by fall-through)', async () => {
+      serving(`${ogLogo}<script type="application/ld+json">{ "@type": "Product", "image": </script>`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('reads a later valid block after an invalid one', async () => {
+      serving(`${ogLogo}<script type="application/ld+json">{ not json</script>${ld(product(FRONT))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('skips a JSON-LD block larger than 100 KB (already passes by fall-through)', async () => {
+      const big = { ...product(FRONT), description: 'x'.repeat(100 * 1024) }
+      serving(`${ogLogo}${ld(big)}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('reads a JSON-LD block just under 100 KB', async () => {
+      const near = { ...product(FRONT), description: 'x'.repeat(90 * 1024) }
+      serving(`${ogLogo}${ld(near)}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('falls through to og:image when the JSON-LD has no Product, only an Organization logo (already passes by fall-through)', async () => {
+      serving(`${ogLogo}${ld({ '@type': 'Organization', name: 'Cetaphil', logo: 'https://www.cetaphil.example/logo-org.png', image: 'https://www.cetaphil.example/org.png' })}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('returns null when the only JSON-LD is not a Product and there is no meta image', async () => {
+      serving(ld({ '@type': 'Organization', image: 'https://www.cetaphil.example/org.png' }))
+
+      expect(await make().pageImageUrl(PAGE)).toBeNull()
+    })
+
+    it('falls through to og:image when the Product has no image (already passes by fall-through)', async () => {
+      serving(`${ogLogo}${ld({ '@type': 'Product', name: 'x' })}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('resolves a relative JSON-LD image against the page url', async () => {
+      serving(`${ogLogo}${ld(product('/dw/image/front.png'))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe('https://www.nivea.example/dw/image/front.png')
+    })
+
+    it('resolves a relative JSON-LD image against the final url after a redirect', async () => {
+      const MOVED = 'https://shop.other.example/new/p.html'
+      stubFetch((url) => (url === PAGE ? redirect(MOVED, 301) : html(`${ogLogo}${ld(product('/dw/image/front.png'))}`)))
+
+      expect(await make().pageImageUrl(PAGE)).toBe('https://shop.other.example/dw/image/front.png')
+    })
+
+    it('does not read a JSON-LD block that starts after 512 KB (already passes by fall-through)', async () => {
+      const padding = '<!-- -->'.repeat(Math.ceil((PAGE_CAP + 1024) / 8))
+      stubFetch(() => new Response(`<html><head>${ogLogo}</head><body>${padding}${ld(product(FRONT))}</body></html>`, { headers: { 'content-type': 'text/html' } }))
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('reads a JSON-LD block that sits well before the 512 KB cap in a big page', async () => {
+      const padding = '<!-- -->'.repeat(Math.ceil((PAGE_CAP / 2) / 8))
+      stubFetch(() => new Response(`<html><head>${ogLogo}</head><body>${padding}${ld(product(FRONT))}</body></html>`, { headers: { 'content-type': 'text/html' } }))
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('does not throw on nesting far deeper than the cap, and falls through to og:image', async () => {
+      const depth = 3000
+      const deep = `${'{"a":'.repeat(depth)}${JSON.stringify(product(FRONT))}${'}'.repeat(depth)}`
+      serving(`${ogLogo}<script type="application/ld+json">${deep}</script>`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('does not find a Product nested just past the depth cap of 8 (already passes by fall-through)', async () => {
+      let nested: unknown = product(FRONT)
+      for (let i = 0; i < 12; i++) nested = { '@graph': [nested] }
+      serving(`${ogLogo}${ld(nested)}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it.each([
+      ['an upper-case type', `<script type="APPLICATION/LD+JSON">`],
+      ['a mixed-case type', `<script type="Application/Ld+Json">`],
+      ['other attributes around it', `<script id="schema" data-n="1" type="application/ld+json" nonce="abc">`],
+      ['single quotes', `<script type='application/ld+json'>`],
+      ['an upper-case tag', `<SCRIPT TYPE="application/ld+json">`],
+    ])('matches the script type with %s', async (_label, open) => {
+      serving(`${ogLogo}${open}${JSON.stringify(product(FRONT))}</script>`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(FRONT)
+    })
+
+    it('ignores a script of another type that carries a Product', async () => {
+      serving(`${ogLogo}${ld(product(FRONT), 'application/json')}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe(LOGO)
+    })
+
+    it('does not decode HTML entities inside the JSON string values', async () => {
+      serving(`${ogLogo}${ld(product('https://assets.brand.example/p.png?a=1&amp;b=2'))}`)
+
+      expect(await make().pageImageUrl(PAGE)).toBe('https://assets.brand.example/p.png?a=1&amp;b=2')
+    })
+
+    it('scans 512 KB of unclosed <script in linear time', async () => {
+      stubFetch(() => new Response(`<html><head>${'<script type="application/ld+json">'.repeat(PAGE_CAP / 35)}</head></html>`, { headers: { 'content-type': 'text/html' } }))
+      const started = performance.now()
+      const result = await make().pageImageUrl(PAGE)
+
+      expect(result).toBeNull()
+      expect(performance.now() - started).toBeLessThan(1000)
+    }, 20_000)
+  })
 })
