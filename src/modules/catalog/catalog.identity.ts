@@ -296,6 +296,17 @@ export const lessSpecificForNearMiss = (reading: Branded, product: Branded, prod
 }
 
 /**
+ * Whether the product says less than the reading, weighed on the same words as `lessSpecificForNearMiss` (the same one-sided
+ * suitability ignoring, decided for this reading and these products): a row that differs only by a line the reading alone gives is
+ * its equal here, not a vaguer row.
+ */
+export const vaguerForNearMiss = (reading: Branded, product: Branded, products: Branded[], threshold = DEFAULT_NEAR_MISS_THRESHOLD): boolean => {
+  const ignoreOneSided = ignoresOneSidedSuitability(reading, products, threshold)
+  const [wr, wp] = wordsForNearMiss(reading, product, ignoreOneSided)
+  return relation(wp, wr) === 'subset'
+}
+
+/**
  * Products of the same brand family (first word) whose words nearly match (Jaccard at the threshold, or one reading's words all inside
  * the other's) but whose identity key differs: the cases for the model to decide (same product or not). Best first, equal similarity by id.
  * A row's own stored key stands even when recomputing its fields today would no longer produce it: a key rule change (the % fix) must

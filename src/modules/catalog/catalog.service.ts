@@ -18,6 +18,7 @@ import {
   normaliseText,
   pagesByNameMatch,
   sameWords,
+  vaguerForNearMiss,
 } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
@@ -352,9 +353,11 @@ export class ProductCatalogService {
     const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable, this.policy.nearMissThreshold)
     // A reading that says less than one candidate ("Facial Moisturizing Lotion" against "PM Facial Moisturizing Lotion") is most likely a
     // partial read of it: landing it on a row vaguer still ("Moisturizing Lotion") would be a guess, so that row is not asked about.
-    // "Says more than the reading" is weighed as the guard weighs it, so a candidate the reading says less than is never also its vaguer row.
-    const saysMore = new Set(candidates.filter((c) => lessSpecificForNearMiss(identity, c, comparable, this.policy.nearMissThreshold)))
-    const vaguer = (c: Product) => saysMore.size > 0 && !saysMore.has(c) && lessSpecific(c, identity)
+    // "Says more" and "vaguer" are both weighed on the words the guard weighs, so a row that differs only by a suitability line the
+    // reading alone gives is its equal, judged as usual, not a vaguer row.
+    const threshold = this.policy.nearMissThreshold
+    const partialRead = candidates.some((c) => lessSpecificForNearMiss(identity, c, comparable, threshold))
+    const vaguer = (c: Product) => partialRead && vaguerForNearMiss(identity, c, comparable, threshold)
     const others = filtered.filter((c) => !equal.includes(c) && !vaguer(c))
     const toJudge = filtered.length === 0 ? equal : [...equal, ...others]
     for (const candidate of toJudge) {

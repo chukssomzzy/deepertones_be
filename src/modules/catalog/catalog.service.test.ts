@@ -4350,6 +4350,82 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
     expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: stored.productId })
   })
 
+  describe('a reading whose suitability line is the only thing it says beyond a stored row', () => {
+    /** The same product, catalogued from a read that missed the suitability line: the reading's words, without the line. */
+    const SAME_ROW = { brand: 'Glowco', name: 'Daily Lotion', form: 'lotion', category: 'skin' } as const
+    /** A longer row of the line that prints the same suitability line: the reading says LESS than this one. */
+    const SIBLING = { brand: 'Glowco', name: 'Daily Night Lotion', variant: 'For All Skin Types', form: 'lotion', category: 'skin' } as const
+    const READING = { brand: 'Glowco', name: 'Daily Lotion', variant: 'For All Skin Types', form: 'lotion', category: 'skin' } as const
+    /** The same case with the suitability line read into the name, as a one-line pack print often is, and no variant anywhere. */
+    const READING_IN_NAME = { brand: 'Glowco', name: 'Daily Lotion For All Skin Types', form: 'lotion', category: 'skin' } as const
+    const SIBLING_IN_NAME = { brand: 'Glowco', name: 'Daily Night Lotion For All Skin Types', form: 'lotion', category: 'skin' } as const
+    const SAME_ROW_ID = 'same-row'
+    const SIBLING_ID = 'sibling-row'
+    /** A row genuinely vaguer than the reading, and the more specific sibling it could be a partial read of. */
+    const VAGUER = { brand: 'Glowco', name: 'Daily Lotion', form: 'lotion', category: 'skin' } as const
+    const MORE_SPECIFIC = { brand: 'Glowco', name: 'Night Facial Daily Lotion', variant: 'For All Skin Types', form: 'lotion', category: 'skin' } as const
+    const PARTIAL_READING = { brand: 'Glowco', name: 'Facial Daily Lotion', variant: 'For All Skin Types', form: 'lotion', category: 'skin' } as const
+    const VAGUER_ID = 'vaguer-row'
+    const MORE_SPECIFIC_ID = 'more-specific-row'
+
+    /** Seeded through the repository, not `resolve`: these rows are near misses of each other, so the service would spend a judge call while seeding. */
+    const row = (ctx: Ctx, id: string, who: ProductIdentity) =>
+      ctx.repository.createProduct({
+        id,
+        identityKey: identityKey(who),
+        brandKey: brandKey(who.brand),
+        kind: 'named',
+        brand: who.brand,
+        name: who.name,
+        variant: who.variant ?? null,
+        form: who.form ?? null,
+        category: who.category,
+        createdAt: T0,
+      })
+
+    /** The candidate each judge call was about, in order. */
+    const asked = (ctx: Ctx) => ctx.analyst.calls.sameProduct.map(([, candidate]) => candidate.name)
+
+    it('is judged against that row, and lands on it, with a longer sibling stored, when the suitability line is part of the name', async () => {
+      const ctx = setup()
+      await row(ctx, SAME_ROW_ID, identity(SAME_ROW))
+      await row(ctx, SIBLING_ID, identity(SIBLING_IN_NAME))
+      ctx.analyst.sameProductWith((_reading, candidate) => candidate.name === SAME_ROW.name)
+
+      const result = await ctx.service.resolve(identity(READING_IN_NAME))
+
+      expect(asked(ctx)).toEqual([SAME_ROW.name])
+      expect(result.productId).toBe(SAME_ROW_ID)
+    })
+
+    // Guards behaviour that already holds: with no longer sibling to be a partial read of, that row is judged as before.
+    it('is judged against that row, and lands on it, when the suitability line is part of the name and nothing longer is stored', async () => {
+      const ctx = setup()
+      await row(ctx, SAME_ROW_ID, identity(SAME_ROW))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING_IN_NAME))
+
+      expect(asked(ctx)).toEqual([SAME_ROW.name])
+      expect(result.productId).toBe(SAME_ROW_ID)
+    })
+
+    // Guards behaviour that already holds: a row the reading really does say more than stays unjudged, suitability line or not.
+    it('still skips a genuinely vaguer row, even on a "no" to the more specific sibling that carries the same suitability line', async () => {
+      const ctx = setup()
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      await row(ctx, MORE_SPECIFIC_ID, identity(MORE_SPECIFIC))
+      ctx.analyst.sameProductWith((_reading, candidate) => candidate.name !== MORE_SPECIFIC.name)
+      const scanned = identity(PARTIAL_READING)
+
+      const result = await ctx.service.resolve(scanned)
+
+      expect(asked(ctx)).toEqual([MORE_SPECIFIC.name])
+      expect([VAGUER_ID, MORE_SPECIFIC_ID]).not.toContain(result.productId)
+      expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
+    })
+  })
+
   it('makes a new product when the judge says a differing variant is another product', async () => {
     const ctx = setup()
     const stored = await ctx.service.resolve(identity({ ...CERAVE_CLEANSER, variant: 'Normal to Dry Skin' }))
