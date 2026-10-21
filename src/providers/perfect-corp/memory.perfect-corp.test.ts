@@ -43,7 +43,7 @@ describe('MemoryPerfectCorpClient call log', () => {
     await fake.getFitzpatrick(fitzTask)
     await fake.downloadMask('https://masks.test/a.png')
     await fake.deleteTask(skinTask)
-    await fake.verifyWebhook('{}', headers)
+    await fake.checkWebhook('{}', headers)
 
     expect(fake.calls).toEqual([
       { method: 'uploadFile', args: [BYTES, UPLOAD] },
@@ -53,7 +53,7 @@ describe('MemoryPerfectCorpClient call log', () => {
       { method: 'getFitzpatrick', args: [fitzTask] },
       { method: 'downloadMask', args: ['https://masks.test/a.png'] },
       { method: 'deleteTask', args: [skinTask] },
-      { method: 'verifyWebhook', args: ['{}', headers] },
+      { method: 'checkWebhook', args: ['{}', headers] },
     ])
   })
 
@@ -96,8 +96,11 @@ describe('MemoryPerfectCorpClient defaults', () => {
     await expect(new MemoryPerfectCorpClient().deleteTask('task-1')).resolves.toBeUndefined()
   })
 
-  it('fails closed on a webhook nobody scripted an answer for: it is not verified', async () => {
-    await expect(new MemoryPerfectCorpClient().verifyWebhook('{}', new Headers())).resolves.toBeNull()
+  it('fails closed on a webhook nobody scripted an answer for: it is rejected as having no headers', async () => {
+    await expect(new MemoryPerfectCorpClient().checkWebhook('{}', new Headers())).resolves.toEqual({
+      ok: false,
+      rejection: { reason: 'missing-headers', missing: ['webhook-id', 'webhook-timestamp', 'webhook-signature'] },
+    })
   })
 })
 
@@ -143,21 +146,33 @@ describe('MemoryPerfectCorpClient.script', () => {
     await expect(fake.getSkinAnalysis('t')).resolves.toEqual(SUCCESS)
   })
 
-  it('scripts the task ids, the Fitzpatrick type, the mask bytes and a verified webhook', async () => {
+  it('scripts the task ids, the Fitzpatrick type, the mask bytes and a checked webhook', async () => {
     const fake = new MemoryPerfectCorpClient()
     const mask = new Uint8Array([1, 2, 3])
-    const hook = { webhookId: 'msg_1', taskId: 'task-1', taskStatus: 'success' as const }
+    const hook = { ok: true as const, delivery: { webhookId: 'msg_1', taskId: 'task-1', taskStatus: 'success' as const } }
     fake.script('createSkinAnalysis', 'task-skin')
     fake.script('createFitzpatrick', 'task-fitz')
     fake.script('getFitzpatrick', { status: 'success', fitzpatrick: 'V' })
     fake.script('downloadMask', mask)
-    fake.script('verifyWebhook', hook)
+    fake.script('checkWebhook', hook)
 
     expect(await fake.createSkinAnalysis({ fileId: 'f', actions: [] })).toBe('task-skin')
     expect(await fake.createFitzpatrick({ fileId: 'f' })).toBe('task-fitz')
     expect(await fake.getFitzpatrick('task-fitz')).toEqual({ status: 'success', fitzpatrick: 'V' })
     expect(await fake.downloadMask('https://masks.test/a.png')).toEqual(mask)
-    expect(await fake.verifyWebhook('{}', new Headers())).toEqual(hook)
+    expect(await fake.checkWebhook('{}', new Headers())).toEqual(hook)
+  })
+
+  it('scripts a rejected webhook with its reason, then falls back to the default rejection', async () => {
+    const fake = new MemoryPerfectCorpClient()
+    const rejected = { ok: false as const, rejection: { reason: 'bad-timestamp' as const } }
+    fake.script('checkWebhook', rejected)
+
+    expect(await fake.checkWebhook('{}', new Headers())).toEqual(rejected)
+    expect(await fake.checkWebhook('{}', new Headers())).toEqual({
+      ok: false,
+      rejection: { reason: 'missing-headers', missing: ['webhook-id', 'webhook-timestamp', 'webhook-signature'] },
+    })
   })
 
   it('keeps separate fakes separate', async () => {
