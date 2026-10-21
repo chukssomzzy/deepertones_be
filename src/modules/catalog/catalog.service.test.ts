@@ -4540,6 +4540,101 @@ describe('ProductCatalogService.resolve: spellings, % names and range-less readi
       expect(result.productId).toBe(shea.productId)
     })
   })
+
+  describe('a reading less specific than one of its candidates', () => {
+    /** The product the reading is probably a partial read of: the AM/PM-style word on the label went unread. */
+    const SPECIFIC = { brand: 'Glowco', name: 'Night Facial Moisturizing Lotion', form: 'lotion', category: 'skin' } as const
+    /** A vaguer row of the same brand, UK spelling, that the reading says MORE than: landing on it would be a guess. */
+    const VAGUER = { brand: 'Glowco', name: 'Moisturising Lotion', form: 'lotion', category: 'skin' } as const
+    const READING = { brand: 'Glowco', name: 'Facial Moisturizing Lotion', form: 'lotion', category: 'skin' } as const
+    const SPECIFIC_ID = 'specific-row'
+    const VAGUER_ID = 'vaguer-row'
+
+    /**
+     * Seeded through the repository, not `resolve`: these two rows are near misses of each other (Jaccard exactly at the
+     * threshold), so creating the second through the service would spend a judge call and hide the one under test.
+     */
+    const row = (ctx: Ctx, id: string, who: ProductIdentity) =>
+      ctx.repository.createProduct({
+        id,
+        identityKey: identityKey(who),
+        brandKey: brandKey(who.brand),
+        kind: 'named',
+        brand: who.brand,
+        name: who.name,
+        variant: who.variant ?? null,
+        form: who.form ?? null,
+        category: who.category,
+        createdAt: T0,
+      })
+
+    /** The candidate each judge call was about, in order. */
+    const asked = (ctx: Ctx) => ctx.analyst.calls.sameProduct.map(([, candidate]) => candidate.name)
+
+    it('puts only the more specific candidate to the judge, and a "yes" lands on it', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
+    })
+
+    it('makes a new product when the judge says no to the more specific candidate, without ever asking about the vaguer row', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith((_reading, candidate) => candidate.name !== SPECIFIC.name)
+      const scanned = identity(READING)
+
+      const result = await ctx.service.resolve(scanned)
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect([SPECIFIC_ID, VAGUER_ID]).not.toContain(result.productId)
+      expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
+    })
+
+    it('skips the vaguer row even when it is the closer near miss, so candidate order does not decide the merge', async () => {
+      const ctx = setup()
+      // Two words beyond the reading, so this row scores BELOW the vaguer one and is offered second.
+      const furtherOff = identity({ ...SPECIFIC, name: 'Night Time Facial Moisturizing Lotion' })
+      await row(ctx, SPECIFIC_ID, furtherOff)
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([furtherOff.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
+    })
+
+    // Guards behaviour that already holds: with nothing more specific to be a partial read of, the vaguer row is still judged.
+    it('is still judged against the vaguer row, and lands on it, when that is the only candidate', async () => {
+      const ctx = setup()
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([VAGUER.name])
+      expect(result.productId).toBe(VAGUER_ID)
+    })
+
+    // Guards behaviour that already holds: the more specific candidate is judged as before.
+    it('is judged against the more specific candidate, and lands on it, when that is the only candidate', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
+    })
+  })
 })
 
 describe('ProductCatalogService.resolve: a row whose identity key the code no longer produces', () => {
