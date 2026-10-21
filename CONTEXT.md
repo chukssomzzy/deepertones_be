@@ -226,6 +226,11 @@ A row that has left the workbook. It is no longer recommended or applied, but is
 still say what they were based on.
 _Avoid_: Deleted, removed
 
+**Origin**:
+How a product reached the recommendation catalog: sourced by us, or submitted by its brand with a disclosed review fee.
+Users see a brand-submitted product's origin; the rules and the AI that choose among candidates never do.
+_Avoid_: Sponsorship, partner, paid placement
+
 **Draft**:
 A workbook row or cell an AI filled from cited sources, which nobody has approved yet. The team decides which products go in
 the workbook; the AI only fills in what is known about them.
