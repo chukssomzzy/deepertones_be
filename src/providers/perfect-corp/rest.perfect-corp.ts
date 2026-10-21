@@ -57,7 +57,8 @@ type Json = Record<string, unknown>
  * `task_id` and `task_status` of the documentation are still accepted).
  *
  * UNVERIFIED VENDOR SHAPES, pinned from the brief and Perfect Corp's docs and to be checked against a real staging response: the result
- * of a skin analysis (`data.results.output`), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the error body (`error_code`),
+ * of a skin analysis (`data.results.output`; an `hd_*` item with no string `region` is read as `whole`, since the reference gives hd_age_spot and
+ * others no subcategories), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the error body (`error_code`),
  * and the GET and delete paths.
  */
 export class RestPerfectCorpClient implements PerfectCorpClient {
@@ -72,6 +73,9 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
   private static readonly MAX_LOGGED_KEYS = 20
   // A rejected task status is logged as written, so only an enum-like word.
   private static readonly STATUS_SHAPE = /^[A-Za-z_-]{1,20}$/
+  // A skipped item's type is logged as written, so only an hd code.
+  private static readonly HD_TYPE_SHAPE = /^hd_[a-z_]{1,40}$/
+  private static readonly WHOLE_FACE = 'whole'
   private static readonly WEBHOOK_HEADERS = ['webhook-id', 'webhook-timestamp', 'webhook-signature'] as const
   // A timestamp above this cannot be seconds before the year 5138, so the sender is counting milliseconds.
   private static readonly MILLISECOND_TIMESTAMP_FROM = 1e11
@@ -127,6 +131,7 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
     if (!Array.isArray(output)) throw new PerfectCorpUnavailableError('Perfect Corp sent a skin analysis with no results')
 
     const concerns: ConcernScore[] = []
+    const skipped: { type: string; problem: 'no-scores' }[] = []
     const skinTypes: { region: string; skinType: string }[] = []
     let skinAge: number | null = null
     let all: number | null = null
@@ -139,14 +144,19 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
         if (typeof item.score === 'number') skinAge = item.score
       } else if (type === 'all') {
         if (typeof item.score === 'number') all = item.score
-      } else if (typeof type === 'string' && type.startsWith('hd_') && typeof item.region === 'string') {
-        // An item without both scores is skipped: it is a thing the vendor did not measure, not a measurement of zero.
-        if (typeof item.raw_score !== 'number' || typeof item.ui_score !== 'number') continue
+      } else if (typeof type === 'string' && type.startsWith('hd_')) {
+        // An item without both scores is left out: it is a thing the vendor did not measure, not a measurement of zero. Its type is reported, once, for the log.
+        if (typeof item.raw_score !== 'number' || typeof item.ui_score !== 'number') {
+          if (RestPerfectCorpClient.HD_TYPE_SHAPE.test(type)) skipped.push({ type, problem: 'no-scores' })
+          continue
+        }
         const maskUrls = Array.isArray(item.mask_urls) ? item.mask_urls.filter((url): url is string => typeof url === 'string') : []
-        concerns.push({ concern: type, region: item.region, rawScore: item.raw_score, uiScore: item.ui_score, maskUrls })
+        // The reference gives hd_age_spot, hd_redness, hd_radiance and others no subcategories, so their items carry no region: that is the whole face.
+        const region = typeof item.region === 'string' ? item.region : RestPerfectCorpClient.WHOLE_FACE
+        concerns.push({ concern: type, region, rawScore: item.raw_score, uiScore: item.ui_score, maskUrls })
       }
     }
-    return { status: 'success', concerns, skinTypes, skinAge, all }
+    return { status: 'success', concerns, skinTypes, skinAge, all, skipped }
   }
 
   async getFitzpatrick(taskId: string): Promise<FitzpatrickResult> {

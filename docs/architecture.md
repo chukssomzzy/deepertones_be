@@ -1164,6 +1164,9 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 - **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
   `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
   and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
+  An `hd_*` item with both scores but no string `region` (the reference gives hd_age_spot, hd_redness, hd_radiance and others no subcategories) is read
+  as region `whole`; one missing a score is left out and reported in the result's `skipped` (type and `no-scores` only). `FaceScanService` logs
+  `face-scan-concern-missing` (concern, the concern names that did come back, `skipped`; no scores, links or photo) once per goal concern absent from a stored result.
 - **The memory fake** logs every call in order with its arguments (a scripted failure too, since the call was made), and `script(method,
   ...answers)` queues answers handed out one per call (an `Error` is thrown as itself). Its defaults keep a service waiting (tasks are
   `running`) and fail a webhook closed.
