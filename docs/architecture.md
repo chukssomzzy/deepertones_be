@@ -1242,14 +1242,16 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     `bandFor`; a concern with no row or that is not visible is left out. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`, `marks`, `redness`,
     `glow`, `texture`, `under-eyes`, `dryness`), never Perfect Corp's `hd_*` names. `nothingStandsOut` is `NOTHING_STANDS_OUT` when nothing is seen.
   - **Overlays.** A shown concern's mask key is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a photo, so
-    `GET /scans/faces/photos/{token}` serves it. A concern that is not shown gets no link; one with no stored mask has `overlay: null`.
+    `GET /scans/faces/photos/{token}` serves it. A concern that is not shown gets no link, and none is signed; one with no stored mask has `overlay: null`.
   - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
     another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
     day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
-    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, ties by lower id; the
-    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`.
-  - **Since day one.** Both scans' `whole`-region scores for each of the goal's concerns, through `concernChange`, worded by `changeWords` (a concern missing
-    on either scan is left out), and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
+    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`; the
+    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`. The
+    cut-off and the upper bound are by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a
+    millisecond in practice, and `scanId` is kept for the tie-break should one be needed.
+  - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
+    worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
   - **Never** in the view: a score (`raw_score`, `ui_score` or the overall `all`), a Perfect Corp concern name, a condition name, the Fitzpatrick type, or a
     word about lightness. The tables test scans every string, and the pipeline and route tests scan the serialised view.
@@ -1260,7 +1262,8 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 - **The list.** `GET /scans/faces` (`listFaceScans`, `signedIn`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
-  about the profile, so the service works it out once and hands it to each `view`.
+  about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
+  is read once per list).
 - **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters

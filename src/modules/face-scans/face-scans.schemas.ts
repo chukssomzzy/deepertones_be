@@ -118,7 +118,8 @@ export const FaceScanResponse = z
     createdAt: z.iso.datetime(),
     photos: z.object({ front: FacePhotoLink.optional(), right: FacePhotoLink.optional(), left: FacePhotoLink.optional() }).openapi({ description: 'A link for each photo that was sent.' }),
     rescanSuggested: z.boolean().openapi({ description: 'True when the profile\'s latest scan was taken under another goal than its current one.' }),
-    result: FaceScanResult.nullable().openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
+    // Not `FaceScanResult.nullable()`: that would make the registered component itself nullable and replace its never-list description.
+    result: z.union([FaceScanResult, z.null()]).openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
   })
   .openapi('FaceScanResponse')
 

@@ -261,6 +261,17 @@ const rowFor = (results: readonly ScoreRow[], concern: ShownConcern): ScoreRow |
   return rows.find((row) => row.region === 'whole') ?? rows.sort((a, b) => (a.region < b.region ? -1 : a.region > b.region ? 1 : 0))[0] ?? null
 }
 
+/** The goal's concerns that can be seen in these rows, in goal order, each with the row read and its band. The same rule `resultView` shows by. */
+export const shownConcerns = (goal: Goal, results: readonly ScoreRow[]): { concern: ShownConcern; row: ScoreRow; band: Band }[] => {
+  const shown: ReturnType<typeof shownConcerns> = []
+  for (const concern of concernsForGoal(goal)) {
+    const row = rowFor(results, concern)
+    const band = row ? bandFor(concern, row.rawScore) : null
+    if (row && band) shown.push({ concern, row, band })
+  }
+  return shown
+}
+
 /**
  * What the app shows for a ready scan, from the stored rows alone: the goal's concerns that can be seen, the skin reading, and how each concern has
  * moved since day one. The words are worked out here, when read, so a change to the tables reaches scans already stored. `overlays` are already signed
@@ -276,13 +287,12 @@ export const resultView = (input: {
 }): ResultView => {
   const { goal, results, overlays, skinType, skinAge, dayOne } = input
   const concerns = concernsForGoal(goal)
-  const seen: ResultView['seen'] = []
-  for (const concern of concerns) {
-    const row = rowFor(results, concern)
-    const band = row ? bandFor(concern, row.rawScore) : null
-    if (!row || !band) continue
-    seen.push({ concern: CONCERN_IDS[concern], region: row.region, words: seenWords(concern, band, row.region), overlay: overlays[concern] ? { url: overlays[concern].url } : null })
-  }
+  const seen: ResultView['seen'] = shownConcerns(goal, results).map(({ concern, row, band }) => ({
+    concern: CONCERN_IDS[concern],
+    region: row.region,
+    words: seenWords(concern, band, row.region),
+    overlay: overlays[concern] ? { url: overlays[concern].url } : null,
+  }))
 
   let sinceDayOne: ResultView['sinceDayOne'] = null
   if (dayOne) {
@@ -290,7 +300,8 @@ export const resultView = (input: {
     for (const concern of concerns) {
       const now = rowFor(results, concern)
       const before = rowFor(dayOne.results, concern)
-      if (!now || !before) continue
+      // A cheek score is not the whole face's: rows for different regions are not comparable, so that concern is left out.
+      if (!now || !before || now.region !== before.region) continue
       const change = concernChange(before.rawScore, now.rawScore)
       changes.push({ concern: CONCERN_IDS[concern], change: CONCERN_CHANGE_IDS[change], words: changeWords(concern, change) })
     }

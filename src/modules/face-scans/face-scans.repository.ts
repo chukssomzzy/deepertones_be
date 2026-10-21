@@ -126,8 +126,11 @@ export class D1FaceScansRepository {
   /**
    * The day-one scan of the scan taken at `at` under `goal`: the profile's earliest ready scan under that goal, taken at or before `at`, with no ready scan
    * under another goal between it and `at`. That is the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, found in one
-   * query (profile_id, created_at serves it). Scans taken at the same time go to the lower id. It is the scan itself when nothing earlier qualifies, and null
-   * when no ready scan does. Only ready scans count either way: one that failed, needs a retake or is analysing neither starts a day one nor ends one.
+   * query (profile_id, created_at serves it). It is the scan itself when nothing earlier qualifies, and null when no ready scan does. Only ready scans count
+   * either way: one that failed, needs a retake or is analysing neither starts a day one nor ends one.
+   *
+   * The cut-off and the upper bound (`at`) are by timestamp alone, and candidates that share a timestamp go to the lower id. Two scans of one profile cannot share
+   * a millisecond in practice (each is a person's upload), so no scan is ever ordered against itself by id. `scanId` is kept for that tie-break, should one be needed.
    */
   async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
     const cutOff = this.db

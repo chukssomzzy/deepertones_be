@@ -2067,7 +2067,15 @@
             "description": "True when the profile's latest scan was taken under another goal than its current one."
           },
           "result": {
-            "$ref": "#/components/schemas/FaceScanResult"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FaceScanResult"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the scan shows: filled when `state` is `ready`, null otherwise."
           }
         },
         "required": [
@@ -2082,10 +2090,7 @@
         ]
       },
       "FaceScanResult": {
-        "type": [
-          "object",
-          "null"
-        ],
+        "type": "object",
         "properties": {
           "seen": {
             "type": "array",
@@ -2281,7 +2286,7 @@
           "sinceDayOne",
           "tablesVersion"
         ],
-        "description": "What the scan shows: filled when `state` is `ready`, null otherwise."
+        "description": "What a ready scan shows. It never holds a score or any number but the skin age in years, never a condition name, never a Perfect Corp name, never a Fitzpatrick type, and never a word about lightness. It describes the face, not the person: show the words as they are."
       },
       "CreateFaceScanBody": {
         "type": "object",

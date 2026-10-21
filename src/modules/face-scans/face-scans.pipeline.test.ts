@@ -116,6 +116,16 @@ class HookedRepository extends FakeFaceScansRepository {
   }
 }
 
+/** A repository that notes which scans' stored scores were read, to count the reads a list makes. */
+class ReadCountingRepository extends FakeFaceScansRepository {
+  readonly resultsRead: string[] = []
+
+  override async resultsOf(faceScanId: string) {
+    this.resultsRead.push(faceScanId)
+    return super.resultsOf(faceScanId)
+  }
+}
+
 class EventsThatFail extends MemoryScanEvents {
   override async publish(): Promise<void> {
     throw new Error('the stream is down')
@@ -1951,6 +1961,8 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
     const ctx = setup()
     const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     const before = await getScan(ctx, first)
+    // A link lives 5 minutes from its read and the later scans are days on, so what the earlier links open is read now, while they are good.
+    const bytesBefore = await Promise.all(before.result.seen.map(async (item: { overlay: { url: string } }) => bytesBehind(ctx, item.overlay.url)))
     await takenUnder(ctx, 'brighter')
     await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
 
@@ -1959,6 +1971,17 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
     // Each read signs fresh overlay links that live 5 minutes from that read, so only the token differs; everything the links point to stays.
     const withoutTokens = (result: unknown) => JSON.parse(JSON.stringify(result).replace(/\/photos\/[A-Za-z0-9_-]+/g, '/photos/<token>')) as unknown
     expect(withoutTokens(after.result)).toEqual(withoutTokens(before.result))
+    // The stripped comparison cannot tell a link to the right mask from a link to another one: open both and compare the bytes.
+    const overlaid = before.result.seen.filter((item: { overlay: unknown }) => item.overlay !== null)
+    expect(overlaid.length).toBeGreaterThan(0)
+    for (const [index, item] of before.result.seen.entries()) {
+      expect(after.result.seen[index].concern).toBe(item.concern)
+      if (item.overlay === null) {
+        expect(after.result.seen[index].overlay).toBeNull()
+        continue
+      }
+      expect(await bytesBehind(ctx, after.result.seen[index].overlay.url)).toBe(bytesBefore[index])
+    }
   })
 
   it('reads all three of the goal\'s concerns, shown now or not, and leaves out one that is missing on either scan', async () => {
@@ -2298,6 +2321,24 @@ describe('FaceScanService.listFaceScans', () => {
     expect(listed[0].result.sinceDayOne).toMatchObject({ dayOneScanId: first })
     expect(listed[0]).toEqual(await getScan(ctx, second))
     expect(listed[2].result.sinceDayOne).toBeNull()
+  })
+
+  it('reads the day-one scan\'s scores once for the whole list, not once per scan, and shows each scan as getFaceScan does', async () => {
+    const repository = new ReadCountingRepository()
+    const ctx = setup({ repository })
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    for (const radiance of [44, 46, 48]) {
+      await takenUnder(ctx, 'brighter')
+      await readyUnder(ctx, 'glow', analysisOf(glowScores(radiance, 44, 55)))
+    }
+    repository.resultsRead.length = 0
+
+    const listed = await listScans(ctx)
+
+    // Once for the day-one scan's own view, and once for the three later scans together.
+    expect(repository.resultsRead.filter((id) => id === dayOne)).toHaveLength(2)
+    expect(listed.filter((scan) => scan.result?.sinceDayOne?.dayOneScanId === dayOne)).toHaveLength(3)
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
   })
 
   it('gives overlay and photo links that open, for the bytes of the mask and of the photo', async () => {

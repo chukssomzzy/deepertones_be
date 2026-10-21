@@ -855,6 +855,21 @@ describe('resultView: change since day one', () => {
     expect(result!.concerns.map((concern) => concern.concern)).toEqual(['glow'])
   })
 
+  it('leaves out a concern whose rows are for different regions on the two scans: a cheek is not compared with the whole face', () => {
+    const result = since(
+      [row('hd_radiance', 'whole', 46), row('hd_moisture', 'whole', 44)],
+      [row('hd_radiance', 'left_cheek', 40), row('hd_moisture', 'whole', 50)],
+    )
+
+    expect(result!.concerns.map((concern) => concern.concern)).toEqual(['dryness'])
+  })
+
+  it('still compares a concern that only has the same other region on both scans', () => {
+    const result = since([row('hd_radiance', 'left_cheek', 46)], [row('hd_radiance', 'left_cheek', 40)])
+
+    expect(result!.concerns).toEqual([{ concern: 'glow', change: 'fainter', words: 'More glow than on day one' }])
+  })
+
   it('has an empty list, not a missing day one, when no concern is on both scans', () => {
     expect(since([row('hd_radiance', 'whole', 46)], [])!.concerns).toEqual([])
   })

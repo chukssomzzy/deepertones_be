@@ -27,7 +27,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -239,7 +239,9 @@ export class FaceScanService {
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
     const rescanSuggested = await this.rescanSuggested(profileId)
-    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested)))
+    // Scans under one goal share a day one, so its scores are read once for the list.
+    const dayOneResults = new Map<string, Promise<FaceResult[]>>()
+    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults)))
   }
 
   /**
@@ -700,8 +702,8 @@ export class FaceScanService {
     return { bytes: photo.bytes, mediaType: 'image/jpeg' }
   }
 
-  /** `rescanSuggested` is worked out here unless the caller, building many views for one profile, already has it. */
-  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean): Promise<FaceScanView> {
+  /** `rescanSuggested` and `dayOneResults` (the day-one scans' scores read so far, by scan id) are worked out here unless the caller, building many views for one profile, shares them. */
+  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean, dayOneResults?: Map<string, Promise<FaceResult[]>>): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
     const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
@@ -715,19 +717,21 @@ export class FaceScanService {
       createdAt: scan.createdAt,
       photos: links,
       rescanSuggested: rescanSuggested ?? (await this.rescanSuggested(scan.profileId)),
-      result: scan.state === 'ready' ? await this.result(scan, link) : null,
+      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map()) : null,
     }
   }
 
   /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest, which is no day one to compare with. */
-  private async result(scan: FaceScan, link: (key: string) => Promise<string>): Promise<ResultView> {
+  private async result(scan: FaceScan, link: (key: string) => Promise<string>, dayOneResults: Map<string, Promise<FaceResult[]>>): Promise<ResultView> {
     const [results, masks, found] = await Promise.all([
       this.repository.resultsOf(scan.id),
       this.repository.masksOf(scan.id),
       this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
     ])
+    // Only the concerns that are shown get a link: a signature per mask that is then dropped is work for nothing.
+    const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
     const overlays: Record<string, { url: string }> = {}
-    for (const mask of masks) overlays[mask.concern] = { url: await link(mask.maskKey) }
+    for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null
     return resultView({
       goal: scan.goalAtScan,
@@ -735,8 +739,17 @@ export class FaceScanService {
       overlays,
       skinType: scan.skinType,
       skinAge: scan.skinAge,
-      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.repository.resultsOf(dayOne.id), skinAge: dayOne.skinAge },
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.dayOneResultsOf(dayOne.id, dayOneResults), skinAge: dayOne.skinAge },
     })
+  }
+
+  private dayOneResultsOf(id: string, cache: Map<string, Promise<FaceResult[]>>): Promise<FaceResult[]> {
+    let read = cache.get(id)
+    if (!read) {
+      read = this.repository.resultsOf(id)
+      cache.set(id, read)
+    }
+    return read
   }
 
   /** Whether the profile's latest scan was taken under another goal than the one it has now. No goal, or typed words nobody sorted into one, suggests nothing. */
