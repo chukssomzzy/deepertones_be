@@ -160,7 +160,23 @@ The ordered daily and weekly steps the user follows to reach their goal, built m
 products added where the shelf has a gap.
 _Avoid_: Regimen, plan (alone)
 
-### Products
+### Skin and products
+
+**Skin concern**:
+Something visible on a person's skin that a goal targets, such as dark spots, acne or redness. A face scan reads it, and a
+recommended product says which ones it works on. Never a diagnosis.
+_Avoid_: Concern (alone), condition, problem
+
+**Caution**:
+Something a product may do to some people, such as irritation, clogging pores or being unsuitable in pregnancy, found from its
+ingredients and their sources.
+_Avoid_: Concern (alone), risk, warning, side effect
+
+**Face scan**:
+The guided face photos a user takes and what is read from them: visible skin concerns, skin type, skin age and Fitzpatrick
+type, worded as what can be seen.
+_Avoid_: Skin analysis, skin profile, diagnosis
+
 
 **Catalog**:
 Every product the app knows, with its ingredient list and sources, however it arrived (a scan, research, a label, or the
