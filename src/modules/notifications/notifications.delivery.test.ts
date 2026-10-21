@@ -7,6 +7,7 @@ import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryPushSender } from '../../providers/push/memory.push'
 import { type PushMessage, PushUnavailableError } from '../../providers/push/push.provider'
 import { FakeNotificationSettingsRepository } from './notification-settings.repository.fake'
+import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 import { checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
 import { NotificationsService } from './notifications.service'
 import { FakePushTokensRepository } from './push-tokens.repository.fake'
@@ -45,6 +46,11 @@ const needsYou = (over: Record<string, unknown> = {}) =>
   ({ kind: 'scan-needs-you', userId: 'user-ada', profileId: 'profile-ada-1', scanId: 'scan-1', itemId: 'item-1', need: 'back-photo', ...over }) as SendPushBody
 const signIn = (over: Record<string, unknown> = {}) =>
   ({ kind: 'new-sign-in', userId: 'user-ada', platform: 'ios', eventId: 'event-1', at: SIGN_IN_AT.getTime(), ...over }) as SendPushBody
+
+const faceReady = (over: Record<string, unknown> = {}) =>
+  ({ kind: 'face-scan-ready', userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', ...over }) as SendPushBody
+const faceRetake = (over: Record<string, unknown> = {}) =>
+  ({ kind: 'face-scan-needs-retake', userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime(), ...over }) as SendPushBody
 
 /** A sender whose `send` can do something after Expo has answered but before the service sees the tickets: a phone registering mid-send. */
 class RacingSender extends MemoryPushSender {
@@ -163,6 +169,41 @@ describe('NotificationsService enqueueing', () => {
     expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe(key)
   })
 
+  it('queues a face-scan-ready push carrying only ids, keyed by the face scan, with no delay', async () => {
+    await service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(jobs.enqueued[0]).toMatchObject({ job: 'send-push', body: faceReady() })
+    expect(jobs.enqueued[0]!.delaySeconds).toBeUndefined()
+    expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe('face-scan-ready:face-1')
+    expect(push.sent).toEqual([])
+  })
+
+  it('queues a face-scan-needs-retake push with the reason and the instant it was stamped with, keyed by the face scan and that instant', async () => {
+    await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(jobs.enqueued[0]).toMatchObject({ job: 'send-push', body: faceRetake({ reason: 'no-face' }) })
+    expect(jobs.enqueued[0]!.delaySeconds).toBeUndefined()
+    expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe(`face-scan-needs-retake:face-1:${T0.getTime()}`)
+  })
+
+  it('stamps a needs-retake push with the time the caller passes, not the time of the enqueue', async () => {
+    clock = new Date(T0.getTime() + 5 * MINUTE)
+
+    await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime() })
+
+    expect((jobs.enqueued[0]!.body as { at: number }).at).toBe(T0.getTime())
+  })
+
+  it('queues one needs-retake push for each rejection of the same face scan, under keys that differ by the instant', async () => {
+    await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime() })
+    await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime() + MINUTE })
+
+    const keys = jobs.enqueued.map((entry) => sendPushSpec.key(entry.body as SendPushBody))
+    expect(keys).toEqual([`face-scan-needs-retake:face-1:${T0.getTime()}`, `face-scan-needs-retake:face-1:${T0.getTime() + MINUTE}`])
+  })
+
   it('queues a new-sign-in push with a fresh event id each time, keyed by that id, stamped with the time of the sign-in', async () => {
     await service.newSignIn({ userId: 'user-ada', platform: 'ios' })
     clock = SIGN_IN_AT
@@ -208,6 +249,8 @@ describe('NotificationsService enqueueing', () => {
     ['scan-finished', () => service.scanFinished({ userId: 'user-ada', profileId: 'profile-ada-1', scanId: 'scan-1', readyCount: 3 })],
     ['scan-needs-you', () => service.scanNeedsYou({ userId: 'user-ada', profileId: 'profile-ada-1', scanId: 'scan-1', itemId: 'item-1', need: 'confirm' })],
     ['new-sign-in', () => service.newSignIn({ userId: 'user-ada', platform: 'ios' })],
+    ['face-scan-ready', () => service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })],
+    ['face-scan-needs-retake', () => service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })],
   ])('logs a failed %s enqueue without throwing, so the scan or the sign-in carries on', async (kind, enqueue) => {
     jobs.failNextWith(new Error('queue is down'))
 
@@ -225,6 +268,19 @@ describe('NotificationsService enqueueing', () => {
     const failure = logged().find((entry) => (entry as { outcome?: string }).outcome === 'push-enqueue-failed') as Record<string, unknown>
     expect(Object.keys(failure).filter((key) => !['outcome', 'kind', 'scanId'].includes(key))).toEqual([])
     expect(JSON.stringify(logged())).not.toMatch(/user-ada|profile-ada|item-1/)
+  })
+
+  it.each([
+    ['face-scan-ready', () => service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })],
+    ['face-scan-needs-retake', () => service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })],
+  ])('logs a failed %s enqueue with no account, profile or error text', async (_kind, enqueue) => {
+    jobs.failNextWith(new Error('queue is down for user-ada'))
+
+    await expect(enqueue()).resolves.toBeUndefined()
+
+    const failure = logged().find((entry) => (entry as { outcome?: string }).outcome === 'push-enqueue-failed') as Record<string, unknown>
+    expect(failure).toBeDefined()
+    expect(JSON.stringify(logged())).not.toMatch(/user-ada|profile-ada|queue is down|too-dark|no-face/)
   })
 })
 
@@ -264,6 +320,50 @@ describe('NotificationsService.deliver: who is told', () => {
     await deliver(needsYou())
 
     expect(sentTo()).toEqual([TOKEN_A])
+  })
+
+  it('sends a ready face scan to the phones on the face scan\'s profile and to no other phone', async () => {
+    await register(ADA, 'ada-phone-1', TOKEN_A)
+    await register(ADA, 'ada-phone-2', TOKEN_B, 'android')
+    await register(ADA_SECOND_PROFILE, 'ada-tablet', TOKEN_C)
+    await register(BOB, 'bob-phone', TOKEN_D)
+
+    await deliver(faceReady())
+
+    expect(sentTo()).toEqual([TOKEN_A, TOKEN_B])
+    expect(push.sent.map((message) => message.title)).toEqual(['Your face scan is ready', 'Your face scan is ready'])
+  })
+
+  it('sends a needs-retake push to the face scan\'s profile only', async () => {
+    await register(ADA, 'ada-phone-1', TOKEN_A)
+    await register(ADA_SECOND_PROFILE, 'ada-tablet', TOKEN_B)
+    await register(BOB, 'bob-phone', TOKEN_C)
+
+    await deliver(faceRetake())
+
+    expect(sentTo()).toEqual([TOKEN_A])
+    expect(push.sent.map((message) => message.title)).toEqual(['Your face photo needs a retake'])
+  })
+
+  it.each([
+    ['face-scan-ready', () => faceReady({ userId: 'user-bob' })],
+    ['face-scan-needs-retake', () => faceRetake({ userId: 'user-bob' })],
+  ])('does not send %s to a phone on the face scan\'s profile that belongs to another account than the message names', async (_kind, body) => {
+    await register(ADA, 'ada-phone', TOKEN_A)
+
+    await deliver(body())
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('does not tell a phone that moved to the other profile before the face scan push was sent', async () => {
+    await register(ADA, 'ada-phone', TOKEN_A)
+    await register(ADA_SECOND_PROFILE, 'ada-phone', TOKEN_A)
+
+    await deliver(faceReady())
+    await deliver(faceRetake())
+
+    expect(push.sent).toEqual([])
   })
 
   it('sends a new-sign-in alert to every phone of the account, on any profile, and to no other account\'s', async () => {
@@ -417,6 +517,58 @@ describe('NotificationsService.deliver: settings', () => {
     expect(push.sent).toEqual([])
   })
 
+  it('sends both face scan notifications when the account never changed a setting', async () => {
+    await deliver(faceReady())
+    await deliver(faceRetake())
+
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready', 'face-scan-needs-retake'])
+  })
+
+  it('puts a ready face scan behind the scanFinished switch: off sends nothing, on sends it, and needs-retake is not affected', async () => {
+    await setSettings(ADA, { scanFinished: false })
+    await deliver(faceReady())
+    expect(push.sent).toEqual([])
+    await deliver(faceRetake())
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-needs-retake'])
+
+    await setSettings(ADA, { scanFinished: true })
+    await deliver(faceReady())
+
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-needs-retake', 'face-scan-ready'])
+  })
+
+  it('puts a needs-retake face scan behind the scanNeedsYou switch: off sends nothing, on sends it, and ready is not affected', async () => {
+    await setSettings(ADA, { scanNeedsYou: false })
+    await deliver(faceRetake())
+    expect(push.sent).toEqual([])
+    await deliver(faceReady())
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready'])
+
+    await setSettings(ADA, { scanNeedsYou: true })
+    await deliver(faceRetake())
+
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready', 'face-scan-needs-retake'])
+  })
+
+  it('reads the face scan switches when it sends, so turning one off after the event queued still stops the push', async () => {
+    await service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })
+    await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime() })
+    await setSettings(ADA, { scanFinished: false, scanNeedsYou: false })
+
+    for (const entry of jobs.enqueued) await deliver(entry.body as SendPushBody)
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('takes the face scan switches from the account the message names, not from another account', async () => {
+    await setSettings(BOB, { scanFinished: false, scanNeedsYou: false })
+
+    await deliver(faceReady())
+    await deliver(faceRetake())
+
+    expect(push.sent.map((message) => message.title)).toEqual(['Your face scan is ready', 'Your face photo needs a retake'])
+  })
+
   it('sends the new-sign-in alert even when both switches are off', async () => {
     await setSettings(ADA, { scanFinished: false, scanNeedsYou: false })
 
@@ -484,6 +636,54 @@ describe('NotificationsService.deliver: what the phone shows', () => {
     expect(push.sent).toEqual([
       { to: TOKEN_A, title: 'New sign-in to your Deeper Tones account', body, data: { url: '/settings/security', kind: 'new-sign-in' } },
     ])
+  })
+
+  it('tells a ready face scan in generic words and links to the face scan', async () => {
+    await deliver(faceReady({ faceScanId: 'face-7' }))
+
+    expect(push.sent).toEqual([
+      {
+        to: TOKEN_A,
+        title: 'Your face scan is ready',
+        body: 'Open the app to see what we noticed',
+        data: { url: '/scans/faces/face-7', kind: 'face-scan-ready', faceScanId: 'face-7', profileId: 'profile-ada-1' },
+      },
+    ])
+  })
+
+  it.each([
+    ['too-dark', 'Find more light and take it again'],
+    ['turn-to-camera', 'Face the camera and take it again'],
+    ['move-closer', 'Move a little closer and take it again'],
+    ['face-not-centred', 'Centre your face in the frame and take it again'],
+    ['no-face', "We couldn't find a face. Take it again"],
+    ['image-size', 'Take it again at full size'],
+  ])('asks for a retake for %s as "%s" and links to the retake screen of the face scan', async (reason, body) => {
+    await deliver(faceRetake({ faceScanId: 'face-7', reason }))
+
+    expect(push.sent).toEqual([
+      {
+        to: TOKEN_A,
+        title: 'Your face photo needs a retake',
+        body,
+        data: { url: '/scans/faces/face-7/retake', kind: 'face-scan-needs-retake', faceScanId: 'face-7', reason, profileId: 'profile-ada-1' },
+      },
+    ])
+  })
+
+  it('has a body for every reason a photo can be refused with, and no two reasons share one', async () => {
+    for (const reason of REJECTED_PHOTO_REASONS) await deliver(faceRetake({ reason }))
+
+    const bodies = push.sent.map((message) => message.body)
+    expect(bodies).toHaveLength(REJECTED_PHOTO_REASONS.length)
+    expect(new Set(bodies).size).toBe(REJECTED_PHOTO_REASONS.length)
+  })
+
+  it('URL-encodes the face scan id in the links it sends', async () => {
+    await deliver(faceReady({ faceScanId: 'a b/c' }))
+    await deliver(faceRetake({ faceScanId: 'a b/c' }))
+
+    expect(push.sent.map((message) => (message.data as { url: string }).url)).toEqual(['/scans/faces/a%20b%2Fc', '/scans/faces/a%20b%2Fc/retake'])
   })
 
   it('URL-encodes the ids in the link it sends', async () => {
@@ -829,6 +1029,62 @@ describe('NotificationsService push logs', () => {
       expect(typeof entry).toBe('object')
       const allowed = (entry as { outcome?: string }).outcome === 'push-enqueue-failed' ? ['outcome', 'kind', 'scanId'] : ['job', 'kind', 'outcome', 'count']
       expect(Object.keys(entry as object).filter((key) => !allowed.includes(key))).toEqual([])
+    }
+  })
+})
+
+// Names a condition, speaks to the person as having something, talks about lightness, or carries a number. Case-insensitive. This mirrors the face
+// tables' ban list (face-scans.tables.test.ts), which is not exported, with the colour words the brief names. A push appears on a lock screen.
+const BANNED: [string, RegExp][] = [
+  ['acne', /\bacne\b/i],
+  ['melasma', /melasma/i],
+  ['rosacea', /rosacea/i],
+  ['eczema', /eczema/i],
+  ['dermatitis', /dermatitis/i],
+  ['psoriasis', /psoriasis/i],
+  ['hyperpigment', /hyperpigment/i],
+  ['you have', /you have/i],
+  ['diagnos', /diagnos/i],
+  ['disease', /disease/i],
+  ['condition', /condition/i],
+  ['lighter', /lighter/i],
+  ['lighten', /lighten/i],
+  ['darker', /darker/i],
+  ['fairer', /fairer/i],
+  ['whiter', /whiter/i],
+  ['bleach', /bleach/i],
+  ['dull', /\bdull/i],
+  ['bright', /\bbright/i],
+  ['fair', /\bfair\b/i],
+  ['pale', /\bpale\b/i],
+  ['a digit', /\d/],
+  ['score', /score/i],
+]
+
+describe('the face scan push words', () => {
+  const caught = (text: string) => BANNED.filter(([, pattern]) => pattern.test(text)).map(([name]) => name)
+
+  it('has a ban list that catches what it is meant to (so a typo in it cannot pass everything)', () => {
+    expect(caught('You HAVE Melasma')).toEqual(expect.arrayContaining(['melasma', 'you have']))
+    expect(caught('Skin looks LIGHTER')).toEqual(['lighter'])
+    expect(caught('Skin looks darker')).toEqual(['darker'])
+    expect(caught('Your score is 62')).toEqual(expect.arrayContaining(['score', 'a digit']))
+    expect(caught('Open the app to see what we noticed')).toEqual([])
+  })
+
+  it('puts no condition word, "you have", lightness word or digit in any title or body a face scan push shows', async () => {
+    await register(ADA, 'ada-phone', TOKEN_A)
+    await deliver(faceReady())
+    for (const reason of REJECTED_PHOTO_REASONS) await deliver(faceRetake({ reason }))
+
+    expect(push.sent).toHaveLength(1 + REJECTED_PHOTO_REASONS.length)
+    for (const message of push.sent) {
+      expect(message.title).toEqual(expect.any(String))
+      expect(message.body).toEqual(expect.any(String))
+      for (const [name, pattern] of BANNED) {
+        expect(pattern.test(message.title), `"${message.title}" must not contain ${name}`).toBe(false)
+        expect(pattern.test(message.body), `"${message.body}" must not contain ${name}`).toBe(false)
+      }
     }
   })
 })

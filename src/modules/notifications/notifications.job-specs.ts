@@ -1,7 +1,8 @@
 import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
+import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 
-export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in'] as const
+export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake'] as const
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number]
 
 const scanFinishedBody = z.object({
@@ -34,6 +35,23 @@ const newSignInBody = z.object({
   at: z.number().int(),
 })
 
+const faceScanReadyBody = z.object({
+  kind: z.literal('face-scan-ready'),
+  userId: z.string(),
+  profileId: z.string(),
+  faceScanId: z.string(),
+})
+
+const faceScanNeedsRetakeBody = z.object({
+  kind: z.literal('face-scan-needs-retake'),
+  userId: z.string(),
+  profileId: z.string(),
+  faceScanId: z.string(),
+  reason: z.enum(REJECTED_PHOTO_REASONS),
+  /** When the scan went to needs-retake, epoch ms (the `updatedAt` written). Retakes are unlimited, so each rejection is its own notification. */
+  at: z.number().int(),
+})
+
 /**
  * What the send job carries: the kind and ids only, never a token, text or link. Those are resolved when the job runs, so a
  * logout, a profile switch or a changed setting between the event and the send is respected.
@@ -41,7 +59,7 @@ const newSignInBody = z.object({
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -54,6 +72,10 @@ export const sendPushSpec = jobSpec({
           : `scan-needs-you:${body.scanId}:${body.need}`
       case 'new-sign-in':
         return `new-sign-in:${body.eventId}`
+      case 'face-scan-ready':
+        return `face-scan-ready:${body.faceScanId}`
+      case 'face-scan-needs-retake':
+        return `face-scan-needs-retake:${body.faceScanId}:${body.at}`
     }
   },
   // A person is waiting for the notification, as with an OTP: 5 attempts finish within a couple of minutes.

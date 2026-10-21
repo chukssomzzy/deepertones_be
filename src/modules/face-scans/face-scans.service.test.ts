@@ -80,6 +80,8 @@ const setup = (options: SetupOptions = {}) => {
     perfectCorp: new MemoryPerfectCorpClient(),
     aiUsage: new FakeVendorSpendLedger(),
     events: new MemoryScanEvents(),
+    // The pushes are the pipeline tests' concern; nothing here reaches them.
+    notifications: { faceScanReady: async () => undefined, faceScanNeedsRetake: async () => undefined },
     opsAlerts: new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test', now: () => clock }),
     photoLinkSecret: PHOTO_SECRET,
     environment: 'test',

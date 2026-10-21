@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 import { checkPushReceiptsSpec, NOTIFICATION_KINDS, sendPushSpec } from './notifications.job-specs'
 
 const FINISHED = { kind: 'scan-finished', userId: 'user-1', profileId: 'profile-1', scanId: 'scan-1', readyCount: 3 }
@@ -6,6 +7,11 @@ const NEEDS_YOU = { kind: 'scan-needs-you', userId: 'user-1', profileId: 'profil
 // The one instant the fixtures hang off.
 const SIGNED_IN_AT = Date.parse('2030-06-15T12:00:00.000Z')
 const SIGN_IN = { kind: 'new-sign-in', userId: 'user-1', platform: 'ios', eventId: 'event-1', at: SIGNED_IN_AT }
+const FACE_READY = { kind: 'face-scan-ready', userId: 'user-1', profileId: 'profile-1', faceScanId: 'face-1' }
+// The instant a face scan went to needs-retake, and one minute after it (a second rejection of the same scan).
+const RETAKE_AT = SIGNED_IN_AT
+const SECOND_RETAKE_AT = SIGNED_IN_AT + 60 * 1000
+const FACE_RETAKE = { kind: 'face-scan-needs-retake', userId: 'user-1', profileId: 'profile-1', faceScanId: 'face-1', reason: 'too-dark', at: RETAKE_AT }
 
 describe('the send-push job', () => {
   it('is named send-push on the push-delivery queue and retries like OTP delivery', () => {
@@ -14,8 +20,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the three notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['new-sign-in', 'scan-finished', 'scan-needs-you'])
+  it('names the five notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'scan-finished', 'scan-needs-you'])
   })
 
   it.each([
@@ -32,6 +38,14 @@ describe('the send-push job', () => {
     expect(sendPushSpec.schema.safeParse(body).success).toBe(true)
   })
 
+  it('accepts a face-scan-ready body', () => {
+    expect(sendPushSpec.schema.safeParse(FACE_READY).success).toBe(true)
+  })
+
+  it.each(REJECTED_PHOTO_REASONS)('accepts a face-scan-needs-retake body for the reason %s', (reason) => {
+    expect(sendPushSpec.schema.safeParse({ ...FACE_RETAKE, reason }).success).toBe(true)
+  })
+
   it.each([
     ['a negative ready count (the boundary: -1)', { ...FINISHED, readyCount: -1 }],
     ['a fractional ready count', { ...FINISHED, readyCount: 1.5 }],
@@ -42,6 +56,14 @@ describe('the send-push job', () => {
     ['a sign-in body with no time', { ...SIGN_IN, at: undefined }],
     ['a sign-in body with a fractional time', { ...SIGN_IN, at: 1.5 }],
     ['a sign-in body with a time that is not a number', { ...SIGN_IN, at: 'later' }],
+    ['a face-scan-ready body with no face scan id', { ...FACE_READY, faceScanId: undefined }],
+    ['a face-scan-ready body with no profile id', { ...FACE_READY, profileId: undefined }],
+    ['a face-scan-needs-retake body with a reason that is not one of the photo reasons', { ...FACE_RETAKE, reason: 'blurry' }],
+    ['a face-scan-needs-retake body with a failure reason (unavailable is not a retake reason)', { ...FACE_RETAKE, reason: 'unavailable' }],
+    ['a face-scan-needs-retake body with no reason', { ...FACE_RETAKE, reason: undefined }],
+    ['a face-scan-needs-retake body with no time', { ...FACE_RETAKE, at: undefined }],
+    ['a face-scan-needs-retake body with a time that is not a number', { ...FACE_RETAKE, at: 'later' }],
+    ['a face-scan-needs-retake body with no face scan id', { ...FACE_RETAKE, faceScanId: undefined }],
     ['a kind that does not exist', { ...FINISHED, kind: 'marketing' }],
     ['a body with no kind', { userId: 'user-1' }],
   ])('rejects %s', (_name, body) => {
@@ -72,6 +94,33 @@ describe('the send-push job', () => {
     expect(sendPushSpec.key({ ...NEEDS_YOU, ask: 0 } as never)).toBe('scan-needs-you:scan-1:back-photo')
     expect(sendPushSpec.key({ ...NEEDS_YOU, ask: 1 } as never)).toBe('scan-needs-you:scan-1:item-1:ask-1')
     expect(sendPushSpec.key({ ...NEEDS_YOU, ask: 2 } as never)).toBe('scan-needs-you:scan-1:item-1:ask-2')
+  })
+})
+
+describe('the send-push job: face scan keys', () => {
+  it('keys a face-scan-ready message by the face scan alone, so a scan that becomes ready once is one notification', () => {
+    expect(sendPushSpec.key(FACE_READY as never)).toBe('face-scan-ready:face-1')
+    expect(sendPushSpec.key({ ...FACE_READY } as never)).toBe(sendPushSpec.key(FACE_READY as never))
+    expect(sendPushSpec.key({ ...FACE_READY, faceScanId: 'face-2' } as never)).toBe('face-scan-ready:face-2')
+  })
+
+  it('keys a face-scan-needs-retake message by the face scan and the instant of the transition', () => {
+    expect(sendPushSpec.key(FACE_RETAKE as never)).toBe(`face-scan-needs-retake:face-1:${RETAKE_AT}`)
+    expect(sendPushSpec.key({ ...FACE_RETAKE } as never)).toBe(sendPushSpec.key(FACE_RETAKE as never))
+  })
+
+  it('gives each rejection of one face scan its own key, because retakes are unlimited and every rejection is its own notification', () => {
+    expect(sendPushSpec.key({ ...FACE_RETAKE, at: SECOND_RETAKE_AT } as never)).toBe(`face-scan-needs-retake:face-1:${SECOND_RETAKE_AT}`)
+    expect(sendPushSpec.key({ ...FACE_RETAKE, at: SECOND_RETAKE_AT } as never)).not.toBe(sendPushSpec.key(FACE_RETAKE as never))
+  })
+
+  it('keeps the key of a needs-retake message apart from its ready key and from another scan\'s', () => {
+    expect(sendPushSpec.key({ ...FACE_RETAKE, faceScanId: 'face-2' } as never)).toBe(`face-scan-needs-retake:face-2:${RETAKE_AT}`)
+    expect(sendPushSpec.key(FACE_RETAKE as never)).not.toBe(sendPushSpec.key(FACE_READY as never))
+  })
+
+  it('does not key a needs-retake message by its reason: the same rejection instant is the same notification', () => {
+    expect(sendPushSpec.key({ ...FACE_RETAKE, reason: 'no-face' } as never)).toBe(sendPushSpec.key(FACE_RETAKE as never))
   })
 })
 
