@@ -187,3 +187,12 @@ _Avoid_: Product database
 The reviewed set of products the app may suggest adding to a routine, each described by the concerns it works on, the skin
 types it suits, its safety notes and the countries it is sold in. A product reaches it only through review.
 _Avoid_: Formulary, catalog (alone), shop
+
+**Approved**:
+A recommendation catalog row the team has signed off, which makes the product recommendable. It names who approved it and when.
+_Avoid_: Verified, certified, dermatologist-approved
+
+**Audit**:
+A dermatologist's periodic review of approved rows, which can correct or retire them. An audited row records who audited it
+and when; being audited is not a condition for being recommended.
+_Avoid_: Approval (for this), sign-off
