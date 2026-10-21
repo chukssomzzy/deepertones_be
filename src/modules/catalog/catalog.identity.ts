@@ -12,11 +12,12 @@ const SIZE = /\b(\d+(?:\.\d+)?)\s*(fl\s*oz|floz|ml|kg|mg|oz|l|g)\b/gi
 export const stripSizes = (text: string): string =>
   text.replace(SIZE, (match, amount: string, unit: string) => (/^[gl]$/i.test(unit) && Number(amount) < 10 ? match : ' '))
 
-const PERCENT_NUMBER = /(\d+(?:\.\d+)?)%/g
+const PERCENT_NUMBER = /(\d+(?:\.\d+)?)\s*%/g
 
-// A "%" glues its number to a letter-only suffix before normalising, so "100%" never reads as "100" next to a bare
-// "l" or "g" word (which stripSizes would then take for litres or grams) once the "%" itself is normalised to a space.
-// "pct" is removed again once stripSizes has run, so the key ends up with the plain number, as if there had been no size.
+// A "%" glues its number to a letter-only suffix before normalising, so "100%" (or "100 %", a space before the
+// sign) never reads as "100" next to a bare "l" or "g" word (which stripSizes would then take for litres or grams)
+// once the "%" itself is normalised to a space. "pct" is removed again once stripSizes has run, so the key ends up
+// with the plain number, as if there had been no size.
 const guardPercent = (text: string): string => text.replace(PERCENT_NUMBER, '$1pct ')
 const unguardPercent = (text: string): string => text.replace(/(\d+(?:\.\d+)?)pct\b/g, '$1')
 
@@ -182,8 +183,10 @@ const contains = (a: Branded, b: Branded): boolean => {
 /**
  * Products of the same brand family (first word) whose words nearly match (Jaccard at the threshold, or one reading's words all inside
  * the other's) but whose identity key differs: the cases for the model to decide (same product or not). Best first, equal similarity by id.
+ * A row's own stored key stands even when recomputing its fields today would no longer produce it: a key rule change (the % fix) must
+ * not hide an old row from the judge, or it becomes a silent duplicate. A row without a stored key falls back to the recomputed one.
  */
-export const nearMissCandidates = <P extends Branded & { id: string }>(
+export const nearMissCandidates = <P extends Branded & { id: string; identityKey?: string }>(
   target: Branded,
   products: P[],
   options: { threshold?: number; limit?: number } = {},
@@ -191,7 +194,7 @@ export const nearMissCandidates = <P extends Branded & { id: string }>(
   const { threshold = 0.6, limit = 3 } = options
   const targetKey = identityKey(target)
   return products
-    .filter((p) => sameBrandFamily(p.brand, target.brand) && identityKey(p) !== targetKey)
+    .filter((p) => sameBrandFamily(p.brand, target.brand) && (p.identityKey ?? identityKey(p)) !== targetKey)
     .map((p) => ({ product: p, similarity: nameSimilarity(target, p) }))
     .filter((c) => c.similarity >= threshold || contains(target, c.product))
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))

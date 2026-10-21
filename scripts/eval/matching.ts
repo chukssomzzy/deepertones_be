@@ -13,6 +13,8 @@
 //             A single-set product's row is seeded from what its own single photos were read as (the first that reads as a beauty product, in
 //             name order; reused from the matching part's own recognitions when it ran this invocation, else read fresh), so the row is what the
 //             catalog would really hold, not the owner's label wording; a product with none readable, and every shelf-only product, keeps its label.
+//             Two seeds that would read the same identity key fall back the single-scan side(s) to its label instead; only two labels that still
+//             collide stop the run. --part shelf alone still reads the whole single set fresh.
 //   --part matching|images|shelf|all   (default all)    --max-usd N   stop spending at N dollars (default 3)    --limit N   products to run
 //   --limit does not cut the shelf photos: the catalog is seeded from the whole set.
 //   --model JOB=MODEL   run a job on another model (repeatable)
@@ -20,7 +22,7 @@
 // Reports go to .eval/matching/<timestamp>/: report.json and contact-sheet.html (the stored images beside your photos, each with the
 // command that records your verdict; the shelf photos with what each listed product landed on). The report may hold what the model read from your labels; the console never does: it prints only
 // folder names, short row ids, codes, field names and numbers, never a prompt, the key or other model text.
-// Exit: 0 every target of the parts that ran was met, 1 one was missed, 2 the run could not start (photo set, verdicts, arguments, key).
+// Exit: 0 every target of the parts that ran was met, 1 one was missed, 2 the run could not start (photo set, verdicts, arguments, key, or an unresolved seed collision).
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -76,7 +78,7 @@ import {
   type Verdicts,
 } from './matching-set'
 import { loadEnv, parseArgs } from './score'
-import { identityOfLabel, type PhotoReading, seedReadingOf, type SeedSource } from './shelf-seeds'
+import { identityOfLabel, type PhotoReading, type ProductSeed, seedReadingOf } from './shelf-seeds'
 
 const DIRECTORY = 'eval-photos/catalog'
 const SHELF_DIRECTORY = 'eval-photos/shelf'
@@ -420,7 +422,8 @@ type ShelfDetail = {
   listed: ShelfListedDetail[]
 }
 
-type ShelfSeed = { id: string; identity: ProductIdentity; inSet: boolean; source: SeedSource; photo?: string }
+/** `reason` is set when a single-scan seed fell back to its label identity, to clear a collision with another in-set seed's identity key. */
+type ShelfSeed = ProductSeed & { id: string; inSet: boolean; reason?: 'collision' }
 
 /**
  * This product's single photos as `PhotoReading`s, in the photo name order the matching part already reads them: reused from its
@@ -429,11 +432,13 @@ type ShelfSeed = { id: string; identity: ProductIdentity; inSet: boolean; source
 const readingsFromRecognised = (recognised: Recognised[], folder: string): PhotoReading[] =>
   recognised
     .filter((item) => item.folder === folder)
-    .map((item): PhotoReading =>
-      'read' in item
-        ? { photo: item.photo.name, recognition: { classification: 'beauty-product', ...item.read.identity, confidence: item.read.confidence } }
-        : { photo: item.photo.name, error: 'unreadable' in item ? item.unreadable : item.error },
-    )
+    .map((item): PhotoReading => {
+      if ('read' in item) return { photo: item.photo.name, recognition: { classification: 'beauty-product', ...item.read.identity, confidence: item.read.confidence } }
+      // A non-beauty classification is a read that succeeded; only a genuinely failed call (not "unreadable", which also covers a
+      // refusal the matching part already counts as unreadable) keeps the `error` shape `readingsForSeeding` gives a failed call.
+      if ('unreadable' in item) return { photo: item.photo.name, recognition: { classification: item.unreadable } as Recognition }
+      return { photo: item.photo.name, error: item.error }
+    })
 
 /**
  * This product's single photos, read fresh in name order and stopped at the first beauty-product reading: what seeding its
@@ -461,20 +466,39 @@ const readingsForSeeding = async (recognizer: AnthropicProductRecognizer, produc
  * The true identity of every product of the single set and of every out-of-set product labelled in a shelf photo, once each. An
  * in-set product is seeded from what its own single photos were read as (`readings`), so the eval measures landing on the row the
  * catalog would really hold, not the owner's label wording; a shelf-only product keeps its label, there being no single photo of it.
- * Two different products with one identity key cannot both be a row, so the set is wrong and no number from it would mean anything.
+ * Two single-scan seeds (or a single-scan seed and a shelf-only label) may read the same identity by coincidence; whichever is
+ * single-scan falls back to its own label identity instead, since that is still a true identity for the product. Two different
+ * products with one identity key cannot both be a row, so only a collision that survives the fallback (two label identities, hand
+ * written and still equal) says the set itself is wrong, and no number from it would mean anything.
  */
 const shelfSeeds = (products: SetProduct[], shelf: ShelfSet, readings: ReadonlyMap<string, PhotoReading[]>): ShelfSeed[] => {
+  const byFolder = new Map(products.map((p) => [p.folder, p]))
   const byKey = new Map<string, ShelfSeed>()
+  // A key two readings already collided on: any later single-scan seed with it falls back too, so a third reading cannot take the freed key.
+  const contested = new Set<string>()
+  const asLabel = (seed: ShelfSeed): ShelfSeed => ({ id: seed.id, inSet: seed.inSet, identity: identityOfLabel(byFolder.get(seed.id)!), source: 'label', reason: 'collision' })
   // No model or label text here: both ids are the owner's own (a folder name or a normalised identity key), never what a reading said.
   const add = (seed: ShelfSeed, where: string) => {
     const key = identityKey(seed.identity)
+    if (seed.source === 'single-scan' && contested.has(key)) return add(asLabel(seed), where)
     const other = byKey.get(key)
-    if (other && other.id !== seed.id) throw new SetupError(`${where}: ${seed.id} has the same identity key as ${other.id}; one product cannot be two rows.`)
-    byKey.set(key, seed)
+    if (!other || other.id === seed.id) {
+      byKey.set(key, seed)
+      return
+    }
+    if (other.source === 'label' && seed.source === 'label') throw new SetupError(`${where}: ${seed.id} has the same identity key as ${other.id}; one product cannot be two rows.`)
+    // A single-scan reading, not a hand-written label, is the side at fault here: fall back to its label and try again. Falling
+    // back `other` as well as `seed` (when both are single-scan) removes it from the map first, so re-adding it cannot find itself.
+    contested.add(key)
+    if (other.source === 'single-scan') {
+      byKey.delete(key)
+      add(asLabel(other), where)
+    }
+    add(seed.source === 'single-scan' ? asLabel(seed) : seed, where)
   }
   for (const product of products) {
     const seeded = seedReadingOf(product, readings.get(product.folder) ?? [])
-    add({ id: product.folder, identity: seeded.identity, inSet: true, source: seeded.source, ...(seeded.source === 'single-scan' ? { photo: seeded.photo } : {}) }, product.folder)
+    add({ ...seeded, id: product.folder, inSet: true }, product.folder)
   }
   for (const photo of shelf.photos) {
     for (const product of photo.products) {
@@ -661,7 +685,8 @@ const main = async (): Promise<number> => {
         readings.set(product.folder, reused.length > 0 ? reused : await readingsForSeeding(recognizer, product))
       }
       seeds = shelfSeeds(set.products, shelfSet, readings)
-      console.log(`Shelf seeds: ${seeds.filter((s) => s.source === 'single-scan').length} from single scans, ${seeds.filter((s) => s.source === 'label').length} from labels`)
+      const collisions = seeds.filter((s) => s.reason === 'collision').length
+      console.log(`Shelf seeds: ${seeds.filter((s) => s.source === 'single-scan').length} from single scans, ${seeds.filter((s) => s.source === 'label').length} from labels${collisions > 0 ? ` (${collisions} fell back to a label after a collision)` : ''}`)
       for (const photo of shelfSet.photos) shelfDetails.push(await runShelfPhoto(photo, seeds, recognizer, analyst))
       shelf = scoreShelf(shelfDetails.map((d) => d.input))
     }
@@ -696,7 +721,7 @@ const main = async (): Promise<number> => {
     images: images && { score: images, hashes: imageDetails.map(({ folder: name, stage, hash, error }) => ({ folder: name, stage, hash, error })) },
     shelf: shelf && {
       score: shelf,
-      seeds: seeds.map(({ id, source, photo }) => ({ id, source, photo })),
+      seeds: seeds.map(({ id, source, photo, reason }) => ({ id, source, photo, reason })),
       photos: shelfDetails.map(({ input, classification, excluded, listed }) => ({ photo: input.photo, error: input.error, classification, excluded, labelled: input.labelled, listed })),
     },
     verdict,

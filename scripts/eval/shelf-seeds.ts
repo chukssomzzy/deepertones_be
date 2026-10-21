@@ -9,7 +9,7 @@ export type PhotoReading = { photo: string; recognition: Recognition } | { photo
 
 export type SeedSource = 'single-scan' | 'label'
 /** `photo` is set exactly when `source` is 'single-scan': the photo the reading came from. */
-export type ProductSeed = { identity: ProductIdentity; source: SeedSource; photo?: string }
+export type ProductSeed = { identity: ProductIdentity; source: 'single-scan'; photo: string } | { identity: ProductIdentity; source: 'label'; photo?: undefined }
 
 /** The identity a label gives a product, exactly as `resolve` would be asked. */
 export const identityOfLabel = (product: { label: Label }): ProductIdentity => {

@@ -1256,10 +1256,14 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   digit is read as "plus" ("SPF 50+" and "Hydro Boost+"; a standalone " + " is just a space). A space is put between a
   letter and the digit after it ("NC15" is "nc 15"), never between a digit and a letter, so "250ml" still reaches the
   size rule. A dot survives only between two digits ("2.5"). **A number written with `%` is never a size**: before
-  the rest of the text is normalised, a number directly followed by `%` is glued to a letter suffix ("100%" becomes
-  "100pct"), so it can never read as a bare `l` or `g` once the `%` itself turns into a space; the suffix comes off
-  again once sizes have been stripped, leaving the plain number ("100% L-Ascorbic Acid Powder" keys as "100 l
-  ascorbic acid powder", not "ascorbic acid powder" with its "100" eaten as 100 litres). **Brand spellings are not merged yet**: two spellings of
+  the rest of the text is normalised, a number followed by `%`, with or without a space before the sign ("100%" or
+  "100 %"), is glued to a letter suffix ("100pct"), so it can never read as a bare `l` or `g` once the `%` itself
+  turns into a space; the suffix comes off again once sizes have been stripped, leaving the plain number ("100% L-Ascorbic
+  Acid Powder" keys as "100 l ascorbic acid powder", not "ascorbic acid powder" with its "100" eaten as 100 litres).
+  **A row stored under a key the rules no longer produce** (written before this fix, or before any future key-rule
+  change) is not lost: `nearMissCandidates` compares a product's own stored `identityKey`, not one recomputed from its
+  fields, so the old row still reaches the judge as a near miss of the reading's new key, and a "same" answer records
+  an alias from the new key to the old row. No migration rewrites old rows. **Brand spellings are not merged yet**: two spellings of
   one brand make two brand keys, so a product under the other spelling is not found as a near miss.
 - **Near-miss candidates** are products of the same brand family with a different identity key whose words overlap
   (Jaccard similarity, default threshold 0.6) or **where one reading's words are all inside the other's** ("NIVEA soft" in
@@ -1270,12 +1274,16 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   (lotion, cream, gel, oil, wash, cleanser, soap, body, face, hand, hair, skin, men, women, sun, original, classic, care, daily ...;
   `GENERIC_WORDS` in `catalog.identity.ts`). "NIVEA soft" in "NIVEA Soft Light Moisturiser" is a containment; "Dove Body Wash" in
   "Dove Go Fresh Body Wash" is not (it may still be a Jaccard candidate). The word relations (equal, subset, superset) behind
-  containment and `lessSpecific` come from one private helper. **UK and US spellings are folded for this scoring only**
-  (`nameSimilarity`, containment and the edition check, `namesAnotherEdition`; never `identityKey`, so a UK and a US
-  reading keep different keys until the judge is asked), word for word from a fixed, reviewed list: the -ise/-ised/
-  -iser/-ising/-isation forms of moisturise, sanitise and normalise, plus colour, centre and grey. No generic suffix
-  rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is whole-word, so "greyhound" and "centred"
-  do not either. Best first by
+  containment and `lessSpecific` come from one private helper. **UK and US spellings are folded** word for word from a
+  fixed, reviewed list: the -ise/-ised/-iser/-ising/-isation forms of moisturise, sanitise and normalise, plus colour,
+  centre and grey. No generic suffix rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is
+  whole-word, so "greyhound" and "centred" do not either. The fold lives in the one shared word set (`words`, pooling
+  brand, name and variant), so it reaches `nameSimilarity`, containment, `lessSpecific` and the edition check
+  (`namesAnotherEdition`) alike — and through `lessSpecific`, the ambiguity guard and the alias-equality check too.
+  That is intended: a UK reading is treated exactly as its US spelling would be, so a UK reading less specific than
+  two US rows of different ranges is held back just as the US reading is, and a UK reading landing on a US row by an
+  equally-specific match is aliased just as the US spelling would be. `identityKey` never folds, so a UK and a US
+  reading keep different keys until the judge is asked. Best first by
   similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
@@ -2005,6 +2013,36 @@ brand and name both agree, ignoring case and runs of spaces; each expected produ
   owner's and are never committed.
 - **Run.** Needs `ANTHROPIC_API_KEY` (environment, else `.dev.vars`) and makes real, billed calls, capped by `--max-usd` (default 2). `--model recognize-shelf=MODEL`
   tries another model, `--limit N` runs the first N photos. Report-only: never part of `npm test` or CI, and it prints no model text beyond the brand and name of found products.
+
+### Matching eval
+`npm run eval:matching` (`scripts/eval/matching.ts`) measures whether `ProductCatalogService` lands a reading on the right row, not just whether a
+photo is read correctly: matching is a separate failure mode from recognition, and this is the only eval that pays for both together. It has three
+parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap for the whole run, `--max-usd` (default 3).
+
+- **matching** reads every catalog photo once, then resolves the same recognitions against a fresh in-memory catalog in 3 fixed random orders
+  (`scripts/eval/matching-set.ts`'s `SEEDS`): does a repeat photo of a product find its existing row (`repeat-hit`), and does a look-alike ever land
+  on the wrong one (`wrongMerges`, the number that must stay 0)? The goal is fewer duplicate rows (so less research and analysis spend is paid
+  twice) without ever merging two different products.
+- **images** creates and researches each catalog product for real and saves the stock image it stores, for the owner to judge `--verdict
+  HASH=right|wrong`.
+- **shelf** reads each shelf photo once and resolves every product it lists against a catalog seeded with the true rows of the single set and of
+  the shelf photos' other products: did it find what is in the photo, invent nothing, land on the right row? **Seeding**: an in-set product's row is
+  seeded from what its own single photos were read as (the first that reads as a beauty product, in name order — `seedReadingOf`,
+  `scripts/eval/shelf-seeds.ts`, tested on its own), reused from the matching part's recognitions when it ran in the same invocation, else read
+  fresh; that is what the catalog would really hold, not the owner's label wording. A product with none of its photos readable, and every
+  shelf-only product (named in a shelf photo but not in the single set), keeps its label identity. **Collision fallback:** two seeds reading the
+  same identity key would be two rows for one product, which the judge is never asked about (the catalog is seeded directly, not resolved); when
+  one side of such a collision came from a single scan, it falls back to that product's label identity instead (recorded as `reason: "collision"`
+  in the report and counted on the console line), since the label is still a true identity for it. Only a collision that survives the fallback —
+  two hand-written labels that still read the same — stops the run (`SetupError`, exit 2): that is the owner's label set, not the pipeline, being
+  wrong. `--part shelf` alone still reads the whole single set fresh (recognitions are not carried over from a part that did not run) and is not cut
+  by `--limit`, which only trims the products the matching and images parts run on.
+- **Cost and models** follow the catalog eval's conventions: one `MemoryAiSpendLedger` cap in dollars, `--model job=model` overrides, console table
+  plus `.eval/matching/<timestamp>/report.json` and a `contact-sheet.html` (stored images and shelf photos beside the owner's own, never a prompt or
+  other model text — only folder names, short row ids, codes, field names and numbers).
+- **Keys.** Locally `ANTHROPIC_API_KEY` from the environment, else `.dev.vars`. Never run by `npm test` or CI, which hold no secrets.
+- **Exit.** 0 when every part that ran met its target, 1 when one missed, 2 when the run could not start (photo set, verdicts, arguments, key, or an
+  unresolved seed collision).
 
 ### Shelf
 
