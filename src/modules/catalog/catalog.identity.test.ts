@@ -854,3 +854,51 @@ describe('a suitability phrase one listing gives and the other does not, in near
     expect(lessSpecific({ brand: 'Zuri', name: 'Softening Milk for Dry Skin' }, { brand: 'Zuri', name: 'Softening Milk Deep Repair Balm' })).toBe(false)
   })
 })
+
+// Invented brands and names on purpose: the rule is general, not a fix for any product the eval happens to hold.
+describe('a phrase that names an edition rather than a suitability, in nearMissCandidates', () => {
+  const RICH = { id: 'row', brand: 'Zuri', name: 'Repair Balm Rich', form: 'balm' }
+  /** Every reading below shares only {zuri, repair, balm} with the Rich row: a candidate when its phrase is set aside (3 of 4), not when it is counted (at most 3 of 7, and "rich" keeps the shorter side from containing the longer). */
+  const found = (readingName: string) => nearMissCandidates({ brand: 'Zuri', name: readingName, form: 'balm' }, [RICH]).map((p) => p.id)
+
+  it.each([
+    ['Repair Balm for Men\'s Skin'],
+    ['Repair Balm for Mens Skin'],
+    ['Repair Balm for Men with Dry Skin'],
+    ['Repair Balm for Women with Oily Skin'],
+    ['Repair Balm for Womens Hair'],
+    ['Repair Balm for Kids Hair'],
+    ['Repair Balm for Baby Skin'],
+    ['Repair Balm for Sensitive Baby Skin'],
+    ['Repair Balm for Teen Skin'],
+  ])('keeps the words of "%s", so the Rich balm is not a candidate of it', (readingName) => {
+    expect(found(readingName)).toEqual([])
+  })
+
+  it('still ignores a phrase that names no edition, so the Rich balm is a candidate of "for Dry Skin"', () => {
+    expect(found('Repair Balm for Dry Skin')).toEqual(['row'])
+  })
+})
+
+// Invented brands and names on purpose: the rule is general, not a fix for any product the eval happens to hold.
+describe('a suitability phrase in the brand family that differs from the reading\'s, in nearMissCandidates', () => {
+  const row = (id: string, name: string) => ({ id, brand: 'Zuri', name, form: 'lotion' })
+  const BARE = row('bare', 'Daily Lotion')
+  const DRY = row('dry', 'Daily Lotion for Dry Skin')
+  const OILY = row('oily', 'Daily Lotion for Oily Skin')
+  const reading = (name: string) => ({ brand: 'Zuri', name, form: 'lotion' })
+  const found = (name: string, rows: typeof BARE[]) => nearMissCandidates(reading(name), rows, { limit: 10 }).map((p) => p.id)
+
+  it('stops ignoring the reading\'s phrase when a row of the family gives a different one, so the bare row is no longer a candidate', () => {
+    // On the full words the bare row is 3 of 6, and its only words beyond the brand ("daily", "lotion") are generic, so there is no containment either.
+    expect(found(DRY.name, [BARE, OILY])).toEqual(['oily'])
+  })
+
+  it('stops ignoring for a reading that gives no phrase when two rows give phrases that differ', () => {
+    expect(found(BARE.name, [DRY, OILY])).toEqual([])
+  })
+
+  it('still ignores the reading\'s phrase when the bare row is the only one in the family', () => {
+    expect(found(DRY.name, [BARE])).toEqual(['bare'])
+  })
+})

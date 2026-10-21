@@ -4761,3 +4761,94 @@ describe('ProductCatalogService.resolve: a candidate with the reading\'s form ag
     expect(Object.values(ids)).not.toContain(result.productId)
   })
 })
+
+describe('ProductCatalogService.resolve: a reading whose suitability line no row of the family gives', () => {
+  const KINKLY = { brand: 'Kinkly', category: 'hair', form: 'gel' } as const
+  const EXTRA_HOLD = 'Shea Butter Extra Hold Edge Stay Gel'
+  const SOFT_HOLD = 'Shea Butter Soft Hold Edge Gel'
+  const SHINE_WAX = 'Shea Butter Shine Wax Edge'
+
+  /** Stores the rows through resolve, oldest first, so each is a real row of the brand. The judge says "different" while they are made. */
+  const catalogued = async (ctx: Ctx, names: string[]) => {
+    const ids: Record<string, string> = {}
+    for (const name of names) {
+      ids[name] = (await ctx.service.resolve(identity({ ...KINKLY, name }))).productId
+      ctx.advance(MINUTE)
+    }
+    return ids
+  }
+
+  // The reading says less than all three rows once its line is set aside, which is how all three became candidates in the first place:
+  // the guard must weigh specificity on the same words, so a line no row gives cannot buy the reading a judge call and a merge into
+  // whichever row happens to score nearest.
+  it.each([
+    ['a suitability line no row gives', 'Shea Butter for Natural Hair'],
+    ['no suitability line at all', 'Shea Butter'],
+  ])('is held back from three rows it says less than, with %s, and makes a new row without a judge call', async (_label, readingName) => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [EXTRA_HOLD, SOFT_HOLD, SHINE_WAX])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(identity({ ...KINKLY, name: readingName }))
+
+    expect(askedSince(ctx, before)).toEqual([])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  // Guards the other side of the guard's threshold: one row it says less than is still judged, so the line is still ignored when candidates are found.
+  it('still judges the one row it says less than, and a "yes" lands the reading on it', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [EXTRA_HOLD])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(identity({ ...KINKLY, name: 'Shea Butter for Natural Hair' }))
+
+    expect(askedSince(ctx, before)).toEqual([EXTRA_HOLD])
+    expect(result.productId).toBe(ids[EXTRA_HOLD])
+  })
+})
+
+describe('ProductCatalogService.resolve: a row of the family whose suitability line differs from the reading\'s', () => {
+  const ZURI = { brand: 'Zuri', category: 'skin', form: 'lotion' } as const
+  const BARE = 'Daily Lotion'
+  const OILY = 'Daily Lotion for Oily Skin'
+  const READING = identity({ ...ZURI, name: 'Daily Lotion for Dry Skin' })
+
+  /** Stores the rows through resolve, oldest first. The judge says "different" while they are made, so each is its own row. */
+  const catalogued = async (ctx: Ctx, names: string[]) => {
+    const ids: Record<string, string> = {}
+    for (const name of names) {
+      ids[name] = (await ctx.service.resolve(identity({ ...ZURI, name }))).productId
+      ctx.advance(MINUTE)
+    }
+    return ids
+  }
+
+  it('never judges the bare row when a sibling prints another line, judges that sibling, and makes a new row on its "no"', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [BARE, OILY])
+    // A judge that would take the bare row for the same product: the Oily sibling is the proof that the line names an edition, so it is never asked.
+    ctx.analyst.sameProductWith((_reading, candidate) => candidate.name === BARE)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([OILY])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  // Guards the one-sided rule itself: with no other line in the family, the reading's line is still ignored and the bare row is judged.
+  it('judges the bare row when it is the only row of the family, and a "yes" lands the reading on it', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [BARE])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([BARE])
+    expect(result.productId).toBe(ids[BARE])
+  })
+})
