@@ -61,6 +61,12 @@ export const mountDocs = (app: OpenAPIHono<AppEnv>) => {
     bearerFormat: 'JWT',
     description: 'The access token from /api/v1/auth/anonymous, /api/v1/auth/otp/verify or /api/v1/auth/refresh.',
   })
+  app.openAPIRegistry.registerComponent('securitySchemes', 'adminToken', {
+    type: 'apiKey',
+    in: 'header',
+    name: 'X-Admin-Token',
+    description: 'The shared admin secret (ADMIN_API_TOKEN) for /api/v1/admin. A user access token never opens these routes.',
+  })
   app.get('/openapi.json', docsEnabled, (c) =>
     c.json(app.getOpenAPI31Document({ ...apiDocument, servers: serversFor(new URL(c.req.url).origin) })),
   )

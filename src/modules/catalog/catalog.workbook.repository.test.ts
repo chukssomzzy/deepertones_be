@@ -6,7 +6,7 @@ import { catalogWorkbookRepositoryContract } from './catalog.workbook.repository
 
 catalogWorkbookRepositoryContract('fake', () => {
   const repo = new FakeCatalogWorkbookRepository()
-  return { repo, publish: async (rulesVersion, rules) => repo.publishRules(rulesVersion, rules) }
+  return { repo, publish: async (rulesVersion, rules) => repo.publishRules(rulesVersion, rules), alias: async (aliasKey, identityKey) => repo.addAlias(aliasKey, identityKey) }
 })
 
 // The fake stands in for the migrated database, so it must start as the database does: the same codes (ING-<NAME>-<KIND>, from the one seed

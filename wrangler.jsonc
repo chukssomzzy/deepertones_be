@@ -45,12 +45,12 @@
     // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
     "PERFECT_CORP_USD_PER_UNIT": "0.05"
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
   // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET", "ADMIN_API_TOKEN"] },
 
   // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -182,6 +182,8 @@
     { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "1027", "simple": { "limit": 10, "period": 60 } },
     // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
     { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "1028", "simple": { "limit": 300, "period": 60 } },
+    // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
+    { "name": "ADMIN_IP_LIMITER", "namespace_id": "1029", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -219,7 +221,8 @@
   // Here it is a local simulation: wrangler dev and the tests write to a local bucket, never the real one.
   //
   // The one private bucket, deepertones-private, for users' product photos, shared by every environment (the owner's rule).
-  // Keys are prefixed photos/<environment>/…. It has no public domain and r2.dev is off: photos leave only through signed
+  // Keys are prefixed photos/<environment>/…, faces/<environment>/… and workbooks/<environment>/… (the catalog workbook archive, which is kept for good,
+  // so set no bucket-wide lifecycle rule). It has no public domain and r2.dev is off: photos leave only through signed
   // photo links the Worker checks. Local here too, like the public bucket.
   "r2_buckets": [
     { "binding": "CATALOG_IMAGES", "bucket_name": "deepertones-assets" },
@@ -280,12 +283,12 @@
         // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
         "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET", "ADMIN_API_TOKEN"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -415,6 +418,8 @@
         { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "2027", "simple": { "limit": 10, "period": 60 } },
         // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
         { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "2028", "simple": { "limit": 300, "period": 60 } },
+        // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
+        { "name": "ADMIN_IP_LIMITER", "namespace_id": "2029", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -479,12 +484,12 @@
         // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
         "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET", "ADMIN_API_TOKEN"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production
@@ -614,6 +619,8 @@
         { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "3027", "simple": { "limit": 10, "period": 60 } },
         // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
         { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "3028", "simple": { "limit": 300, "period": 60 } },
+        // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
+        { "name": "ADMIN_IP_LIMITER", "namespace_id": "3029", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],

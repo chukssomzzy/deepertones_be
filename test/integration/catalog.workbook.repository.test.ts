@@ -19,4 +19,8 @@ catalogWorkbookRepositoryContract('D1', () => ({
     for (const rule of rules) await db.insert(ingredientRules).values({ ...rule, updatedInVersion: version })
     await db.insert(catalogVersions).values({ version, rulesVersion, contractVersion: '1.0.0', uploadedBy: 'contract test', archiveKey: null, createdAt: new Date() })
   },
+  // As ProductCatalogService.addAlias writes one: the product is found by its identity key.
+  alias: async (aliasKey, identityKey) => {
+    await env.DB.prepare('insert into product_aliases (alias_key, product_id) select ?, id from products where identity_key = ?').bind(aliasKey, identityKey).run()
+  },
 }))

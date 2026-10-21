@@ -65,6 +65,10 @@ export const SECRETS: Record<string, SecretSpec> = {
       'RestPerfectCorpClient verifies the Standard Webhooks signature of every Perfect Corp webhook with it.',
     required: true,
   },
+  ADMIN_API_TOKEN: {
+    reason: 'src/middleware/admin-token.ts compares the X-Admin-Token header of every /api/v1/admin request with it; the catalog export and import are the routes behind it.',
+    required: true,
+  },
 }
 
 const VAR = 'a var in wrangler.jsonc; a secret of the same name is shadowed on deploy'

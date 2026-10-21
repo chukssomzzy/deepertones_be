@@ -8,6 +8,7 @@ import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
 import { D1CatalogWorkbookRepository } from './modules/catalog/catalog.workbook.repository'
+import { CatalogWorkbookService } from './modules/catalog/catalog.workbook.service'
 import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
 import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
 import { FaceScanService } from './modules/face-scans/face-scans.service'
@@ -49,6 +50,7 @@ import { AnthropicProductRecognizer } from './providers/product-recognition/anth
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
 import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
+import { R2WorkbookArchive } from './providers/workbook-archive/r2.workbook-archive'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
 
@@ -150,6 +152,18 @@ export const buildContainer = (env: CloudflareBindings) => {
           // Our own zones, so a redirect from a brand site cannot point the Worker back at us.
           blockedHostSuffixes: ['deepertones.com', 'workers.dev'],
         }),
+      }),
+  )
+
+  // The catalog workbook: the live rules, the countries and the approved products, and the admin export and import. The archive of each applied
+  // upload's .xlsx goes in the private bucket, under workbooks/<this environment>/.
+  const catalogWorkbook = once(
+    () =>
+      new CatalogWorkbookService({
+        repository: new D1CatalogWorkbookRepository(db()),
+        archive: new R2WorkbookArchive({ bucket: env.PRIVATE_PHOTOS, environment: photoEnvironment(env.ENVIRONMENT) }),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
       }),
   )
 
@@ -325,6 +339,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get catalog() {
       return catalog()
+    },
+    get catalogWorkbook() {
+      return catalogWorkbook()
     },
     get faceScans() {
       return faceScans()
