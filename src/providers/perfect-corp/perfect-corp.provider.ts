@@ -65,6 +65,8 @@ export type SkinAnalysisResult =
       skinAge: number | null
       /** The overall score. Kept for the routine stage; it is never shown. */
       all: number | null
+      /** The `hd_*` items left out of `concerns` because a score was missing, by type (only when it is an hd code), for the log. */
+      skipped: { type: string; problem: 'no-scores' }[]
     }
 
 export const FITZPATRICK_TYPES = ['I', 'II', 'III', 'IV', 'V', 'VI'] as const

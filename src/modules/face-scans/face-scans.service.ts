@@ -515,11 +515,21 @@ export class FaceScanService {
       await this.deleteMasks(masks)
       throw error
     }
+    FaceScanService.warnMissingConcerns(scan, analysis)
     // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. At most once: a push lost here (the worker dies, or the queue refuses it) is not sent again.
     await this.notifications.faceScanReady({ userId, profileId, faceScanId: id })
     await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)
     await this.publishFrame(id, 'ready', null, { done: true })
+  }
+
+  /** A goal concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores, links or photo. */
+  private static warnMissingConcerns(scan: FaceScan, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): void {
+    const present = new Set(analysis.concerns.map((item) => item.concern))
+    const returned = [...present].sort()
+    for (const concern of concernsForGoal(scan.goalAtScan)) {
+      if (!present.has(concern)) console.warn({ outcome: 'face-scan-concern-missing', faceScanId: scan.id, concern, returned, skipped: analysis.skipped })
+    }
   }
 
   /** The Fitzpatrick webhook may have been lost, and nothing else asks for that task again: when the analysis is in and the profile still has no type, ask now. */

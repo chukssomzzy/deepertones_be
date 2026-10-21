@@ -217,6 +217,17 @@ const errorOf = async (promise: Promise<unknown>) => {
   throw new Error('expected the promise to reject')
 }
 
+/** The face-scan-concern-missing warnings `fn` logs, as the objects logged. */
+const warningsDuring = async (fn: () => Promise<unknown>) => {
+  const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  try {
+    await fn()
+    return warn.mock.calls.map((call) => call[0] as { outcome?: string }).filter((entry) => entry?.outcome === 'face-scan-concern-missing')
+  } finally {
+    warn.mockRestore()
+  }
+}
+
 /** What the app and Perfect Corp see logged while `fn` runs, as one string. */
 const loggedDuring = async (fn: () => Promise<unknown>) => {
   const spies = (['log', 'info', 'warn', 'error'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => undefined))
@@ -284,6 +295,7 @@ const analysed = (over: Partial<Extract<SkinAnalysisResult, { status: 'success' 
   ],
   skinAge: 31,
   all: 70,
+  skipped: [],
   ...over,
 })
 const byConcernThenRegion = (a: { concern: string; region: string }, b: { concern: string; region: string }) => a.concern.localeCompare(b.concern) || a.region.localeCompare(b.region)
@@ -779,6 +791,145 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'unavailable', skinAge: null })
     expect(await ctx.repository.resultsOf(id)).toEqual([])
     expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+  })
+
+  it('stores the age-spot result of a fade-dark-marks scan, and its mask, like the other concerns, when Perfect Corp sent it without a region (read as the whole face)', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'fade-dark-marks')
+    ctx.perfectCorp.script(
+      'getSkinAnalysis',
+      analysed({
+        concerns: [
+          { concern: 'hd_age_spot', region: 'whole', rawScore: 57.33, uiScore: 68, maskUrls: [maskUrl('age_spot')] },
+          { concern: 'hd_acne', region: 'whole', rawScore: 80, uiScore: 85, maskUrls: [maskUrl('acne')] },
+          { concern: 'hd_texture', region: 'whole', rawScore: 55, uiScore: 63, maskUrls: [] },
+        ],
+      }),
+    )
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'ready', reason: null })
+    expect((await ctx.repository.resultsOf(id)).filter((row) => row.concern === 'hd_age_spot')).toEqual([
+      { faceScanId: id, userId: USER, concern: 'hd_age_spot', region: 'whole', rawScore: 57.33, uiScore: 68 },
+    ])
+    expect(callsOf(ctx, 'downloadMask').map((call) => call.args[0]).sort()).toEqual([maskUrl('acne'), maskUrl('age_spot')])
+    expect(masksStored(ctx)).toEqual([maskKey(ctx, id, 'hd-acne'), maskKey(ctx, id, 'hd-age-spot')])
+    expect(new TextDecoder().decode(ctx.photos.stored.get(maskKey(ctx, id, 'hd-age-spot'))!.bytes)).toBe(maskUrl('age_spot'))
+    expect((await ctx.repository.masksOf(id)).map((mask) => mask.concern).sort()).toEqual(['hd_acne', 'hd_age_spot'])
+    expect(warnings).toEqual([])
+  })
+
+  it('warns once, by name, when a goal concern is missing from the result, with the names that did come back and what the adapter skipped, and still makes the scan ready with the concerns it has', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'fade-dark-marks')
+    ctx.perfectCorp.script(
+      'getSkinAnalysis',
+      analysed({
+        concerns: [
+          { concern: 'hd_texture', region: 'whole', rawScore: 55, uiScore: 63, maskUrls: [] },
+          { concern: 'hd_acne', region: 'left_cheek', rawScore: 70, uiScore: 75, maskUrls: [] },
+          { concern: 'hd_acne', region: 'whole', rawScore: 80, uiScore: 85, maskUrls: [maskUrl('acne')] },
+        ],
+        skipped: [{ type: 'hd_redness', problem: 'no-scores' }],
+      }),
+    )
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(warnings).toEqual([
+      { outcome: 'face-scan-concern-missing', faceScanId: id, concern: 'hd_age_spot', returned: ['hd_acne', 'hd_texture'], skipped: [{ type: 'hd_redness', problem: 'no-scores' }] },
+    ])
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'ready', reason: null, skinType: 'dry', skinAge: 31 })
+    expect((await ctx.repository.resultsOf(id)).map((row) => `${row.concern}/${row.region}`).sort()).toEqual(['all/whole', 'hd_acne/left_cheek', 'hd_acne/whole', 'hd_texture/whole'])
+    expect(masksStored(ctx)).toEqual([maskKey(ctx, id, 'hd-acne')])
+    expect(ctx.events.eventsFor(id).at(-1)).toEqual({ type: 'done' })
+  })
+
+  it('warns once for each missing goal concern, in the goal\'s order, each carrying the same distinct sorted names that came back', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script(
+      'getSkinAnalysis',
+      analysed({
+        concerns: [
+          { concern: 'hd_radiance', region: 'whole', rawScore: 41.5, uiScore: 52, maskUrls: [] },
+          { concern: 'hd_radiance', region: 'left_cheek', rawScore: 38, uiScore: 47, maskUrls: [] },
+          // Not a glow concern: it is returned, so it is named in `returned`, but it does not make a glow concern present.
+          { concern: 'hd_acne', region: 'whole', rawScore: 80, uiScore: 85, maskUrls: [] },
+        ],
+      }),
+    )
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    const returned = ['hd_acne', 'hd_radiance']
+    expect(warnings).toEqual([
+      { outcome: 'face-scan-concern-missing', faceScanId: id, concern: 'hd_moisture', returned, skipped: [] },
+      { outcome: 'face-scan-concern-missing', faceScanId: id, concern: 'hd_texture', returned, skipped: [] },
+    ])
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+  })
+
+  it('warns for every goal concern, with an empty list of what came back, when the result has no concern items at all', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'clear-skin')
+    ctx.perfectCorp.script('getSkinAnalysis', analysed({ concerns: [] }))
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(warnings.map((warning) => (warning as { concern: string }).concern)).toEqual(['hd_acne', 'hd_pore', 'hd_oiliness'])
+    for (const warning of warnings) expect(warning).toMatchObject({ outcome: 'face-scan-concern-missing', faceScanId: id, returned: [], skipped: [] })
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+  })
+
+  it('does not warn when every concern of the goal is in the result', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(warnings).toEqual([])
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+  })
+
+  it('logs nothing about the photo, the scores or the mask links when it warns about a missing concern', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script('getSkinAnalysis', analysed({ concerns: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5, uiScore: 52, maskUrls: [maskUrl('radiance')] }] }))
+
+    const logged = await loggedDuring(() => fetchStep(ctx, id))
+
+    expect(logged).toContain('face-scan-concern-missing')
+    expect(logged).not.toContain('masks.test')
+    expect(logged).not.toContain('41.5')
+    expect(logged).not.toContain('front.jpg')
+  })
+
+  it('does not warn about a missing concern when the scan was deleted while the masks were being fetched, because nothing was stored', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script('getSkinAnalysis', analysed({ concerns: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5, uiScore: 52, maskUrls: [maskUrl('radiance')] }] }))
+    ctx.perfectCorp.duringDownload = () => asUser(() => ctx.service.deleteFaceScan(id))
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(warnings).toEqual([])
+  })
+
+  it('does not warn about a missing concern when the scan stopped being analysing while the masks were being fetched, because nothing was stored', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script('getSkinAnalysis', analysed({ concerns: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5, uiScore: 52, maskUrls: [maskUrl('radiance')] }] }))
+    ctx.perfectCorp.duringDownload = () => ctx.service.markFailed(id)
+
+    const warnings = await warningsDuring(() => fetchStep(ctx, id))
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed' })
+    expect(await ctx.repository.resultsOf(id)).toEqual([])
+    expect(warnings).toEqual([])
   })
 
   it('does nothing when it runs again on a scan that is already ready: no call to Perfect Corp, no second spend, no second stream event', async () => {
