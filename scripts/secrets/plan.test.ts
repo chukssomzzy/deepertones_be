@@ -58,6 +58,8 @@ describe('SECRETS', () => {
       'JWT_SECRET',
       'JWT_SECRET_PREVIOUS',
       'OTP_PEPPER',
+      'PERFECT_CORP_API_KEY',
+      'PERFECT_CORP_WEBHOOK_SECRET',
       'WHATSAPP_ACCESS_TOKEN',
       'ZEPTOMAIL_API_KEY',
     ])
@@ -67,13 +69,16 @@ describe('SECRETS', () => {
     expect(SECRETS.JWT_SECRET!.required).toBe(true)
     expect(SECRETS.DEVICE_ID_KEY!.required).toBe(true)
     expect(SECRETS.EXPO_ACCESS_TOKEN!.required).toBe(true)
+    // Optional until the webhook and the analysis job read them (PR 3 flips both): a deploy must not fail before the owner sets them.
+    expect(SECRETS.PERFECT_CORP_API_KEY!.required).toBe(false)
+    expect(SECRETS.PERFECT_CORP_WEBHOOK_SECRET!.required).toBe(false)
     expect(SECRETS.JWT_SECRET_PREVIOUS!.required).toBe(false)
     expect(SECRETS.WHATSAPP_ACCESS_TOKEN!.required).toBe(false)
   })
 })
 
 describe('planSecretPush', () => {
-  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak', EXPO_ACCESS_TOKEN: 'ek' }
+  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak', EXPO_ACCESS_TOKEN: 'ek', PERFECT_CORP_API_KEY: 'pk', PERFECT_CORP_WEBHOOK_SECRET: 'ws' }
 
   it('sends known secrets that have a value', () => {
     const plan = planSecretPush({ values: map({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' }) })
@@ -143,6 +148,31 @@ describe('planSecretPush', () => {
     expect(blank.errors).toEqual([])
   })
 
+  // One Perfect Corp account serves every environment today, so the same key is fine; the webhook secret belongs to a registered webhook
+  // URL, and may also be the same until each environment has its own. Unlike the pepper, nothing here forces them apart.
+  it('accepts the same Perfect Corp key and webhook secret in both environments, because one account is shared today', () => {
+    const plan = planSecretPush({ values: map(good), otherEnvironment: map({ PERFECT_CORP_API_KEY: 'pk', PERFECT_CORP_WEBHOOK_SECRET: 'ws', OTP_PEPPER: 'pepper-b' }) })
+
+    expect(plan.errors).toEqual([])
+    expect(plan.send.PERFECT_CORP_API_KEY).toBe('pk')
+    expect(plan.send.PERFECT_CORP_WEBHOOK_SECRET).toBe('ws')
+  })
+
+  it('never sends a blank Perfect Corp secret, and lists it as blank', () => {
+    const plan = planSecretPush({ values: map({ ...good, PERFECT_CORP_WEBHOOK_SECRET: '' }) })
+
+    expect(plan.send).not.toHaveProperty('PERFECT_CORP_WEBHOOK_SECRET')
+    expect(plan.blank).toEqual(['PERFECT_CORP_WEBHOOK_SECRET'])
+    // Optional, so a blank one is not a missing required secret.
+    expect(plan.missingRequired).toEqual([])
+  })
+
+  it('does not report an absent Perfect Corp key or webhook secret as missing', () => {
+    const { PERFECT_CORP_API_KEY: _key, PERFECT_CORP_WEBHOOK_SECRET: _secret, ...without } = good
+
+    expect(planSecretPush({ values: map(without) }).missingRequired).toEqual([])
+  })
+
   it('sorts skipped and blank entries', () => {
     const plan = planSecretPush({
       values: map({ ...good, WHATSAPP_ACCESS_TOKEN: '', OTP_CHANNELS: 'email', DOCS_ENABLED: 'true' }),
@@ -178,7 +208,7 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
     })
   })
 
-  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_RECOGNIZE_SHELF', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS'])(
+  it.each(['AI_DAILY_BUDGET_USD', 'ANTHROPIC_MODEL_RESEARCH', 'ANTHROPIC_MODEL_VISION', 'ANTHROPIC_MODEL_RECOGNIZE_SHELF', 'ANTHROPIC_MODEL_JUDGE', 'ANTHROPIC_MODEL_ANALYSIS', 'PERFECT_CORP_BASE_URL', 'PERFECT_CORP_USD_PER_UNIT'])(
     'lists %s as config, so it is never pushed as a secret',
     (name) => {
       expect(NOT_SECRETS).toHaveProperty(name)
@@ -188,6 +218,14 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
   it('lists OPS_ALERT_EMAIL as a var, never a secret: an address in .dev.vars is skipped, not sent', () => {
     expect(NOT_SECRETS).toHaveProperty('OPS_ALERT_EMAIL')
     expect(SECRETS).not.toHaveProperty('OPS_ALERT_EMAIL')
+  })
+
+  it('lists the Perfect Corp key and webhook secret as secrets, never as config: a value in .dev.vars is sent, not skipped', () => {
+    for (const name of ['PERFECT_CORP_API_KEY', 'PERFECT_CORP_WEBHOOK_SECRET']) {
+      expect(SECRETS, name).toHaveProperty(name)
+      expect(NOT_SECRETS, name).not.toHaveProperty(name)
+      expect(SECRETS[name]!.reason.length, name).toBeGreaterThan(0)
+    }
   })
 
   it('no longer lists ANTHROPIC_MODEL, which wrangler.jsonc replaced with one variable per job', () => {

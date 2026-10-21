@@ -30,6 +30,19 @@ describe('buildContainer', () => {
     expect(buildContainer(env).aiUsage).toBeInstanceOf(AiUsageService)
   })
 
+  // The price is read when a Perfect Corp call is recorded, not when the ledger is built: the same ledger serves every Claude call.
+  it.each(['not-a-number', '', '0', '-0.05'])('builds the container and keeps the Claude ledger working with PERFECT_CORP_USD_PER_UNIT of "%s"; only recording a Perfect Corp call fails', async (price) => {
+    const container = buildContainer({ ...env, PERFECT_CORP_USD_PER_UNIT: price })
+
+    expect(container.aiUsage).toBeInstanceOf(AiUsageService)
+    expect(container.catalog).toBeInstanceOf(ProductCatalogService)
+    // Give the reservation back so the real day's spend in this database stays clean.
+    const id = await container.aiUsage.reserve({ job: 'research', model: 'claude-sonnet-5-5', estimateMicros: 1 })
+    await container.aiUsage.release(id)
+    expect(id).toEqual(expect.any(String))
+    await expect(container.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: `container-${crypto.randomUUID()}` })).rejects.toThrow()
+  })
+
   it('does not refuse a reservation past AI_DAILY_BUDGET_USD: the cap only alerts', async () => {
     const { aiUsage } = buildContainer({ ...env, AI_DAILY_BUDGET_USD: '1' })
 

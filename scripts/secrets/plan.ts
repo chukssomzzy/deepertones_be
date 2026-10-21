@@ -55,6 +55,16 @@ export const SECRETS: Record<string, SecretSpec> = {
       'ExpoPushSender sends push notifications with it. Enhanced push security must be on in Expo, which then refuses sends without it.',
     required: true,
   },
+  PERFECT_CORP_API_KEY: {
+    reason:
+      'RestPerfectCorpClient authorises every Perfect Corp (YouCam) call with it, for the face scan. Optional until the analysis job reads it.',
+    required: false,
+  },
+  PERFECT_CORP_WEBHOOK_SECRET: {
+    reason:
+      'RestPerfectCorpClient verifies the Standard Webhooks signature of every Perfect Corp webhook with it. Optional until the webhook route reads it.',
+    required: false,
+  },
 }
 
 const VAR = 'a var in wrangler.jsonc; a secret of the same name is shadowed on deploy'
@@ -82,6 +92,8 @@ export const NOT_SECRETS: Record<string, string> = {
   AI_DAILY_BUDGET_USD: VAR,
   OPS_ALERT_EMAIL: VAR,
   CATALOG_IMAGES_PUBLIC_URL: VAR,
+  PERFECT_CORP_BASE_URL: VAR,
+  PERFECT_CORP_USD_PER_UNIT: VAR,
 }
 
 /**

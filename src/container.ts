@@ -86,7 +86,13 @@ export const buildContainer = (env: CloudflareBindings) => {
     if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
       throw new Error('AI_DAILY_BUDGET_USD must be a positive number of US dollars, e.g. "5"')
     }
-    return new AiUsageService({ repository: new D1AiUsageRepository(db()), opsAlerts: opsAlerts(), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
+    return new AiUsageService({
+      repository: new D1AiUsageRepository(db()),
+      opsAlerts: opsAlerts(),
+      capMicros: Math.round(dailyBudgetUsd * 1_000_000),
+      // Passed raw and checked when a Perfect Corp call is recorded, so a bad price cannot take the Claude calls down with it.
+      perfectCorpUsdPerUnit: env.PERFECT_CORP_USD_PER_UNIT,
+    })
   })
 
   // The clients share the key, the models and the spend ledger. `timeoutMs` is the client's alone, so a caller that must answer within a

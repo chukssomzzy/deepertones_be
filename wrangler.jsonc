@@ -39,7 +39,11 @@
     // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
     "OPS_ALERT_EMAIL": "",
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
-    "CATALOG_IMAGES_PUBLIC_URL": ""
+    "CATALOG_IMAGES_PUBLIC_URL": "",
+    // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+    "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+    // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+    "PERFECT_CORP_USD_PER_UNIT": "0.05"
   },
   // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
@@ -253,7 +257,11 @@
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
-        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
+        // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+        "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+        "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
       // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
@@ -431,7 +439,11 @@
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
-        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
+        // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+        "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+        "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
       // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.

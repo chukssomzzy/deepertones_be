@@ -81,6 +81,42 @@ describe('wrangler.jsonc product catalog config', () => {
   })
 })
 
+// Perfect Corp (YouCam) runs the face scan. Per environment even though one account is shared today, so a separate account per
+// environment later needs no code change. The key and webhook secret are secrets (optional for now); the address and
+// the price of one unit are plain vars. Env blocks do not inherit either, so each block restates them. The price is not pinned to a
+// number, only to a positive one, because it is the owner's to set.
+describe('wrangler.jsonc Perfect Corp config', () => {
+  it.each(blocks)('%s sets the Perfect Corp API address', (_, block) => {
+    expect(block?.vars?.PERFECT_CORP_BASE_URL).toBe('https://yce-api-01.makeupar.com')
+  })
+
+  it.each(blocks)('%s sets the price of one Perfect Corp unit in USD as a positive number', (_, block) => {
+    const price = block?.vars?.PERFECT_CORP_USD_PER_UNIT
+
+    expect(typeof price).toBe('string')
+    expect(price).toMatch(/^\d+(\.\d+)?$/)
+    expect(Number(price)).toBeGreaterThan(0)
+    expect(Number.isFinite(Number(price))).toBe(true)
+  })
+
+  // Optional for now, like WHATSAPP_ACCESS_TOKEN: no route reads them yet, and a deploy must not fail before they are set. A later PR flips them.
+  it.each(blocks)('%s does not yet require PERFECT_CORP_API_KEY or PERFECT_CORP_WEBHOOK_SECRET, so a deploy does not fail without them', (_, block) => {
+    expect(block?.secrets?.required).not.toContain('PERFECT_CORP_API_KEY')
+    expect(block?.secrets?.required).not.toContain('PERFECT_CORP_WEBHOOK_SECRET')
+  })
+
+  it.each(blocks)('%s does not hold the key or the webhook secret as plain vars', (_, block) => {
+    expect(block?.vars).not.toHaveProperty('PERFECT_CORP_API_KEY')
+    expect(block?.vars).not.toHaveProperty('PERFECT_CORP_WEBHOOK_SECRET')
+  })
+
+  it.each(blocks)('%s still requires the secrets it already required', (_, block) => {
+    expect(block?.secrets?.required).toEqual(
+      expect.arrayContaining(['ZEPTOMAIL_API_KEY', 'OTP_PEPPER', 'JWT_SECRET', 'DEVICE_ID_KEY', 'ANTHROPIC_API_KEY', 'EXPO_ACCESS_TOKEN']),
+    )
+  })
+})
+
 // Users' product photos are private: one private bucket for every environment, told apart by key prefix
 // (photos/<environment>/…), with no public address. It sits beside the public assets bucket, never in its place.
 describe('wrangler.jsonc private photo storage', () => {

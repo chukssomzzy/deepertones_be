@@ -57,6 +57,8 @@ src/
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
     (push/ sends push notifications: a PushSender port, the Expo adapter, a memory fake. See "Push notifications (Expo)".)
+    (perfect-corp/ reaches Perfect Corp (YouCam) for the face scan: a PerfectCorpClient port with its error classes, the REST adapter, a memory
+     fake, and the VendorSpendLedger port. See "Perfect Corp provider" and "Vendor spend ledger".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
 docs/openapi.json          the generated spec, committed (npm run openapi)
 scripts/                   build-time scripts (spec generation, prompts generation)
@@ -1110,6 +1112,7 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   `settled`, `released`), the estimate, and once settled the cost in micros, the five usage counts and the time.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
+  Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
   `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
@@ -1124,6 +1127,97 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   reads `ai_usage` through `wrangler d1 execute` and prints today, the last 7 days and the last N days in dollars (settled
   cost only), a line "held by unsettled reservations" with the estimates still reserved and how many, then each job and
   model. It is read-only. The catalog eval reports its own cost (see "Catalog eval").
+
+### Perfect Corp provider
+Face photos are analysed by Perfect Corp (YouCam), behind a `PerfectCorpClient` port (`providers/perfect-corp/perfect-corp.provider.ts`) with
+one adapter, `RestPerfectCorpClient` (`rest.perfect-corp.ts`), and a memory fake, `MemoryPerfectCorpClient`. It is REST only, so there is no
+vendor SDK; the adapter calls the API through `requestJson$` (and `requestBytes$` for masks), bearer-authorised with
+`PERFECT_CORP_API_KEY`, against `PERFECT_CORP_BASE_URL`. No retries here (the job system retries), and nothing is logged.
+The API key and webhook secret are `#` fields so they stay out of `JSON.stringify`.
+
+- **The port.** `uploadFile` (a slot request, then a PUT of the bytes to the slot's own address, method and headers, without our key),
+  `createSkinAnalysis` (HD actions, `format: json`), `createFitzpatrick`, `getSkinAnalysis`, `getFitzpatrick`, `deleteTask`,
+  `downloadMask` (capped, no redirects, no key) and `verifyWebhook`. A task read answers `running` or `success` with the parsed result;
+  a task that ended on an error throws.
+- **Error mapping.** Four classes, so a caller chooses by class and never reads vendor text:
+  - `PerfectCorpUnavailableError`: no connection, a timeout, HTTP 5xx, 429 or 408, a reply that cannot be read (no task id, no results, a
+    status it does not know), and any task error that is not a photo problem. Retry with jitter.
+  - `PerfectCorpRejectedPhotoError` (with a fixed `reason`): a task error that a retake fixes. `error_lighting_dark` is `too-dark`;
+    `error_pose` and the three `error_face_angle_*` are `turn-to-camera`; `error_src_face_too_small` is `move-closer`;
+    `error_src_face_out_of_bound` is `face-not-centred`; `error_no_face` is `no-face`; `error_below_min_image_size` and
+    `error_exceed_max_image_size` are `image-size`. Exact matches only. Perfect Corp charges only on success, so a rejection costs nothing.
+  - `PerfectCorpCreditError`: HTTP 400 with `error_code` `CreditInsufficiency` (on a 400 only). Not retried: an ops alert, not a retry storm.
+  - `PerfectCorpBadRequestError`: every other 4xx, a mask address that is not an absolute `https:` URL (refused before any request is made:
+    the address comes from the vendor's reply, so a plain, local or odd scheme is never fetched), a mask over the size cap, and a mask
+    answered with a redirect.
+  Error messages carry the class, an HTTP status or a code-shaped vendor code, and nothing the vendor wrote: its free text can echo an
+  address with a signature in it.
+- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `verifyWebhook(rawBody, headers)` needs `webhook-id`,
+  `webhook-timestamp` (seconds, digits only, within 5 minutes either way) and `webhook-signature` (space-separated `v1,<base64>`
+  entries; any one may match, other versions are ignored). The signature is HMAC-SHA-256 over `id.timestamp.body` with `crypto.subtle`,
+  keyed with the base64-DECODED secret (`whsec_` stripped when present), compared in constant time. Only after that is the body read: it
+  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to `null` (never throws), and the route
+  answers 401. The clock is injected.
+- **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
+  `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
+  and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
+- **The memory fake** logs every call in order with its arguments (a scripted failure too, since the call was made), and `script(method,
+  ...answers)` queues answers handed out one per call (an `Error` is thrown as itself). Its defaults keep a service waiting (tasks are
+  `running`) and fail a webhook closed.
+
+### Face scan tables
+`modules/face-scans/face-scans.tables.ts` holds the face-scan rules as pure, versioned tables: no I/O, no clock, no model, so the same
+results always give the same words. Everything reads `raw_score` (1 to 100, HIGHER IS HEALTHIER), never `ui_score`.
+
+- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today: `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
+  three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
+  and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
+- **The thresholds are placeholders to calibrate** against real staging results, and the overlays and skin age have not been checked on
+  darker skin (see CONTEXT.md). A concern is visible at a `raw_score` of 60 or less; bands are `a-little` (above 45), `some` (above 30) and
+  `clear` (30 or less). A change counts only when it is bigger than 5 points for a concern or 2 years for skin age; exactly that much is noise.
+  A rise in a concern is "fainter", a fall "more visible"; no change is ever worded as lightness.
+- **The wording** is one text per concern and band, with a `whole` text that answers any region without words of its own (region-specific
+  words are added once Perfect Corp's region names are confirmed). Every text describes only what can be seen, in 80 characters or fewer, with
+  no digit, no exclamation mark, no condition name, no "acne" (spots and breakouts are what show), no "you have" and no lightness word.
+  `face-scans.tables.test.ts` scans every string for these, so a new text that breaks one fails there. The skin age is the one text with a
+  number, and it is a plain fact (`Your skin looks about 29`) that never compares with a real age.
+- **Skin type** is read from the whole-face `hd_skin_type` item only (never guessed from the t_zone and u_zone items): `Oily`, `Dry`,
+  `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
+
+### Vendor spend ledger
+`AiUsageService` is also the `VendorSpendLedger` (`providers/perfect-corp/vendor-spend.provider.ts`), so a face job depends on the port and not the service.
+`record({ vendor: 'perfect-corp', job: 'face-analysis' | 'fitzpatrick', units, key })` writes one row to the same `ai_usage` table, already
+`settled`, and raises the same `ai-spend-cap` alert when the day's sum passes the figure. It never refuses a call for the figure.
+
+- **Idempotent per vendor task.** `key` is the Perfect Corp task id and the row id is `<vendor>:<key>`, so a redelivered job or a webhook that
+  came twice is one charge. `insertSettled` inserts with `onConflictDoNothing` on the id, `returning` the id, in the same `db.batch` as the
+  sum; a repeat stores nothing, answers `{ overCap: false }` and so raises no alert (the first record already did, if it passed the figure).
+- **Units are validated.** `units` must be a positive whole number or `record` throws before anything is stored (so a bad record does not
+  use up its task id).
+
+- **Recorded once, on success.** Perfect Corp charges only when a result succeeds, and nothing sweeps a reservation held open across a
+  webhook wait, so nothing is reserved. A rejected photo records nothing. The units are 12 for the HD analysis and 10 for a first Fitzpatrick read.
+- **Cost** is `Math.round(units x PERFECT_CORP_USD_PER_UNIT x 1,000,000)` micro-USD, rounded once at the end (12 x 0.07 is not exact in floating point).
+  The container passes `PERFECT_CORP_USD_PER_UNIT` raw and `record` validates it when it is used, throwing an error that names the
+  variable unless it is a positive number (or the text of one). It is not checked when the container is built, because the same ledger serves every
+  Claude call, and a bad price must fail only the Perfect Corp record, never reserve, settle or release.
+- **Migration 0028** adds `vendor` (text, not null, default `anthropic`) and `units` (integer, null) to `ai_usage`. A vendor row stores
+  the vendor name as `model` and its estimate as its cost, since both columns are not null. `AI_JOBS` stays Claude's list: the Perfect Corp
+  jobs are not in it, so no model, price or prompt is wired for them.
+- **Two summaries.** `summary()` is Claude only (it excludes any other vendor); `vendorSummary()` adds up the others per vendor and job
+  with calls, units and cost. The daily sum (`committedMicrosSince`) counts both. `npm run ai:spend` reads every settled row, so its
+  totals include Perfect Corp, and the vendor's rows show with the vendor name as the model.
+
+### Perfect Corp config
+Per environment (dev, staging, production) even though one Perfect Corp account is shared today; the code never assumes that.
+
+- Vars in all three `wrangler.jsonc` blocks: `PERFECT_CORP_BASE_URL` (`https://yce-api-01.makeupar.com`) and `PERFECT_CORP_USD_PER_UNIT`.
+  **The price is a placeholder (`0.05`)**: confirm it from Perfect Corp's feature-cost endpoint and the plan price before trusting spend figures.
+- Secrets `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`, in the secrets plan with `required: false` and declared optional in
+  `src/lib/env.ts` (the `WHATSAPP_ACCESS_TOKEN` precedent), and NOT in `secrets.required`, so a deploy does not fail before they are set. The PR that
+  adds the analysis job and the webhook route makes them required, and deletes the `env.ts` declarations. Both are in the two `.dev.vars` example files.
+- The webhook URL for each environment is registered in Perfect Corp's console (a deploy step, not code); the console shows the secret.
 
 ### Ops alerts
 `modules/ops-alerts` (`OpsAlertsService`) emails the owner when an environment-wide problem needs them. Nothing here is shown to a
