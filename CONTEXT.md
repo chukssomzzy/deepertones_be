@@ -201,7 +201,9 @@ _Avoid_: Product database
 
 **Recommendation catalog**:
 The reviewed set of products the app may suggest adding to a routine, each described by the concerns it works on, the skin
-types it suits, its safety notes and the countries it is sold in. A product reaches it only through review.
+types it suits, its safety notes and the countries it is sold in. A product reaches it only through review. Every
+recommended product is also a catalog product, with the ingredient list the workbook gives it, so scanning it shows the
+same product.
 _Avoid_: Formulary, catalog (alone), shop
 
 **Candidate**:
