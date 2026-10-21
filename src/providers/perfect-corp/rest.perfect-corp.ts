@@ -53,6 +53,9 @@ type Json = Record<string, unknown>
  * does. Errors carry a class, an HTTP status or a code-shaped vendor error code, and nothing else of what the vendor said: its free text
  * can echo a photo address or a key. Nothing is logged.
  *
+ * The webhook body is verified against a real staging delivery: `data.taskId` and `data.taskStatus` in camelCase (the snake_case
+ * `task_id` and `task_status` of the documentation are still accepted).
+ *
  * UNVERIFIED VENDOR SHAPES, pinned from the brief and Perfect Corp's docs and to be checked against a real staging response: the result
  * of a skin analysis (`data.results.output`), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the error body (`error_code`),
  * and the GET and delete paths.
@@ -67,6 +70,8 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
   // A body's key names go into the log of a rejected webhook, so only plain identifier-shaped ones, and few.
   private static readonly KEY_NAME_SHAPE = /^[A-Za-z0-9_]{1,40}$/
   private static readonly MAX_LOGGED_KEYS = 20
+  // A rejected task status is logged as written, so only an enum-like word.
+  private static readonly STATUS_SHAPE = /^[A-Za-z_-]{1,20}$/
   private static readonly WEBHOOK_HEADERS = ['webhook-id', 'webhook-timestamp', 'webhook-signature'] as const
   // A timestamp above this cannot be seconds before the year 5138, so the sender is counting milliseconds.
   private static readonly MILLISECOND_TIMESTAMP_FROM = 1e11
@@ -212,9 +217,15 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
     if (payload === undefined) return reject({ reason: 'bad-shape', problem: 'not-json', ...keys })
     const data = RestPerfectCorpClient.isObject(payload) ? payload.data : undefined
     if (!RestPerfectCorpClient.isObject(data)) return reject({ reason: 'bad-shape', problem: 'no-data', ...keys })
-    const { task_id: taskId, task_status: taskStatus } = data
+    // Perfect Corp sends camelCase; the documentation says snake_case. snake_case wins per field when it is usable.
+    const taskId = typeof data.task_id === 'string' && data.task_id !== '' ? data.task_id : data.taskId
+    // A status that is there but wrong does not fall back: it would let a stale spelling hide the real one.
+    const taskStatus = data.task_status !== undefined ? data.task_status : data.taskStatus
     if (typeof taskId !== 'string' || taskId === '') return reject({ reason: 'bad-shape', problem: 'no-task-id', ...keys })
-    if (taskStatus !== 'success' && taskStatus !== 'error') return reject({ reason: 'bad-shape', problem: 'bad-task-status', ...keys })
+    if (taskStatus !== 'success' && taskStatus !== 'error') {
+      const enumLike = typeof taskStatus === 'string' && RestPerfectCorpClient.STATUS_SHAPE.test(taskStatus)
+      return reject({ reason: 'bad-shape', problem: 'bad-task-status', ...(enumLike ? { taskStatusValue: taskStatus } : {}), ...keys })
+    }
     return { ok: true, delivery: { webhookId, taskId, taskStatus } }
   }
 

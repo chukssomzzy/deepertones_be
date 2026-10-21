@@ -77,7 +77,7 @@ export type VerifiedWebhook = { webhookId: string; taskId: string; taskStatus: '
 
 /**
  * Why a webhook delivery was refused. For the log, so it holds a reason, counts, yes-or-no flags and key names, and never the secret,
- * a signature, a header value or a value from the body.
+ * a signature, a header value or a value from the body (but for an enum-like task status, see `bad-task-status`).
  */
 export type WebhookRejection =
   | { reason: 'missing-headers'; missing: ('webhook-id' | 'webhook-timestamp' | 'webhook-signature')[] }
@@ -98,7 +98,9 @@ export type WebhookRejection =
       topLevelKeys: string[]
       dataKeys: string[]
     }
-  | { reason: 'bad-shape'; problem: 'not-json' | 'no-data' | 'no-task-id' | 'bad-task-status'; topLevelKeys: string[]; dataKeys: string[] }
+  | { reason: 'bad-shape'; problem: 'not-json' | 'no-data' | 'no-task-id'; topLevelKeys: string[]; dataKeys: string[] }
+  /** `taskStatusValue` is the status as sent, only when it is an enum-like word (letters, `_` and `-`, up to 20), so it is safe to log. */
+  | { reason: 'bad-shape'; problem: 'bad-task-status'; taskStatusValue?: string; topLevelKeys: string[]; dataKeys: string[] }
 
 export type WebhookCheck = { ok: true; delivery: VerifiedWebhook } | { ok: false; rejection: WebhookRejection }
 
