@@ -149,6 +149,8 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/onboarding',
         'PUT /api/v1/me/safety',
         'GET /api/v1/me/safety',
+        'PUT /api/v1/me/shopping',
+        'GET /api/v1/me/shopping',
         'PUT /api/v1/me/face-consent',
         'GET /api/v1/me/face-consent',
         'DELETE /api/v1/me/face-consent',
@@ -175,6 +177,8 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/webhooks/perfect-corp',
         'GET /api/v1/products/search',
         'GET /api/v1/onboarding/content',
+        'GET /api/v1/admin/catalog/export',
+        'POST /api/v1/admin/catalog/import',
       ].sort(),
     )
   })

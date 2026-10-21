@@ -8,6 +8,7 @@ import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
 import { D1CatalogWorkbookRepository } from './modules/catalog/catalog.workbook.repository'
+import { CatalogWorkbookService } from './modules/catalog/catalog.workbook.service'
 import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
 import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
 import { FaceScanService } from './modules/face-scans/face-scans.service'
@@ -23,6 +24,8 @@ import { D1OtpRepository } from './modules/otp/otp.repository'
 import { OtpService, parseOtpChannels } from './modules/otp/otp.service'
 import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
+import { D1RecommendationsRepository } from './modules/recommendations/recommendations.repository'
+import { RecommendationService } from './modules/recommendations/recommendations.service'
 import { D1SafetyRepository } from './modules/safety/safety.repository'
 import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
@@ -49,6 +52,7 @@ import { AnthropicProductRecognizer } from './providers/product-recognition/anth
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
 import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
+import { R2WorkbookArchive } from './providers/workbook-archive/r2.workbook-archive'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
 
@@ -154,6 +158,18 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  // The catalog workbook: the live rules, the countries and the approved products, and the admin export and import. The archive of each applied
+  // upload's .xlsx goes in the private bucket, under workbooks/<this environment>/.
+  const catalogWorkbook = once(
+    () =>
+      new CatalogWorkbookService({
+        repository: new D1CatalogWorkbookRepository(db()),
+        archive: new R2WorkbookArchive({ bucket: env.PRIVATE_PHOTOS, environment: photoEnvironment(env.ENVIRONMENT) }),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
+      }),
+  )
+
   // One producer for every job: each job's `queue` name picks its binding.
   const jobQueue = once(
     () =>
@@ -229,7 +245,7 @@ export const buildContainer = (env: CloudflareBindings) => {
   const faceCleaner = once(() => new FaceDataCleaner({ repository: new D1FaceScansRepository(db()), photos: privatePhotos() }))
 
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
-  // (push_tokens, notification_settings, profile_goals and profile_safety are not listed: their foreign keys cascade from users or profiles.)
+  // (push_tokens, notification_settings, profile_goals, profile_safety and profile_shopping are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
@@ -305,6 +321,20 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const recommendations = once(
+    () =>
+      new RecommendationService({
+        repository: new D1RecommendationsRepository(db()),
+        goals: goals(),
+        safety: safety(),
+        workbook: catalogWorkbook(),
+        faceScans: faceScans(),
+        catalog: catalog(),
+        now: () => new Date(),
+        newId: () => crypto.randomUUID(),
+      }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -327,6 +357,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     get catalog() {
       return catalog()
     },
+    get catalogWorkbook() {
+      return catalogWorkbook()
+    },
     get faceScans() {
       return faceScans()
     },
@@ -347,6 +380,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get profiles() {
       return profiles()
+    },
+    get recommendations() {
+      return recommendations()
     },
     get safety() {
       return safety()

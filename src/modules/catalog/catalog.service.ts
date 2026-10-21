@@ -7,7 +7,19 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
+import {
+  brandFirstWord,
+  brandKey,
+  identityKey,
+  lessSpecific,
+  lessSpecificForNearMiss,
+  namesAnotherEdition,
+  nearMissCandidates,
+  normaliseText,
+  pagesByNameMatch,
+  sameWords,
+  vaguerForNearMiss,
+} from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -205,6 +217,29 @@ export class ProductCatalogService {
   /** A form missing on either side is compatible (the label may simply not print it); two different known forms are different products. */
   private static formsCompatible = (a: string | null | undefined, b: string | null | undefined): boolean => !a || !b || a === b
 
+  /**
+   * Which near-miss candidates the judge is asked about: a reading strictly less specific than two or more of them
+   * ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either, so none are judged and a duplicate is
+   * made instead. When the reading gives a form and exactly one of those less-specific candidates shares it (any of a
+   * different known form was already dropped before `candidates` was built), the ones with no form recorded settle
+   * nothing: they are not counted towards the guard above, and are not judged either, so a vaguer, formless sibling
+   * never stands in front of the one candidate that already agrees on form. Specificity is judged with the
+   * suitability-phrase ignoring applied, on the same `allComparable` list and `threshold` `nearMissCandidates` saw,
+   * so a phrase that bought a candidate past the threshold (or kept one out) is seen the same way here.
+   */
+  private static ambiguityFiltered<P extends Product>(
+    identity: { brand: string; name: string; variant?: string; form?: string | null },
+    candidates: P[],
+    allComparable: P[],
+    threshold: number,
+  ): P[] {
+    const lessSpecificOnes = candidates.filter((c) => lessSpecificForNearMiss(identity, c, allComparable, threshold))
+    const sameForm = identity.form ? lessSpecificOnes.filter((c) => c.form === identity.form) : []
+    const exempt = sameForm.length === 1 ? lessSpecificOnes.filter((c) => !c.form) : []
+    const counted = exempt.length > 0 ? sameForm : lessSpecificOnes
+    return counted.length >= 2 ? [] : candidates.filter((c) => !exempt.includes(c))
+  }
+
   private static readonly SKIN_OR_BODY: ReadonlySet<ProductCategory> = new Set<ProductCategory>(['skin', 'body'])
 
   /**
@@ -316,9 +351,21 @@ export class ProductCatalogService {
       threshold: this.policy.nearMissThreshold,
       limit: this.policy.nearMissLimit,
     })
-    // A reading that says less than two or more candidates ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either: a duplicate is safer than a wrong merge.
-    const ambiguous = candidates.filter((c) => lessSpecific(identity, c)).length >= 2
-    for (const candidate of ambiguous ? [] : candidates) {
+    // A candidate with exactly the reading's words is not held back by the guard: when the guard holds the reading back from
+    // its longer look-alikes, the equal ones are still judged (a "no" then makes a new row); otherwise every candidate is judged
+    // as before, equal ones first (they sort first by similarity).
+    const equal = candidates.filter((c) => sameWords(identity, c))
+    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable, this.policy.nearMissThreshold)
+    // A reading that says less than one candidate ("Facial Moisturizing Lotion" against "PM Facial Moisturizing Lotion") is most likely a
+    // partial read of it: landing it on a row vaguer still ("Moisturizing Lotion") would be a guess, so that row is not asked about.
+    // "Says more" and "vaguer" are both weighed on the words the guard weighs, so a row that differs only by a suitability line the
+    // reading alone gives is its equal, judged as usual, not a vaguer row.
+    const threshold = this.policy.nearMissThreshold
+    const partialRead = candidates.some((c) => lessSpecificForNearMiss(identity, c, comparable, threshold))
+    const vaguer = (c: Product) => partialRead && vaguerForNearMiss(identity, c, comparable, threshold)
+    const others = filtered.filter((c) => !equal.includes(c) && !vaguer(c))
+    const toJudge = filtered.length === 0 ? equal : [...equal, ...others]
+    for (const candidate of toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         // A reading that says less than the product ("Hydro Boost"), or more than a vague row, or prints no form where the product does, would as an alias claim a
         // look-alike's next reading by exact key; only a reading of equal specificity is remembered.
@@ -646,6 +693,14 @@ export class ProductCatalogService {
       if (product) summaries.set(formulation.id, this.summaryOf(product))
     }
     return summaries
+  }
+
+  /**
+   * The ingredient list of the product's most recently found formulation, or null when it has none (never researched) or the catalog does not hold the
+   * product. For a caller that must go on without it (a product a user named): it asks no researcher and no model, and writes nothing.
+   */
+  async latestIngredients(productId: string): Promise<string[] | null> {
+    return (await this.repository.latestFormulation(productId))?.ingredients ?? null
   }
 
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */

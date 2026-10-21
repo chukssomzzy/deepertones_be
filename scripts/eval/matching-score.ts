@@ -1,5 +1,5 @@
 import type { StockImageOutcome } from '../../src/modules/catalog/catalog.service'
-import { sameBrandFamily } from '../../src/modules/catalog/catalog.identity'
+import { nameSimilarity, sameBrandFamily } from '../../src/modules/catalog/catalog.identity'
 import type { Verdicts } from './matching-set'
 
 // Pure scoring for `npm run eval:matching` (see matching.ts): what the photos did to the catalog, and whether the targets held.
@@ -223,13 +223,13 @@ export const scoreImages = (outcomes: ImageOutcome[], verdicts: Verdicts): Image
 /** A shelf photo holds at most this many listed products (the shelf prompt's cap), so a photo with more is not expected to find them all. */
 const SHELF_PRODUCT_CAP = 5
 
-/** A product labelled in a shelf photo: `rowId` is the row it was seeded as, `inSet` whether it is a product of the single set. */
-export type ShelfLabelled = { id: string; rowId: string; brand: string; inSet: boolean }
+/** A product labelled in a shelf photo (its label's name and variant): `rowId` is the row it was seeded as, `inSet` whether it is a product of the single set. */
+export type ShelfLabelled = { id: string; rowId: string; brand: string; name: string; variant?: string | null; inSet: boolean }
 /**
  * A product the recognizer listed: the row it resolved to, or null when resolve created a row. `onCreatedRow` marks a row an earlier
  * listing of the same photo created (the same product listed twice), which is a repeat, never a wrong merge.
  */
-export type ShelfListed = { brand: string; landed: string | null; onCreatedRow?: true }
+export type ShelfListed = { brand: string; name: string; variant?: string | null; landed: string | null; onCreatedRow?: true }
 /** One shelf photo's labels and what was listed, in run order. `error` is the class name of a failed recognition. */
 export type ShelfPhotoInput = { photo: string; labelled: ShelfLabelled[]; listed: ShelfListed[]; error?: string }
 
@@ -288,7 +288,11 @@ const scoreShelfPhoto = (input: ShelfPhotoInput): { score: ShelfPhotoScore; foun
   const misread = new Set<string>()
   const outcomes: ShelfOutcome[] = listed.map((item): ShelfOutcome => {
     if (item.landed === null) {
-      const target = labelled.find((l) => !found.has(l.id) && !misread.has(l.id) && sameBrandFamily(l.brand, item.brand))
+      // Blamed on the unfound product of the family it reads most like (earliest in label order on a tie), not simply the first:
+      // label order puts single-set products first, which would charge an unlisted one with every look-alike's misread.
+      const target = labelled
+        .filter((l) => !found.has(l.id) && !misread.has(l.id) && sameBrandFamily(l.brand, item.brand))
+        .reduce<ShelfLabelled | undefined>((best, l) => (best === undefined || nameSimilarity(l, item) > nameSimilarity(best, item) ? l : best), undefined)
       if (!target) return 'invented'
       misread.add(target.id)
       return 'misread'

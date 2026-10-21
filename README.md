@@ -169,7 +169,7 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET` to staging and production before this lands). See [Face scan setup](#face-scan-setup-perfect-corp) for the last two. `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `ADMIN_API_TOKEN`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `ADMIN_API_TOKEN` to staging and production before this lands). See [Face scan setup](#face-scan-setup-perfect-corp) for the last two. `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET`, `DEVICE_ID_KEY` and `ADMIN_API_TOKEN` (the `X-Admin-Token` of the `/api/v1/admin` catalog routes; it must differ per environment) with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
 ## Product catalog setup
@@ -196,7 +196,7 @@ bucket, which serves no public URL, so product views show no image. For `wrangle
 ### Private photo storage
 
 Users' product photos go to the private R2 bucket `deepertones-private` (binding `PRIVATE_PHOTOS`), one bucket for every
-environment, keys under `photos/<environment>/`. The bucket already exists (created 2026-10-15), so there is nothing to do:
+environment, keys under `photos/<environment>/` (and `faces/<environment>/` for face scans). The catalog workbook archive, the `.xlsx` of every applied catalog upload, lives in the same bucket under `workbooks/<environment>/` and is kept for good, so set no bucket-wide lifecycle rule (expiry or deletion) on it. The bucket already exists (created 2026-10-15), so there is nothing to do:
 no bucket, domain or secret to create. Keep it private: never attach a custom domain or enable r2.dev. Design in
 "Private photos" in `docs/architecture.md`.
 
@@ -244,7 +244,7 @@ database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.m
 Both commands read `ADMIN_API_TOKEN` from the environment's vars file: `.dev.vars` for `local`, `.dev.vars.staging` and `.dev.vars.production` for the
 deployed ones (the same gitignored files as above). The token is sent only in the `X-Admin-Token` header and is never printed.
 
-- **Creating or rotating the token:** generate a long random value (for example `openssl rand -base64 48`), put it in `.dev.vars.<env>` as
+- **Creating or rotating the token:** generate a long random value (`openssl rand -hex 32`, as for the other secrets), put it in `.dev.vars.<env>` as
   `ADMIN_API_TOKEN`, and push it with `npm run secrets:push -- --env <env> --apply`. To rotate, replace the value and push again; the old value stops
   working as soon as the Worker has the new one. For `local`, the value in `.dev.vars` is what `wrangler dev` reads.
 - **A file only goes back where it came from.** The export stamps the environment, the catalog version and the contract version into the hidden `_meta`

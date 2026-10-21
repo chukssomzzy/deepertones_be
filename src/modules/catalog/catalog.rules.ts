@@ -29,16 +29,29 @@ const KIND_RANK: Record<ConcernKind, number> = {
   drying: 9,
 }
 
-/**
- * Checks each ingredient against `rules` (the live approved ones; REFERENCE is the seed and the eval's fixture), in label order. An
- * ingredient is matched by its whole name and by the parts either side of a bracket, and yields at most one fact per kind.
- */
-export const flagFacts = (ingredients: string[], rules: readonly ReferenceEntry[]): FlaggedFact[] => {
+// The label map is the same for every product checked against one rules array (the live rules are one array per rules version), so it is built once
+// per array and not once per product. A WeakMap, so a replaced rules array takes its map with it.
+const labelMaps = new WeakMap<readonly ReferenceEntry[], Map<string, ReferenceEntry[]>>()
+
+const labelMapOf = (rules: readonly ReferenceEntry[]): Map<string, ReferenceEntry[]> => {
+  const known = labelMaps.get(rules)
+  if (known) return known
   const byLabel = new Map<string, ReferenceEntry[]>()
   for (const entry of rules) {
     for (const label of [entry.name, ...entry.aliases]) byLabel.set(label, [...(byLabel.get(label) ?? []), entry])
   }
   for (const entries of byLabel.values()) entries.sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind])
+  labelMaps.set(rules, byLabel)
+  return byLabel
+}
+
+/**
+ * Checks each ingredient against `rules` (the live approved ones; REFERENCE is the seed and the eval's fixture), in label order. An
+ * ingredient is matched by its whole name and by the parts either side of a bracket, and yields at most one fact per kind. `rules` is not
+ * changed after it is passed (a new rules version is a new array).
+ */
+export const flagFacts = (ingredients: string[], rules: readonly ReferenceEntry[]): FlaggedFact[] => {
+  const byLabel = labelMapOf(rules)
   const facts: FlaggedFact[] = []
   for (const ingredient of ingredients) {
     const seen = new Set<ConcernKind>()

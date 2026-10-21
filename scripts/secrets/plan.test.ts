@@ -52,6 +52,7 @@ describe('parseEnvFile', () => {
 describe('SECRETS', () => {
   it('lists exactly the known secrets, with the right ones required', () => {
     expect(Object.keys(SECRETS).sort()).toEqual([
+      'ADMIN_API_TOKEN',
       'ANTHROPIC_API_KEY',
       'DEVICE_ID_KEY',
       'EXPO_ACCESS_TOKEN',
@@ -72,13 +73,15 @@ describe('SECRETS', () => {
     // The analysis job and the webhook route read them, so a deploy without them must be caught.
     expect(SECRETS.PERFECT_CORP_API_KEY!.required).toBe(true)
     expect(SECRETS.PERFECT_CORP_WEBHOOK_SECRET!.required).toBe(true)
+    // The admin catalog routes read it, so a deploy without it would leave the door locked for everyone, or worse.
+    expect(SECRETS.ADMIN_API_TOKEN!.required).toBe(true)
     expect(SECRETS.JWT_SECRET_PREVIOUS!.required).toBe(false)
     expect(SECRETS.WHATSAPP_ACCESS_TOKEN!.required).toBe(false)
   })
 })
 
 describe('planSecretPush', () => {
-  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak', EXPO_ACCESS_TOKEN: 'ek', PERFECT_CORP_API_KEY: 'pk', PERFECT_CORP_WEBHOOK_SECRET: 'ws' }
+  const good = { ZEPTOMAIL_API_KEY: 'zk', OTP_PEPPER: 'pepper-a', JWT_SECRET: 'jwt', DEVICE_ID_KEY: 'dk', ANTHROPIC_API_KEY: 'ak', EXPO_ACCESS_TOKEN: 'ek', PERFECT_CORP_API_KEY: 'pk', PERFECT_CORP_WEBHOOK_SECRET: 'ws', ADMIN_API_TOKEN: 'at' }
 
   it('sends known secrets that have a value', () => {
     const plan = planSecretPush({ values: map({ ...good, WHATSAPP_ACCESS_TOKEN: 'wa' }) })
@@ -119,6 +122,7 @@ describe('planSecretPush', () => {
 
   it('warns, without erroring, about required secrets that are absent or blank (sorted)', () => {
     expect(planSecretPush({ values: map({}) }).missingRequired).toEqual([
+      'ADMIN_API_TOKEN',
       'ANTHROPIC_API_KEY',
       'DEVICE_ID_KEY',
       'EXPO_ACCESS_TOKEN',
@@ -228,6 +232,12 @@ describe('drift between wrangler.jsonc and the secrets table', () => {
       expect(NOT_SECRETS, name).not.toHaveProperty(name)
       expect(SECRETS[name]!.reason.length, name).toBeGreaterThan(0)
     }
+  })
+
+  it('lists ADMIN_API_TOKEN as a secret, never as config: a value in .dev.vars is sent, not skipped, and says which module reads it', () => {
+    expect(SECRETS).toHaveProperty('ADMIN_API_TOKEN')
+    expect(NOT_SECRETS).not.toHaveProperty('ADMIN_API_TOKEN')
+    expect(SECRETS.ADMIN_API_TOKEN!.reason.length).toBeGreaterThan(0)
   })
 
   it('no longer lists ANTHROPIC_MODEL, which wrangler.jsonc replaced with one variable per job', () => {
