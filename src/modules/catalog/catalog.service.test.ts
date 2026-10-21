@@ -4602,3 +4602,162 @@ describe('ProductCatalogService.resolve: a row whose identity key the code no lo
     expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
   })
 })
+
+// Invented brands and names on purpose: the rules are general, not fixes for any product the eval happens to hold.
+
+/** The names of the candidates the judge was asked about since `before`, in the order it was asked. */
+const askedSince = (ctx: Ctx, before: number) => ctx.analyst.calls.sameProduct.slice(before).map(([, candidate]) => candidate.name)
+
+describe('ProductCatalogService.resolve: a reading with the same words as one of several candidates', () => {
+  const GLOWCO = { brand: 'Glowco', category: 'body', form: 'lotion' } as const
+  /** The reading: the same words as the UK row, and less specific than the Daily and Night ones. */
+  const READING = identity({ ...GLOWCO, name: 'Moisturizing Lotion' })
+  const UK_SPELLING = 'Moisturising Lotion'
+  const LONGER = ['Daily Moisturizing Lotion', 'Night Moisturizing Lotion']
+  /** The same three words again, the recognizer having read "Lotion" as the variant: equal to the reading because the words are pooled. */
+  const SPLIT_ROW = { name: 'Moisturizing', variant: 'Lotion' }
+
+  /** Stores the rows through resolve, oldest first, so each is a real row of the brand. The judge says "different" while they are made. */
+  const catalogued = async (ctx: Ctx, rows: { name: string; variant?: string }[]) => {
+    const ids: Record<string, string> = {}
+    for (const row of rows) {
+      ids[row.name] = (await ctx.service.resolve(identity({ ...GLOWCO, name: row.name, ...(row.variant ? { variant: row.variant } : {}) }))).productId
+      ctx.advance(MINUTE)
+    }
+    return ids
+  }
+  const named = (...names: string[]) => names.map((name) => ({ name }))
+
+  it('judges only the row with the same words, and a "yes" lands the reading on it and records the alias', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, named(UK_SPELLING, ...LONGER))
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([UK_SPELLING])
+    expect(result.productId).toBe(ids[UK_SPELLING])
+    expect(await ctx.repository.findProductByKey(identityKey(READING))).toMatchObject({ id: ids[UK_SPELLING] })
+  })
+
+  it('makes a new row on a "no", having never judged the longer rows', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, named(UK_SPELLING, ...LONGER))
+    ctx.analyst.sameProductWith(() => false)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([UK_SPELLING])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  it('judges every row with the same words, and lands on the one the judge confirms', async () => {
+    // Four candidates, so the limit is raised: at three the Night row would fall outside it and the guard would not fire today either.
+    const ctx = setup({ policy: { nearMissLimit: 4 } })
+    const ids = await catalogued(ctx, [...named(UK_SPELLING), SPLIT_ROW, ...named(...LONGER)])
+    ctx.analyst.sameProductWith((_reading, candidate) => candidate.name === SPLIT_ROW.name)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([UK_SPELLING, SPLIT_ROW.name])
+    expect(result.productId).toBe(ids[SPLIT_ROW.name])
+  })
+
+  // Guards the ambiguity guard itself: without a row of the same words, a reading less specific than two rows is still held back.
+  it('is still held back, with no judge call, when no candidate has the same words', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, named(...LONGER))
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  // The same words means the full words: a row that differs only by a suitability line is not the reading's equal, so the guard still applies.
+  it('is still held back when the nearest row differs by a suitability line', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, named(`${UK_SPELLING} for Dry Skin`, ...LONGER))
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+})
+
+describe('ProductCatalogService.resolve: a candidate with the reading\'s form against candidates with none', () => {
+  const OAKLEAF = { brand: 'Oakleaf', category: 'body' } as const
+  const WITH_FORM = 'Shea Comfort Body Oil'
+  const NO_FORM = 'Shea Comfort Solid Jar'
+  const SECOND_WITH_FORM = 'Shea Comfort Night Oil'
+  /** The reading: less specific than every row below, and it prints its form. */
+  const READING = identity({ ...OAKLEAF, name: 'Shea Comfort', form: 'oil' })
+
+  /** Stores the rows through resolve, oldest first. A row given no form is one whose pack never showed it. */
+  const catalogued = async (ctx: Ctx, rows: [name: string, form?: 'oil'][]) => {
+    const ids: Record<string, string> = {}
+    for (const [name, form] of rows) {
+      ids[name] = (await ctx.service.resolve(identity({ ...OAKLEAF, name, ...(form ? { form } : {}) }))).productId
+      ctx.advance(MINUTE)
+    }
+    return ids
+  }
+
+  it('judges only the row of the reading\'s form, and a "yes" lands the reading on it, with no alias for the less specific reading', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [[WITH_FORM, 'oil'], [NO_FORM]])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([WITH_FORM])
+    expect(result.productId).toBe(ids[WITH_FORM])
+    expect(await ctx.repository.findProductByKey(identityKey(READING))).toBeNull()
+  })
+
+  it('makes a new row on a "no", having never judged the row with no form', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [[WITH_FORM, 'oil'], [NO_FORM]])
+    ctx.analyst.sameProductWith(() => false)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([WITH_FORM])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  // Guards the ambiguity guard itself: two rows of the reading's form cannot be told apart, so neither is judged.
+  it('is still held back, with no judge call, when two candidates have the reading\'s form', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [[WITH_FORM, 'oil'], [SECOND_WITH_FORM, 'oil']])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(READING)
+
+    expect(askedSince(ctx, before)).toEqual([])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+
+  it('is still held back when the reading itself prints no form', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [[WITH_FORM, 'oil'], [NO_FORM]])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(identity({ ...OAKLEAF, name: 'Shea Comfort' }))
+
+    expect(askedSince(ctx, before)).toEqual([])
+    expect(Object.values(ids)).not.toContain(result.productId)
+  })
+})
