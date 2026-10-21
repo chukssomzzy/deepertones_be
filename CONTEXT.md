@@ -188,6 +188,16 @@ The reviewed set of products the app may suggest adding to a routine, each descr
 types it suits, its safety notes and the countries it is sold in. A product reaches it only through review.
 _Avoid_: Formulary, catalog (alone), shop
 
+**Ingredient rule**:
+A reviewed statement that an ingredient carries a caution, and when (for example, retinoids in pregnancy), with its source.
+Ingredient rules decide whether a product is safe for a user; a product row's own claims can only make it stricter.
+_Avoid_: Reference entry, flag
+
+**Catalog workbook**:
+The reviewed spreadsheet, with a Products tab and an Ingredients tab, that is the source of the recommendation catalog and of
+the ingredient rules. Each row has a stable code.
+_Avoid_: Dataset, master sheet, CSV
+
 **Approved**:
 A recommendation catalog row the team has signed off, which makes the product recommendable. It names who approved it and when.
 _Avoid_: Verified, certified, dermatologist-approved
