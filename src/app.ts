@@ -13,6 +13,7 @@ import { cors } from './middleware/cors'
 import { requestContext } from './middleware/request-context'
 import { authRoutes, meRoutes } from './modules/auth/auth.routes'
 import { productRoutes } from './modules/catalog/catalog.routes'
+import { adminCatalogRoutes } from './modules/catalog/catalog.workbook.routes'
 import { faceConsentRoutes, faceScanRoutes, webhookRoutes } from './modules/face-scans/face-scans.routes'
 import { goalsRoutes } from './modules/goals/goals.routes'
 import { healthRoutes } from './modules/health/health.routes'
@@ -48,6 +49,7 @@ const v1 = openapiApp()
   .route(PRODUCT_SCANS_PATH, scanRoutes)
   .route(FACE_SCANS_PATH, faceScanRoutes)
   .route('/webhooks', webhookRoutes)
+  .route('/admin', adminCatalogRoutes)
 const routes = app.route('/health', healthRoutes).route(API_V1_PREFIX, v1)
 
 mountDocs(app)

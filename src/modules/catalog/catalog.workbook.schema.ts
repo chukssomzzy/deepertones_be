@@ -26,14 +26,15 @@ import {
 // is plain JSON (a pattern is a string), so it can be fingerprinted, and `npm run catalog:contract-doc` writes it out for the people who fill the
 // workbook in. Change it, and the version, fingerprint and that document all have to move with it.
 // The file is `.schema.ts`, not `.contract.ts`: dependency-cruiser treats a `*.contract.ts` as test-only, and the import service has to use this.
+// The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
 export const CONTRACT_VERSION = '1.0.0'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
-/** One row, keyed by its header names. A key the row leaves out is an empty cell. */
-export type RawRow = Record<string, Cell>
+/** One row, keyed by its header names. A key the row leaves out is an empty cell, so reading one may give undefined. */
+export type RawRow = Record<string, Cell | undefined>
 /** A tab as a spreadsheet library gives it: the header row, and the rows below it. The headers say what the columns are, whatever keys the rows have. */
 export type RawTab = { headers: string[]; rows: RawRow[] }
 export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab }

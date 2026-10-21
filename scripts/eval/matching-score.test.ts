@@ -465,12 +465,17 @@ describe('duplicateUnitCost', () => {
 })
 
 // scoreShelf takes one ShelfPhotoInput per shelf photo, in run order:
-//   { photo, labelled: [{ id, rowId, brand, inSet }] in label order, listed: [{ brand, landed }] in listed order, error? }
+//   { photo, labelled: [{ id, rowId, brand, name, inSet }] in label order, listed: [{ brand, name, landed }] in listed order, error? }
 // `rowId` is the row the labelled product was seeded as; `landed` is the row a listed product resolved to, or null when resolve created a row.
+
+// Every fixture that does not say otherwise gives each product the same name, so no reading is more like one labelled
+// product than another and attribution falls back to label order.
+const NAME = 'Day Cream'
+
 describe('scoreShelf', () => {
-  const lab = (id: string, brand = 'Acme', inSet = true) => ({ id, rowId: `row-${id}`, brand, inSet })
-  const onRow = (id: string, brand = 'Acme') => ({ brand, landed: `row-${id}` })
-  const created = (brand = 'Acme') => ({ brand, landed: null })
+  const lab = (id: string, brand = 'Acme', inSet = true, name = NAME) => ({ id, rowId: `row-${id}`, brand, name, inSet })
+  const onRow = (id: string, brand = 'Acme', name = NAME) => ({ brand, name, landed: `row-${id}` })
+  const created = (brand = 'Acme', name = NAME) => ({ brand, name, landed: null })
   const shelf = (photo: string, labelled: ShelfPhotoInput['labelled'], listed: ShelfPhotoInput['listed'], error?: string): ShelfPhotoInput => ({ photo, labelled, listed, ...(error ? { error } : {}) })
   const first = (score: ReturnType<typeof scoreShelf>) => score.photos[0]!
 
@@ -489,7 +494,7 @@ describe('scoreShelf', () => {
   })
 
   it('counts a listed product that landed on a row of a product not in the photo as a wrong row', () => {
-    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [{ brand: 'Acme', landed: 'row-elsewhere' }])])
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [{ brand: 'Acme', name: NAME, landed: 'row-elsewhere' }])])
 
     expect(first(score)).toMatchObject({ found: 0, wrongRows: 1, misread: 0, invented: 0, missing: ['p1'] })
     expect(first(score).outcomes).toEqual(['wrong-row'])
@@ -516,7 +521,7 @@ describe('scoreShelf', () => {
     expect(first(score).outcomes).toEqual(['found', 'invented'])
   })
 
-  it('attributes each misread to the next unfound same-brand product in label order, so two created rows are two misreads and a third is invented', () => {
+  it('attributes each misread to another unfound same-brand product, so two created rows are two misreads and a third is invented', () => {
     const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2')], [created(), created(), created()])])
 
     expect(first(score)).toMatchObject({ misread: 2, invented: 1, missing: ['p1', 'p2'] })
@@ -524,7 +529,7 @@ describe('scoreShelf', () => {
   })
 
   it('scores a product listed again onto the row an earlier listing of this photo created as a repeat, not a wrong merge', () => {
-    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [created(), { brand: 'Acme', landed: 'made-1', onCreatedRow: true }])])
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [created(), { brand: 'Acme', name: NAME, landed: 'made-1', onCreatedRow: true }])])
 
     expect(first(score).outcomes).toEqual(['misread', 'repeat'])
     expect(first(score)).toMatchObject({ wrongRows: 0, repeat: 1 })
@@ -568,7 +573,7 @@ describe('scoreShelf', () => {
   it('totals repeat, misread, invented and wrong rows across photos', () => {
     const score = scoreShelf([
       shelf('a.jpg', [lab('a1')], [onRow('a1'), onRow('a1'), created('Zed')]),
-      shelf('b.jpg', [lab('b1')], [created(), { brand: 'Acme', landed: 'row-elsewhere' }]),
+      shelf('b.jpg', [lab('b1')], [created(), { brand: 'Acme', name: NAME, landed: 'row-elsewhere' }]),
     ])
 
     expect(score).toMatchObject({ found: 1, repeat: 1, invented: 1, misread: 1, wrongRows: 1 })
@@ -590,7 +595,7 @@ describe('scoreShelf', () => {
   })
 
   it('does not count a wrong row in same-row: its landed row is not a product of the photo, so it cannot be attributed', () => {
-    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), { brand: 'Acme', landed: 'row-elsewhere' }])])
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), { brand: 'Acme', name: NAME, landed: 'row-elsewhere' }])])
 
     expect(score).toMatchObject({ found: 1, wrongRows: 1 })
     expect(score.sameRow).toBe(1)
@@ -634,6 +639,95 @@ describe('scoreShelf', () => {
   it('has evidence once one photo was read, even if it listed nothing', () => {
     expect(scoreShelf([shelf('a.jpg', [lab('p1')], [])]).evidence).toBe(true)
   })
+
+  // ---- which labelled product a created row is blamed for ----
+  // The brand family narrows the candidates to the unfound ones; `nameSimilarity` (src/modules/catalog/catalog.identity.ts)
+  // chooses among them, and label order only breaks a tie. Which one was blamed is visible from outside through its in-set
+  // flag: a misread of an in-set product joins the same-row denominator, a misread of an out-of-set product does not. So
+  // every fixture here also has one in-set product found, to keep the numerator real.
+  const BRAND = 'Zolara'
+  const OTHER_BRAND = 'Mirelle'
+  const product = (id: string, name: string, inSet = true, brand = BRAND) => lab(id, brand, inSet, name)
+  const onItsRow = (p: ReturnType<typeof product>) => onRow(p.id, p.brand, p.name)
+  const reading = (name: string, brand = BRAND) => created(brand, name)
+
+  it('blames a created row on the unfound same-family product its name is most like, not on the first one in label order', () => {
+    const cream = product('cream', 'Leave In Moisture Cream')
+    const shampoo = product('shampoo', 'Clarifying Shampoo', false)
+    const milk = product('milk', 'Hair Milk Lotion')
+    // The reading is word for word the shampoo (similarity 1); the cream shares only the brand word (1 of 7).
+    const score = scoreShelf([shelf('a.jpg', [cream, shampoo, milk], [onItsRow(milk), reading('Clarifying Shampoo')])])
+
+    expect(first(score)).toMatchObject({ found: 1, misread: 1, invented: 0, missing: ['cream', 'shampoo'] })
+    expect(first(score).outcomes).toEqual(['found', 'misread'])
+    // The blamed shampoo is out of set, so same-row is the in-set milk alone: 1 of 1.
+    expect(score.sameRow).toBe(1)
+  })
+
+  it('blames the most similar product even when an out-of-set product of the family comes earlier in label order', () => {
+    const shampoo = product('shampoo', 'Clarifying Shampoo', false)
+    const cream = product('cream', 'Leave In Moisture Cream')
+    const milk = product('milk', 'Hair Milk Lotion')
+    const score = scoreShelf([shelf('a.jpg', [shampoo, cream, milk], [onItsRow(milk), reading('Leave In Moisture Cream')])])
+
+    expect(first(score)).toMatchObject({ found: 1, misread: 1, invented: 0 })
+    // The blamed cream is in set: 1 found in-set over that found plus this misread.
+    expect(score.sameRow).toBeCloseTo(0.5, 10)
+  })
+
+  it('breaks a tie in similarity by label order', () => {
+    const serum = product('serum', 'Night Repair Serum')
+    const glow = product('glow', 'Morning Glow Lotion', false)
+    const milk = product('milk', 'Hair Milk Lotion')
+    // Neither candidate shares a word with the reading beyond the brand, and all three pool 4 words: 1 of 7 each, exactly.
+    const score = scoreShelf([shelf('a.jpg', [serum, glow, milk], [onItsRow(milk), reading('Vitamin C Drops')])])
+
+    expect(first(score)).toMatchObject({ misread: 1, invented: 0 })
+    // The tie goes to the earlier serum, which is in set: 1 of 2.
+    expect(score.sameRow).toBeCloseTo(0.5, 10)
+  })
+
+  it('passes over the product a reading is most like once it has been found, and blames an unfound one instead', () => {
+    const shampoo = product('shampoo', 'Clarifying Shampoo')
+    const cream = product('cream', 'Leave In Moisture Cream', false)
+    const score = scoreShelf([shelf('a.jpg', [shampoo, cream], [onItsRow(shampoo), reading('Clarifying Shampoo')])])
+
+    expect(first(score)).toMatchObject({ found: 1, misread: 1, invented: 0, missing: ['cream'] })
+    // The only unfound product left is the out-of-set cream, so the misread stays out of same-row: 1 of 1.
+    expect(score.sameRow).toBe(1)
+  })
+
+  it("considers only the reading's own brand family, even when another family holds the better name match", () => {
+    const twin = product('twin', 'Clarifying Shampoo', true, OTHER_BRAND)
+    const oil = product('oil', 'Deep Repair Oil', false)
+    const milk = product('milk', 'Hair Milk Lotion')
+    const score = scoreShelf([shelf('a.jpg', [twin, oil, milk], [onItsRow(milk), reading('Clarifying Shampoo')])])
+
+    expect(first(score)).toMatchObject({ misread: 1, invented: 0, missing: ['twin', 'oil'] })
+    // The identically named Mirelle product is another family, so the out-of-set Zolara oil is blamed: same-row keeps 1 of 1.
+    expect(score.sameRow).toBe(1)
+  })
+
+  it("calls a created row invented when its own family holds no unfound product, however like another family's it reads", () => {
+    const shampoo = product('shampoo', 'Clarifying Shampoo')
+    const twin = product('twin', 'Clarifying Shampoo', true, OTHER_BRAND)
+    const score = scoreShelf([shelf('a.jpg', [shampoo, twin], [onItsRow(shampoo), reading('Clarifying Shampoo')])])
+
+    expect(first(score)).toMatchObject({ found: 1, misread: 0, invented: 1, missing: ['twin'] })
+    expect(first(score).outcomes).toEqual(['found', 'invented'])
+    expect(score.sameRow).toBe(1)
+  })
+
+  it('does not blame one product for two created rows: the second falls to the next unfound product of the family', () => {
+    const shampoo = product('shampoo', 'Clarifying Shampoo', false)
+    const cream = product('cream', 'Leave In Moisture Cream')
+    const milk = product('milk', 'Hair Milk Lotion')
+    const score = scoreShelf([shelf('a.jpg', [shampoo, cream, milk], [onItsRow(milk), reading('Clarifying Shampoo'), reading('Clarifying Shampoo')])])
+
+    expect(first(score).outcomes).toEqual(['found', 'misread', 'misread'])
+    // The first reading blames the out-of-set shampoo, the second the in-set cream: 1 found in-set over 1 found plus 1 misread.
+    expect(score.sameRow).toBeCloseTo(0.5, 10)
+  })
 })
 
 describe('judge with shelf', () => {
@@ -641,15 +735,15 @@ describe('judge with shelf', () => {
   const shelfWith = (found: number, extra: { misread?: number; invented?: number; wrong?: number; error?: string } = {}) => {
     const photos: ShelfPhotoInput[] = Array.from({ length: 4 }, (_, p) => ({
       photo: `p${p}.jpg`,
-      labelled: Array.from({ length: 5 }, (_, i) => ({ id: `p${p}-${i}`, rowId: `row-p${p}-${i}`, brand: 'Acme', inSet: true })),
+      labelled: Array.from({ length: 5 }, (_, i) => ({ id: `p${p}-${i}`, rowId: `row-p${p}-${i}`, brand: 'Acme', name: NAME, inSet: true })),
       listed: [],
     }))
     let index = 0
     const at = () => photos[Math.floor(index / 5)]!
-    for (; index < found; index++) at().listed.push({ brand: 'Acme', landed: `row-${at().labelled[index % 5]!.id}` })
-    for (let m = 0; m < (extra.misread ?? 0); m++, index++) at().listed.push({ brand: 'Acme', landed: null })
-    for (let i = 0; i < (extra.invented ?? 0); i++) photos[0]!.listed.push({ brand: 'Zed', landed: null })
-    for (let w = 0; w < (extra.wrong ?? 0); w++) photos[0]!.listed.push({ brand: 'Acme', landed: 'row-elsewhere' })
+    for (; index < found; index++) at().listed.push({ brand: 'Acme', name: NAME, landed: `row-${at().labelled[index % 5]!.id}` })
+    for (let m = 0; m < (extra.misread ?? 0); m++, index++) at().listed.push({ brand: 'Acme', name: NAME, landed: null })
+    for (let i = 0; i < (extra.invented ?? 0); i++) photos[0]!.listed.push({ brand: 'Zed', name: NAME, landed: null })
+    for (let w = 0; w < (extra.wrong ?? 0); w++) photos[0]!.listed.push({ brand: 'Acme', name: NAME, landed: 'row-elsewhere' })
     if (extra.error) photos[3]!.error = extra.error
     return scoreShelf(photos)
   }

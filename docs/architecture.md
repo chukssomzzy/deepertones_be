@@ -58,6 +58,7 @@ src/
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
     (push/ sends push notifications: a PushSender port, the Expo adapter, a memory fake. See "Push notifications (Expo)".)
+    (workbook-archive/ keeps the .xlsx of each applied catalog upload in the private bucket: a WorkbookArchive port, an R2 adapter, a memory fake. See "Catalog workbook import".)
     (perfect-corp/ reaches Perfect Corp (YouCam) for the face scan: a PerfectCorpClient port with its error classes, the REST adapter, a memory
      fake, and the VendorSpendLedger port. See "Perfect Corp provider" and "Vendor spend ledger".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
@@ -290,11 +291,11 @@ columns cannot leak by accident, and `AppType` (the frontend's typed client) ref
 Every route is declared with `defineRoute()` on an `openapiApp()` (`lib/openapi.ts`, built on
 `@hono/zod-openapi`). The same zod schemas validate requests, generate the spec and type the
 handler, so the compiler rejects a handler that returns a status or body its route does not
-declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
+declare: the docs cannot drift from the code. `AppType`/`hc` keep working. A route's `security` names how it is guarded: `bearerAuth` for a user's access token, `adminToken` (the `X-Admin-Token` header) for the `/api/v1/admin` routes, `[]` for a public one.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`, `/admin`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
 `client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products`, `client.api.v1.onboarding` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
@@ -1479,7 +1480,8 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
 - **One private bucket for every environment.** `deepertones-private`, bound as `PRIVATE_PHOTOS` in all three
   `wrangler.jsonc` blocks, next to the public `CATALOG_IMAGES`, never in its place. It has no public domain and r2.dev
   is off, so the only way out is a signed photo link. Environments are told apart by key prefix, as in the public
-  bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket.
+  bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket. **It also holds the catalog workbook archive**, `workbooks/<environment>/<version>-<uuid>.xlsx` (see "Catalog workbook import"): those files are kept for good,
+  so no bucket-wide lifecycle rule (expiry or deletion) may be set on the bucket, and the photo sweeps never reach them (they delete by `photos/` and `faces/` key only).
 - **Key layout.** Product photos are `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`. Face photos are
   `faces/<environment>/<user id>/<profile id>/<scan id>/<name>`: `<name>` is `front.jpg`, `right.jpg` or `left.jpg`, or `mask-<concern>.png` for an
   overlay mask, and exactly three id segments sit between the environment and the name. The profile is in the key so a photo link can be checked
@@ -1561,12 +1563,43 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   centre and grey. No generic suffix rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is
   whole-word, so "greyhound" and "centred" do not either. The fold lives in the one shared word set (`words`, pooling
   brand, name and variant), so it reaches `nameSimilarity`, containment, `lessSpecific` and the edition check
-  (`namesAnotherEdition`) alike — and through `lessSpecific`, the ambiguity guard and the alias-equality check too.
+  (`namesAnotherEdition`) alike — and through `lessSpecific` and `lessSpecificForNearMiss`, the alias-equality check
+  and the ambiguity guard too.
   That is intended: a UK reading is treated exactly as its US spelling would be, so a UK reading less specific than
   two US rows of different ranges is held back just as the US reading is, and a UK reading landing on a US row by an
   equally-specific match is aliased just as the US spelling would be. `identityKey` never folds, so a UK and a US
-  reading keep different keys until the judge is asked. Best first by
-  similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
+  reading keep different keys until the judge is asked. **A suitability phrase named on only one side is ignored here**
+  ("for" then up to 3 words then "hair" or "skin", optionally followed by "type"/"types" — "for Natural Hair", "for All
+  Hair Types", "for Normal to Oily Skin"; four words between "for" and the hair/skin word is too many to be the phrase,
+  so nothing is set aside). **An edition marker is not a suitability line:** a phrase whose words between "for" and
+  "hair"/"skin" include any of men, mens, man, mans, women, womens, woman, womans, kids, kid, baby, babys, babies, child,
+  childs, children, childrens, teen, teens, boys, boy, girls, girl, ladies, lady, gents, gent, toddler, toddlers, infant,
+  infants ("for Men's Skin", "for Kids Hair", "for Boys Hair") is never treated as the phrase and never
+  set aside — it names an edition of the range, a real difference, not the pack's wording of the same suitability
+  (apostrophes are already dropped by `normaliseText`, so "men's" reads as "mens"). The phrase is dropped from the
+  similarity ratio and the containment check only when exactly one of the two listings gives one; the same phrase on
+  both sides, two that differ on both sides, and no phrase on either side score on the full words, as before. **Two or
+  more distinct phrases switch the ignoring off for the whole call, but the count is scoped to the near misses
+  themselves, not the whole family window:** `ignoresOneSidedSuitability(target, products)` first finds the near
+  misses with the ignoring on (the same brand-family, different-key, threshold-or-containment pass `nearMissCandidates`
+  runs, before sorting and the limit), then counts distinct suitability phrases across the reading and only those near
+  misses (a reading with a phrase and a near-miss sibling with a different one; or a reading with none among near-miss
+  rows with two different ones). With 2 or more, nothing is set aside for any pair in that call, because the near
+  misses themselves then show the words tell products apart rather than restate a shared suitability; otherwise the
+  first pass (ignoring on) stands. One distinct phrase, on whichever side, still gets ignored. A row of the family
+  that is no near miss settles nothing: its own suitability line is never read for this count, even when the row sits
+  in the same brand family as the reading and the near misses. This is local to `nearMissCandidates` and
+  `lessSpecificForNearMiss` (both call `ignoresOneSidedSuitability` so they decide the same way for one reading): it
+  never reaches `identityKey`, `namesAnotherEdition`, the exported `lessSpecific`, the ambiguity guard's equal-words
+  check, or the alias-equality check, all of which still see the phrase's words — but it does reach the ambiguity
+  guard's specificity check below (`lessSpecificForNearMiss`) and the form-outranking rule's count, which uses the
+  same less-specific set, so a line that bought (or cost) a candidate its place here is seen the same way there.
+  Ranking (best first by similarity, then id, at most 3 after ranking) sorts on this phrase-ignored similarity too, not
+  the full words'. Switching the ignoring off can itself add a candidate, not only drop one: once the phrase's words
+  ("for", "hair"/"skin", and the word(s) between) are no longer set aside, a row with no suitability line of its own
+  that happens to hold some of those same words gets credit for sharing them, which can be enough to cross the
+  threshold where the words would otherwise have been removed from the comparison — the judge still decides whether
+  it is the same product. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
   looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
@@ -1721,6 +1754,33 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  This specificity test (`lessSpecificForNearMiss`) weighs the same words the suitability-phrase ignoring (near-miss
+  candidates, above) used to find the candidate in the first place — a one-sided phrase set aside, or not, by the same
+  two-or-more-distinct-phrases switch-off, decided from the same comparable list and the same `nearMissThreshold` —
+  not the full words `lessSpecific` gives: a phrase that bought a candidate past the threshold, or kept one out, is
+  seen the same way here, so a line no row of the family gives cannot buy the reading a judge call it would not
+  otherwise have earned.
+  **An equal candidate is never held back by it.** Whenever one or more of the near-miss candidates have exactly the reading's
+  words (full words, `sameWords`, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
+  judged even when the guard holds the reading back from the rest: then only the equal ones are asked about, so a "no" still
+  makes a new row and the longer look-alikes are never asked (a "Moisturizing Lotion" reading against stored "Moisturising
+  Lotion", "Daily Moisturizing Lotion" and "Night Moisturizing Lotion" rows judges only the first). When the guard would not
+  have fired, every candidate is judged as usual, equal ones first.
+  **A candidate of the reading's own form outranks one with none.** When the reading gives a form and, among the candidates it
+  is less specific than, exactly one shares that form (a candidate of a *different* known form was already dropped by the form
+  check above), the ones with no form recorded do not count towards the guard and are not judged either: that one candidate,
+  and any candidate the reading is not less specific than, is judged as usual ("Cocoa Butter Formula" (oil) against "Cocoa
+  Butter Formula Body Oil" (oil) and "Cocoa Butter Formula Solid Jar" (no form) judges only the oil). Two or more less-specific
+  candidates sharing the reading's form are still held back, and a reading that gives no form is unaffected by either rule.
+  **A partial read is not judged against a vaguer row:** when the reading is less specific than at least one candidate (by the
+  same `lessSpecificForNearMiss` test), the candidates less specific than the reading on those same words (`vaguerForNearMiss`, so a row
+  that differs only by a suitability line the reading alone gives counts as its equal, not as vaguer) are not asked about ("Facial
+  Moisturizing Lotion" with "PM Facial Moisturizing Lotion" and "Moisturising Lotion" stored asks only about the PM lotion, and a "no"
+  makes a new row): the reading is most likely the more specific product read in part, so landing it on a row vaguer still would be a
+  guess. Equal candidates are never vaguer, so they are unaffected. Like the ambiguity guard, it sees only the near misses left after
+  `nearMissLimit`: a more specific row ranked out of the top 3 by closer, vaguer ones does not trigger it. A suitability line read into
+  the variant is still weighed in full by the edition check (`namesAnotherEdition`), so it can keep a variantless row out of the near
+  misses altogether: "for Dry Skin" printed as a variant may really be an edition.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
   (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
   missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this
@@ -2369,6 +2429,82 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 - **Adding by search (typed scans).** `POST /api/v1/me/shelf { productId }` (`addShelfProduct`; limiters `SHELF_ADD_IP_LIMITER` then `SHELF_ADD_USER_LIMITER`, as the scan routes order them) puts a named catalog product picked from `GET /api/v1/products/search` on the shelf. `ShelfService.add` first asks `D1ShelfRepository.activeForProduct(profileId, productId)` (non-removed `product` rows only): a product already on the shelf is **200** with its entry, in the view `GET /me/shelf` returns, and nothing else happens (no scan, nothing counted, no model, no push). A removed entry is not active, so it goes on and the scan restores it as the same entry (Latest wins). Otherwise `ScanService.createTyped({ productId, clientIp })` runs as the session and answers **202** `{ scanId, itemId }`: it resolves the product first (`catalog.choose` + `namedProduct`, PRODUCT_NOT_FOUND before anything is written), and only if the catalog says the product needs a model (`needs-research` or `needs-analysis`) takes the daily allowance (user and address, adding 1, SCAN_DAILY_LIMIT as a photo scan does). It then writes a scan of **`kind = 'typed'`** with no photos and one item at position 0 with no `photo_id` or `photo_key`, created in **`needs-identification`** (not `recognising`: with no photo the reaper would requeue a recognise that can only fail as photo-missing, and `needs-identification` is a waiting state it leaves alone, which the app can still identify by hand), and moves it on with the same `identifyByChoice` a user's pick uses: `ready` (on the shelf in the same batch), `analysing`, `researching` or `failed` as `analysis-failed`. If that throws, the item stays in `needs-identification`. The app follows the scan (`GET /api/v1/scans/products/{scanId}` or its events) and reads the shelf once the item is final.
 - **The `counted` flag.** `scan_items.counted` (integer boolean, NOT NULL, default true; migration 0027, a plain `ALTER TABLE ... ADD`) says whether an item counts toward the daily photo quotas. `photoCounts`, so both `photosSince` and `photosSinceIp`, count only counted items. Every item that existed before the column, and every photo or shelf item, is counted; only a typed item created with `counted = false` is not, and that is a product that needed no model (`ready` or `analysis-failed`), so adding one is never refused for the allowance and does not use any of it. A typed item that needs a model is counted, as one photo.
 - **The push rule.** A typed scan sends "your scan is ready" only if it waited for a model: `notifyFinished` skips the push for a typed scan none of whose items is counted (it finished inside the request, in front of the user), and sends it, with the usual notification settings, for a counted one (which finishes later, possibly after the user left). The `done` event is published either way.
+
+### Admin access
+The `/api/v1/admin` routes change shared data (today the catalog workbook, see below), so they are not a user's to call. A user's token, guest or
+signed-in, never opens them: they have a door of their own.
+
+- **`X-Admin-Token`**, compared with the `ADMIN_API_TOKEN` secret by the `adminToken()` middleware (`src/middleware/admin-token.ts`). It is the only place
+  read: an `Authorization: Bearer` header, whatever it holds, is ignored, and a missing, wrong or empty header is 401 `ADMIN_TOKEN_INVALID`.
+- **Constant time.** Both sides are HMAC-SHA-256'd under a key made fresh for the call, and the two digests (always the same length) are compared with
+  `timingSafeEqual`, so how long a refusal takes says nothing about how much of the token was right.
+- **An unset secret locks the door.** An empty or missing `ADMIN_API_TOKEN` refuses everyone, including the caller who sends nothing, so a Worker deployed
+  without the secret exposes nothing. It is in `secrets.required` in all three blocks, so a deploy fails until it is set, and in `scripts/secrets/plan.ts`,
+  so `secrets:push` sends it. Generate one per environment with `openssl rand -hex 32`.
+- **Rate limited per address, before the token is checked.** `ADMIN_IP_LIMITER` (10 a minute, namespace ids 1029 / 2029 / 3029) comes first in the
+  route's `middleware`, then `adminToken()`, then the body limit, so every guess at the token uses an attempt, a flood of wrong ones is answered 429
+  before it is compared, and the right token is turned away once the allowance is gone. The token is checked before the body is read.
+- **No actor.** The routes carry `security: [{ adminToken: [] }]` and call a service that needs no signed-in user; `requireUser` is never involved.
+  An admin is a holder of the secret, not an account, and the upload records a label (`uploadedBy`) because nothing else says who it was.
+
+### Catalog workbook import
+`CatalogWorkbookService` (`catalog.workbook.service.ts`, built by the container as `catalogWorkbook`) serves and changes the catalog workbook: the
+Products, Availability, Ingredients and Countries tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
+(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, and the `ingredient_rules` and
+`catalog_versions` of "Product catalog data". The routes are `GET /api/v1/admin/catalog/export` and `POST /api/v1/admin/catalog/import`
+(`catalog.workbook.routes.ts`), behind "Admin access".
+
+- **Export** gives `{ catalogVersion, contractVersion, workbook }`: every tab with its full header row, retired rows included, in the shape the import
+  takes (lists joined with `; `, dates `YYYY-MM-DD`, an empty cell `null`; `catalog.workbook.raw.ts`). Importing an export unchanged is an empty diff.
+- **Import** is multipart: `workbook` (the JSON text), `file` (the `.xlsx`, up to 10 MB), `baseVersion`, `dryRun` (**default `true`**) and `uploadedBy`
+  (1 to 80 characters). In order:
+  1. `validateWorkbook` runs on the server whatever the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
+  2. `baseVersion` must be the live catalog version: 409 `CATALOG_STALE`, for a dry run too, so a stale copy is told before anyone applies it.
+  3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
+     `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
+     reused, and a retired code put back is reactivated. A product's availability that is gone is listed under `retired` and the row is removed.
+  4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
+     `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
+     spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
+     `source_kind` `'workbook'` and the row pins it; if the product already has that exact list, that formulation is the one pinned and nothing is added,
+     and any other list the product had is left as it was.
+  5. A dry run stops here and writes nothing. An apply without a file is 400 `CATALOG_FILE_REQUIRED`; a file over 10 MB is 400 `CATALOG_FILE_TOO_LARGE`; one that does not start with the zip bytes `PK\x03\x04` (an .xlsx is a zip; the server never opens it) is 400 `CATALOG_FILE_NOT_XLSX`. The whole body is capped at 16 MB (413), after the token is checked. `uploadedBy` is trimmed before its 1 to 80 characters are checked. A file that cannot be archived is 503 `CATALOG_ARCHIVE_FAILED`, and nothing is applied.
+  6. **The archive** is put first, through the `WorkbookArchive` port (`providers/workbook-archive`: an R2 adapter and a memory fake, locked to the
+     environment like the photo store). It lives in the private bucket under `workbooks/<environment>/<version>-<uuid>.xlsx`, as an `.xlsx`, never cached.
+     The key is made for the attempt, so a batch that fails or loses leaves an orphan object and never overwrites another upload's file; the key that
+     counts is the one on the version's `catalog_versions.archive_key`.
+  7. **`applyWorkbook(plan)`** is one repository method and one `db.batch`. Only the rows the diff names are written. It upserts countries, creates the new
+     products (`on conflict (identity_key) do nothing`), stores the workbook formulations (`on conflict (product_id, ingredients_key) do nothing`),
+     upserts the Products rows with their pinned formulation found by a subquery, replaces availability when it changed, upserts the rules, and marks the
+     codes the upload left out retired.
+- **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
+  since the service read it, the insert violates `catalog_versions.version` and D1 rolls the WHOLE batch back, so the loser writes nothing: no product, no
+  formulation, no row, no version. The repository then sees that the live version moved past `baseVersion` and reports it, and the service answers
+  409 `CATALOG_STALE`. If the batch throws, the repository reads the row of version `baseVersion + 1`: it carries this upload's own archive key (the batch committed and only its answer was lost, so the upload stands and is reported as applied), another upload's key (a lost race), or there is none (a real failure, which surfaces as one). No later statement needs its own guard, because none can apply alone.
+- **The rules version names a set.** An upload's approved rules, in code order, are hashed, each rule's aliases sorted first because they are a set (`catalog.workbook.rules-version.ts`): `rules-<first 16 hex of
+  the sha256 of the stable JSON of the entries the matcher reads>`. If the set is the one in force, **the current version is kept**, so a Products-only
+  upload, or an edit to a draft, moves nothing and no product is analysed again. The seed's set is always `seed-2026-10`, so restoring it is not a new
+  version, and restoring any other set gives back exactly the version it had. An edit that changes what the matcher reads (name, aliases, kind, statement,
+  source, or a rule approved, drafted or retired) is a new version, and each product is analysed again on its next scan.
+- **Size, and what Cloudflare documents.**
+  - Every table is written with **multi-row** statements, chunked so none binds more than D1's 100 parameters (`STATEMENT_ROWS` in the repository: for
+    example 3 Products rows, 12 formulations, 15 availability rows or 6 rules to a statement, and 90 codes to a retire). A test reads the parameters off
+    the built statements. The batch is still ONE `db.batch`, with the version insert first.
+  - A 500-product, 1500-availability, 200-rule workbook applied against local D1 as **409 statements** (it was about 1,200 with a statement for each row)
+    in about 0.66 s for the whole request (0.46 s as a dry run); a one-cell change is 2 statements. This is local, a simulation.
+  - What the docs say (https://developers.cloudflare.com/d1/platform/limits/): 1,000 queries per Worker invocation on the paid plan (50 on free); 100 bound
+    parameters and 100 KB of SQL a statement, and the limits for individual queries "apply to each individual statement contained within a batch"; 30 seconds
+    for a batch call as a whole; no stated cap on the number of statements in a batch. The batch API page
+    (https://developers.cloudflare.com/d1/worker-api/d1-database/) says a batch is a SQL transaction that rolls back whole when a statement fails, and **does
+    not say whether the statements of a batch count one by one toward the per-invocation query limit**. So the service assumes they do:
+    `CatalogWorkbookService` refuses a plan of more than 900 statements (`MAX_BATCH_STATEMENTS`, under 1,000 with room for the request's other reads)
+    with 400 `CATALOG_TOO_LARGE`, for a dry run too and before anything is archived. A batch is never split, because a split could not be atomic; a change
+    that big is made in several uploads, each from the version the last one made.
+  - **Remote behaviour has not been confirmed.** Nothing above was run against a remote D1. Before relying on it, apply a catalog-sized upload on
+    staging (a few hundred products with availability) and check that it commits and how long it takes; the 900 limit is a guess at the safe side, to be
+    set from that run.
+- **Logs** carry the catalog version, the per-tab counts and the outcome (`catalog-import-applied`, `-dry-run`, `-invalid`, `-stale`, `-lost-race`, `-too-large`, and `catalog-archive-failed`, which carries the version only), never a
+  brand, a name, an ingredient, a rule or a place of sale.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent

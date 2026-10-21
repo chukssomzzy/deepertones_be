@@ -175,6 +175,8 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/webhooks/perfect-corp',
         'GET /api/v1/products/search',
         'GET /api/v1/onboarding/content',
+        'GET /api/v1/admin/catalog/export',
+        'POST /api/v1/admin/catalog/import',
       ].sort(),
     )
   })

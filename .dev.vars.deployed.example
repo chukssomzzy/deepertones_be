@@ -63,3 +63,6 @@ PERFECT_CORP_API_KEY=
 
 # Perfect Corp webhook secret ("whsec_..."), shown when this environment's webhook URL is registered in their console. Required: a deploy fails until it is set.
 PERFECT_CORP_WEBHOOK_SECRET=
+
+# Token for the admin catalog routes (/api/v1/admin/*), sent as X-Admin-Token. Must differ per environment: `openssl rand -hex 32`. Required: a deploy fails until it is set; an empty one locks the routes.
+ADMIN_API_TOKEN=
