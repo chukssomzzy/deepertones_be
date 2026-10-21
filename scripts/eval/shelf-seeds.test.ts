@@ -3,8 +3,8 @@ import type { Recognition } from '../../src/providers/product-recognition/produc
 import type { Label } from './matching-set'
 import { seedReadingOf, type PhotoReading } from './shelf-seeds'
 
-// seedReadingOf is pure: it only picks. Two products whose chosen identities share an identity key are still reported by
-// shelfSeeds (matching.ts), which runs the existing collision rule over whatever this returns; that is not retested here.
+// seedReadingOf is pure: it only picks. Two products whose chosen identities share an identity key are handled by shelfSeeds
+// (matching.ts), which falls a single-scan side back to its label; that is not tested here.
 
 const LABEL: Label = { brand: 'Cantu', name: 'Curling Cream', variant: 'Coconut', form: 'cream', category: 'hair' }
 const product = { folder: 'cantu', label: LABEL }

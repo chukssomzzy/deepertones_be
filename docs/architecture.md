@@ -2031,12 +2031,16 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
   `scripts/eval/shelf-seeds.ts`, tested on its own), reused from the matching part's recognitions when it ran in the same invocation, else read
   fresh; that is what the catalog would really hold, not the owner's label wording. A product with none of its photos readable, and every
   shelf-only product (named in a shelf photo but not in the single set), keeps its label identity. **Collision fallback:** two seeds reading the
-  same identity key would be two rows for one product, which the judge is never asked about (the catalog is seeded directly, not resolved); when
-  one side of such a collision came from a single scan, it falls back to that product's label identity instead (recorded as `reason: "collision"`
+  same identity key would be two rows for one product, which the judge is never asked about (the catalog is seeded directly, not resolved); each
+  side of such a collision that came from a single scan falls back to its product's label identity instead (a key already collided on sends any
+  later single-scan seed with it to its label too) (recorded as `reason: "collision"`
   in the report and counted on the console line), since the label is still a true identity for it. Only a collision that survives the fallback —
   two hand-written labels that still read the same — stops the run (`SetupError`, exit 2): that is the owner's label set, not the pipeline, being
   wrong. `--part shelf` alone still reads the whole single set fresh (recognitions are not carried over from a part that did not run) and is not cut
   by `--limit`, which only trims the products the matching and images parts run on.
+- **Photos.** Single-product photos in `eval-photos/catalog/<folder>/` with `eval-photos/catalog/labels.json` (one label per folder); shelf photos in
+  `eval-photos/shelf/` with `labels.json` (`{ "<file>": { "products": [{ "folder": "..." } | { brand, name, variant?, form?, category }] } }`), not the
+  shelf eval's `expected.json`. Both folders are git-ignored and never committed.
 - **Cost and models** follow the catalog eval's conventions: one `MemoryAiSpendLedger` cap in dollars, `--model job=model` overrides, console table
   plus `.eval/matching/<timestamp>/report.json` and a `contact-sheet.html` (stored images and shelf photos beside the owner's own, never a prompt or
   other model text — only folder names, short row ids, codes, field names and numbers).

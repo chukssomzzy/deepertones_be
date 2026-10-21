@@ -434,9 +434,10 @@ const readingsFromRecognised = (recognised: Recognised[], folder: string): Photo
     .filter((item) => item.folder === folder)
     .map((item): PhotoReading => {
       if ('read' in item) return { photo: item.photo.name, recognition: { classification: 'beauty-product', ...item.read.identity, confidence: item.read.confidence } }
-      // A non-beauty classification is a read that succeeded; only a genuinely failed call (not "unreadable", which also covers a
-      // refusal the matching part already counts as unreadable) keeps the `error` shape `readingsForSeeding` gives a failed call.
-      if ('unreadable' in item) return { photo: item.photo.name, recognition: { classification: item.unreadable } as Recognition }
+      // Not a beauty product (or a refusal, which the matching part also counts as unreadable): a read that gave no seed. Only a
+      // failed call keeps the `error` shape, as in `readingsForSeeding`. `unreadable` holds a classification or an error name, so it is
+      // not carried over: nothing downstream needs more than "not a beauty product".
+      if ('unreadable' in item) return { photo: item.photo.name, recognition: { classification: 'unreadable' } }
       return { photo: item.photo.name, error: item.error }
     })
 
