@@ -1231,7 +1231,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
   per photo, `rescanSuggested`) and no result yet. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
   a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
-  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows (204). Another profile's
+  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
+  `mask-<concern>.png` of its goal's concerns) once more, so a mask written by an analysis that committed between the key read and the row delete does not
+  stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
 - **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET
   /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
@@ -1258,13 +1260,25 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     region, plus the overall score as concern `all`, region `whole`), the `face_masks` rows, `skin_type` (`skinTypeLabel`), `skin_age`, `tables_version`
     (`TABLES_VERSION`) and `state = 'ready'` as one batch that holds only while the scan exists and is `analysing`. When it does not (deleted, or moved on,
     while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
-    recorded after, as `face-analysis` with the units for the action count (1 to 4: 12, 5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id. Then
+    recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
+    scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
   - `fitzpatrick`: stores the type for the profile (insert, first read stands) and records 10 units keyed by the task, then deletes their copy. It never
-    changes the scan and is never shown. A profile that already has a type only has the task deleted.
+    changes the scan and is never shown. A task that already gave the profile its type only has its copy deleted again; a task that succeeds after another
+    one gave the profile its type is still charged, so its spend is recorded (a ledger failure is logged, not retried) before its copy is deleted.
+  - **Perfect Corp's copy of the photo.** The face photo must not outlive the scan at Perfect Corp, so `deleteTask` (best effort: the error's name is logged as
+    `task-delete-failed`, nothing else changes) is called for **both** the analysis and the Fitzpatrick task, when set, when a scan goes to `failed` (any
+    reason: credit, bad request, the reaper's 2-hour give-up, the dead-letter hook, consent withdrawn), when the user deletes it, and for the analysis task
+    when it goes to `needs-retake`. The one exception: a Fitzpatrick task is **kept** on a `needs-retake` scan while the profile has no Fitzpatrick row, since
+    it is a read of the same face and may still complete (its own step deletes it). A task created by an upload that then loses (the scan was deleted or failed,
+    or a second upload stored its task first; the task id is stored only while the scan has none) is deleted at once. **Not covered:** the account and guest
+    purge (`FaceDataCleaner`) does not reach Perfect Corp; tasks there expire on their own. **A failed delete is logged, not retried**, a deliberate deviation from
+    the spec's "retried" (a retry would need a place to remember the task id once the scan row is gone).
   - **Perfect Corp's errors**, mapped alike in every step that calls it: `PerfectCorpRejectedPhotoError` sends the scan to `needs-retake` with the reason
     (no spend); `PerfectCorpUnavailableError` is rethrown for the queue to retry (after 4 retries the dead-letter hook fails the scan as `unavailable`,
-    except for a `fitzpatrick` step, which leaves the scan alone); `PerfectCorpCreditError` raises the `face-scan-account` ops alert, fails the scan as
+    except for a `fitzpatrick` step, which leaves the scan alone); `PerfectCorpCreditError` raises the `face-scan-account` ops alert (also when it comes from creating the Fitzpatrick task, which still never fails the scan), fails the scan as
     `unavailable` and ends the message as a `PermanentJobError` (the service fails the scan itself because the dispatcher acks a permanent error and never
     dead-letters it); `PerfectCorpBadRequestError` does the same without the alert. A webhook that says the task ended in an error still queues `fetch`:
     the provider's mapping on `getSkinAnalysis` decides whether that is a retake or an outage.
@@ -1279,20 +1293,23 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   this order and nothing changes until all pass: the scan is the caller's (404 `FACE_SCAN_NOT_FOUND`), consent is current (409 `FACE_CONSENT_REQUIRED`), the
   scan is `needs-retake` (409 `FACE_SCAN_NOT_AWAITING_RETAKE`), then the photo (the same JPEG checks). The front object is overwritten under the same
   key, the scan moves `needs-retake` to `analysing` with `reason`, `pc_analysis_task_id` and `reaper_checked_at` cleared (the retaken photo gets a task and a
-  reaper check of its own), and `upload` is queued. If it cannot be queued the scan fails as `unavailable`, still 202. There is no limit and no due-check.
+  reaper check of its own; the analysis task id is cleared on the row only, its Perfect Corp task was deleted when the photo was refused), and `upload` is queued.
+  If the move loses and the scan no longer exists (deleted meanwhile), the front object just written is deleted and the answer is 404; if it exists but is
+  no longer waiting for a retake it is 409. If `upload` cannot be queued the scan fails as `unavailable`, still 202. There is no limit and no due-check.
 - **The reaper's one check.** `createScanReaper` also calls `FaceScanService.reap(now)`, in its own try (a failure is logged, never fails the product
-  sweep nor is hidden by it). From the 100 `analysing` scans that have sat longest and are older than 15 minutes: one older than 2 hours since it last moved
-  is failed as `unavailable`; otherwise, if it has not been checked, `reaper_checked_at` is set (leaving `updated_at`, so the 2 hours do not restart) and
-  `fetch` is queued, or `upload` if it has no task (its first message was lost). The check happens once. *Known limit:* a checked scan that is still
-  under 2 hours old stays in that list until it is failed, so 100 of them at once would hold back newer ones; the query does not skip them because it knows
-  only the 15-minute cut-off, not the time the sweep runs at.
+  sweep nor is hidden by it). It runs two queries of at most 100 scans each, longest-waiting first. First `staleAnalysing(now - 2h)`: those are failed as
+  `unavailable`. Then `staleAnalysing(now - 15min, { unchecked: true })`, which leaves out scans with `reaper_checked_at` set so that ones already checked
+  and not yet 2 hours old cannot fill the batch and starve newer scans: for each, `markReaperChecked` sets `reaper_checked_at` (a conditional write of that
+  column alone: it holds only while the scan is `analysing` and unchecked, and never touches `updated_at`, so the 2 hours do not restart and a scan that
+  moved on since it was read keeps its own time) and, only if it did, `fetch` is queued, or `upload` if the scan has no task (its first message was lost).
+  The check happens once.
 - **The live stream.** The `ScanStream` Durable Object, one per face scan id, carries a `{ type: 'face', faceScan: { id, state, reason } }` event as SSE
   event `face`; product frames are unchanged. `GET /scans/faces/{id}/events` (signed in, the caller's own scan, else 404 `FACE_SCAN_NOT_FOUND`) opens a
   stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
   scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
   change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
-- **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), only once a result is stored, and a failure to record it is logged and does not
-  fail a scan that is already `ready`.
+- **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), as soon as Perfect Corp reports a task successful (before our copy of the result is
+  stored: they bill on success), and a failure to record it is logged and does not fail the step.
 - **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket
   first, then their face rows (which also cascade from the profile), so a bucket failure leaves the rows and the keys for the next run. Both
   halves are safe to repeat and chunk the ids under D1's bound-parameter limit. It deletes only what the face tables list, so product photos are untouched.
@@ -1308,8 +1325,8 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 - **Units are validated.** `units` must be a positive whole number or `record` throws before anything is stored (so a bad record does not
   use up its task id).
 
-- **Recorded once, on success.** Perfect Corp charges only when a result succeeds, and nothing sweeps a reservation held open across a
-  webhook wait, so nothing is reserved. A rejected photo records nothing. The units are 12 for the HD analysis and 10 for a first Fitzpatrick read.
+- **Recorded once, on success.** Perfect Corp charges only when a task succeeds, and nothing sweeps a reservation held open across a
+  webhook wait, so nothing is reserved. The spend is recorded when the task is seen to have succeeded, before anything of ours that could fail. A rejected photo records nothing. The units are 12 for the HD analysis and 10 for a first Fitzpatrick read.
 - **Cost** is `Math.round(units x PERFECT_CORP_USD_PER_UNIT x 1,000,000)` micro-USD, rounded once at the end (12 x 0.07 is not exact in floating point).
   The container passes `PERFECT_CORP_USD_PER_UNIT` raw and `record` validates it when it is used, throwing an error that names the
   variable unless it is a positive number (or the text of one). It is not checked when the container is built, because the same ledger serves every

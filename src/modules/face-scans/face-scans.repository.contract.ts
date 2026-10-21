@@ -686,6 +686,96 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
         expect(found.reaperCheckedAt!.getTime()).toBe(at(20 * MINUTE).getTime())
         expect(found.updatedAt.getTime()).toBe(BASE.getTime())
       })
+
+      it('stores the analysis task only while the scan has none, when asked to, and leaves the first task alone otherwise', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        const first = `skin-${freshId()}`
+        const second = `skin-${freshId()}`
+
+        const stored = await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: first, pcEnvironment: 'test', updatedAt: at(MINUTE) }, { onlyIfNoAnalysisTask: true })
+        const lost = await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: second, pcEnvironment: 'staging', updatedAt: at(2 * MINUTE) }, { onlyIfNoAnalysisTask: true })
+
+        expect(stored).toBe(true)
+        expect(lost).toBe(false)
+        const found = (await repository.findFaceScan(scan.id))!
+        expect(found).toMatchObject({ pcAnalysisTaskId: first, pcEnvironment: 'test' })
+        expect(found.updatedAt.getTime()).toBe(at(MINUTE).getTime())
+        expect(await repository.findByTaskId(second)).toBeNull()
+      })
+
+      it('stores a new analysis task again once a retake has cleared the old one', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: `skin-${freshId()}`, updatedAt: at(MINUTE) }, { onlyIfNoAnalysisTask: true })
+        await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'too-dark', updatedAt: at(2 * MINUTE) })
+        await repository.updateFaceScan(scan.id, 'needs-retake', { state: 'analysing', reason: null, pcAnalysisTaskId: null, updatedAt: at(3 * MINUTE) })
+        const again = `skin-${freshId()}`
+
+        expect(await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: again, updatedAt: at(4 * MINUTE) }, { onlyIfNoAnalysisTask: true })).toBe(true)
+
+        expect((await repository.findByTaskId(again))?.id).toBe(scan.id)
+      })
+
+      it('still refuses the conditional store for a scan that is not in the expected state, or does not exist', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt: at(MINUTE) })
+        const task = `skin-${freshId()}`
+
+        expect(await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: task, updatedAt: at(2 * MINUTE) }, { onlyIfNoAnalysisTask: true })).toBe(false)
+        expect(await repository.updateFaceScan(freshId(), 'analysing', { pcAnalysisTaskId: task, updatedAt: at(2 * MINUTE) }, { onlyIfNoAnalysisTask: true })).toBe(false)
+        expect((await repository.findFaceScan(scan.id))!.pcAnalysisTaskId).toBeNull()
+      })
+    })
+
+    describe('markReaperChecked', () => {
+      it('notes the check and leaves the updated time alone, even when the scan moved on after the caller read it', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: `skin-${freshId()}`, updatedAt: at(10 * MINUTE) })
+
+        expect(await repository.markReaperChecked(scan.id, at(20 * MINUTE))).toBe(true)
+
+        const found = (await repository.findFaceScan(scan.id))!
+        expect(found.reaperCheckedAt!.getTime()).toBe(at(20 * MINUTE).getTime())
+        expect(found.updatedAt.getTime()).toBe(at(10 * MINUTE).getTime())
+        expect(found.state).toBe('analysing')
+      })
+
+      it('says false, and keeps the first check, when the scan was already checked', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.markReaperChecked(scan.id, at(20 * MINUTE))
+
+        expect(await repository.markReaperChecked(scan.id, at(30 * MINUTE))).toBe(false)
+
+        expect((await repository.findFaceScan(scan.id))!.reaperCheckedAt!.getTime()).toBe(at(20 * MINUTE).getTime())
+      })
+
+      it.each(['ready', 'failed', 'needs-retake'] as const)('says false and changes nothing for a scan that is %s', async (state) => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        if (state === 'ready') await repository.completeFaceScan(scan.id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt: at(MINUTE) })
+        if (state === 'failed') await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt: at(MINUTE) })
+        if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'too-dark', updatedAt: at(MINUTE) })
+
+        expect(await repository.markReaperChecked(scan.id, at(20 * MINUTE))).toBe(false)
+
+        expect((await repository.findFaceScan(scan.id))!.reaperCheckedAt).toBeNull()
+      })
+
+      it('says false for a scan that does not exist', async () => {
+        const { repository } = await make()
+
+        expect(await repository.markReaperChecked(freshId(), at(MINUTE))).toBe(false)
+      })
     })
 
     // The reaper's query is over every scan there is, and the D1 database is shared, so these scans live in 1970 + a random offset, which no other
@@ -766,6 +856,38 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
         expect(listed).toMatchObject({ pcAnalysisTaskId: taskId, state: 'analysing' })
         expect(listed!.reaperCheckedAt!.getTime()).toBe(t - 5)
         await cleanUp(repository, scan)
+      })
+
+      it('leaves out the scans the reaper has already checked when asked for the unchecked ones only, and lists them all otherwise', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const t = era()
+        const unchecked = await staleScan(repository, account, t - 10)
+        const checked = await staleScan(repository, account, t - 10)
+        await repository.markReaperChecked(checked.id, new Date(t - 5))
+
+        const only = (await repository.staleAnalysing(new Date(t), 1000, { unchecked: true })).map((scan) => scan.id)
+        const every = (await repository.staleAnalysing(new Date(t), 1000)).map((scan) => scan.id)
+
+        expect(only).toContain(unchecked.id)
+        expect(only).not.toContain(checked.id)
+        expect(every).toEqual(expect.arrayContaining([unchecked.id, checked.id]))
+        await cleanUp(repository, unchecked, checked)
+      })
+
+      it('counts only unchecked scans against the limit, so older checked ones cannot use it up', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        // The oldest scans in the database, so the limit cannot be used up by anybody else's.
+        const t = Math.floor(Math.random() * 1_000_000_000) + 1_000
+        const checked = await staleScan(repository, account, t + 100)
+        const newer = await staleScan(repository, account, t + 200)
+        await repository.markReaperChecked(checked.id, new Date(t + 300))
+
+        const one = (await repository.staleAnalysing(new Date(t + 1000), 1, { unchecked: true })).map((scan) => scan.id)
+
+        expect(one).toEqual([newer.id])
+        await cleanUp(repository, checked, newer)
       })
     })
 

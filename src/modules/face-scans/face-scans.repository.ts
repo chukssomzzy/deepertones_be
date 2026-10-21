@@ -117,12 +117,28 @@ export class D1FaceScansRepository {
     return row ?? null
   }
 
-  /** Applies the patch only while the scan is still in `expected`, and says whether it did (one conditional UPDATE, so of two simultaneous callers exactly one wins). */
-  async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch): Promise<boolean> {
+  /**
+   * Applies the patch only while the scan is still in `expected`, and says whether it did (one conditional UPDATE, so of two simultaneous callers exactly one wins).
+   * With `onlyIfNoAnalysisTask` it also holds only while the scan has no analysis task, so of two uploads that both created a task the first to store keeps its own.
+   */
+  async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch, options?: { onlyIfNoAnalysisTask?: true }): Promise<boolean> {
     const rows = await this.db
       .update(faceScans)
       .set(patch)
-      .where(and(eq(faceScans.id, id), eq(faceScans.state, expected)))
+      .where(and(eq(faceScans.id, id), eq(faceScans.state, expected), options?.onlyIfNoAnalysisTask ? isNull(faceScans.pcAnalysisTaskId) : undefined))
+      .returning({ id: faceScans.id })
+    return rows.length > 0
+  }
+
+  /**
+   * Notes the reaper's check of an `analysing` scan that has not been checked yet, and says whether it did. It writes only that column, so a scan that moved on
+   * after the caller read it keeps its own updated time (the 2-hour clock is the scan's, not the check's), and of two simultaneous reapers exactly one wins.
+   */
+  async markReaperChecked(id: string, at: Date): Promise<boolean> {
+    const rows = await this.db
+      .update(faceScans)
+      .set({ reaperCheckedAt: at })
+      .where(and(eq(faceScans.id, id), eq(faceScans.state, 'analysing'), isNull(faceScans.reaperCheckedAt)))
       .returning({ id: faceScans.id })
     return rows.length > 0
   }
@@ -137,12 +153,15 @@ export class D1FaceScansRepository {
     return row ?? null
   }
 
-  /** Scans still `analysing` whose updated time is strictly before `before`, the longest-waiting first, at most `limit`. */
-  async staleAnalysing(before: Date, limit: number): Promise<FaceScan[]> {
+  /**
+   * Scans still `analysing` whose updated time is strictly before `before`, the longest-waiting first, at most `limit`. With `unchecked` only those the reaper has
+   * not checked yet, so scans it has already looked at cannot fill the limit.
+   */
+  async staleAnalysing(before: Date, limit: number, options?: { unchecked?: true }): Promise<FaceScan[]> {
     return this.db
       .select()
       .from(faceScans)
-      .where(and(eq(faceScans.state, 'analysing'), lt(faceScans.updatedAt, before)))
+      .where(and(eq(faceScans.state, 'analysing'), lt(faceScans.updatedAt, before), options?.unchecked ? isNull(faceScans.reaperCheckedAt) : undefined))
       .orderBy(asc(faceScans.updatedAt), sql`rowid`)
       .limit(limit)
   }

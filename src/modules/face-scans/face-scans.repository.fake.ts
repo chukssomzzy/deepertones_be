@@ -80,10 +80,18 @@ export class FakeFaceScansRepository implements FaceScansRepository {
     return latest ? { ...latest } : null
   }
 
-  async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch): Promise<boolean> {
+  async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch, options?: { onlyIfNoAnalysisTask?: true }): Promise<boolean> {
     const found = this.scans.get(id)
     if (!found || found.state !== expected) return false
+    if (options?.onlyIfNoAnalysisTask && found.pcAnalysisTaskId !== null) return false
     this.scans.set(id, { ...found, ...patch })
+    return true
+  }
+
+  async markReaperChecked(id: string, at: Date): Promise<boolean> {
+    const found = this.scans.get(id)
+    if (!found || found.state !== 'analysing' || found.reaperCheckedAt !== null) return false
+    this.scans.set(id, { ...found, reaperCheckedAt: at })
     return true
   }
 
@@ -94,9 +102,9 @@ export class FakeFaceScansRepository implements FaceScansRepository {
     return null
   }
 
-  async staleAnalysing(before: Date, limit: number): Promise<FaceScan[]> {
+  async staleAnalysing(before: Date, limit: number, options?: { unchecked?: true }): Promise<FaceScan[]> {
     return [...this.scans.values()]
-      .filter((scan) => scan.state === 'analysing' && scan.updatedAt.getTime() < before.getTime())
+      .filter((scan) => scan.state === 'analysing' && scan.updatedAt.getTime() < before.getTime() && (!options?.unchecked || scan.reaperCheckedAt === null))
       .sort((a, b) => a.updatedAt.getTime() - b.updatedAt.getTime())
       .slice(0, limit)
       .map((scan) => ({ ...scan }))

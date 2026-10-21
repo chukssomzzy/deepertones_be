@@ -64,6 +64,16 @@ const NO_CATALOG = {
 /** A Perfect Corp client whose mask download can be interrupted by the test, and that answers with the bytes of the address it was given. */
 class HookedPerfectCorp extends MemoryPerfectCorpClient {
   duringDownload: (() => Promise<void>) | undefined
+  /** Runs once, after the analysis task exists at Perfect Corp and before the caller has it. */
+  duringCreateSkinAnalysis: (() => Promise<void>) | undefined
+
+  override async createSkinAnalysis(input: { fileId: string; actions: string[] }): Promise<string> {
+    const taskId = await super.createSkinAnalysis(input)
+    const hook = this.duringCreateSkinAnalysis
+    this.duringCreateSkinAnalysis = undefined
+    await hook?.()
+    return taskId
+  }
 
   override async downloadMask(url: string): Promise<Uint8Array> {
     await super.downloadMask(url)
@@ -71,6 +81,37 @@ class HookedPerfectCorp extends MemoryPerfectCorpClient {
     this.duringDownload = undefined
     await hook?.()
     return new TextEncoder().encode(url)
+  }
+}
+
+/** A repository whose reads can be interrupted once by the test, to put another change exactly between two of the service's own calls. */
+class HookedRepository extends FakeFaceScansRepository {
+  afterPhotosRead: (() => Promise<void>) | undefined
+  afterKeysRead: (() => Promise<void>) | undefined
+  afterUncheckedStaleRead: (() => Promise<void>) | undefined
+
+  override async photosOf(faceScanId: string) {
+    const photos = await super.photosOf(faceScanId)
+    await this.once('afterPhotosRead')
+    return photos
+  }
+
+  override async keysOfFaceScan(faceScanId: string) {
+    const keys = await super.keysOfFaceScan(faceScanId)
+    await this.once('afterKeysRead')
+    return keys
+  }
+
+  override async staleAnalysing(before: Date, limit: number, options?: { unchecked?: true }) {
+    const stale = await super.staleAnalysing(before, limit, options)
+    if (options?.unchecked) await this.once('afterUncheckedStaleRead')
+    return stale
+  }
+
+  private async once(name: 'afterPhotosRead' | 'afterKeysRead' | 'afterUncheckedStaleRead') {
+    const hook = this[name]
+    this[name] = undefined
+    await hook?.()
   }
 }
 
@@ -195,6 +236,7 @@ const callsOf = (ctx: Ctx, method: string) => ctx.perfectCorp.calls.filter((call
 const methodsCalled = (ctx: Ctx) => ctx.perfectCorp.calls.map((call) => call.method)
 const queuedSteps = (ctx: Ctx) => ctx.jobs.enqueued.filter((job) => job.job === analyseFaceScanSpec.name).map((job) => job.body as Record<string, unknown>)
 const clearQueue = (ctx: Ctx) => void (ctx.jobs.enqueued.length = 0)
+const deletedTasks = (ctx: Ctx) => callsOf(ctx, 'deleteTask').map((call) => call.args[0])
 const opsAlertsRaised = (ctx: Ctx) => ctx.alertJobs.enqueued.map((job) => (job.body as { kind: string }).kind)
 
 const maskUrl = (name: string) => `https://masks.test/${name}.png?sig=abc`
@@ -438,6 +480,40 @@ describe('FaceScanService.advance: the upload step', () => {
     expect(ctx.events.eventsFor(id)).toEqual([{ type: 'face', faceScan: { id, state: 'analysing', reason: null } }])
   })
 
+  it('keeps the task of the upload that stored first and deletes the task of the one that lost, when two uploads of one scan run at once', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+    // The outer upload has its task (skin-task-1) when a whole second upload runs and stores skin-task-2.
+    ctx.perfectCorp.duringCreateSkinAnalysis = () => upload(ctx, id)
+
+    await upload(ctx, id)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ pcAnalysisTaskId: 'skin-task-2', state: 'analysing' })
+    expect(deletedTasks(ctx)).toEqual(['skin-task-1'])
+    expect(callsOf(ctx, 'createFitzpatrick')).toHaveLength(1)
+  })
+
+  it('raises the ops alert too when Perfect Corp has no credit for the Fitzpatrick read, and still analyses the face', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createFitzpatrick', new PerfectCorpCreditError('no units'))
+
+    await loggedDuring(() => upload(ctx, id))
+
+    expect(opsAlertsRaised(ctx)).toEqual(['face-scan-account'])
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'analysing', pcAnalysisTaskId: 'skin-task-1', pcFitzpatrickTaskId: null })
+  })
+
+  it('raises no ops alert for a Fitzpatrick read that fails for any other reason', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createFitzpatrick', new PerfectCorpUnavailableError('down'))
+
+    await loggedDuring(() => upload(ctx, id))
+
+    expect(opsAlertsRaised(ctx)).toEqual([])
+  })
+
   it('does not fail the upload when the stream is down: the change is stored and the publish is best effort', async () => {
     const ctx = setup({ events: new EventsThatFail() })
     const id = await started(ctx)
@@ -502,7 +578,7 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(ctx.photos.stored.size).toBe(0)
   })
 
-  it('records the spend once, after the results are stored: face-analysis, 12 units for the 4 actions, keyed by the analysis task id', async () => {
+  it('records the spend once: face-analysis, 12 units for the 4 actions, keyed by the analysis task id', async () => {
     const ctx = setup()
     const { id, analysisTask } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
@@ -520,6 +596,85 @@ describe('FaceScanService.advance: the fetch step', () => {
     await fetchStep(ctx, id)
 
     expect(callsOf(ctx, 'deleteTask').map((call) => call.args[0])).toEqual([analysisTask])
+  })
+
+  it('records the spend as soon as Perfect Corp reports success: before a mask is downloaded and before the results are stored', async () => {
+    const ctx = setup()
+    const { id, analysisTask } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    let spendWhenDownloading: unknown[] = []
+    let stateWhenDownloading = ''
+    ctx.perfectCorp.duringDownload = async () => {
+      spendWhenDownloading = [...ctx.aiUsage.recorded]
+      stateWhenDownloading = (await rowOf(ctx, id)).state
+    }
+
+    await fetchStep(ctx, id)
+
+    expect(spendWhenDownloading).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(stateWhenDownloading).toBe('analysing')
+  })
+
+  it('is still ready when the spend cannot be recorded; the failure is logged by name with the task id, and nothing is thrown', async () => {
+    const ctx = setup()
+    const { id, analysisTask } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    ctx.aiUsage.failNextWith(new Error('ledger is down SECRET-LEDGER-TEXT-3306'))
+
+    const logged = await loggedDuring(() => fetchStep(ctx, id))
+
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+    expect(logged).toContain('spend-record-failed')
+    expect(logged).toContain(analysisTask)
+    expect(logged).not.toContain('SECRET-LEDGER-TEXT-3306')
+  })
+
+  it('queues the Fitzpatrick step, stamped with now, when the scan has a Fitzpatrick task and the profile still has no type: the backstop for a lost webhook', async () => {
+    const ctx = setup()
+    const { id, fitzpatrickTask } = await uploaded(ctx)
+    expect(fitzpatrickTask).not.toBeNull()
+    clearQueue(ctx)
+    ctx.advanceClock(2 * MINUTE)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    await fetchStep(ctx, id)
+
+    expect(queuedSteps(ctx)).toEqual([{ faceScanId: id, step: 'fitzpatrick', at: ctx.now().getTime() }])
+  })
+
+  it('queues no Fitzpatrick step when the profile already has a type', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    clearQueue(ctx)
+
+    await fetchStep(ctx, id)
+
+    expect(queuedSteps(ctx)).toEqual([])
+  })
+
+  it('queues no Fitzpatrick step when the scan has no Fitzpatrick task', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    await ctx.repository.updateFaceScan(id, 'analysing', { pcFitzpatrickTaskId: null, updatedAt: T0 })
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    clearQueue(ctx)
+
+    await fetchStep(ctx, id)
+
+    expect(queuedSteps(ctx)).toEqual([])
+  })
+
+  it('is still ready when the Fitzpatrick step cannot be queued', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    ctx.jobs.failNextWith(new Error('queue is down'))
+
+    await loggedDuring(() => fetchStep(ctx, id))
+
+    expect((await rowOf(ctx, id)).state).toBe('ready')
   })
 
   it('tells the stream the scan is ready and then that it is done', async () => {
@@ -567,9 +722,9 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(logged).not.toContain('SECRET-VENDOR-TEXT-9917')
   })
 
-  it('leaves no mask in the bucket, no results and no spend when the user deleted the scan while the masks were being fetched', async () => {
+  it('leaves no mask in the bucket and no results, but still records the spend, when the user deleted the scan while the masks were being fetched', async () => {
     const ctx = setup()
-    const { id } = await uploaded(ctx)
+    const { id, analysisTask } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
     ctx.perfectCorp.duringDownload = () => asUser(() => ctx.service.deleteFaceScan(id))
 
@@ -579,12 +734,13 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(await ctx.repository.findFaceScan(id)).toBeNull()
     expect(await ctx.repository.resultsOf(id)).toEqual([])
     expect(await ctx.repository.masksOf(id)).toEqual([])
-    expect(ctx.aiUsage.recorded).toEqual([])
+    // Perfect Corp charged for the task when it succeeded, whatever became of our copy.
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
   })
 
-  it('leaves no mask in the bucket and no spend, and the scan as it moved to, when the scan stopped being analysing while the masks were being fetched', async () => {
+  it('leaves no mask in the bucket, and the scan as it moved to, but still records the spend, when the scan stopped being analysing while the masks were being fetched', async () => {
     const ctx = setup()
-    const { id } = await uploaded(ctx)
+    const { id, analysisTask } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
     ctx.perfectCorp.duringDownload = () => ctx.service.markFailed(id)
 
@@ -594,7 +750,7 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(ctx.photos.stored.has(frontKey(ctx, id))).toBe(true)
     expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'unavailable', skinAge: null })
     expect(await ctx.repository.resultsOf(id)).toEqual([])
-    expect(ctx.aiUsage.recorded).toEqual([])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
   })
 
   it('does nothing when it runs again on a scan that is already ready: no call to Perfect Corp, no second spend, no second stream event', async () => {
@@ -648,16 +804,16 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(ctx.aiUsage.recorded).toEqual([])
   })
 
-  it('throws and leaves the scan analysing when a mask cannot be downloaded, so the queue tries again without a spend', async () => {
+  it('throws and leaves the scan analysing when a mask cannot be downloaded, so the queue tries again; the spend is already recorded, once, under the task id', async () => {
     const ctx = setup()
-    const { id } = await uploaded(ctx)
+    const { id, analysisTask } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
     ctx.perfectCorp.script('downloadMask', new PerfectCorpUnavailableError('down'))
 
     expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PerfectCorpUnavailableError)
 
     expect((await rowOf(ctx, id)).state).toBe('analysing')
-    expect(ctx.aiUsage.recorded).toEqual([])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
     expect(await ctx.repository.resultsOf(id)).toEqual([])
   })
 
@@ -742,6 +898,45 @@ describe('FaceScanService.advance: the fitzpatrick step', () => {
 
     expect((await rowOf(ctx, id)).state).toBe('ready')
     expect(await ctx.repository.fitzpatrickOf(PROFILE)).toMatchObject({ fitzpatrick: 'VI' })
+  })
+
+  it('records the spend, and keeps the type it has, when the profile already had a type from another task and this task reports success: Perfect Corp charged for it all the same', async () => {
+    const ctx = setup()
+    const { id, fitzpatrickTask } = await uploaded(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+    ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'II' })
+
+    await fitzpatrickStep(ctx, id)
+
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'fitzpatrick', units: 10, key: fitzpatrickTask }])
+    expect(await ctx.repository.fitzpatrickOf(PROFILE)).toMatchObject({ fitzpatrick: 'V', taskId: 'earlier-task' })
+    expect(deletedTasks(ctx)).toEqual([fitzpatrickTask])
+    expect(callsOf(ctx, 'getFitzpatrick').map((call) => call.args[0])).toEqual([fitzpatrickTask])
+  })
+
+  it('records nothing and leaves the task to come back to when the profile already had a type from another task and this one is still running', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+
+    await fitzpatrickStep(ctx, id)
+
+    expect(ctx.aiUsage.recorded).toEqual([])
+    expect(deletedTasks(ctx)).toEqual([])
+  })
+
+  it('still deletes the task when the spend of a task the profile did not need cannot be recorded; the failure is logged by name', async () => {
+    const ctx = setup()
+    const { id, fitzpatrickTask } = await uploaded(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+    ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'II' })
+    ctx.aiUsage.failNextWith(new Error('ledger is down SECRET-LEDGER-TEXT-5512'))
+
+    const logged = await loggedDuring(() => fitzpatrickStep(ctx, id))
+
+    expect(deletedTasks(ctx)).toEqual([fitzpatrickTask])
+    expect(logged).toContain('spend-record-failed')
+    expect(logged).not.toContain('SECRET-LEDGER-TEXT-5512')
   })
 
   it('does nothing while the task is still running', async () => {
@@ -1183,6 +1378,286 @@ describe('FaceScanService.reap: the reaper\'s one check', () => {
       ]),
     )
     expect(queuedSteps(withTask)).toHaveLength(2)
+  })
+})
+
+describe('FaceScanService.reap: scans the reaper cannot let hold it back', () => {
+  it('still checks a newer unchecked scan when 100 or more older ones were checked already and are not yet 2 hours old', async () => {
+    const ctx = setup()
+    for (let i = 0; i < 101; i++) {
+      const id = `old-${i}`
+      await ctx.repository.createFaceScan({ id, userId: 'old-user', profileId: `old-profile-${i}`, goalAtScan: 'glow', createdAt: new Date(T0.getTime() - 10 * MINUTE) }, [])
+      await ctx.repository.markReaperChecked(id, T0)
+    }
+    const { id } = await uploaded(ctx)
+    clearQueue(ctx)
+    const at = new Date(T0.getTime() + 20 * MINUTE)
+
+    const result = await reap(ctx, at)
+
+    expect(queuedSteps(ctx)).toEqual([{ faceScanId: id, step: 'fetch', at: at.getTime() }])
+    expect(result).toEqual({ checked: 1, failed: 0 })
+  })
+
+  it('does not move the updated time back when the scan moved on after the reaper read it', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const { id } = await uploaded(ctx)
+    const at = new Date(T0.getTime() + 20 * MINUTE)
+    const movedAt = new Date(T0.getTime() + 19 * MINUTE)
+    repository.afterUncheckedStaleRead = async () => void (await repository.updateFaceScan(id, 'analysing', { updatedAt: movedAt }))
+
+    await reap(ctx, at)
+
+    const row = await rowOf(ctx, id)
+    expect(row.updatedAt).toEqual(movedAt)
+    expect(row.reaperCheckedAt).toEqual(at)
+  })
+
+  it('queues nothing for a scan that another sweep checked between this one reading it and noting its check', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const { id } = await uploaded(ctx)
+    clearQueue(ctx)
+    const other = new Date(T0.getTime() + 19 * MINUTE)
+    repository.afterUncheckedStaleRead = async () => void (await repository.markReaperChecked(id, other))
+
+    const result = await reap(ctx, new Date(T0.getTime() + 20 * MINUTE))
+
+    expect(ctx.jobs.enqueued).toEqual([])
+    expect(result).toEqual({ checked: 0, failed: 0 })
+    expect((await rowOf(ctx, id)).reaperCheckedAt).toEqual(other)
+  })
+})
+
+describe('FaceScanService: Perfect Corp\'s copy of the face photo is never left behind', () => {
+  /** A scan whose analysis and Fitzpatrick tasks both exist at Perfect Corp, so a test can tell which of them were deleted. */
+  const withBothTasks = async (ctx: Ctx) => {
+    const scan = await uploaded(ctx)
+    expect(scan.fitzpatrickTask).not.toBeNull()
+    return { id: scan.id, both: [scan.analysisTask, scan.fitzpatrickTask!], analysisTask: scan.analysisTask, fitzpatrickTask: scan.fitzpatrickTask! }
+  }
+  const twoDeleteFailures = (ctx: Ctx) => ctx.perfectCorp.script('deleteTask', new PerfectCorpUnavailableError('vendor said SECRET-VENDOR-TEXT-7741'), new PerfectCorpUnavailableError('vendor said SECRET-VENDOR-TEXT-7741'))
+
+  it('deletes the analysis task, and leaves a Fitzpatrick task that may still complete, when the photo is refused and the profile has no type yet', async () => {
+    const ctx = setup()
+    const { id, analysisTask } = await withBothTasks(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+
+    await fetchStep(ctx, id)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'too-dark' })
+    expect(deletedTasks(ctx)).toEqual([analysisTask])
+  })
+
+  it('deletes the Fitzpatrick task too when the photo is refused and the profile already has a type, because nothing waits for it', async () => {
+    const ctx = setup()
+    const { id, both } = await withBothTasks(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+
+    await fetchStep(ctx, id)
+
+    expect(deletedTasks(ctx)).toEqual(both)
+  })
+
+  it('deletes nothing when the photo is refused before any task exists', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+
+    await upload(ctx, id)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake' })
+    expect(callsOf(ctx, 'deleteTask')).toEqual([])
+  })
+
+  it('still lets the Fitzpatrick task of a refused photo finish after a retake: its step stores the type and deletes it', async () => {
+    const ctx = setup()
+    const { id, fitzpatrickTask } = await withBothTasks(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('move-closer'))
+    await fetchStep(ctx, id)
+    await retake(ctx, id, face(9))
+    ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'IV' })
+
+    await fitzpatrickStep(ctx, id)
+
+    expect(await ctx.repository.fitzpatrickOf(PROFILE)).toMatchObject({ fitzpatrick: 'IV', taskId: fitzpatrickTask })
+    expect(deletedTasks(ctx)).toContain(fitzpatrickTask)
+  })
+
+  it.each([
+    ['has no credit', () => new PerfectCorpCreditError('no units'), true],
+    ['calls the request bad', () => new PerfectCorpBadRequestError('expired'), false],
+  ])('deletes both tasks when the scan fails because Perfect Corp %s', async (_label, error, _alert) => {
+    const ctx = setup()
+    const { id, both } = await withBothTasks(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', error())
+
+    expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PermanentJobError)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+    expect(deletedTasks(ctx)).toEqual(both)
+  })
+
+  it('deletes both tasks when the reaper gives up on a scan after 2 hours', async () => {
+    const ctx = setup()
+    const { id, both } = await withBothTasks(ctx)
+
+    await reap(ctx, new Date(T0.getTime() + FAIL_AFTER + 1))
+
+    expect((await rowOf(ctx, id)).state).toBe('failed')
+    expect(deletedTasks(ctx)).toEqual(both)
+  })
+
+  it('deletes both tasks when the queue gives up on a step of the scan (the dead letter), but none for a Fitzpatrick step, which leaves the scan alone', async () => {
+    const ctx = setup()
+    const { id, both } = await withBothTasks(ctx)
+
+    await asSystem(() => ctx.service.giveUp({ faceScanId: id, step: 'fitzpatrick', at: T0.getTime() }))
+    expect(callsOf(ctx, 'deleteTask')).toEqual([])
+    expect((await rowOf(ctx, id)).state).toBe('analysing')
+
+    await asSystem(() => ctx.service.giveUp({ faceScanId: id, step: 'fetch', at: T0.getTime() }))
+    expect((await rowOf(ctx, id)).state).toBe('failed')
+    expect(deletedTasks(ctx)).toEqual(both)
+  })
+
+  it('deletes the Fitzpatrick task a retaken scan still holds when the consent was withdrawn before its upload ran', async () => {
+    const ctx = setup()
+    const { id, fitzpatrickTask } = await withBothTasks(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    await fetchStep(ctx, id)
+    await retake(ctx, id, face(9))
+    await asUser(() => ctx.service.withdrawConsent())
+    ctx.perfectCorp.calls.length = 0
+
+    await upload(ctx, id)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'consent-withdrawn' })
+    expect(deletedTasks(ctx)).toEqual([fitzpatrickTask])
+  })
+
+  it('deletes nothing for a scan that fails before it has any task', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+
+    await asSystem(() => ctx.service.markFailed(id))
+
+    expect(callsOf(ctx, 'deleteTask')).toEqual([])
+  })
+
+  it('deletes no task when the scan had already moved on and the failure changed nothing', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx)
+    ctx.perfectCorp.calls.length = 0
+
+    await asSystem(() => ctx.service.markFailed(id))
+
+    expect(callsOf(ctx, 'deleteTask')).toEqual([])
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+  })
+
+  it('deletes both tasks when the user deletes the scan, and the scan is gone as before', async () => {
+    const ctx = setup()
+    const { id, both } = await withBothTasks(ctx)
+
+    await asUser(() => ctx.service.deleteFaceScan(id))
+
+    expect(deletedTasks(ctx)).toEqual(both)
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('changes nothing else when Perfect Corp cannot delete the tasks of a scan that fails: it is failed, the stream is told, the message still ends as permanent, and only the error\'s name is logged', async () => {
+    const ctx = setup()
+    const { id } = await withBothTasks(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpCreditError('no units'))
+    twoDeleteFailures(ctx)
+
+    const logged = await loggedDuring(async () => expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PermanentJobError))
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+    expect(ctx.events.eventsFor(id).slice(-2)).toEqual([{ type: 'face', faceScan: { id, state: 'failed', reason: 'unavailable' } }, { type: 'done' }])
+    expect(opsAlertsRaised(ctx)).toEqual(['face-scan-account'])
+    expect(deletedTasks(ctx)).toHaveLength(2)
+    expect(logged).toContain('task-delete-failed')
+    expect(logged).toContain('PerfectCorpUnavailableError')
+    expect(logged).not.toContain('SECRET-VENDOR-TEXT-7741')
+  })
+
+  it('changes nothing else when Perfect Corp cannot delete the tasks of a refused photo', async () => {
+    const ctx = setup()
+    const { id } = await withBothTasks(ctx)
+    await ctx.repository.saveFitzpatrick({ profileId: PROFILE, userId: USER, fitzpatrick: 'V', taskId: 'earlier-task', createdAt: T0 })
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    twoDeleteFailures(ctx)
+
+    await loggedDuring(() => fetchStep(ctx, id))
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'too-dark' })
+    expect(ctx.events.eventsFor(id).slice(-2)).toEqual([{ type: 'face', faceScan: { id, state: 'needs-retake', reason: 'too-dark' } }, { type: 'done' }])
+  })
+
+  it('changes nothing else when Perfect Corp cannot delete the tasks of a scan the user deletes: the scan and its photos are gone', async () => {
+    const ctx = setup()
+    const { id } = await withBothTasks(ctx)
+    twoDeleteFailures(ctx)
+
+    const logged = await loggedDuring(() => asUser(() => ctx.service.deleteFaceScan(id)))
+
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+    expect(logged).toContain('PerfectCorpUnavailableError')
+    expect(logged).not.toContain('SECRET-VENDOR-TEXT-7741')
+  })
+})
+
+describe('FaceScanService: races with the bucket', () => {
+  it('leaves nothing in the bucket for a scan the user deletes while an analysis commits its masks between the key read and the row delete', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const { id } = await uploaded(ctx)
+    repository.afterKeysRead = async () => {
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+      expect(masksStored(ctx)).toHaveLength(2)
+    }
+
+    await asUser(() => ctx.service.deleteFaceScan(id))
+
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('removes the front photo it just wrote when the scan was deleted between its reading the scan and its moving it, and answers 404', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    await upload(ctx, id)
+    repository.afterPhotosRead = () => asUser(() => ctx.service.deleteFaceScan(id))
+
+    const error = await errorOf(retake(ctx, id, face(9)))
+
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('FACE_SCAN_NOT_FOUND')
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('leaves the front photo in place, and answers 409, when the scan still exists but another retake moved it first', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    await upload(ctx, id)
+    repository.afterPhotosRead = async () => void (await repository.updateFaceScan(id, 'needs-retake', { state: 'analysing', reason: null, pcAnalysisTaskId: null, updatedAt: T0 }))
+
+    const error = await errorOf(retake(ctx, id, face(9)))
+
+    expect(error.code).toBe('FACE_SCAN_NOT_AWAITING_RETAKE')
+    expect(ctx.photos.stored.has(frontKey(ctx, id))).toBe(true)
   })
 })
 

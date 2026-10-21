@@ -184,7 +184,7 @@ export class FaceScanService {
       faceScanId: scanId,
       userId,
       position,
-      photoKey: `faces/${this.environment}/${userId}/${profileId}/${scanId}/${position}.jpg`,
+      photoKey: this.objectKey({ id: scanId, userId, profileId }, `${position}.jpg`),
       createdAt: now,
     }))
     const keys = rows.map(({ photoKey }) => photoKey)
@@ -226,11 +226,19 @@ export class FaceScanService {
     return this.view(scan, await this.repository.photosOf(id))
   }
 
-  /** Deletes the scan's photos and masks from the bucket, then its rows, so a bucket that fails leaves the scan to delete again. */
+  /**
+   * Deletes the scan's photos and masks from the bucket, then its rows, so a bucket that fails leaves the scan to delete again. The keys a scan can have are
+   * fixed, so they are deleted once more after the rows: an analysis that committed its masks after the keys were read has rows no longer, and its masks
+   * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
+   */
   async deleteFaceScan(id: string): Promise<void> {
-    await this.ownedScan(id)
+    const scan = await this.ownedScan(id)
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
+    // The rows are gone, so a failure here cannot be retried by the user (the next delete is a 404): log it and finish.
+    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...concernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
+    await this.photos.deleteMany(fixedKeys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: id, error: describeUnexpectedError(cleanup) }))
+    await this.deleteTasks(scan)
   }
 
   /**
@@ -310,7 +318,14 @@ export class FaceScanService {
     const now = this.now()
     // Cleared with the task: the retaken photo gets a task of its own and the reaper a check of its own.
     const moved = await this.repository.updateFaceScan(id, 'needs-retake', { state: 'analysing', reason: null, pcAnalysisTaskId: null, reaperCheckedAt: null, updatedAt: now })
-    if (!moved) throw FaceScanService.notAwaitingRetake()
+    if (!moved) {
+      // Deleted since the scan was read: the photo just written belongs to nothing, and nothing else will ever delete it.
+      if (!(await this.repository.findFaceScan(id))) {
+        await this.photos.delete(front.photoKey).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: id, error: describeUnexpectedError(cleanup) }))
+        throw FaceScanService.faceScanNotFound()
+      }
+      throw FaceScanService.notAwaitingRetake()
+    }
     try {
       await this.jobs.enqueue(analyseFaceScanSpec, { faceScanId: id, step: 'upload', at: now.getTime() })
     } catch (error) {
@@ -325,24 +340,28 @@ export class FaceScanService {
   }
 
   /**
-   * The reaper's one check of the scans still analysing. A scan that has sat 15 minutes without its webhook is looked at once: the step that would have
-   * run is queued again (`fetch` when Perfect Corp has its task, else `upload`, because the first message was lost) and the check is noted, so it is
-   * never repeated. A scan that has sat 2 hours since it last moved is failed as unavailable. The check does not move the scan's updated time, or the
-   * 2 hours would start again. A failure on one scan is logged by id and does not stop the sweep.
+   * The reaper's one check of the scans still analysing. A scan that has sat 2 hours since it last moved is failed as unavailable. A scan that has sat 15
+   * minutes without its webhook, and has not been checked, is looked at once: the step that would have run is queued again (`fetch` when Perfect Corp has its
+   * task, else `upload`, because the first message was lost) and the check is noted, so it is never repeated. The check does not move the scan's updated time,
+   * or the 2 hours would start again. These are two queries, because one over the 15-minute cut-off would fill its batch with scans already checked that
+   * have not yet reached 2 hours, and keep newer ones from being looked at. A failure on one scan is logged by id and does not stop the sweep.
    */
   async reap(now: Date): Promise<{ checked: number; failed: number }> {
-    const stale = await this.repository.staleAnalysing(new Date(now.getTime() - FaceScanService.STUCK_AFTER_MS), FaceScanService.REAP_BATCH)
     let checked = 0
     let failed = 0
-    for (const scan of stale) {
+    for (const scan of await this.repository.staleAnalysing(new Date(now.getTime() - FaceScanService.GIVE_UP_AFTER_MS), FaceScanService.REAP_BATCH)) {
       try {
-        if (scan.updatedAt.getTime() < now.getTime() - FaceScanService.GIVE_UP_AFTER_MS) {
-          if (await this.fail(scan.id, 'unavailable')) failed++
-        } else if (scan.reaperCheckedAt === null) {
-          if (!(await this.repository.updateFaceScan(scan.id, 'analysing', { reaperCheckedAt: now, updatedAt: scan.updatedAt }))) continue
-          await this.jobs.enqueue(analyseFaceScanSpec, { faceScanId: scan.id, step: scan.pcAnalysisTaskId ? 'fetch' : 'upload', at: now.getTime() })
-          checked++
-        }
+        if (await this.fail(scan.id, 'unavailable')) failed++
+      } catch (error) {
+        console.error({ outcome: 'reap-failed', faceScanId: scan.id, error: describeUnexpectedError(error) })
+      }
+    }
+    for (const scan of await this.repository.staleAnalysing(new Date(now.getTime() - FaceScanService.STUCK_AFTER_MS), FaceScanService.REAP_BATCH, { unchecked: true })) {
+      try {
+        // Only the sweep that notes the check queues the step, and only while the scan has not been checked: it may have moved on since it was read.
+        if (!(await this.repository.markReaperChecked(scan.id, now))) continue
+        await this.jobs.enqueue(analyseFaceScanSpec, { faceScanId: scan.id, step: scan.pcAnalysisTaskId ? 'fetch' : 'upload', at: now.getTime() })
+        checked++
       } catch (error) {
         console.error({ outcome: 'reap-failed', faceScanId: scan.id, error: describeUnexpectedError(error) })
       }
@@ -388,10 +407,11 @@ export class FaceScanService {
       const fileId = await this.perfectCorp.uploadFile(photo.bytes, { contentType: 'image/jpeg', fileName: 'front.jpg' })
       const taskId = await this.perfectCorp.createSkinAnalysis({ fileId, actions: hdActionsForGoal(scan.goalAtScan) })
       const now = this.now()
-      // At once, before anything else can fail: a task Perfect Corp holds that we do not know of is one we cannot fetch or pay for.
-      const stored = await this.repository.updateFaceScan(id, 'analysing', { pcAnalysisTaskId: taskId, pcEnvironment: this.environment, updatedAt: now })
+      // At once, before anything else can fail: a task Perfect Corp holds that we do not know of is one we cannot fetch or pay for. Only while the scan has no
+      // task: of two uploads of one scan the first to store keeps its task.
+      const stored = await this.repository.updateFaceScan(id, 'analysing', { pcAnalysisTaskId: taskId, pcEnvironment: this.environment, updatedAt: now }, { onlyIfNoAnalysisTask: true })
       if (!stored) {
-        // The scan was deleted or failed while the photo was on its way: nothing will ever fetch this task, so their copy of the photo goes now.
+        // The scan was deleted or failed while the photo was on its way, or another upload stored its task first: nothing will ever fetch this task, so their copy of the photo goes now.
         await this.deleteTaskQuietly(taskId)
         return
       }
@@ -408,6 +428,10 @@ export class FaceScanService {
       await this.repository.updateFaceScan(scan.id, 'analysing', { pcFitzpatrickTaskId: taskId, updatedAt: now })
     } catch (error) {
       console.error({ outcome: 'fitzpatrick-start-failed', faceScanId: scan.id, error: describeUnexpectedError(error) })
+      // The same account problem as the analysis would have, and it must reach the owner even though this read never fails the scan.
+      if (error instanceof PerfectCorpCreditError) {
+        await this.opsAlerts.raise('face-scan-account').catch((raising: unknown) => console.error({ outcome: 'ops-alert-failed', faceScanId: scan.id, error: describeUnexpectedError(raising) }))
+      }
     }
   }
 
@@ -419,6 +443,14 @@ export class FaceScanService {
       const analysis = await this.perfectCorp.getSkinAnalysis(taskId)
       // Not done yet: the webhook or the reaper comes back.
       if (analysis.status === 'running') return
+      // Perfect Corp charges when the task succeeds, not when we store the result, so the spend is recorded now: a mask that will not download, a scan deleted
+      // meanwhile or a failed write must not leave a charge off the books. The ledger is keyed by the task, so a retry does not record it twice.
+      try {
+        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(hdActionsForGoal(scan.goalAtScan).length), key: taskId })
+      } catch (error) {
+        // Not worth losing the result for: the books are caught up from the ledger's side, and a retry would only fail the same way.
+        console.error({ outcome: 'spend-record-failed', faceScanId: id, taskId, error: describeUnexpectedError(error) })
+      }
       await this.copyResults(scan, taskId, analysis)
     })
   }
@@ -426,7 +458,7 @@ export class FaceScanService {
   /**
    * Stores a finished analysis. The masks are downloaded and put in the bucket first, then the rows and the state change go in as one write that holds only
    * while the scan is still analysing; when it does not (the scan was deleted or moved on meanwhile) the masks just written are deleted again, so nothing is
-   * left in the bucket for a scan that is gone. The spend is recorded only once the write held. Perfect Corp's copy of the task is then deleted, best effort.
+   * left in the bucket for a scan that is gone. Perfect Corp's copy of the task is then deleted, best effort. (The spend was recorded before, by `fetch`.)
    */
   private async copyResults(scan: FaceScan, taskId: string, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): Promise<void> {
     const { id, userId, profileId } = scan
@@ -435,7 +467,7 @@ export class FaceScanService {
       for (const concern of concernsForGoal(scan.goalAtScan)) {
         const url = FaceScanService.maskUrlOf(analysis.concerns, concern)
         if (!url) continue
-        const maskKey = `faces/${this.environment}/${userId}/${profileId}/${id}/mask-${concern.replaceAll('_', '-')}.png`
+        const maskKey = this.objectKey(scan, FaceScanService.maskName(concern))
         await this.photos.put(maskKey, { bytes: await this.perfectCorp.downloadMask(url), mediaType: 'image/png' })
         masks.push({ faceScanId: id, userId, concern, maskKey })
       }
@@ -456,21 +488,29 @@ export class FaceScanService {
       await this.deleteMasks(masks)
       throw error
     }
-    try {
-      await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(hdActionsForGoal(scan.goalAtScan).length), key: taskId })
-    } catch (error) {
-      // The scan is ready and a retry would find it so: the user must not wait on, nor lose a result to, the books.
-      console.error({ outcome: 'spend-record-failed', faceScanId: id, error: describeUnexpectedError(error) })
-    }
+    await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)
     await this.publishFrame(id, 'ready', null, { done: true })
+  }
+
+  /** The Fitzpatrick webhook may have been lost, and nothing else asks for that task again: when the analysis is in and the profile still has no type, ask now. */
+  private async queueFitzpatrickBackstop(scan: FaceScan): Promise<void> {
+    if (!scan.pcFitzpatrickTaskId) return
+    try {
+      if (await this.repository.fitzpatrickOf(scan.profileId)) return
+      await this.jobs.enqueue(analyseFaceScanSpec, { faceScanId: scan.id, step: 'fitzpatrick', at: this.now().getTime() })
+    } catch (error) {
+      console.error({ outcome: 'enqueue-failed', faceScanId: scan.id, step: 'fitzpatrick', error: describeUnexpectedError(error) })
+    }
   }
 
   private async readFitzpatrick(id: string): Promise<void> {
     const scan = await this.repository.findFaceScan(id)
     const taskId = scan?.pcFitzpatrickTaskId
     if (!scan || !taskId) return
-    if (await this.repository.fitzpatrickOf(scan.profileId)) {
+    const held = await this.repository.fitzpatrickOf(scan.profileId)
+    // This very task gave the profile its type, and was paid for then: only its copy at Perfect Corp is left.
+    if (held?.taskId === taskId) {
       await this.deleteTaskQuietly(taskId)
       return
     }
@@ -485,6 +525,16 @@ export class FaceScanService {
       return
     }
     if (read.status === 'running') return
+    if (held) {
+      // Another task gave the profile its type first, but this one succeeded all the same, and Perfect Corp charges for that.
+      try {
+        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'fitzpatrick', units: FITZPATRICK_UNITS, key: taskId })
+      } catch (error) {
+        console.error({ outcome: 'spend-record-failed', faceScanId: id, taskId, error: describeUnexpectedError(error) })
+      }
+      await this.deleteTaskQuietly(taskId)
+      return
+    }
     // Recorded before it is stored: a failure in between is retried, and the retry finds the type missing and records it again as the same task.
     await this.aiUsage.record({ vendor: 'perfect-corp', job: 'fitzpatrick', units: FITZPATRICK_UNITS, key: taskId })
     await this.repository.saveFitzpatrick({ profileId: scan.profileId, userId: scan.userId, fitzpatrick: read.fitzpatrick, taskId, createdAt: this.now() })
@@ -514,13 +564,19 @@ export class FaceScanService {
   private async needRetake(id: string, reason: RejectedPhotoReason): Promise<void> {
     if (await this.repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason, updatedAt: this.now() })) {
       await this.publishFrame(id, 'needs-retake', reason, { done: true })
+      // The photo will be replaced, so the analysis task is dead weight. A Fitzpatrick task is kept while the profile has no type: it is a read of the same face,
+      // it may still complete, and its own step deletes it.
+      await this.deleteTasksOf(id, { keepPendingFitzpatrick: true })
     }
   }
 
   /** Fails a scan that is still analysing, and says whether it did. */
   private async fail(id: string, reason: 'unavailable' | 'consent-withdrawn'): Promise<boolean> {
     const failed = await this.repository.updateFaceScan(id, 'analysing', { state: 'failed', reason, updatedAt: this.now() })
-    if (failed) await this.publishFrame(id, 'failed', reason, { done: true })
+    if (failed) {
+      await this.publishFrame(id, 'failed', reason, { done: true })
+      await this.deleteTasksOf(id)
+    }
     return failed
   }
 
@@ -541,6 +597,33 @@ export class FaceScanService {
     } catch (error) {
       console.error({ outcome: 'task-delete-failed', error: describeUnexpectedError(error) })
     }
+  }
+
+  /** Where a scan's object `name` (`front.jpg`, `mask-<concern>.png`) lives in the private bucket. */
+  private objectKey(scan: Pick<FaceScan, 'id' | 'userId' | 'profileId'>, name: string): string {
+    return `faces/${this.environment}/${scan.userId}/${scan.profileId}/${scan.id}/${name}`
+  }
+
+  private static maskName(concern: string): string {
+    return `mask-${concern.replaceAll('_', '-')}.png`
+  }
+
+  /** Deletes the tasks a scan holds at Perfect Corp, reading it for them. Best effort like `deleteTaskQuietly`: whatever goes wrong here is logged, never thrown. */
+  private async deleteTasksOf(id: string, options: { keepPendingFitzpatrick?: true } = {}): Promise<void> {
+    try {
+      const scan = await this.repository.findFaceScan(id)
+      if (scan) await this.deleteTasks(scan, options)
+    } catch (error) {
+      console.error({ outcome: 'task-delete-failed', faceScanId: id, error: describeUnexpectedError(error) })
+    }
+  }
+
+  /** The face photo must not outlive the scan at Perfect Corp: both of the scan's tasks go, except (with `keepPendingFitzpatrick`) a Fitzpatrick task the profile still waits for. */
+  private async deleteTasks(scan: FaceScan, options: { keepPendingFitzpatrick?: true } = {}): Promise<void> {
+    if (scan.pcAnalysisTaskId) await this.deleteTaskQuietly(scan.pcAnalysisTaskId)
+    if (!scan.pcFitzpatrickTaskId) return
+    if (options.keepPendingFitzpatrick && !(await this.repository.fitzpatrickOf(scan.profileId))) return
+    await this.deleteTaskQuietly(scan.pcFitzpatrickTaskId)
   }
 
   private async deleteMasks(masks: FaceMask[]): Promise<void> {
