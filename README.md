@@ -224,6 +224,38 @@ tracking" in `docs/architecture.md`.
 
 To measure the research, analysis, goal-reading and mention-reading steps against fixed cases, run `npm run eval:catalog` (the default `--mode all` includes the goal and mention readers; `-- --mode goals` runs only the first, about 40 Haiku calls and a few cents, and `-- --mode mentions` only the second, about 22 Haiku calls and a few cents; it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
 
+## Catalog workbook
+
+The recommendation catalog (products, where they are sold and at what price, ingredient rules, countries) is edited as a spreadsheet, not in the
+database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.md](docs/catalog-workbook-contract.md) (written from the contract by
+`npm run catalog:contract-doc`), and the two commands below move the workbook in and out of an environment.
+
+1. **Export** the live catalog: `npm run catalog:export -- --env staging` (or `local`, `production`; `--out file.xlsx` to name the file). It writes
+   `catalog-<env>-v<version>.xlsx` with the four tabs (Products, Availability, Ingredients, Countries) and a hidden `_meta` sheet that remembers the
+   catalog version the file came from. Leave `_meta` alone.
+2. **Edit** the workbook in Excel or Sheets. Keep the tab names and header rows as they are.
+3. **Upload as a dry run**: `npm run catalog:upload -- catalog-staging-v12.xlsx --env staging --by "Your name"`. The file is checked against the
+   contract on your machine first, and every problem is listed by tab, row and column with nothing sent. If it passes, the server answers with what
+   would change per tab (added, updated, retired, reactivated) and any product it would create as new. A different spelling of a product's name is a
+   new product, so read that list. A dry run changes nothing.
+4. **Apply** it by running the same command with `--apply`. This writes the new catalog version and archives the file. If someone else applied a
+   change after your export, the upload is refused as `CATALOG_STALE`: export again and redo the edits on the new file.
+
+Both commands read `ADMIN_API_TOKEN` from the environment's vars file: `.dev.vars` for `local`, `.dev.vars.staging` and `.dev.vars.production` for the
+deployed ones (the same gitignored files as above). The token is sent only in the `X-Admin-Token` header and is never printed.
+
+- **Creating or rotating the token:** generate a long random value (`openssl rand -hex 32`, as for the other secrets), put it in `.dev.vars.<env>` as
+  `ADMIN_API_TOKEN`, and push it with `npm run secrets:push -- --env <env> --apply`. To rotate, replace the value and push again; the old value stops
+  working as soon as the Worker has the new one. For `local`, the value in `.dev.vars` is what `wrangler dev` reads.
+- **A file only goes back where it came from.** The export stamps the environment, the catalog version and the contract version into the hidden `_meta`
+  sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
+  server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
+  `--force`.
+- **Use Excel or LibreOffice.** Google Sheets and Numbers may drop the hidden `_meta` sheet when they save; a file without it is refused, so use Excel or
+  LibreOffice, or export again.
+- **Keep the cells as text.** Excel may retype a date, or turn a code such as `007` into a number, when you paste over a cell. Dates are written
+  `YYYY-MM-DD` and codes are text, and the contract check lists any cell that no longer fits.
+
 ## Face scan setup (Perfect Corp)
 
 The face scan sends the front photo to Perfect Corp (YouCam) and gets the analysis back by webhook. Design in "Face scans" in
