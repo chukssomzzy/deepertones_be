@@ -1289,22 +1289,33 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   Hair Types", "for Normal to Oily Skin"; four words between "for" and the hair/skin word is too many to be the phrase,
   so nothing is set aside). **An edition marker is not a suitability line:** a phrase whose words between "for" and
   "hair"/"skin" include any of men, mens, man, mans, women, womens, woman, womans, kids, kid, baby, babys, babies, child,
-  childs, children, childrens, teen, teens ("for Men's Skin", "for Kids Hair") is never treated as the phrase and never
+  childs, children, childrens, teen, teens, boys, boy, girls, girl, ladies, lady, gents, gent, toddler, toddlers, infant,
+  infants ("for Men's Skin", "for Kids Hair", "for Boys Hair") is never treated as the phrase and never
   set aside — it names an edition of the range, a real difference, not the pack's wording of the same suitability
   (apostrophes are already dropped by `normaliseText`, so "men's" reads as "mens"). The phrase is dropped from the
   similarity ratio and the containment check only when exactly one of the two listings gives one; the same phrase on
   both sides, two that differ on both sides, and no phrase on either side score on the full words, as before. **Two or
-  more distinct phrases switch the ignoring off for the whole call:** when the reading and the products passed to
-  `nearMissCandidates` hold 2+ distinct suitability phrases between them (a reading with a phrase and a sibling with a
-  different one; or a reading with none among rows with two different ones), nothing is set aside for any pair in that
-  call, because the family itself then shows the words tell products apart rather than restate a shared suitability.
-  One distinct phrase, on whichever side, still gets ignored. This is local to `nearMissCandidates`: it never reaches
-  `identityKey`, `namesAnotherEdition`, the exported `lessSpecific`, the ambiguity guard's equal-words check, or the
-  alias-equality check, all of which still see the phrase's words — but it does reach the ambiguity guard's
-  specificity check below (`lessSpecificForNearMiss`) and the form-outranking rule's count, which uses the same
-  less-specific set, so a line that bought (or cost) a candidate its place here is seen the same way there. Ranking
-  (best first by similarity, then id, at most 3 after ranking) sorts on this phrase-ignored similarity too, not the full
-  words'. The family is the first word of the normalised brand
+  more distinct phrases switch the ignoring off for the whole call, but the count is scoped to the near misses
+  themselves, not the whole family window:** `ignoresOneSidedSuitability(target, products)` first finds the near
+  misses with the ignoring on (the same brand-family, different-key, threshold-or-containment pass `nearMissCandidates`
+  runs, before sorting and the limit), then counts distinct suitability phrases across the reading and only those near
+  misses (a reading with a phrase and a near-miss sibling with a different one; or a reading with none among near-miss
+  rows with two different ones). With 2 or more, nothing is set aside for any pair in that call, because the near
+  misses themselves then show the words tell products apart rather than restate a shared suitability; otherwise the
+  first pass (ignoring on) stands. One distinct phrase, on whichever side, still gets ignored. A row of the family
+  that is no near miss settles nothing: its own suitability line is never read for this count, even when the row sits
+  in the same brand family as the reading and the near misses. This is local to `nearMissCandidates` and
+  `lessSpecificForNearMiss` (both call `ignoresOneSidedSuitability` so they decide the same way for one reading): it
+  never reaches `identityKey`, `namesAnotherEdition`, the exported `lessSpecific`, the ambiguity guard's equal-words
+  check, or the alias-equality check, all of which still see the phrase's words — but it does reach the ambiguity
+  guard's specificity check below (`lessSpecificForNearMiss`) and the form-outranking rule's count, which uses the
+  same less-specific set, so a line that bought (or cost) a candidate its place here is seen the same way there.
+  Ranking (best first by similarity, then id, at most 3 after ranking) sorts on this phrase-ignored similarity too, not
+  the full words'. Switching the ignoring off can itself add a candidate, not only drop one: once the phrase's words
+  ("for", "hair"/"skin", and the word(s) between) are no longer set aside, a row with no suitability line of its own
+  that happens to hold some of those same words gets credit for sharing them, which can be enough to cross the
+  threshold where the words would otherwise have been removed from the comparison — the judge still decides whether
+  it is the same product. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
   looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
@@ -1436,9 +1447,10 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
   This specificity test (`lessSpecificForNearMiss`) weighs the same words the suitability-phrase ignoring (near-miss
   candidates, above) used to find the candidate in the first place — a one-sided phrase set aside, or not, by the same
-  two-or-more-distinct-phrases switch-off — not the full words `lessSpecific` gives: a phrase that bought a candidate
-  past the threshold, or kept one out, is seen the same way here, so a line no row of the family gives cannot buy the
-  reading a judge call it would not otherwise have earned.
+  two-or-more-distinct-phrases switch-off, decided from the same comparable list and the same `nearMissThreshold` —
+  not the full words `lessSpecific` gives: a phrase that bought a candidate past the threshold, or kept one out, is
+  seen the same way here, so a line no row of the family gives cannot buy the reading a judge call it would not
+  otherwise have earned.
   **An equal candidate is never held back by it.** Whenever one or more of the near-miss candidates have exactly the reading's
   words (full words, `sameWords`, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
   judged even when the guard holds the reading back from the rest: then only the equal ones are asked about, so a "no" still

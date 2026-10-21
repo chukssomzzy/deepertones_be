@@ -199,6 +199,7 @@ const SUITABILITY_PHRASE = /\bfor((?: \S+){0,3}) (?:hair|skin)\b(?: types?\b)?/
 const EDITION_WORDS = new Set([
   'men', 'mens', 'man', 'mans', 'women', 'womens', 'woman', 'womans',
   'kids', 'kid', 'baby', 'babys', 'babies', 'child', 'childs', 'children', 'childrens', 'teen', 'teens',
+  'boys', 'boy', 'girls', 'girl', 'ladies', 'lady', 'gents', 'gent', 'toddler', 'toddlers', 'infant', 'infants',
 ])
 
 /** The words of a suitability phrase in this pooled text, for `nearMissCandidates` to set aside on one side only; null when there is none, or when the words between "for" and "hair"/"skin" name an edition rather than a suitability. */
@@ -210,13 +211,13 @@ const suitabilityPhraseWords = (text: string): string[] | null => {
 }
 
 /**
- * How many different suitability phrases the reading and these products hold between them (the same phrase on
- * several of them counts once): with 2 or more, a one-sided phrase is no longer ignored for any pair in this call,
- * since the family itself shows the words tell products apart rather than just restating a shared suitability.
+ * How many different suitability phrases `target` and this list hold between them (the same phrase on several of
+ * them counts once): with 2 or more, a one-sided phrase is no longer ignored for any pair in this call, since the
+ * list itself shows the words tell products apart rather than just restating a shared suitability.
  */
-const distinctSuitabilityPhrases = (target: Branded, products: Branded[]): number =>
+const distinctPhraseCount = (target: Branded, candidates: Branded[]): number =>
   new Set(
-    [target, ...products]
+    [target, ...candidates]
       .map((p) => suitabilityPhraseWords(pooledText(p)))
       .filter((p): p is string[] => p !== null)
       // Folded, so one suitability line in UK and US spelling ("for Colour Treated Hair", "for Color Treated Hair") counts once.
@@ -227,7 +228,7 @@ const distinctSuitabilityPhrases = (target: Branded, products: Branded[]): numbe
  * The pooled words of `target` and `product`, for near-miss scoring only, with a suitability phrase removed from whichever
  * side alone gives one: the extra words should neither sink a match the rest of the name would make, nor manufacture one
  * neither listing meant. A phrase on both sides (the same line, or two that differ) and no phrase on either side are left
- * exactly as `words` gives them. `ignoreOneSided` is false once the call's products hold 2+ distinct phrases between them.
+ * exactly as `words` gives them. `ignoreOneSided` is false once the call's near misses hold 2+ distinct phrases between them.
  */
 const wordsForNearMiss = (target: Branded, product: Branded, ignoreOneSided: boolean): [Set<string>, Set<string>] => {
   const targetPhrase = suitabilityPhraseWords(pooledText(target))
@@ -242,14 +243,54 @@ const wordsForNearMiss = (target: Branded, product: Branded, ignoreOneSided: boo
   return [words(target), words(product)]
 }
 
+type NearMissCandidate<P extends Branded> = { product: P; similarity: number; wt: Set<string>; wp: Set<string> }
+
+/** The default near-miss threshold, also `nearMissCandidates`'s own default: `ignoresOneSidedSuitability` must use the
+ * same one when the caller does not say otherwise, or its first pass would see a different set of near misses. */
+const DEFAULT_NEAR_MISS_THRESHOLD = 0.6
+
+/**
+ * The same-brand-family, different-key, threshold-or-containment pass `nearMissCandidates` runs, before sorting and
+ * the limit: the shared plumbing both it and `ignoresOneSidedSuitability`'s first pass need.
+ */
+const rawNearMisses = <P extends Branded & { identityKey?: string }>(
+  target: Branded,
+  products: P[],
+  threshold: number,
+  ignoreOneSided: boolean,
+): NearMissCandidate<P>[] => {
+  const targetKey = identityKey(target)
+  return products
+    .filter((p) => sameBrandFamily(p.brand, target.brand) && (p.identityKey ?? identityKey(p)) !== targetKey)
+    .map((p) => {
+      const [wt, wp] = wordsForNearMiss(target, p, ignoreOneSided)
+      return { product: p, similarity: jaccard(wt, wp), wt, wp }
+    })
+    .filter((c) => c.similarity >= threshold || containsWords(target, c.wt, c.product, c.wp))
+}
+
+/**
+ * Whether a one-sided suitability phrase is ignored when `target` is compared against `products`: found with the
+ * ignoring on, first, are the near misses themselves (same brand-family, different-key, threshold-or-containment pass,
+ * before sorting and the limit) — not the whole family window `products` may hold. Only `target` and those near
+ * misses are then counted for distinct suitability phrases; with 2 or more, the ignoring is off, so candidates are
+ * found again on full words. A row of the family that is no near miss settles nothing: it is not read for its own line.
+ */
+export const ignoresOneSidedSuitability = (target: Branded, products: Branded[], threshold = DEFAULT_NEAR_MISS_THRESHOLD): boolean =>
+  distinctPhraseCount(
+    target,
+    rawNearMisses(target, products, threshold, true).map((c) => c.product),
+  ) < 2
+
 /**
  * `lessSpecific`'s full-word check, but with the suitability-phrase ignoring applied, for the ambiguity guard: it must
  * judge specificity on the same words that made a candidate a candidate, or a phrase that bought a reading past the
- * threshold (or kept it out) would leave the guard weighing a different comparison. `products` is the same list
- * `nearMissCandidates` was given for this reading, so the two-or-more-distinct-phrases switch-off decides the same way.
+ * threshold (or kept it out) would leave the guard weighing a different comparison. `products` and `threshold` are
+ * the same ones `nearMissCandidates` was given for this reading, so `ignoresOneSidedSuitability`'s first pass finds
+ * the same near misses and decides the same way for both.
  */
-export const lessSpecificForNearMiss = (reading: Branded, product: Branded, products: Branded[]): boolean => {
-  const ignoreOneSided = distinctSuitabilityPhrases(reading, products) < 2
+export const lessSpecificForNearMiss = (reading: Branded, product: Branded, products: Branded[], threshold = DEFAULT_NEAR_MISS_THRESHOLD): boolean => {
+  const ignoreOneSided = ignoresOneSidedSuitability(reading, products, threshold)
   const [wr, wp] = wordsForNearMiss(reading, product, ignoreOneSided)
   return relation(wr, wp) === 'subset'
 }
@@ -265,16 +306,9 @@ export const nearMissCandidates = <P extends Branded & { id: string; identityKey
   products: P[],
   options: { threshold?: number; limit?: number } = {},
 ): P[] => {
-  const { threshold = 0.6, limit = 3 } = options
-  const targetKey = identityKey(target)
-  const ignoreOneSided = distinctSuitabilityPhrases(target, products) < 2
-  return products
-    .filter((p) => sameBrandFamily(p.brand, target.brand) && (p.identityKey ?? identityKey(p)) !== targetKey)
-    .map((p) => {
-      const [wt, wp] = wordsForNearMiss(target, p, ignoreOneSided)
-      return { product: p, similarity: jaccard(wt, wp), wt, wp }
-    })
-    .filter((c) => c.similarity >= threshold || containsWords(target, c.wt, c.product, c.wp))
+  const { threshold = DEFAULT_NEAR_MISS_THRESHOLD, limit = 3 } = options
+  const ignoreOneSided = ignoresOneSidedSuitability(target, products, threshold)
+  return rawNearMisses(target, products, threshold, ignoreOneSided)
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))
     .slice(0, limit)
     .map((c) => c.product)

@@ -220,15 +220,16 @@ export class ProductCatalogService {
    * different known form was already dropped before `candidates` was built), the ones with no form recorded settle
    * nothing: they are not counted towards the guard above, and are not judged either, so a vaguer, formless sibling
    * never stands in front of the one candidate that already agrees on form. Specificity is judged with the
-   * suitability-phrase ignoring applied, on the same `allComparable` list `nearMissCandidates` saw, so a phrase that
-   * bought a candidate past the threshold (or kept one out) is seen the same way here.
+   * suitability-phrase ignoring applied, on the same `allComparable` list and `threshold` `nearMissCandidates` saw,
+   * so a phrase that bought a candidate past the threshold (or kept one out) is seen the same way here.
    */
   private static ambiguityFiltered<P extends Product>(
     identity: { brand: string; name: string; variant?: string; form?: string | null },
     candidates: P[],
     allComparable: P[],
+    threshold: number,
   ): P[] {
-    const lessSpecificOnes = candidates.filter((c) => lessSpecificForNearMiss(identity, c, allComparable))
+    const lessSpecificOnes = candidates.filter((c) => lessSpecificForNearMiss(identity, c, allComparable, threshold))
     const sameForm = identity.form ? lessSpecificOnes.filter((c) => c.form === identity.form) : []
     const exempt = sameForm.length === 1 ? lessSpecificOnes.filter((c) => !c.form) : []
     const counted = exempt.length > 0 ? sameForm : lessSpecificOnes
@@ -348,7 +349,7 @@ export class ProductCatalogService {
     // its longer look-alikes, the equal ones are still judged (a "no" then makes a new row); otherwise every candidate is judged
     // as before, equal ones first (they sort first by similarity).
     const equal = candidates.filter((c) => sameWords(identity, c))
-    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable)
+    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable, this.policy.nearMissThreshold)
     const toJudge = filtered.length === 0 ? equal : [...equal, ...filtered.filter((c) => !equal.includes(c))]
     for (const candidate of toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
