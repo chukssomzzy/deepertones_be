@@ -1,10 +1,20 @@
 import { bodyLimit } from 'hono/body-limit'
-import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, success } from '../../lib/openapi'
+import { defineRoute, errorResponses, imageResponse, jsonBody, multipartBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { toProductImage } from '../scans/scans.presenter'
 import { toFaceConsentGivenResponse, toFaceConsentResponse, toFaceScanResponse } from './face-scans.presenter'
-import { CreateFaceScanBody, FaceConsentGivenResponse, FaceConsentResponse, FacePhotoLinkParams, FaceScanParams, FaceScanResponse, SetFaceConsentBody } from './face-scans.schemas'
+import {
+  CreateFaceScanBody,
+  FaceConsentGivenResponse,
+  FaceConsentResponse,
+  FacePhotoLinkParams,
+  FaceScanParams,
+  FaceScanResponse,
+  PerfectCorpWebhookResponse,
+  RetakeFaceScanBody,
+  SetFaceConsentBody,
+} from './face-scans.schemas'
 import { FACE_SCAN_POLICY } from './face-scans.service'
 
 const bearer = [{ bearerAuth: [] }]
@@ -12,6 +22,9 @@ const bearer = [{ bearerAuth: [] }]
 // Room for the multipart framing around the photos. bodyLimit runs before the form is read, so an oversized upload is never buffered.
 const FRAMING_BYTES = 1_000_000
 const MAX_FACE_SCAN_BODY_BYTES = 3 * FACE_SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+const MAX_RETAKE_BODY_BYTES = FACE_SCAN_POLICY.maxPhotoBytes + FRAMING_BYTES
+// The webhook is a small JSON notice. Public, so the cap is the same whatever the sender says.
+const MAX_WEBHOOK_BODY_BYTES = 64 * 1024
 
 const setConsent = defineRoute({
   method: 'put',
@@ -79,10 +92,46 @@ const getFaceScan = defineRoute({
   operationId: 'getFaceScan',
   tags: ['Face scans'],
   summary: 'A face scan and where it has got to',
-  description: 'Shows no result yet. Another profile\'s scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.',
+  description:
+    'Shows no result yet. `state` is `analysing`, `needs-retake`, `ready` or `failed`, and `reason` says why a scan needs a retake or failed: follow it live with `GET /api/v1/scans/faces/{id}/events` or poll this. Another profile\'s scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.',
   security: bearer,
   request: { params: FaceScanParams },
   responses: { 200: success(FaceScanResponse, 'The scan'), ...errorResponses(401, 404) },
+})
+
+const watchFaceScan = defineRoute({
+  method: 'get',
+  path: '/{id}/events',
+  operationId: 'watchFaceScan',
+  tags: ['Face scans'],
+  summary: 'Follow a face scan live, as server-sent events',
+  description:
+    'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` ' +
+    'with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is ' +
+    'already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
+    'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. ' +
+    'Another profile\'s scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.',
+  security: bearer,
+  request: { params: FaceScanParams },
+  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 404) },
+})
+
+const retakeFaceScan = defineRoute({
+  method: 'post',
+  path: '/{id}/retake',
+  operationId: 'retakeFaceScan',
+  tags: ['Face scans'],
+  summary: 'Send a new front photo for a scan that needs a retake',
+  description:
+    'Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: ' +
+    '404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, ' +
+    'and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with ' +
+    'reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.',
+  security: bearer,
+  // The same order and reasons as createFaceScan, and the same limiters: a retake sends a photo to Perfect Corp, which is paid per use.
+  middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), signedIn(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_RETAKE_BODY_BYTES })],
+  request: { params: FaceScanParams, body: multipartBody(RetakeFaceScanBody) },
+  responses: { 202: success(FaceScanResponse, 'The scan, analysing again'), ...errorResponses(401, 404, 409, 413, 429) },
 })
 
 const deleteFaceScan = defineRoute({
@@ -111,6 +160,22 @@ const getFacePhoto = defineRoute({
   responses: { 200: imageResponse('The photo'), ...errorResponses(404) },
 })
 
+const receivePerfectCorpWebhook = defineRoute({
+  method: 'post',
+  path: '/perfect-corp',
+  operationId: 'receivePerfectCorpWebhook',
+  tags: ['Face scans'],
+  summary: 'Perfect Corp tells us an analysis task has ended',
+  description:
+    'Called by Perfect Corp, not by the app. Public: the Standard Webhooks signature (`webhook-id`, `webhook-timestamp`, `webhook-signature`) on the raw body is the credential, and a delivery that is not correctly signed, ' +
+    'is older than 5 minutes, or is not the webhook\'s shape is 401 `WEBHOOK_SIGNATURE_INVALID`. A signed delivery is 200 `{ received: true }` whether or not it matches a scan of this environment (a task from another ' +
+    'environment, or of a deleted scan, is ignored). A delivery that matches is queued for the analysis job, which asks Perfect Corp for the result itself; a delivery that cannot be queued is 503 `WEBHOOK_UNAVAILABLE`, so Perfect Corp sends it ' +
+    'again, and the same `webhook-id` delivered twice runs the job once. Register this address for each environment in the Perfect Corp console.',
+  security: [],
+  middleware: [rateLimit('PERFECT_CORP_WEBHOOK_LIMITER', 'ip'), bodyLimit({ maxSize: MAX_WEBHOOK_BODY_BYTES })],
+  responses: { 200: success(PerfectCorpWebhookResponse, 'The delivery was accepted'), ...errorResponses(401, 413, 429, 503) },
+})
+
 /** Consent is mounted under /me, beside the other things a profile says about itself. */
 export const faceConsentRoutes = openapiApp()
   .openapi(setConsent, async (c) => ok(c, toFaceConsentGivenResponse(await c.var.services.faceScans.giveConsent(c.req.valid('json').version)), 'Consent recorded'))
@@ -131,6 +196,11 @@ export const faceScanRoutes = openapiApp()
     return ok(c, toFaceScanResponse(scan), 'Face scan started', 202)
   })
   .openapi(getFaceScan, async (c) => ok(c, toFaceScanResponse(await c.var.services.faceScans.getFaceScan(c.req.valid('param').id)), 'Face scan found'))
+  .openapi(watchFaceScan, async (c) => c.var.services.faceScans.watch(c.req.valid('param').id))
+  .openapi(retakeFaceScan, async (c) => {
+    const scan = await c.var.services.faceScans.retake(c.req.valid('param').id, { front: await toProductImage(c.req.valid('form').front) })
+    return ok(c, toFaceScanResponse(scan), 'Face scan sent for analysis again', 202)
+  })
   .openapi(deleteFaceScan, async (c) => {
     await c.var.services.faceScans.deleteFaceScan(c.req.valid('param').id)
     return c.body(null, 204)
@@ -139,3 +209,10 @@ export const faceScanRoutes = openapiApp()
     const photo = await c.var.services.faceScans.photoForLink(c.req.valid('param').token)
     return new Response(photo.bytes, { headers: { 'Content-Type': photo.mediaType, 'Cache-Control': 'private, no-store' } })
   })
+
+/** Mounted at /webhooks: what other services call us on. */
+export const webhookRoutes = openapiApp().openapi(receivePerfectCorpWebhook, async (c) => {
+  // The raw text, not a parsed body: the signature is over exactly the bytes that arrived.
+  await c.var.services.faceScans.receiveWebhook(await c.req.text(), c.req.raw.headers)
+  return ok(c, { received: true as const }, 'Webhook received')
+})

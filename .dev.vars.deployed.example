@@ -57,9 +57,9 @@ ANTHROPIC_API_KEY=
 # A different token per environment is fine but not required.
 EXPO_ACCESS_TOKEN=
 
-# Perfect Corp (YouCam) API key for the face scan (Perfect Corp console → API keys). Optional until the face scan is switched on.
+# Perfect Corp (YouCam) API key for the face scan (Perfect Corp console → API keys). Required: a deploy fails until it is set.
 # One account serves every environment today; the code never assumes that, so a key per environment needs no change.
 PERFECT_CORP_API_KEY=
 
-# Perfect Corp webhook secret ("whsec_..."), shown when this environment's webhook URL is registered in their console. Optional until then.
+# Perfect Corp webhook secret ("whsec_..."), shown when this environment's webhook URL is registered in their console. Required: a deploy fails until it is set.
 PERFECT_CORP_WEBHOOK_SECRET=

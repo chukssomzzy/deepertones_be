@@ -15,23 +15,16 @@ export type BaseEnv = { Bindings: CloudflareBindings; Variables: RequestIdVariab
  * container and tests can still read it; the WhatsApp adapter fails loudly if it is enabled without one.
  * When whatsapp joins OTP_CHANNELS, make it required again AND delete this declaration, or the
  * regenerated required type will conflict with it.
- *
- * PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are the same: secrets outside `secrets.required` until the analysis job and the webhook
- * route read them. When a later PR makes them required, delete both declarations.
  */
 declare global {
   interface CloudflareBindings {
     WHATSAPP_ACCESS_TOKEN?: string
     JWT_SECRET_PREVIOUS?: string
-    PERFECT_CORP_API_KEY?: string
-    PERFECT_CORP_WEBHOOK_SECRET?: string
   }
   namespace Cloudflare {
     interface Env {
       WHATSAPP_ACCESS_TOKEN?: string
       JWT_SECRET_PREVIOUS?: string
-      PERFECT_CORP_API_KEY?: string
-      PERFECT_CORP_WEBHOOK_SECRET?: string
     }
   }
 }

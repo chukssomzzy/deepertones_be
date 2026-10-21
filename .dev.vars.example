@@ -26,7 +26,7 @@ ANTHROPIC_API_KEY=
 # Also turn on "Enhanced security for push notifications" in the Expo project settings.
 # Use a separate token per environment if you like; sharing one is fine.
 EXPO_ACCESS_TOKEN=
-# Perfect Corp (YouCam) API key for the face scan (Perfect Corp console → API keys). Optional until the face scan is switched on.
+# Perfect Corp (YouCam) API key for the face scan (Perfect Corp console → API keys). Required: a deploy fails until it is set.
 PERFECT_CORP_API_KEY=
-# Perfect Corp webhook secret ("whsec_..."), shown when the webhook URL is registered in their console. Optional until then.
+# Perfect Corp webhook secret ("whsec_..."), shown when the webhook URL is registered in their console. Required: a deploy fails until it is set.
 PERFECT_CORP_WEBHOOK_SECRET=

@@ -40,6 +40,7 @@ import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-
 import { AnthropicMentionReader } from './providers/mention-reading/anthropic.mention-reader'
 import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
+import { RestPerfectCorpClient } from './providers/perfect-corp/rest.perfect-corp'
 import type { PhotoEnvironment } from './providers/photo-store/photo-store.provider'
 import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
 import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.product-analyst'
@@ -280,6 +281,8 @@ export const buildContainer = (env: CloudflareBindings) => {
     () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
   )
 
+  const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
+
   const faceScans = once(
     () =>
       new FaceScanService({
@@ -287,6 +290,11 @@ export const buildContainer = (env: CloudflareBindings) => {
         goals: goals(),
         photos: privatePhotos(),
         jobs: jobQueue(),
+        perfectCorp: perfectCorp(),
+        // Perfect Corp's units go in the same ledger as the Claude calls: one table, one daily figure, one alert.
+        aiUsage: aiUsage(),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        opsAlerts: opsAlerts(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         environment: photoEnvironment(env.ENVIRONMENT),

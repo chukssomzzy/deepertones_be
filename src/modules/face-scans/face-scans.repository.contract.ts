@@ -1,10 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { FaceScansRepository } from './face-scans.repository'
-import type { NewFacePhoto, NewFaceScan } from './face-scans.types'
+import type { FaceMask, FaceResult, FaceScanCompletion, NewFacePhoto, NewFaceScan } from './face-scans.types'
 
 // The one clock every fixture hangs off; later times are offsets from it.
 const BASE = new Date('2030-06-15T12:00:00.000Z')
 const MINUTE = 60 * 1000
+const HOUR = 60 * MINUTE
+const YEAR = 365 * 24 * HOUR
 const at = (offsetMs: number) => new Date(BASE.getTime() + offsetMs)
 
 type Account = { userId: string; profileId: string }
@@ -601,6 +603,333 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
 
         expect(await repository.findFaceScan(scans.mine.id)).toBeNull()
         expect(await repository.findFaceScan(scans.theirs.id)).not.toBeNull()
+      })
+    })
+
+    // PR 3: the analysis pipeline. The calls below are what the job steps, the webhook and the reaper stand on.
+    describe('the task ids of a scan, and findByTaskId', () => {
+      const withTasks = async (tasks: { analysis?: string; fitzpatrick?: string }) => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.updateFaceScan(scan.id, 'analysing', {
+          ...(tasks.analysis ? { pcAnalysisTaskId: tasks.analysis } : {}),
+          ...(tasks.fitzpatrick ? { pcFitzpatrickTaskId: tasks.fitzpatrick } : {}),
+          pcEnvironment: 'test',
+          updatedAt: at(MINUTE),
+        })
+        return { repository, scan }
+      }
+
+      it('stores the analysis task id, the Fitzpatrick task id and the Perfect Corp environment on the scan', async () => {
+        const analysis = `skin-${freshId()}`
+        const fitzpatrick = `fitz-${freshId()}`
+        const { repository, scan } = await withTasks({ analysis, fitzpatrick })
+
+        expect(await repository.findFaceScan(scan.id)).toMatchObject({ pcAnalysisTaskId: analysis, pcFitzpatrickTaskId: fitzpatrick, pcEnvironment: 'test', state: 'analysing' })
+      })
+
+      it('finds the scan whose analysis task id it is', async () => {
+        const analysis = `skin-${freshId()}`
+        const { repository, scan } = await withTasks({ analysis })
+
+        expect((await repository.findByTaskId(analysis))?.id).toBe(scan.id)
+      })
+
+      it('finds the scan whose Fitzpatrick task id it is', async () => {
+        const fitzpatrick = `fitz-${freshId()}`
+        const { repository, scan } = await withTasks({ fitzpatrick })
+
+        expect((await repository.findByTaskId(fitzpatrick))?.id).toBe(scan.id)
+      })
+
+      it('finds nothing for a task id no scan holds, and keeps two scans\' tasks apart', async () => {
+        const first = await withTasks({ analysis: `skin-${freshId()}` })
+        const secondAnalysis = `skin-${freshId()}`
+        const second = await withTasks({ analysis: secondAnalysis })
+
+        expect(await second.repository.findByTaskId(`unknown-${freshId()}`)).toBeNull()
+        expect((await second.repository.findByTaskId(secondAnalysis))?.id).toBe(second.scan.id)
+        expect(first.scan.id).not.toBe(second.scan.id)
+      })
+
+      it('clears the analysis task id when a patch says null, which is what a retake does', async () => {
+        const analysis = `skin-${freshId()}`
+        const { repository, scan } = await withTasks({ analysis })
+        await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'too-dark', updatedAt: at(2 * MINUTE) })
+
+        await repository.updateFaceScan(scan.id, 'needs-retake', { state: 'analysing', reason: null, pcAnalysisTaskId: null, updatedAt: at(3 * MINUTE) })
+
+        expect(await repository.findFaceScan(scan.id)).toMatchObject({ state: 'analysing', reason: null, pcAnalysisTaskId: null })
+        expect(await repository.findByTaskId(analysis)).toBeNull()
+      })
+
+      it.each(['too-dark', 'turn-to-camera', 'move-closer', 'face-not-centred', 'no-face', 'image-size'] as const)('keeps the retake reason %s on a scan that needs a retake', async (reason) => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+
+        expect(await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason, updatedAt: at(MINUTE) })).toBe(true)
+
+        expect(await repository.findFaceScan(scan.id)).toMatchObject({ state: 'needs-retake', reason })
+      })
+
+      it('records the reaper\'s check without moving the scan\'s updated time when the patch repeats it', async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        expect((await repository.findFaceScan(scan.id))!.reaperCheckedAt).toBeNull()
+
+        await repository.updateFaceScan(scan.id, 'analysing', { reaperCheckedAt: at(20 * MINUTE), updatedAt: scan.createdAt })
+
+        const found = (await repository.findFaceScan(scan.id))!
+        expect(found.reaperCheckedAt!.getTime()).toBe(at(20 * MINUTE).getTime())
+        expect(found.updatedAt.getTime()).toBe(BASE.getTime())
+      })
+    })
+
+    // The reaper's query is over every scan there is, and the D1 database is shared, so these scans live in 1970 + a random offset, which no other
+    // test's scans do, and each test deletes what it made.
+    describe('staleAnalysing', () => {
+      const era = () => BASE.getTime() - 60 * YEAR + Math.floor(Math.random() * 1_000_000_000)
+      const staleScan = async (repository: FaceScansContractSetup['repository'], account: Account, updatedAt: number, state: 'analysing' | 'ready' | 'failed' | 'needs-retake' = 'analysing') => {
+        const scan = newScan(account, { createdAt: new Date(updatedAt) })
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        if (state === 'ready') await repository.completeFaceScan(scan.id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt: new Date(updatedAt) })
+        if (state === 'failed') await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt: new Date(updatedAt) })
+        if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'too-dark', updatedAt: new Date(updatedAt) })
+        return scan
+      }
+      const cleanUp = async (repository: FaceScansContractSetup['repository'], ...scans: NewFaceScan[]) => {
+        for (const scan of scans) await repository.deleteFaceScan(scan.id)
+      }
+
+      it('lists an analysing scan whose updated time is before the cut-off, and leaves out one at the cut-off or after it', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const t = era()
+        const before = await staleScan(repository, account, t - 1)
+        const exactly = await staleScan(repository, account, t)
+        const after = await staleScan(repository, account, t + 1)
+
+        const ids = (await repository.staleAnalysing(new Date(t), 1000)).map((scan) => scan.id)
+
+        expect(ids).toContain(before.id)
+        expect(ids).not.toContain(exactly.id)
+        expect(ids).not.toContain(after.id)
+        await cleanUp(repository, before, exactly, after)
+      })
+
+      it('lists only scans that are still analysing', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const t = era()
+        const analysing = await staleScan(repository, account, t - 10)
+        const ready = await staleScan(repository, account, t - 10, 'ready')
+        const failed = await staleScan(repository, account, t - 10, 'failed')
+        const retake = await staleScan(repository, account, t - 10, 'needs-retake')
+
+        const ids = (await repository.staleAnalysing(new Date(t), 1000)).map((scan) => scan.id)
+
+        expect(ids).toContain(analysing.id)
+        for (const other of [ready, failed, retake]) expect(ids).not.toContain(other.id)
+        await cleanUp(repository, analysing, ready, failed, retake)
+      })
+
+      it('lists the oldest first and stops at the limit', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        // The oldest scans in the database, so the limit cannot be used up by anybody else's.
+        const t = Math.floor(Math.random() * 1_000_000_000) + 1_000
+        const newest = await staleScan(repository, account, t + 300)
+        const oldest = await staleScan(repository, account, t + 100)
+        const middle = await staleScan(repository, account, t + 200)
+
+        const all = (await repository.staleAnalysing(new Date(t + 1000), 1000)).map((scan) => scan.id).filter((id) => [oldest.id, middle.id, newest.id].includes(id))
+        const two = (await repository.staleAnalysing(new Date(t + 1000), 2)).map((scan) => scan.id)
+
+        expect(all).toEqual([oldest.id, middle.id, newest.id])
+        expect(two).toEqual([oldest.id, middle.id])
+        await cleanUp(repository, newest, oldest, middle)
+      })
+
+      it('gives each scan as it is stored, with its task id and its reaper check', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const t = era()
+        const scan = await staleScan(repository, account, t - 10)
+        const taskId = `skin-${freshId()}`
+        await repository.updateFaceScan(scan.id, 'analysing', { pcAnalysisTaskId: taskId, reaperCheckedAt: new Date(t - 5), updatedAt: new Date(t - 10) })
+
+        const listed = (await repository.staleAnalysing(new Date(t), 1000)).find((candidate) => candidate.id === scan.id)
+
+        expect(listed).toMatchObject({ pcAnalysisTaskId: taskId, state: 'analysing' })
+        expect(listed!.reaperCheckedAt!.getTime()).toBe(t - 5)
+        await cleanUp(repository, scan)
+      })
+    })
+
+    describe('completeFaceScan: the results of a scan, all together or not at all', () => {
+      const resultRow = (scan: NewFaceScan, concern: string, region: string, rawScore: number, uiScore: number): FaceResult => ({ faceScanId: scan.id, userId: scan.userId, concern, region, rawScore, uiScore })
+      const maskRow = (scan: NewFaceScan, concern: string): FaceMask => ({ faceScanId: scan.id, userId: scan.userId, concern, maskKey: `faces/test/${scan.userId}/${scan.profileId}/${scan.id}/mask-${concern.replace(/_/g, '-')}.png` })
+      const completionFor = (scan: NewFaceScan, over: Partial<FaceScanCompletion> = {}): FaceScanCompletion => ({
+        results: [resultRow(scan, 'hd_radiance', 'whole', 41.5, 52), resultRow(scan, 'hd_radiance', 'left_cheek', 38, 47), resultRow(scan, 'all', 'whole', 70, 70)],
+        masks: [maskRow(scan, 'hd_radiance')],
+        skinType: 'combination',
+        skinAge: 31,
+        tablesVersion: '1',
+        updatedAt: at(5 * MINUTE),
+        ...over,
+      })
+      const analysing = async () => {
+        const { repository, newAccount } = await make()
+        const scan = newScan(await newAccount())
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        return { repository, scan }
+      }
+
+      it('stores the results and masks, the skin type, skin age and tables version, and makes the scan ready in one step, saying it did', async () => {
+        const { repository, scan } = await analysing()
+        const completion = completionFor(scan)
+
+        expect(await repository.completeFaceScan(scan.id, completion)).toBe(true)
+
+        const found = (await repository.findFaceScan(scan.id))!
+        expect(found).toMatchObject({ state: 'ready', reason: null, skinType: 'combination', skinAge: 31, tablesVersion: '1' })
+        expect(found.updatedAt.getTime()).toBe(at(5 * MINUTE).getTime())
+        expect((await repository.resultsOf(scan.id)).sort((a, b) => a.concern.localeCompare(b.concern) || a.region.localeCompare(b.region))).toEqual(
+          [...completion.results].sort((a, b) => a.concern.localeCompare(b.concern) || a.region.localeCompare(b.region)),
+        )
+        expect(await repository.masksOf(scan.id)).toEqual(completion.masks)
+      })
+
+      it('keeps a skin type or skin age the vendor did not send as null', async () => {
+        const { repository, scan } = await analysing()
+
+        await repository.completeFaceScan(scan.id, completionFor(scan, { skinType: null, skinAge: null }))
+
+        expect(await repository.findFaceScan(scan.id)).toMatchObject({ state: 'ready', skinType: null, skinAge: null })
+      })
+
+      it.each(['failed', 'needs-retake', 'ready'] as const)('writes nothing and says false when the scan is %s, not analysing', async (state) => {
+        const { repository, scan } = await analysing()
+        if (state === 'failed') await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'consent-withdrawn', updatedAt: at(MINUTE) })
+        if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'no-face', updatedAt: at(MINUTE) })
+        if (state === 'ready') await repository.completeFaceScan(scan.id, completionFor(scan, { results: [], masks: [], skinAge: 20 }))
+
+        const done = await repository.completeFaceScan(scan.id, completionFor(scan, { skinAge: 99 }))
+
+        expect(done).toBe(false)
+        expect(await repository.resultsOf(scan.id)).toEqual([])
+        expect(await repository.masksOf(scan.id)).toEqual([])
+        const found = (await repository.findFaceScan(scan.id))!
+        expect(found.state).toBe(state)
+        expect(found.skinAge).not.toBe(99)
+      })
+
+      it('says false and does not throw for a scan that was deleted, writing no result or mask for it', async () => {
+        const { repository, scan } = await analysing()
+        await repository.deleteFaceScan(scan.id)
+
+        await expect(repository.completeFaceScan(scan.id, completionFor(scan))).resolves.toBe(false)
+
+        expect(await repository.resultsOf(scan.id)).toEqual([])
+        expect(await repository.masksOf(scan.id)).toEqual([])
+        expect(await repository.findFaceScan(scan.id)).toBeNull()
+      })
+
+      it('lets exactly one of two simultaneous completions win, and keeps the winner\'s results', async () => {
+        const { repository, scan } = await analysing()
+
+        const [a, b] = await Promise.all([
+          repository.completeFaceScan(scan.id, completionFor(scan, { skinAge: 20, results: [resultRow(scan, 'hd_texture', 'whole', 10, 11)], masks: [] })),
+          repository.completeFaceScan(scan.id, completionFor(scan, { skinAge: 40, results: [resultRow(scan, 'hd_moisture', 'whole', 20, 21)], masks: [] })),
+        ])
+
+        expect([a, b].filter(Boolean)).toHaveLength(1)
+        const found = (await repository.findFaceScan(scan.id))!
+        const results = await repository.resultsOf(scan.id)
+        expect(results).toHaveLength(1)
+        expect(found.skinAge).toBe(results[0]!.concern === 'hd_texture' ? 20 : 40)
+      })
+
+      it('lists the mask keys with the photo keys, so a delete empties the bucket, and deletes the results and masks with the scan', async () => {
+        const { repository, scan } = await analysing()
+        const completion = completionFor(scan)
+        await repository.completeFaceScan(scan.id, completion)
+
+        expect((await repository.keysOfFaceScan(scan.id)).sort()).toEqual([keyOf(scan, 'front'), completion.masks[0]!.maskKey].sort())
+        await repository.deleteFaceScan(scan.id)
+
+        expect(await repository.resultsOf(scan.id)).toEqual([])
+        expect(await repository.masksOf(scan.id)).toEqual([])
+        expect(await repository.keysOfFaceScan(scan.id)).toEqual([])
+      })
+
+      it('keeps another scan\'s results apart', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = newScan(account, { createdAt: at(MINUTE) })
+        const second = newScan(account, { createdAt: at(2 * MINUTE) })
+        await repository.createFaceScan(first, [newPhoto(first, 'front')])
+        await repository.createFaceScan(second, [newPhoto(second, 'front')])
+
+        await repository.completeFaceScan(first.id, completionFor(first))
+
+        expect(await repository.resultsOf(second.id)).toEqual([])
+        expect(await repository.masksOf(second.id)).toEqual([])
+        expect((await repository.findFaceScan(second.id))!.state).toBe('analysing')
+      })
+    })
+
+    describe('fitzpatrickOf and saveFitzpatrick', () => {
+      it('has none for a profile that was never read', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.fitzpatrickOf(profileId)).toBeNull()
+      })
+
+      it('stores the type, the task that read it and the time, for the profile', async () => {
+        const { repository, newAccount } = await make()
+        const { userId, profileId } = await newAccount()
+        const taskId = `fitz-${freshId()}`
+
+        await repository.saveFitzpatrick({ profileId, userId, fitzpatrick: 'V', taskId, createdAt: at(MINUTE) })
+
+        const found = await repository.fitzpatrickOf(profileId)
+        expect(found).toMatchObject({ profileId, userId, fitzpatrick: 'V', taskId })
+        expect(found!.createdAt.getTime()).toBe(at(MINUTE).getTime())
+      })
+
+      it('keeps the first read when a second arrives, which is how a redelivered job changes nothing', async () => {
+        const { repository, newAccount } = await make()
+        const { userId, profileId } = await newAccount()
+        await repository.saveFitzpatrick({ profileId, userId, fitzpatrick: 'V', taskId: 'first-task', createdAt: at(MINUTE) })
+
+        await expect(repository.saveFitzpatrick({ profileId, userId, fitzpatrick: 'II', taskId: 'second-task', createdAt: at(2 * MINUTE) })).resolves.toBeUndefined()
+
+        expect(await repository.fitzpatrickOf(profileId)).toMatchObject({ fitzpatrick: 'V', taskId: 'first-task' })
+      })
+
+      it('belongs to the profile: another profile of the account has none', async () => {
+        const { repository, newAccount, newProfile } = await make()
+        const { userId, profileId } = await newAccount()
+        const second = await newProfile(userId)
+
+        await repository.saveFitzpatrick({ profileId, userId, fitzpatrick: 'IV', taskId: 't', createdAt: at(MINUTE) })
+
+        expect(await repository.fitzpatrickOf(second)).toBeNull()
+      })
+
+      it('is removed with the guest\'s other face data by the cleanup', async () => {
+        const { repository, newAccount } = await make()
+        const { userId, profileId } = await newAccount()
+        await repository.saveFitzpatrick({ profileId, userId, fitzpatrick: 'IV', taskId: 't', createdAt: at(MINUTE) })
+
+        await repository.deleteForUsers([userId])
+
+        expect(await repository.fitzpatrickOf(profileId)).toBeNull()
       })
     })
   })

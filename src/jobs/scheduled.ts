@@ -11,8 +11,9 @@ type ScheduledHandler = (controller: ScheduledController, env: CloudflareBinding
 
 /**
  * The scan reaper (ScanService.reap): queues again the steps of items stuck in a working state, fails the ones stuck for
- * over 2 hours. It then fills the search text of products that have none (ProductCatalogService.fillSearchText), also when the sweep failed. It reads no request context, so it needs no actor. A sweep failure is logged and rethrown (after the fill) so Cloudflare records
- * the run as failed; the next sweep, 10 minutes on, looks at the same items again.
+ * over 2 hours. It then sweeps the face scans stuck analysing (FaceScanService.reap) and fills the search text of products that have none
+ * (ProductCatalogService.fillSearchText), each in its own try and also when the sweep failed. It reads no request context, so it needs no actor.
+ * A sweep failure is logged and rethrown (after those) so Cloudflare records the run as failed; the next sweep, 10 minutes on, looks at the same items again.
  */
 export const createScanReaper = (): ScheduledHandler => async (_controller, env) => {
   const job = 'scan-reaper'
@@ -26,6 +27,13 @@ export const createScanReaper = (): ScheduledHandler => async (_controller, env)
     console.error({ job, outcome: 'failed', error: describeError(error) })
     sweepFailed = true
     sweepError = error
+  }
+  // Face scans stuck analysing: their one check, or the give-up after 2 hours. Its own try for the same reason: a failure here never fails the sweep nor is hidden by it.
+  try {
+    const { checked, failed } = await container.faceScans.reap(new Date())
+    if (checked > 0 || failed > 0) console.log({ job, outcome: 'face-scans-reaped', checked, failed })
+  } catch (error) {
+    console.error({ job, outcome: 'face-scan-sweep-failed', error: describeError(error) })
   }
   // Catalog upkeep rides on this cron: search text for products a Worker that did not know the column made. After the sweep, which is the
   // job's purpose and spends the Worker's subrequests first; in its own try, so a failure here never fails the sweep nor is hidden by it.

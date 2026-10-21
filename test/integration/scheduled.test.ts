@@ -4,12 +4,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
+import { D1FaceScansRepository } from '../../src/modules/face-scans/face-scans.repository'
+import { FaceScanService } from '../../src/modules/face-scans/face-scans.service'
 import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
 import { SafetyService } from '../../src/modules/safety/safety.service'
 import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
+import { queueRecorder } from './perfect-corp.stub'
 
 // The Worker's scheduled handler is one export for every cron in wrangler.jsonc. Each cron runs its own job and no other:
 // the daily guest cleanup must not run every 10 minutes, nor the reaper once a day. The crons are pinned to the config in
@@ -263,5 +266,121 @@ describe('the Worker scheduled handler: parses due for their second try', () => 
     await fireWithQueue(GUEST_CLEANUP_CRON).catch(() => undefined)
 
     expect(queuedIds()).toContain(id)
+  })
+})
+
+// --- face scans stuck analysing: the reaper's one check ---
+
+// A face scan sits `analysing` while Perfect Corp works, and the webhook normally wakes it. If the webhook never comes (or the first message was
+// lost) the reaper looks once, 15 minutes on, by queueing the step that would have run, and gives up after 2 hours. The Worker's face-scans producer is a
+// recorder here, so what the reaper queues can be read back. The reaper reads the real clock, so the scans are aged from NOW with margins far from the
+// 15-minute and 2-hour lines (the exact lines are pinned in FaceScanService's unit tests).
+describe('the Worker scheduled handler: face scans stuck analysing', () => {
+  const faces = new D1FaceScansRepository(createDb(env.DB))
+  const recorder = queueRecorder()
+  const MINUTE = 60 * 1000
+  const fireFaces = async (cron: string) => {
+    const ctx = createExecutionContext()
+    await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), { ...env, FACE_SCANS_QUEUE: recorder.queue } as typeof env, ctx)
+    await waitOnExecutionContext(ctx)
+  }
+  afterEach(() => {
+    recorder.messages.length = 0
+  })
+
+  /** A guest's face scan that has sat analysing for `ageMs`, with an analysis task at Perfect Corp when `task` is set. */
+  const stuckFace = async (ageMs: number, { task = true }: { task?: boolean } = {}) => {
+    const userId = crypto.randomUUID()
+    const profileId = crypto.randomUUID()
+    await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    const id = crypto.randomUUID()
+    const createdAt = new Date(NOW - ageMs)
+    await faces.createFaceScan(
+      { id, userId, profileId, goalAtScan: 'glow', createdAt },
+      [{ faceScanId: id, userId, position: 'front', photoKey: `faces/${env.ENVIRONMENT}/${userId}/${profileId}/${id}/front.jpg`, createdAt }],
+    )
+    if (task) await faces.updateFaceScan(id, 'analysing', { pcAnalysisTaskId: `skin-${id}`, pcEnvironment: env.ENVIRONMENT, updatedAt: createdAt })
+    return id
+  }
+  const queuedFor = (id: string) => (recorder.messages as { faceScanId: string }[]).filter((message) => message.faceScanId === id)
+
+  it('on the reaper cron, queues the fetch step once for a scan that has sat 20 minutes with an analysis task, and notes that it looked', async () => {
+    const id = await stuckFace(20 * MINUTE)
+
+    await fireFaces(SCAN_REAPER_CRON)
+
+    expect(queuedFor(id)).toEqual([{ faceScanId: id, step: 'fetch', at: expect.any(Number) }])
+    const row = (await faces.findFaceScan(id))!
+    expect(row.state).toBe('analysing')
+    expect(row.reaperCheckedAt).toBeInstanceOf(Date)
+  })
+
+  it('looks only once: the next sweep queues nothing more for the same scan', async () => {
+    const id = await stuckFace(20 * MINUTE)
+    await fireFaces(SCAN_REAPER_CRON)
+    recorder.messages.length = 0
+
+    await fireFaces(SCAN_REAPER_CRON)
+
+    expect(queuedFor(id)).toEqual([])
+    expect((await faces.findFaceScan(id))!.state).toBe('analysing')
+  })
+
+  it('queues the upload step once for a scan that has sat 20 minutes with no analysis task, because its first message was lost', async () => {
+    const id = await stuckFace(20 * MINUTE, { task: false })
+
+    await fireFaces(SCAN_REAPER_CRON)
+    await fireFaces(SCAN_REAPER_CRON)
+
+    expect(queuedFor(id)).toEqual([{ faceScanId: id, step: 'upload', at: expect.any(Number) }])
+  })
+
+  it('fails a scan that has sat for over 2 hours as unavailable, queueing nothing for it', async () => {
+    const id = await stuckFace(3 * 60 * MINUTE)
+
+    await fireFaces(SCAN_REAPER_CRON)
+
+    expect(await faces.findFaceScan(id)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+    expect(queuedFor(id)).toEqual([])
+  })
+
+  it('leaves a scan that has only sat 5 minutes alone', async () => {
+    const id = await stuckFace(5 * MINUTE)
+
+    await fireFaces(SCAN_REAPER_CRON)
+
+    expect(await faces.findFaceScan(id)).toMatchObject({ state: 'analysing', reaperCheckedAt: null })
+    expect(queuedFor(id)).toEqual([])
+  })
+
+  it('on the daily cron, does not look at face scans', async () => {
+    const id = await stuckFace(20 * MINUTE)
+    const old = await stuckFace(3 * 60 * MINUTE)
+
+    await fireFaces(GUEST_CLEANUP_CRON)
+
+    expect(queuedFor(id)).toEqual([])
+    expect((await faces.findFaceScan(old))!.state).toBe('analysing')
+  })
+
+  it('still reaps face scans when the product scan sweep throws, and the run still fails with the sweep\'s error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(ScanService.prototype, 'reap').mockRejectedValue(new Error('the sweep exploded'))
+    const id = await stuckFace(3 * 60 * MINUTE)
+
+    await expect(fireFaces(SCAN_REAPER_CRON)).rejects.toThrow('the sweep exploded')
+
+    expect((await faces.findFaceScan(id))!.state).toBe('failed')
+  })
+
+  it('still sweeps the product scans and fills in search text when the face scan sweep throws, and does not fail the run for it (it is logged)', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(FaceScanService.prototype, 'reap').mockRejectedValue(new Error('the face sweep exploded'))
+    const stuck = await stuckItem(3 * HOUR)
+
+    await expect(fireFaces(SCAN_REAPER_CRON)).resolves.toBeUndefined()
+
+    expect(await scans.findItem(stuck)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+    expect(logged).toHaveBeenCalled()
   })
 })

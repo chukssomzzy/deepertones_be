@@ -24,6 +24,7 @@ const SNAPSHOT = { id: 'scan-snapshot', createdAt: '2030-06-15T12:00:00.000Z', i
 const itemEvent = (item: Record<string, unknown>) => ({ type: 'item', item }) as unknown as ScanEvent
 const photoEvent = (photo: Record<string, unknown>) => ({ type: 'photo', photo }) as unknown as ScanEvent
 const DONE = { type: 'done' } as ScanEvent
+const faceEvent = (faceScan: Record<string, unknown>) => ({ type: 'face', faceScan }) as unknown as ScanEvent
 
 const stubFor = (scanId: string) => env.SCAN_STREAM.get(env.SCAN_STREAM.idFromName(scanId))
 const freshScanId = () => `scan-stream-${crypto.randomUUID()}`
@@ -220,6 +221,32 @@ describe('ScanStream photo events', () => {
       const { frames } = await stream.read(2)
       expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['snapshot', 'photo'])
     }
+  })
+})
+
+describe('ScanStream face scan frames', () => {
+  it('writes a face scan frame as a `face` event carrying the scan\'s id, state and reason, then ends the stream on done', async () => {
+    const scanId = freshScanId()
+    const { stream } = await subscribe(scanId, { id: scanId, state: 'analysing', reason: null })
+    await stream.read(1)
+    const frame = { id: scanId, state: 'needs-retake', reason: 'too-dark' }
+
+    await stubFor(scanId).publish(faceEvent(frame))
+    await stubFor(scanId).publish(DONE)
+
+    const { frames, ended } = await stream.read(3)
+    expect(frames).toEqual([`event: face\ndata: ${JSON.stringify(frame)}`, 'event: done\ndata: {}'])
+    expect(ended).toBe(true)
+  })
+
+  it('does not write it as an item or a photo', async () => {
+    const scanId = freshScanId()
+    const { stream } = await subscribe(scanId)
+    await stream.read(1)
+
+    await stubFor(scanId).publish(faceEvent({ id: scanId, state: 'ready', reason: null }))
+
+    expect(parseFrame((await stream.read(1)).frames[0]!).event).toBe('face')
   })
 })
 

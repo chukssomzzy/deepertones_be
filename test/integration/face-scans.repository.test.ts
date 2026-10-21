@@ -176,6 +176,77 @@ describe('the face tables in D1', () => {
     })
   })
 
+  // The webhook finds a scan by either task id, and the reaper lists analysing scans by how long they have sat: both are queries over every scan there is.
+  describe('indexes of face_scans that the analysis relies on', () => {
+    const indexed = async (...columns: string[]) => {
+      const { results } = await env.DB.prepare(
+        "SELECT l.name AS name, i.seqno AS seqno, i.name AS column_name FROM pragma_index_list('face_scans') l JOIN pragma_index_info(l.name) i ORDER BY l.name, i.seqno",
+      ).all<{ name: string; seqno: number; column_name: string }>()
+      const byIndex = new Map<string, string[]>()
+      for (const row of results) byIndex.set(row.name, [...(byIndex.get(row.name) ?? []), row.column_name])
+      return [...byIndex.values()].some((names) => columns.every((column, i) => names[i] === column))
+    }
+
+    it.each(['pc_analysis_task_id', 'pc_fitzpatrick_task_id'])('has an index that starts with %s, so a webhook finds its scan without reading them all', async (column) => {
+      expect(await indexed(column)).toBe(true)
+    })
+
+    it('has an index on state and then updated_at, for the reaper', async () => {
+      expect(await indexed('state', 'updated_at')).toBe(true)
+    })
+
+    it('has a reaper_checked_at column that is empty for a new scan', async () => {
+      const { results } = await env.DB.prepare("SELECT name, \"notnull\" AS required FROM pragma_table_info('face_scans') WHERE name = 'reaper_checked_at'").all<{ name: string; required: number }>()
+
+      expect(results).toEqual([{ name: 'reaper_checked_at', required: 0 }])
+    })
+  })
+
+  describe('completeFaceScan in D1', () => {
+    const resultRow = (scan: { id: string; userId: string }, concern: string, region: string) => ({ faceScanId: scan.id, userId: scan.userId, concern, region, rawScore: 40, uiScore: 60 })
+    const countOf = async (table: 'face_results' | 'face_masks', scanId: string) => (await env.DB.prepare(`SELECT count(*) AS n FROM ${table} WHERE face_scan_id = ?`).bind(scanId).first<{ n: number }>())!.n
+
+    it('writes everything or nothing: two results for one concern and region fail the whole batch, leaving the scan analysing with no result or mask', async () => {
+      const account = await newGuest()
+      const scan = await withFaceData(account)
+      const mask = { faceScanId: scan.id, userId: scan.userId, concern: 'hd_acne', maskKey: `faces/test/${scan.userId}/${scan.profileId}/${scan.id}/mask-hd-acne.png` }
+
+      await expect(
+        repository.completeFaceScan(scan.id, {
+          results: [resultRow(scan, 'hd_acne', 'whole'), resultRow(scan, 'hd_acne', 'whole')],
+          masks: [mask],
+          skinType: 'dry',
+          skinAge: 30,
+          tablesVersion: '1',
+          updatedAt: new Date(BASE.getTime() + 5 * MINUTE),
+        }),
+      ).rejects.toThrow()
+
+      expect(await repository.findFaceScan(scan.id)).toMatchObject({ state: 'analysing', skinType: null, skinAge: null, tablesVersion: null })
+      expect(await countOf('face_results', scan.id)).toBe(0)
+      expect(await countOf('face_masks', scan.id)).toBe(0)
+    })
+
+    it('says false and writes nothing, instead of failing on the foreign key, for a scan that is already gone', async () => {
+      const account = await newGuest()
+      const scan = await withFaceData(account)
+      await repository.deleteFaceScan(scan.id)
+
+      const done = await repository.completeFaceScan(scan.id, {
+        results: [resultRow(scan, 'hd_acne', 'whole')],
+        masks: [{ faceScanId: scan.id, userId: scan.userId, concern: 'hd_acne', maskKey: `faces/test/${scan.userId}/${scan.profileId}/${scan.id}/mask-hd-acne.png` }],
+        skinType: null,
+        skinAge: null,
+        tablesVersion: '1',
+        updatedAt: BASE,
+      })
+
+      expect(done).toBe(false)
+      expect(await countOf('face_results', scan.id)).toBe(0)
+      expect(await countOf('face_masks', scan.id)).toBe(0)
+    })
+  })
+
   // Every query of the guest cleanup looks a user's rows up by user_id, so each table needs an index that leads with it.
   describe.each(['face_consents', 'face_scans', 'face_scan_photos', 'face_results', 'face_masks', 'profile_fitzpatrick'])('indexes of %s', (table) => {
     it('has an index that starts with user_id', async () => {

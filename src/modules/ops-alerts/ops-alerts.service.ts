@@ -28,6 +28,11 @@ const ALERTS: Record<OpsAlertKind, { windowMs: number; what: string; todo: strin
     what: 'Claude refused our account: no credit, an invalid API key, or missing permissions. Scan steps that need Claude are waiting and ask again every 5 minutes; an item gives up after 2 hours.',
     todo: 'Check the billing and the API key in the Anthropic console.',
   },
+  'face-scan-account': {
+    windowMs: HOUR,
+    what: 'Perfect Corp refused our account: no units left, an invalid API key, or missing permissions. Face scans that hit it end as unavailable.',
+    todo: 'Check the unit balance and the API key in the Perfect Corp console.',
+  },
   'ai-spend-cap': {
     windowMs: DAY,
     what: "Today's AI spend passed AI_DAILY_BUDGET_USD. Every call still goes ahead and is still recorded.",
@@ -46,7 +51,7 @@ const ALERTS: Record<OpsAlertKind, { windowMs: number; what: string; todo: strin
 }
 
 /**
- * Emails the owner when an environment-wide problem needs them: Claude refusing our account (at most once an hour) or a daily limit
+ * Emails the owner when an environment-wide problem needs them: Claude or Perfect Corp refusing our account (at most once an hour each) or a daily limit
  * passed (once a day, per limit). The limits never refuse anyone; this is how they are noticed.
  *
  * `raise` is called from the paths that hit the problem, so it NEVER throws and costs them one guarded write at most. It claims the

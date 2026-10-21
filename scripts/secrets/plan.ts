@@ -57,13 +57,13 @@ export const SECRETS: Record<string, SecretSpec> = {
   },
   PERFECT_CORP_API_KEY: {
     reason:
-      'RestPerfectCorpClient authorises every Perfect Corp (YouCam) call with it, for the face scan. Optional until the analysis job reads it.',
-    required: false,
+      'RestPerfectCorpClient authorises every Perfect Corp (YouCam) call with it, for the face scan.',
+    required: true,
   },
   PERFECT_CORP_WEBHOOK_SECRET: {
     reason:
-      'RestPerfectCorpClient verifies the Standard Webhooks signature of every Perfect Corp webhook with it. Optional until the webhook route reads it.',
-    required: false,
+      'RestPerfectCorpClient verifies the Standard Webhooks signature of every Perfect Corp webhook with it.',
+    required: true,
   },
 }
 

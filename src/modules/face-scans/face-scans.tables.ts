@@ -15,6 +15,9 @@ export const WORDING_VERSION = 1
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
 
+/** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION}`
+
 /** A concern a goal can show. `hd_skin_type` is also asked for, but it is the skin type label and never a seen-words concern. */
 export type ShownConcern =
   | 'hd_acne'

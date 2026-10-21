@@ -1,4 +1,5 @@
 import { index, integer, primaryKey, real, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 import { GOALS } from '../goals/goals.vocabulary'
 import { profiles } from '../profiles/profiles.table'
 
@@ -37,8 +38,8 @@ export const faceScans = sqliteTable(
     state: text('state', { enum: ['analysing', 'needs-retake', 'ready', 'failed'] })
       .notNull()
       .default('analysing'),
-    // Why the scan failed or needs a retake. Retake reasons are added with the analysis; the column is plain text in SQL.
-    reason: text('reason', { enum: ['unavailable'] }),
+    // Why the scan failed or needs a retake. The retake reasons are REJECTED_PHOTO_REASONS (the Perfect Corp provider's fixed set); the column is plain text in SQL.
+    reason: text('reason', { enum: ['unavailable', 'consent-withdrawn', ...REJECTED_PHOTO_REASONS] }),
     goalAtScan: text('goal_at_scan', { enum: GOALS }).notNull(),
     pcAnalysisTaskId: text('pc_analysis_task_id'),
     pcFitzpatrickTaskId: text('pc_fitzpatrick_task_id'),
@@ -48,9 +49,18 @@ export const faceScans = sqliteTable(
     tablesVersion: text('tables_version'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
+    // When the reaper queued its one check of this scan; null until it has. Last, because createFaceScan's INSERT ... SELECT lists the columns by position.
+    reaperCheckedAt: integer('reaper_checked_at', { mode: 'timestamp_ms' }),
   },
-  // (profile_id, created_at) serves "the latest scan of this profile".
-  (t) => [index('face_scans_profile_id_created_at_idx').on(t.profileId, t.createdAt), index('face_scans_user_id_idx').on(t.userId)],
+  (t) => [
+    // (profile_id, created_at) serves "the latest scan of this profile".
+    index('face_scans_profile_id_created_at_idx').on(t.profileId, t.createdAt),
+    index('face_scans_user_id_idx').on(t.userId),
+    // A webhook finds its scan by either task id; (state, updated_at) serves the reaper's "analysing for longest".
+    index('face_scans_pc_analysis_task_id_idx').on(t.pcAnalysisTaskId),
+    index('face_scans_pc_fitzpatrick_task_id_idx').on(t.pcFitzpatrickTaskId),
+    index('face_scans_state_updated_at_idx').on(t.state, t.updatedAt),
+  ],
 )
 
 /** The photos of a scan, at most one per position. The key is under faces/ in the private bucket. */

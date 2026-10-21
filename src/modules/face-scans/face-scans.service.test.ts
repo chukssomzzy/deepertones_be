@@ -5,11 +5,16 @@ import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../li
 import { MemoryGoalReader } from '../../providers/goal-reading/memory.goal-reader'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryMentionReader } from '../../providers/mention-reading/memory.mention-reader'
+import { MemoryEmailSender } from '../../providers/email/memory.email'
+import { MemoryPerfectCorpClient } from '../../providers/perfect-corp/memory.perfect-corp'
 import { MemoryPhotoStore } from '../../providers/photo-store/memory.photo-store'
+import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { FakeGoalsRepository } from '../goals/goals.repository.fake'
 import { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
+import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { FakeSafetyRepository } from '../safety/safety.repository.fake'
 import { SafetyService } from '../safety/safety.service'
 import { garbagePhoto, jpegPhoto, pngPhoto, webpPhoto } from '../scans/scans.photos.fake'
@@ -17,6 +22,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { analyseFaceScanSpec } from './face-scans.job-specs'
 import { FakeFaceScansRepository } from './face-scans.repository.fake'
 import { FaceScanService } from './face-scans.service'
+import { FakeVendorSpendLedger } from './face-scans.vendor-spend.fake'
 
 // The one clock every test hangs off; fixtures are offsets from it.
 const T0 = new Date('2030-06-15T12:00:00.000Z')
@@ -70,6 +76,11 @@ const setup = (options: SetupOptions = {}) => {
     goals,
     photos,
     jobs,
+    // The analysis pipeline's collaborators (its behaviour is face-scans.pipeline.test.ts's); nothing here reaches them.
+    perfectCorp: new MemoryPerfectCorpClient(),
+    aiUsage: new FakeVendorSpendLedger(),
+    events: new MemoryScanEvents(),
+    opsAlerts: new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test', now: () => clock }),
     photoLinkSecret: PHOTO_SECRET,
     environment: 'test',
     now: () => clock,

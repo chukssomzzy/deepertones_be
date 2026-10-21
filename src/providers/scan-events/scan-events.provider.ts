@@ -7,11 +7,16 @@ export type ScanEventItem = { id: string; state: string; [field: string]: unknow
 /** A scan photo exactly as the HTTP responses show it; typed by its id and state for the same reason. */
 export type ScanEventPhoto = { id: string; state: string; [field: string]: unknown }
 
+/** A face scan as its stream shows it: where it has got to, and why when it needs a retake or failed. The whole of a face scan's snapshot and its `face` events. */
+export type FaceScanFrame = { id: string; state: string; reason: string | null }
+
 export type ScanEvent =
   /** An item changed; carries the item as it now is. */
   | { type: 'item'; item: ScanEventItem }
   /** A shelf photo was read; carries the photo as it now is, and goes out before the events of the items read from it. Product scans never send one. */
   | { type: 'photo'; photo: ScanEventPhoto }
+  /** A face scan changed state; carries the frame as it now is. Product scans never send one. */
+  | { type: 'face'; faceScan: FaceScanFrame }
   /** Every item of the scan is in a final state. Sent once the last one gets there. */
   | { type: 'done' }
 
@@ -26,9 +31,9 @@ export type ScanSnapshot = { id: string; items: ScanEventItem[]; [field: string]
 export interface ScanEvents {
   publish(scanId: string, event: ScanEvent): Promise<void>
   /**
-   * Opens a client's event stream: a `text/event-stream` response that starts with `snapshot` and then carries what is
+   * Opens a client's event stream (a face scan's snapshot is its frame): a `text/event-stream` response that starts with `snapshot` and then carries what is
    * published for the scan, until `done`, until the stream has lived too long, or until the client goes. Unlike publish,
    * a failure here is the caller's: there is no stream without it.
    */
-  subscribe(scanId: string, snapshot: ScanSnapshot): Promise<Response>
+  subscribe(scanId: string, snapshot: ScanSnapshot | FaceScanFrame): Promise<Response>
 }

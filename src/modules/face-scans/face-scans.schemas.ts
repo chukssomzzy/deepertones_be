@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 import { GOALS } from '../goals/goals.vocabulary'
 import { FACE_SCAN_POLICY } from './face-scans.service'
 
@@ -40,13 +41,28 @@ export const CreateFaceScanBody = z
   })
   .openapi('CreateFaceScanBody')
 
+export const RetakeFaceScanBody = z
+  .object({ front: FacePhotoFile.openapi({ description: 'The new front photo, required.' }) })
+  .openapi('RetakeFaceScanBody')
+
 const FacePhotoLink = z.object({ url: z.string().openapi({ description: 'A signed link, good for 5 minutes, to `GET /api/v1/scans/faces/photos/{token}`.' }) })
+
+export const PerfectCorpWebhookResponse = z
+  .object({ received: z.literal(true) })
+  .openapi('PerfectCorpWebhookResponse')
 
 export const FaceScanResponse = z
   .object({
     id: z.string(),
     state: z.enum(['analysing', 'needs-retake', 'ready', 'failed']),
-    reason: z.enum(['unavailable']).nullable().openapi({ description: 'Why the scan `failed`; null otherwise.' }),
+    reason: z
+      .enum(['unavailable', 'consent-withdrawn', ...REJECTED_PHOTO_REASONS])
+      .nullable()
+      .openapi({
+        description:
+          'Why the scan `failed` (`unavailable`, or `consent-withdrawn` when consent was taken back before the photo was analysed) or needs a retake ' +
+          '(`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`, `no-face` or `image-size`: one instruction for the app to show); null otherwise.',
+      }),
     goal: z.enum(GOALS).openapi({ description: 'The goal the scan was taken under, whatever the goal is now.' }),
     createdAt: z.iso.datetime(),
     photos: z.object({ front: FacePhotoLink.optional(), right: FacePhotoLink.optional(), left: FacePhotoLink.optional() }).openapi({ description: 'A link for each photo that was sent.' }),

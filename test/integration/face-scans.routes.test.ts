@@ -1,6 +1,6 @@
-import { createExecutionContext } from 'cloudflare:test'
+import { abortAllDurableObjects, createExecutionContext, createMessageBatch, getQueueResult } from 'cloudflare:test'
 import { env } from 'cloudflare:workers'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { TokenService } from '../../src/modules/auth/tokens.service'
@@ -8,10 +8,13 @@ import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.reposi
 import { garbagePhoto, jpegPhoto, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
+import { glowOutput, skinSuccess, stubPerfectCorp, taskError } from './perfect-corp.stub'
+import { parseFrame, sseReader, type SseReader } from './sse'
 
-// The face scan HTTP routes (consent, create, read, delete, the photo link) through the Worker's real entrypoint, with real local D1 and R2.
-// The face-scans queue's producer is a recorder: the analysis job's steps arrive in a later change, so all this change does with the queue is
-// put one message on it. Nothing here reaches Perfect Corp, and nothing at all is called for the goal (a chip needs no model).
+// The face scan HTTP routes (consent, create, read, delete, the photo link, retake, the live stream) through the Worker's real entrypoint, with real
+// local D1 and R2. The face-scans queue's producer is a recorder: what the routes queue is read back from it, and where a test needs the analysis to
+// have run it feeds that message to the Worker's queue handler by hand, with Perfect Corp stubbed at fetch (./perfect-corp.stub; the real API is never
+// called). Nothing at all is called for the goal (a chip needs no model).
 
 const SECOND = 1000
 const MINUTE = 60 * SECOND
@@ -859,5 +862,364 @@ describe('POST /api/v1/scans/faces: two at once', () => {
     const prefix = `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${accepted.id}`
     expect((await bucketKeysOf(guest.userId)).sort()).toEqual([`${prefix}/front.jpg`, `${prefix}/left.jpg`, `${prefix}/right.jpg`])
     expect(queued).toEqual([{ faceScanId: accepted.id, step: 'upload', at: expect.any(Number) }])
+  })
+})
+
+// --- PR 3: the analysis pipeline reaches the routes: retake, and the live stream ---
+
+const MAIN = `deepertones-face-scans-${env.ENVIRONMENT}`
+/** The front photo is replaced under the same key, so the key says where to look. */
+const frontKeyOf = (guest: Guest, scanId: string) => `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${scanId}/front.jpg`
+const bytesOfStored = async (key: string) => new Uint8Array(await (await env.PRIVATE_PHOTOS.get(key))!.arrayBuffer())
+const rowOf = (scanId: string) => env.DB.prepare('SELECT state, reason, pc_analysis_task_id AS task, skin_age AS skinAge FROM face_scans WHERE id = ?').bind(scanId).first<{ state: string; reason: string | null; task: string | null; skinAge: number | null }>()
+
+/** Runs one message through the Worker's queue handler, as the queue would deliver it. */
+const runFaceJob = async (body: unknown) => {
+  const batch = createMessageBatch(MAIN, [{ id: 'm', timestamp: new Date(), attempts: 1, body }])
+  const ctx = createExecutionContext()
+  vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  await worker.queue!(batch, WORKER_ENV, ctx)
+  return getQueueResult(batch, ctx)
+}
+let lastAt = 0
+const nextAt = () => (lastAt = Math.max(Date.now(), lastAt + 1))
+const stepOf = (scanId: string, step: 'upload' | 'fetch') => ({ faceScanId: scanId, step, at: nextAt() })
+
+/** A scan that was analysed up to the point of asking for a retake: made by the route, its upload step run, and its finished task refused for the photo. */
+const needingRetake = async (guest: Guest, reason = 'error_no_face') => {
+  const stub = stubPerfectCorp()
+  const view = await createdFace(guest)
+  expect((await runFaceJob(queued.at(-1))).explicitAcks).toEqual(['m'])
+  stub.answerSkin((await rowOf(view.id))!.task!, () => taskError(reason))
+  expect((await runFaceJob(stepOf(view.id, 'fetch'))).explicitAcks).toEqual(['m'])
+  expect(await rowOf(view.id)).toMatchObject({ state: 'needs-retake' })
+  queued.length = 0
+  return { view, stub }
+}
+
+const retakeFace = (guest: Guest | undefined, id: string, fields: Record<string, File | undefined> = { front: fileOf(face({}, 9), 'front') }, from?: string) =>
+  fetchWorker(`${FACES}/${id}/retake`, { method: 'POST', body: formOf(fields), headers: guest ? guest.headers(from) : { 'cf-connecting-ip': from ?? freshIp() } })
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
+
+describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
+  it('shows a scan that needs a retake with the reason, and the same fields as before', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest, 'error_lighting_dark')
+
+    const shown = await dataOf<FaceScanView>(await getFace(guest, view.id))
+
+    expect(shown).toMatchObject({ id: view.id, state: 'needs-retake', reason: 'too-dark' })
+    expect(Object.keys(shown).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'state'])
+  })
+
+  it('shows a scan that is ready with no result in it: the result view is a later change', async () => {
+    const guest = await readyGuest()
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    await runFaceJob(queued.at(-1))
+    stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess(glowOutput()))
+    await runFaceJob(stepOf(view.id, 'fetch'))
+
+    const shown = await dataOf<FaceScanView>(await getFace(guest, view.id))
+
+    expect(shown).toMatchObject({ id: view.id, state: 'ready', reason: null })
+    expect(Object.keys(shown).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'state'])
+  })
+})
+
+describe('POST /api/v1/scans/faces/{id}/retake', () => {
+  it('answers 202 with the scan analysing again, no reason, and a link to the new front photo', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+
+    const res = await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
+
+    expect(res.status).toBe(202)
+    const retaken = await dataOf<FaceScanView>(res)
+    expect(retaken).toMatchObject({ id: view.id, state: 'analysing', reason: null, goal: 'glow' })
+    const link = await openPhoto(tokenOf(retaken.photos.front.url))
+    expect(link.status).toBe(200)
+    expect(new Uint8Array(await link.arrayBuffer())).toEqual(face({}, 9).bytes)
+  })
+
+  it('replaces the front photo under the same key, clears the reason and the old analysis task in the database, and stores no second photo', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+    expect(new Uint8Array(await bytesOfStored(frontKeyOf(guest, view.id)))).toEqual(face({}, 1).bytes)
+
+    await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
+
+    expect(await bytesOfStored(frontKeyOf(guest, view.id))).toEqual(face({}, 9).bytes)
+    expect(await bucketKeysOf(guest.userId)).toEqual([frontKeyOf(guest, view.id)])
+    expect(await rowOf(view.id)).toEqual({ state: 'analysing', reason: null, task: null, skinAge: null })
+    expect(await countOf('face_scan_photos', guest.userId)).toBe(1)
+  })
+
+  it('queues the upload step for the scan, and nothing else', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+
+    await retakeFace(guest, view.id)
+
+    expect(queued).toEqual([{ faceScanId: view.id, step: 'upload', at: expect.any(Number) }])
+  })
+
+  it('leads to a fresh analysis: the queued upload step sends the new photo and starts a new task', async () => {
+    const guest = await readyGuest()
+    const { view, stub } = await needingRetake(guest)
+    const oldTask = (await rowOf(view.id))!.task
+    await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
+    const [uploadStep] = queued.splice(0)
+
+    expect((await runFaceJob(uploadStep)).explicitAcks).toEqual(['m'])
+
+    const row = (await rowOf(view.id))!
+    expect(row.state).toBe('analysing')
+    expect(row.task).toMatch(/^skin-/)
+    expect(row.task).not.toBe(oldTask)
+    const puts = stub.calls.filter((call) => call.method === 'PUT')
+    expect(new Uint8Array(puts.at(-1)!.body as ArrayBuffer | Uint8Array)).toEqual(face({}, 9).bytes)
+  })
+
+  it('may be done again after another refusal: there is no limit on retakes', async () => {
+    const guest = await readyGuest()
+    const { view, stub } = await needingRetake(guest)
+    for (const marker of [2, 3]) {
+      expect((await retakeFace(guest, view.id, { front: fileOf(face({}, marker), 'front') })).status).toBe(202)
+      expect((await runFaceJob(queued.splice(0)[0])).explicitAcks).toEqual(['m'])
+      stub.answerSkin((await rowOf(view.id))!.task!, () => taskError('error_pose'))
+      await runFaceJob(stepOf(view.id, 'fetch'))
+      expect(await rowOf(view.id)).toMatchObject({ state: 'needs-retake', reason: 'turn-to-camera' })
+    }
+  })
+
+  it('refuses a caller who is not signed in: 401 AUTH_REQUIRED', async () => {
+    const res = await retakeFace(undefined, crypto.randomUUID())
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+
+  it('is 404 FACE_SCAN_NOT_FOUND for a scan that does not exist and for another profile\'s scan, and changes nothing', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+    const second = await asSecondProfile(guest)
+    expect((await putConsent(second)).status).toBe(200)
+
+    const unknown = await retakeFace(guest, crypto.randomUUID())
+    const foreign = await retakeFace(second, view.id)
+
+    for (const res of [unknown, foreign]) {
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_FOUND')
+    }
+    expect(await rowOf(view.id)).toMatchObject({ state: 'needs-retake' })
+    expect(queued).toEqual([])
+  })
+
+  it('is 409 FACE_SCAN_NOT_AWAITING_RETAKE for a scan that is analysing, and leaves its photo and queue alone', async () => {
+    const guest = await readyGuest()
+    const view = await createdFace(guest)
+    queued.length = 0
+
+    const res = await retakeFace(guest, view.id)
+
+    expect(res.status).toBe(409)
+    expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_AWAITING_RETAKE')
+    expect(await bytesOfStored(frontKeyOf(guest, view.id))).toEqual(face({}, 1).bytes)
+    expect(queued).toEqual([])
+  })
+
+  it('is 409 FACE_SCAN_NOT_AWAITING_RETAKE for a scan that is ready', async () => {
+    const guest = await readyGuest()
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    await runFaceJob(queued.splice(0)[0])
+    stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess(glowOutput()))
+    await runFaceJob(stepOf(view.id, 'fetch'))
+
+    const res = await retakeFace(guest, view.id)
+
+    expect(res.status).toBe(409)
+    expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_AWAITING_RETAKE')
+    expect(await rowOf(view.id)).toMatchObject({ state: 'ready' })
+  })
+
+  it('is 409 FACE_CONSENT_REQUIRED when the consent was withdrawn, and keeps the old photo', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+    expect((await deleteConsent(guest)).status).toBe(204)
+
+    const res = await retakeFace(guest, view.id)
+
+    expect(res.status).toBe(409)
+    expect(await errorCodeOf(res)).toBe('FACE_CONSENT_REQUIRED')
+    expect(await bytesOfStored(frontKeyOf(guest, view.id))).toEqual(face({}, 1).bytes)
+    expect(await rowOf(view.id)).toMatchObject({ state: 'needs-retake' })
+  })
+
+  it.each([
+    { label: 'a PNG', file: () => fileOf(pngPhoto({ width: 1080, height: 1440 }), 'front', 'image/png'), code: 'UNSUPPORTED_IMAGE' },
+    { label: 'bytes that are no image', file: () => fileOf(garbagePhoto(), 'front', 'image/jpeg'), code: 'UNSUPPORTED_IMAGE' },
+    { label: 'a WebP', file: () => fileOf(webpPhoto({ width: 1080, height: 1440 }), 'front', 'image/webp'), code: 'UNSUPPORTED_IMAGE' },
+    { label: 'a JPEG whose shorter side is one pixel under 1080', file: () => fileOf(face({ width: 1079, height: 1440 }), 'front'), code: 'IMAGE_TOO_SMALL' },
+  ])('is 400 for $label, and keeps the old photo and the scan waiting for a retake', async ({ file, code }) => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+
+    const res = await retakeFace(guest, view.id, { front: file() })
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe(code)
+    expect(await bytesOfStored(frontKeyOf(guest, view.id))).toEqual(face({}, 1).bytes)
+    expect(await rowOf(view.id)).toMatchObject({ state: 'needs-retake' })
+    expect(queued).toEqual([])
+  })
+
+  it('is 400 VALIDATION_FAILED without a front part', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+
+    const res = await retakeFace(guest, view.id, {})
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+  })
+
+  it('answers 413 on a Content-Length one byte over a photo plus 1,000,000 of framing', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+
+    const res = await fetchWorker(`${FACES}/${view.id}/retake`, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(MAX_FACE_PHOTO_BYTES + 1_000_000 + 1) } })
+
+    expect(res.status).toBe(413)
+    expect(await errorCodeOf(res)).toBe('HTTP_413')
+  })
+
+  it('answers 202 with the scan failed as unavailable, still, when the analysis cannot be queued', async () => {
+    const guest = await readyGuest()
+    const { view } = await needingRetake(guest)
+    queueFails = true
+
+    const res = await retakeFace(guest, view.id)
+
+    expect(res.status).toBe(202)
+    expect(await dataOf<FaceScanView>(res)).toMatchObject({ id: view.id, state: 'failed', reason: 'unavailable' })
+    expect(await rowOf(view.id)).toMatchObject({ state: 'failed', reason: 'unavailable' })
+  })
+})
+
+describe('GET /api/v1/scans/faces/{id}/events', () => {
+  const opened: SseReader[] = []
+  afterEach(async () => {
+    await Promise.all(opened.splice(0).map((stream) => stream.cancel()))
+    await abortAllDurableObjects()
+  })
+  const eventsOf = (guest: Guest | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}/events`)
+  const watch = async (guest: Guest, id: string) => {
+    const res = await eventsOf(guest, id)
+    expect(res.status).toBe(200)
+    const stream = sseReader(res)
+    opened.push(stream)
+    return { res, stream }
+  }
+
+  it('refuses a caller who is not signed in: 401 AUTH_REQUIRED', async () => {
+    const res = await eventsOf(undefined, crypto.randomUUID())
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+
+  it('is 404 FACE_SCAN_NOT_FOUND for a scan that does not exist and for another profile\'s scan', async () => {
+    const guest = await readyGuest()
+    const view = await createdFace(guest)
+    const second = await asSecondProfile(guest)
+
+    for (const res of [await eventsOf(guest, crypto.randomUUID()), await eventsOf(second, view.id)]) {
+      expect(res.status).toBe(404)
+      expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_FOUND')
+    }
+  })
+
+  it('answers 200 as an event stream that no proxy buffers or rewrites, starting with a snapshot of the scan as it is: its id, state and reason', async () => {
+    const guest = await readyGuest()
+    const view = await createdFace(guest)
+
+    const { res, stream } = await watch(guest, view.id)
+
+    expect(res.headers.get('Content-Type')).toBe('text/event-stream; charset=utf-8')
+    expect(res.headers.get('Cache-Control')).toBe('no-cache, no-transform')
+    expect(res.headers.get('X-Accel-Buffering')).toBe('no')
+    const first = parseFrame((await stream.read(1)).frames[0]!)
+    expect(first.event).toBe('snapshot')
+    expect(first.data).toMatchObject({ id: view.id, state: 'analysing', reason: null })
+  })
+
+  it('keeps an analysing scan\'s stream open: nothing but the snapshot comes, and it does not end', async () => {
+    const guest = await readyGuest()
+    const view = await createdFace(guest)
+    const { stream } = await watch(guest, view.id)
+    await stream.read(1)
+
+    const quiet = await stream.read(1, 300)
+
+    expect(quiet.frames).toEqual([])
+    expect(quiet.ended).toBe(false)
+  })
+
+  it('tells a client that is watching when the scan is ready, with a face frame and then done, and ends the stream', async () => {
+    const guest = await readyGuest()
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    await runFaceJob(queued.splice(0)[0])
+    stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess(glowOutput()))
+    const { stream } = await watch(guest, view.id)
+    expect(parseFrame((await stream.read(1)).frames[0]!).event).toBe('snapshot')
+
+    await runFaceJob(stepOf(view.id, 'fetch'))
+
+    const { frames, ended } = await stream.read(2)
+    const [face, done] = frames.map(parseFrame)
+    expect(face).toMatchObject({ event: 'face', data: { id: view.id, state: 'ready', reason: null } })
+    expect(done!.event).toBe('done')
+    expect((await stream.read(1)).ended || ended).toBe(true)
+  })
+
+  it('tells a client that is watching when the scan needs a retake, with the reason', async () => {
+    const guest = await readyGuest()
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    await runFaceJob(queued.splice(0)[0])
+    stub.answerSkin((await rowOf(view.id))!.task!, () => taskError('error_src_face_too_small'))
+    const { stream } = await watch(guest, view.id)
+    await stream.read(1)
+
+    await runFaceJob(stepOf(view.id, 'fetch'))
+
+    const frames = (await stream.read(2)).frames.map(parseFrame)
+    expect(frames[0]).toMatchObject({ event: 'face', data: { id: view.id, state: 'needs-retake', reason: 'move-closer' } })
+    expect(frames[1]!.event).toBe('done')
+  })
+
+  it('says done straight after the snapshot for a scan that has already ended, and then closes', async () => {
+    const guest = await readyGuest()
+    queueFails = true
+    const failed = await createdFace(guest)
+    queueFails = false
+    expect(failed).toMatchObject({ state: 'failed', reason: 'unavailable' })
+
+    const { stream } = await watch(guest, failed.id)
+
+    const { frames, ended } = await stream.read(3)
+    const parsed = frames.map(parseFrame)
+    expect(parsed[0]).toMatchObject({ event: 'snapshot', data: { id: failed.id, state: 'failed', reason: 'unavailable' } })
+    expect(parsed[1]!.event).toBe('done')
+    expect(frames).toHaveLength(2)
+    expect(ended).toBe(true)
   })
 })

@@ -1187,18 +1187,23 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
 
 ### Face scans
-`modules/face-scans` is the face scan (#112), built as four stacked changes. This one (2 of 4) is the **records**: consent, the scan and its
-photos, the routes, the queue and the cleaner. The pure rules (`face-scans.tables.ts`) and the Perfect Corp provider came before it; the
-analysis itself (the job that sends the front photo, the webhook, the results and the masks) and the result view come after.
+`modules/face-scans` is the face scan (#112), built as four stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
+provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), and this one (3 of 4) is the **analysis
+pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
+check, the live stream and the spend. The result view (which concerns are shown, their wording, the change since day one, the mask links) comes after.
 `FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
-store and the job queue. It never reaches Perfect Corp yet.
+store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events and the ops alerts (`Pick<OpsAlertsService,
+'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
 - **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
   from `face_scans`. `face_consents` (one row per profile: version, given and withdrawn times), `face_scans` (`state` `analysing` |
   `needs-retake` | `ready` | `failed`, `reason`, `goal_at_scan`, the Perfect Corp task ids and environment, `skin_age`, `skin_type`, `tables_version`,
-  timestamps; indexed on `(profile_id, created_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
-  and, for the analysis to fill, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
-  `profile_fitzpatrick` (`I` to `VI` and the task id). No route uses those last three yet. `reason` is `unavailable` for now; retake reasons come with the analysis.
+  timestamps; indexed on `(profile_id, created_at)`; migration 0030 adds `reaper_checked_at` and indexes on both task-id columns and on
+  `(state, updated_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
+  and, filled by the analysis, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
+  `profile_fitzpatrick` (`I` to `VI` and the task id). No route shows those last three yet. `reason` is `unavailable` or `consent-withdrawn` for a
+  failed scan, and for a scan that needs a retake one of `REJECTED_PHOTO_REASONS` (`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`,
+  `no-face`, `image-size`); the column is plain text and the enum is the TypeScript table's.
 - **Consent.** `CURRENT_FACE_CONSENT_VERSION` (1) is the version of the wording; bump it and every earlier consent stops counting.
   Consent belongs to the profile. `PUT /me/face-consent { version }` records it (any other version is 400 `FACE_CONSENT_VERSION_MISMATCH`
   with `details.current`; giving again starts it afresh and clears a withdrawal), `GET` shows it (404 `FACE_CONSENT_NOT_FOUND` until given; a
@@ -1236,10 +1241,58 @@ store and the job queue. It never reaches Perfect Corp yet.
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters
   have namespace ids 1026/1027, 2026/2027 and 3026/3027.
-- **A placeholder handler.** The analysis is not built in this change, so `face-scans.jobs.ts` registers `analyse-face-scan` with a handler that
-  marks the scan `failed` / `unavailable` and then throws a `PermanentJobError` ("face analysis not built yet"); its dead-letter hook does the
-  same. The handler marks the scan itself because the dispatcher acks a `PermanentJobError` and never sends it to the dead-letter queue. So a
-  scan fails cleanly when this ships without the analysis, instead of hanging in `analysing`. The analysis replaces the handler.
+- **States.** `analysing` becomes `ready` (results copied), `needs-retake` (Perfect Corp refused the front photo; `reason` is one retake reason) or
+  `failed` (`unavailable` or `consent-withdrawn`); `needs-retake` becomes `analysing` again on a retake. `ready` and `failed` are final. Every change is
+  a conditional `updateFaceScan(id, expectedState, patch)`, so of two simultaneous callers exactly one wins and a late message does nothing.
+- **The job** `analyse-face-scan { faceScanId, step, at, webhookId? }` has three steps, all in `FaceScanService.advance`. The key is
+  `<id>:<step>:wh:<webhookId>` when a webhook woke it and `<id>:<step>:<at>` otherwise, so a webhook delivered twice is one run (the dispatcher's
+  `job_runs` claim acks the repeat; there is no table of webhook ids).
+  - `upload`: does nothing for a scan that is gone, not `analysing`, or that already has its analysis task (a message taken over after its lease must not
+    pay twice). It re-checks consent (no current consent fails the scan as `consent-withdrawn` with no Perfect Corp call), reads the front photo (missing:
+    `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
+    A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
+    never fails the scan.
+  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each of the goal's
+    three concerns that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
+    `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
+    region, plus the overall score as concern `all`, region `whole`), the `face_masks` rows, `skin_type` (`skinTypeLabel`), `skin_age`, `tables_version`
+    (`TABLES_VERSION`) and `state = 'ready'` as one batch that holds only while the scan exists and is `analysing`. When it does not (deleted, or moved on,
+    while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
+    recorded after, as `face-analysis` with the units for the action count (1 to 4: 12, 5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id. Then
+    Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
+  - `fitzpatrick`: stores the type for the profile (insert, first read stands) and records 10 units keyed by the task, then deletes their copy. It never
+    changes the scan and is never shown. A profile that already has a type only has the task deleted.
+  - **Perfect Corp's errors**, mapped alike in every step that calls it: `PerfectCorpRejectedPhotoError` sends the scan to `needs-retake` with the reason
+    (no spend); `PerfectCorpUnavailableError` is rethrown for the queue to retry (after 4 retries the dead-letter hook fails the scan as `unavailable`,
+    except for a `fitzpatrick` step, which leaves the scan alone); `PerfectCorpCreditError` raises the `face-scan-account` ops alert, fails the scan as
+    `unavailable` and ends the message as a `PermanentJobError` (the service fails the scan itself because the dispatcher acks a permanent error and never
+    dead-letters it); `PerfectCorpBadRequestError` does the same without the alert. A webhook that says the task ended in an error still queues `fetch`:
+    the provider's mapping on `getSkinAnalysis` decides whether that is a retake or an outage.
+- **The webhook.** `POST /webhooks/perfect-corp` (under the API prefix) is public (`security: []`): the Standard Webhooks signature on the RAW body is the
+  credential (`RestPerfectCorpClient.verifyWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
+  (300 a minute per address; namespace ids 1028/2028/3028) then `bodyLimit` (64 KB, so an oversized body is 413 before any signature work). The route reads
+  `c.req.text()` and calls `receiveWebhook`: a bad signature is 401 `WEBHOOK_SIGNATURE_INVALID`; otherwise `findByTaskId` (both task-id columns are
+  indexed) finds the scan, and a task of another environment (`pc_environment` is not this one) or of a deleted scan is ignored; a match queues `fetch` (its
+  analysis task) or `fitzpatrick` with the `webhook-id`. Every non-401 case answers 200 `{ received: true }` in the usual envelope; a step that cannot be
+  queued is 503, so Perfect Corp sends the webhook again. Register the URL for each environment in Perfect Corp's console (see the README).
+- **Retake.** `POST /scans/faces/{id}/retake` takes multipart `front` only, with create's middleware and its single-photo body limit. The checks run in
+  this order and nothing changes until all pass: the scan is the caller's (404 `FACE_SCAN_NOT_FOUND`), consent is current (409 `FACE_CONSENT_REQUIRED`), the
+  scan is `needs-retake` (409 `FACE_SCAN_NOT_AWAITING_RETAKE`), then the photo (the same JPEG checks). The front object is overwritten under the same
+  key, the scan moves `needs-retake` to `analysing` with `reason`, `pc_analysis_task_id` and `reaper_checked_at` cleared (the retaken photo gets a task and a
+  reaper check of its own), and `upload` is queued. If it cannot be queued the scan fails as `unavailable`, still 202. There is no limit and no due-check.
+- **The reaper's one check.** `createScanReaper` also calls `FaceScanService.reap(now)`, in its own try (a failure is logged, never fails the product
+  sweep nor is hidden by it). From the 100 `analysing` scans that have sat longest and are older than 15 minutes: one older than 2 hours since it last moved
+  is failed as `unavailable`; otherwise, if it has not been checked, `reaper_checked_at` is set (leaving `updated_at`, so the 2 hours do not restart) and
+  `fetch` is queued, or `upload` if it has no task (its first message was lost). The check happens once. *Known limit:* a checked scan that is still
+  under 2 hours old stays in that list until it is failed, so 100 of them at once would hold back newer ones; the query does not skip them because it knows
+  only the 15-minute cut-off, not the time the sweep runs at.
+- **The live stream.** The `ScanStream` Durable Object, one per face scan id, carries a `{ type: 'face', faceScan: { id, state, reason } }` event as SSE
+  event `face`; product frames are unchanged. `GET /scans/faces/{id}/events` (signed in, the caller's own scan, else 404 `FACE_SCAN_NOT_FOUND`) opens a
+  stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
+  scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
+  change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
+- **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), only once a result is stored, and a failure to record it is logged and does not
+  fail a scan that is already `ready`.
 - **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket
   first, then their face rows (which also cascade from the profile), so a bucket failure leaves the rows and the keys for the next run. Both
   halves are safe to repeat and chunk the ids under D1's bound-parameter limit. It deletes only what the face tables list, so product photos are untouched.
@@ -1273,10 +1326,10 @@ Per environment (dev, staging, production) even though one Perfect Corp account 
 
 - Vars in all three `wrangler.jsonc` blocks: `PERFECT_CORP_BASE_URL` (`https://yce-api-01.makeupar.com`) and `PERFECT_CORP_USD_PER_UNIT`.
   **The price is a placeholder (`0.05`)**: confirm it from Perfect Corp's feature-cost endpoint and the plan price before trusting spend figures.
-- Secrets `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`, in the secrets plan with `required: false` and declared optional in
-  `src/lib/env.ts` (the `WHATSAPP_ACCESS_TOKEN` precedent), and NOT in `secrets.required`, so a deploy does not fail before they are set. The PR that
-  adds the analysis job and the webhook route makes them required, and deletes the `env.ts` declarations. Both are in the two `.dev.vars` example files.
-- The webhook URL for each environment is registered in Perfect Corp's console (a deploy step, not code); the console shows the secret.
+- Secrets `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`, **required** in the secrets plan and in `secrets.required` in all three blocks, so a
+  deploy fails until both are set on that environment's Worker. Both are in the two `.dev.vars` example files.
+- The webhook URL for each environment (`https://<that Worker's host>/api/v1/webhooks/perfect-corp`) is registered in Perfect Corp's console (a deploy
+  step, not code); the console shows the secret. Until it is registered nothing wakes the `fetch` step, and the reaper's check 15 minutes on is what finds the result.
 
 ### Ops alerts
 `modules/ops-alerts` (`OpsAlertsService`) emails the owner when an environment-wide problem needs them. Nothing here is shown to a
@@ -1285,6 +1338,7 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
 | Kind              | Raised when                                                                                  | At most one email per |
 | ----------------- | -------------------------------------------------------------------------------------------- | --------------------- |
 | `ai-account`      | Claude refuses our account: any `AnthropicConfigError` (401, 402 `billing_error`, 403)       | hour                  |
+| `face-scan-account` | Perfect Corp refuses our account: a `PerfectCorpCreditError` in a face scan step          | hour                  |
 | `ai-spend-cap`    | A call takes the UTC day's AI spend past `AI_DAILY_BUDGET_USD`                               | UTC day               |
 | `research-budget` | A research attempt is made when the day's count has reached `dailyResearchBudget` (200)      | UTC day               |
 | `analysis-budget` | An analysis attempt is made when the day's count has reached `dailyAnalysisBudget` (300)     | UTC day               |
@@ -1294,7 +1348,7 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   is logged `{ outcome: 'ops-alert-failed', kind, error }` with the error's name only.
 - **One claim per kind and window, then a job.** `OpsAlertsRepository.claim(kind, windowStart)` is ONE guarded upsert on
   `ops_alert_claims` (one row per kind, replaced only by a newer window), so however many callers hit the problem in a window
-  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`)
+  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`, `face-scan-account`)
   or UTC day (the rest). The repository does not know how long a window is. *Trade-off:* the window is claimed before the job is
   queued, so a queue outage loses that window's email (the next window sends); queueing first would send one email per caller.
 - **`send-ops-alert` is the first job on the shared `email` queue** (see "Background jobs"), keyed `kind:windowStart`, so a

@@ -1,8 +1,11 @@
-import type { faceConsents, faceScanPhotos, faceScans } from './face-scans.table'
+import type { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
 
 export type FaceConsent = typeof faceConsents.$inferSelect
 export type FaceScan = typeof faceScans.$inferSelect
 export type FaceScanPhoto = typeof faceScanPhotos.$inferSelect
+export type FaceResult = typeof faceResults.$inferSelect
+export type FaceMask = typeof faceMasks.$inferSelect
+export type ProfileFitzpatrick = typeof profileFitzpatrick.$inferSelect
 
 export type FaceScanState = FaceScan['state']
 export type FaceScanReason = NonNullable<FaceScan['reason']>
@@ -17,3 +20,13 @@ export type NewFacePhoto = Pick<FaceScanPhoto, 'faceScanId' | 'userId' | 'positi
 export type FaceScanPatch = Partial<Omit<FaceScan, 'id' | 'userId' | 'profileId' | 'goalAtScan' | 'createdAt' | 'updatedAt'>> & { updatedAt: Date }
 
 export type GiveFaceConsent = { profileId: string; userId: string; version: number; at: Date }
+
+/** What a finished analysis writes, all together: the rows, the skin reading and the version of the tables that wrote it. The scan becomes `ready` at `updatedAt`. */
+export type FaceScanCompletion = {
+  results: FaceResult[]
+  masks: FaceMask[]
+  skinType: FaceScan['skinType']
+  skinAge: FaceScan['skinAge']
+  tablesVersion: string
+  updatedAt: Date
+}

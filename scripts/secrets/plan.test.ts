@@ -69,9 +69,9 @@ describe('SECRETS', () => {
     expect(SECRETS.JWT_SECRET!.required).toBe(true)
     expect(SECRETS.DEVICE_ID_KEY!.required).toBe(true)
     expect(SECRETS.EXPO_ACCESS_TOKEN!.required).toBe(true)
-    // Optional until the webhook and the analysis job read them (PR 3 flips both): a deploy must not fail before the owner sets them.
-    expect(SECRETS.PERFECT_CORP_API_KEY!.required).toBe(false)
-    expect(SECRETS.PERFECT_CORP_WEBHOOK_SECRET!.required).toBe(false)
+    // The analysis job and the webhook route read them, so a deploy without them must be caught.
+    expect(SECRETS.PERFECT_CORP_API_KEY!.required).toBe(true)
+    expect(SECRETS.PERFECT_CORP_WEBHOOK_SECRET!.required).toBe(true)
     expect(SECRETS.JWT_SECRET_PREVIOUS!.required).toBe(false)
     expect(SECRETS.WHATSAPP_ACCESS_TOKEN!.required).toBe(false)
   })
@@ -124,6 +124,8 @@ describe('planSecretPush', () => {
       'EXPO_ACCESS_TOKEN',
       'JWT_SECRET',
       'OTP_PEPPER',
+      'PERFECT_CORP_API_KEY',
+      'PERFECT_CORP_WEBHOOK_SECRET',
       'ZEPTOMAIL_API_KEY',
     ])
     const blankOne = planSecretPush({ values: map({ ...good, OTP_PEPPER: '' }) })
@@ -163,14 +165,14 @@ describe('planSecretPush', () => {
 
     expect(plan.send).not.toHaveProperty('PERFECT_CORP_WEBHOOK_SECRET')
     expect(plan.blank).toEqual(['PERFECT_CORP_WEBHOOK_SECRET'])
-    // Optional, so a blank one is not a missing required secret.
-    expect(plan.missingRequired).toEqual([])
+    // Required, so a blank one is a missing required secret.
+    expect(plan.missingRequired).toEqual(['PERFECT_CORP_WEBHOOK_SECRET'])
   })
 
-  it('does not report an absent Perfect Corp key or webhook secret as missing', () => {
+  it('reports an absent Perfect Corp key and webhook secret as missing', () => {
     const { PERFECT_CORP_API_KEY: _key, PERFECT_CORP_WEBHOOK_SECRET: _secret, ...without } = good
 
-    expect(planSecretPush({ values: map(without) }).missingRequired).toEqual([])
+    expect(planSecretPush({ values: map(without) }).missingRequired).toEqual(['PERFECT_CORP_API_KEY', 'PERFECT_CORP_WEBHOOK_SECRET'])
   })
 
   it('sorts skipped and blank entries', () => {

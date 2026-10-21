@@ -169,7 +169,7 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY` and `EXPO_ACCESS_TOKEN` to staging and production before this lands). `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET` to staging and production before this lands). See [Face scan setup](#face-scan-setup-perfect-corp) for the last two. `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
 ## Product catalog setup
@@ -223,6 +223,23 @@ It prints today, the last 7 days and the last N days in dollars, then each job a
 tracking" in `docs/architecture.md`.
 
 To measure the research, analysis, goal-reading and mention-reading steps against fixed cases, run `npm run eval:catalog` (the default `--mode all` includes the goal and mention readers; `-- --mode goals` runs only the first, about 40 Haiku calls and a few cents, and `-- --mode mentions` only the second, about 22 Haiku calls and a few cents; it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
+
+## Face scan setup (Perfect Corp)
+
+The face scan sends the front photo to Perfect Corp (YouCam) and gets the analysis back by webhook. Design in "Face scans" in
+`docs/architecture.md`. What is left for the account owner, once per environment, **before** merging to `staging` or `main`:
+
+1. Put `PERFECT_CORP_API_KEY` (the API key from the Perfect Corp console) and `PERFECT_CORP_WEBHOOK_SECRET` (the signing secret the console shows for
+   the webhook, `whsec_` and then base64) in `.dev.vars.staging` and `.dev.vars.production`, then push them:
+   `npm run secrets:push -- --env staging --apply`, then `--env production --apply`. Both are in `secrets.required`, so **a deploy fails until both are
+   set** on that environment's Worker.
+2. Register the webhook URL in Perfect Corp's console, once per environment, for task results:
+   `https://<that Worker's host>/api/v1/webhooks/perfect-corp`. Until it is registered nothing wakes the analysis, and the reaper's single check 15
+   minutes after the photo is what finds the result.
+3. Confirm `PERFECT_CORP_USD_PER_UNIT` in `wrangler.jsonc` (a placeholder) and create the `face-scans` queues (see [Before the first deploy](#before-the-first-deploy)).
+
+The webhook route has its own per-address limit (`PERFECT_CORP_WEBHOOK_LIMITER`, 300 a minute) and refuses a body over 64 KB. The tests never reach Perfect
+Corp: they stub `fetch`.
 
 ## ZeptoMail setup
 

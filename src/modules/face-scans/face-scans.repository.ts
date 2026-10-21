@@ -1,11 +1,24 @@
-import { and, asc, desc, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
-import type { FaceConsent, FaceScan, FaceScanPatch, FaceScanPhoto, FaceScanState, GiveFaceConsent, NewFacePhoto, NewFaceScan } from './face-scans.types'
+import type {
+  FaceConsent,
+  FaceMask,
+  FaceResult,
+  FaceScan,
+  FaceScanCompletion,
+  FaceScanPatch,
+  FaceScanPhoto,
+  FaceScanState,
+  GiveFaceConsent,
+  NewFacePhoto,
+  NewFaceScan,
+  ProfileFitzpatrick,
+} from './face-scans.types'
 
-export type { FaceConsent, FaceScan, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan }
+export type { FaceConsent, FaceMask, FaceResult, FaceScan, FaceScanCompletion, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan, ProfileFitzpatrick }
 
 const batchOf = (statements: BatchItem<'sqlite'>[]) => statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
 
@@ -59,7 +72,7 @@ export class D1FaceScansRepository {
       this.db
         .insert(faceScans)
         .select(
-          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}
+          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}, NULL
             WHERE (SELECT id FROM ${faceScans} WHERE ${faceScans.profileId} = ${scan.profileId} AND ${faceScans.state} <> 'failed' ORDER BY ${faceScans.createdAt} DESC, rowid DESC LIMIT 1) IS ${options.expectLatestId}`,
         )
         .returning({ id: faceScans.id }),
@@ -112,6 +125,67 @@ export class D1FaceScansRepository {
       .where(and(eq(faceScans.id, id), eq(faceScans.state, expected)))
       .returning({ id: faceScans.id })
     return rows.length > 0
+  }
+
+  /** The scan whose analysis task or Fitzpatrick task this is, or null. Task ids are Perfect Corp's and unique, so at most one scan holds one. */
+  async findByTaskId(taskId: string): Promise<FaceScan | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceScans)
+      .where(or(eq(faceScans.pcAnalysisTaskId, taskId), eq(faceScans.pcFitzpatrickTaskId, taskId)))
+      .limit(1)
+    return row ?? null
+  }
+
+  /** Scans still `analysing` whose updated time is strictly before `before`, the longest-waiting first, at most `limit`. */
+  async staleAnalysing(before: Date, limit: number): Promise<FaceScan[]> {
+    return this.db
+      .select()
+      .from(faceScans)
+      .where(and(eq(faceScans.state, 'analysing'), lt(faceScans.updatedAt, before)))
+      .orderBy(asc(faceScans.updatedAt), sql`rowid`)
+      .limit(limit)
+  }
+
+  /**
+   * Stores a finished analysis and makes the scan `ready`, or stores nothing, in one batch, and says whether it did. The rows are written only while the scan
+   * exists and is still `analysing` (so a scan deleted meanwhile gives false instead of a foreign key error, and a scan that moved on keeps what it has), and
+   * the UPDATE is last, so its answer is the answer for the batch. A row that cannot be stored (the same concern and region twice) fails the whole batch.
+   */
+  async completeFaceScan(id: string, completion: FaceScanCompletion): Promise<boolean> {
+    const stillAnalysing = sql`WHERE EXISTS (SELECT 1 FROM ${faceScans} WHERE ${faceScans.id} = ${id} AND ${faceScans.state} = 'analysing')`
+    // insert ... select takes its values by column position, so each select lists the table's columns in order.
+    const statements: BatchItem<'sqlite'>[] = [
+      ...completion.results.map((row) =>
+        this.db.insert(faceResults).select(sql`SELECT ${row.faceScanId}, ${row.userId}, ${row.concern}, ${row.region}, ${row.rawScore}, ${row.uiScore} ${stillAnalysing}`),
+      ),
+      ...completion.masks.map((row) => this.db.insert(faceMasks).select(sql`SELECT ${row.faceScanId}, ${row.userId}, ${row.concern}, ${row.maskKey} ${stillAnalysing}`)),
+      this.db
+        .update(faceScans)
+        .set({ state: 'ready', skinType: completion.skinType, skinAge: completion.skinAge, tablesVersion: completion.tablesVersion, updatedAt: completion.updatedAt })
+        .where(and(eq(faceScans.id, id), eq(faceScans.state, 'analysing')))
+        .returning({ id: faceScans.id }),
+    ]
+    const answers = await this.db.batch(batchOf(statements))
+    return (answers.at(-1) as { id: string }[]).length === 1
+  }
+
+  async resultsOf(faceScanId: string): Promise<FaceResult[]> {
+    return this.db.select().from(faceResults).where(eq(faceResults.faceScanId, faceScanId))
+  }
+
+  async masksOf(faceScanId: string): Promise<FaceMask[]> {
+    return this.db.select().from(faceMasks).where(eq(faceMasks.faceScanId, faceScanId))
+  }
+
+  async fitzpatrickOf(profileId: string): Promise<ProfileFitzpatrick | null> {
+    const [row] = await this.db.select().from(profileFitzpatrick).where(eq(profileFitzpatrick.profileId, profileId))
+    return row ?? null
+  }
+
+  /** Stores the profile's Fitzpatrick type unless it already has one: the first read stands, so a job run twice changes nothing. */
+  async saveFitzpatrick(row: ProfileFitzpatrick): Promise<void> {
+    await this.db.insert(profileFitzpatrick).values(row).onConflictDoNothing({ target: profileFitzpatrick.profileId })
   }
 
   /** Every bucket key the scan holds: its photos and its masks. */

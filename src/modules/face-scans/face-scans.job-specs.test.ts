@@ -29,8 +29,33 @@ describe('analyseFaceScanSpec', () => {
     expect(capSeconds).toBeGreaterThanOrEqual(baseSeconds)
   })
 
-  it('accepts the upload step, which is what creating a face scan queues', () => {
-    expect(analyseFaceScanSpec.schema.safeParse({ faceScanId: 'scan-1', step: 'upload', at: 1000 }).success).toBe(true)
+  it('keys a webhook-driven message by the webhook\'s id and not the time, so a webhook delivered twice is one run', () => {
+    const delivery = { faceScanId: 'scan-1', step: 'fetch', at: 1000, webhookId: 'msg_abc' } as const
+
+    expect(analyseFaceScanSpec.key(delivery)).toBe('scan-1:fetch:wh:msg_abc')
+    expect(analyseFaceScanSpec.key({ ...delivery, at: 999_999 })).toBe(analyseFaceScanSpec.key(delivery))
+    expect(analyseFaceScanSpec.key({ ...delivery, webhookId: 'msg_def' })).not.toBe(analyseFaceScanSpec.key(delivery))
+  })
+
+  it('keys a step with no webhook id by face scan, step and time', () => {
+    expect(analyseFaceScanSpec.key({ faceScanId: 'scan-1', step: 'upload', at: 1000 })).toBe('scan-1:upload:1000')
+    expect(analyseFaceScanSpec.key({ faceScanId: 'scan-1', step: 'fetch', at: 2000 })).toBe('scan-1:fetch:2000')
+  })
+
+  it('keeps the steps of one scan apart even for one webhook id', () => {
+    const fetchKey = analyseFaceScanSpec.key({ faceScanId: 'scan-1', step: 'fetch', at: 1, webhookId: 'msg_abc' })
+    const fitzpatrickKey = analyseFaceScanSpec.key({ faceScanId: 'scan-1', step: 'fitzpatrick', at: 1, webhookId: 'msg_abc' })
+
+    expect(fitzpatrickKey).not.toBe(fetchKey)
+  })
+
+  it.each(['upload', 'fetch', 'fitzpatrick'])('accepts the %s step', (step) => {
+    expect(analyseFaceScanSpec.schema.safeParse({ faceScanId: 'scan-1', step, at: 1000 }).success).toBe(true)
+  })
+
+  it('accepts a webhook id on a step, and refuses one that is not text', () => {
+    expect(analyseFaceScanSpec.schema.safeParse({ faceScanId: 'scan-1', step: 'fetch', at: 1000, webhookId: 'msg_abc' }).success).toBe(true)
+    expect(analyseFaceScanSpec.schema.safeParse({ faceScanId: 'scan-1', step: 'fetch', at: 1000, webhookId: 5 }).success).toBe(false)
   })
 
   it.each([

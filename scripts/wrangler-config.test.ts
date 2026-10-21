@@ -99,10 +99,10 @@ describe('wrangler.jsonc Perfect Corp config', () => {
     expect(Number.isFinite(Number(price))).toBe(true)
   })
 
-  // Optional for now, like WHATSAPP_ACCESS_TOKEN: no route reads them yet, and a deploy must not fail before they are set. A later PR flips them.
-  it.each(blocks)('%s does not yet require PERFECT_CORP_API_KEY or PERFECT_CORP_WEBHOOK_SECRET, so a deploy does not fail without them', (_, block) => {
-    expect(block?.secrets?.required).not.toContain('PERFECT_CORP_API_KEY')
-    expect(block?.secrets?.required).not.toContain('PERFECT_CORP_WEBHOOK_SECRET')
+  // Required now that the face scan pipeline calls Perfect Corp and verifies its webhooks: a deploy without them must fail, not run without them.
+  it.each(blocks)('%s requires PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET, so a deploy fails without them', (_, block) => {
+    expect(block?.secrets?.required).toContain('PERFECT_CORP_API_KEY')
+    expect(block?.secrets?.required).toContain('PERFECT_CORP_WEBHOOK_SECRET')
   })
 
   it.each(blocks)('%s does not hold the key or the webhook secret as plain vars', (_, block) => {
@@ -285,6 +285,9 @@ describe('wrangler.jsonc scan, goal, safety, product search and shelf route rate
     // per goal anyway (409/429 on the rest), so this only stops a flood of rejected attempts.
     ['FACE_SCAN_IP_LIMITER', 20],
     ['FACE_SCAN_USER_LIMITER', 10],
+    // Perfect Corp's webhook: public, and signed, so the limit only keeps a flood of unsigned requests from costing a signature check each. A burst of
+    // genuine deliveries (every scan sends one or two) is far under it.
+    ['PERFECT_CORP_WEBHOOK_LIMITER', 300],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 
@@ -361,6 +364,20 @@ describe('wrangler.jsonc face scan rate limit namespace ids', () => {
 
     expect(byName.FACE_SCAN_IP_LIMITER).toBe(expected.ip)
     expect(byName.FACE_SCAN_USER_LIMITER).toBe(expected.user)
+  })
+})
+
+describe('wrangler.jsonc Perfect Corp webhook rate limit namespace id', () => {
+  const ids: [string, QueueBlock | undefined, string][] = [
+    ['top level', queueConfig, '1028'],
+    ['env.staging', queueConfig.env.staging, '2028'],
+    ['env.production', queueConfig.env.production, '3028'],
+  ]
+
+  it.each(ids)('%s gives PERFECT_CORP_WEBHOOK_LIMITER its own id', (_, block, expected) => {
+    const byName = Object.fromEntries((block?.ratelimits ?? []).map((limit) => [limit.name, limit.namespace_id]))
+
+    expect(byName.PERFECT_CORP_WEBHOOK_LIMITER).toBe(expected)
   })
 })
 
