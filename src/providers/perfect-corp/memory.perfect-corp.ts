@@ -1,4 +1,4 @@
-import type { FitzpatrickResult, PerfectCorpClient, SkinAnalysisResult, VerifiedWebhook } from './perfect-corp.provider'
+import type { FitzpatrickResult, PerfectCorpClient, SkinAnalysisResult, WebhookCheck } from './perfect-corp.provider'
 
 type Method = keyof PerfectCorpClient
 type Answer<M extends Method> = Awaited<ReturnType<PerfectCorpClient[M]>>
@@ -10,7 +10,7 @@ const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a
  * A PerfectCorpClient in memory, for the tests of whatever calls it. Every call is logged in order with its arguments (so a test can
  * assert the exact sequence a scan made), including a call scripted to fail. An answer is scripted per method: `script` queues values
  * that are handed out one per call, an Error being thrown as that very instance, and a plain default follows once the queue is empty.
- * The defaults keep a service waiting (tasks are `running`) and fail a webhook closed (it is not verified).
+ * The defaults keep a service waiting (tasks are `running`) and fail a webhook closed (it is rejected as having no headers).
  */
 export class MemoryPerfectCorpClient implements PerfectCorpClient {
   readonly calls: { method: Method; args: unknown[] }[] = []
@@ -51,8 +51,11 @@ export class MemoryPerfectCorpClient implements PerfectCorpClient {
     return this.run('downloadMask', [url], () => PNG_BYTES.slice())
   }
 
-  async verifyWebhook(body: string, headers: Headers): Promise<VerifiedWebhook | null> {
-    return this.run('verifyWebhook', [body, headers], () => null)
+  async checkWebhook(body: string, headers: Headers): Promise<WebhookCheck> {
+    return this.run('checkWebhook', [body, headers], () => ({
+      ok: false,
+      rejection: { reason: 'missing-headers', missing: ['webhook-id', 'webhook-timestamp', 'webhook-signature'] },
+    }))
   }
 
   private run<M extends Method>(method: M, args: unknown[], fallback: () => Answer<M>): Answer<M> {

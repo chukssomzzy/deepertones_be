@@ -118,7 +118,7 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    `GET`/`PATCH /api/v1/me/notification-settings` read and change `{ scanFinished, scanNeedsYou }` (both on by default; PATCH names at
    least one). The pushes sent are "your scan is ready" (to the phones on the profile that made the scan), "your scan needs you" (an item
    needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
-   a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
+   a security alert to the account's other phones when a guest signs in to an existing account. The same two switches cover face scans: "your face scan is ready" follows `scanFinished`, and "your face photo needs a retake" follows `scanNeedsYou` (no push for a face scan that fails). Each carries `data.url`, `kind` and
    the ids to route the tap.
 7. **For shelf scans**, `POST /api/v1/scans/products/shelf` takes 1 to 3 `photos` (multipart) and answers 202 with the scan. Every scan
    response and the stream's `snapshot` now carry `kind` (`product` or `shelf`) and `photos[]` (`id`, `position`, `state`, and the
@@ -240,6 +240,24 @@ The face scan sends the front photo to Perfect Corp (YouCam) and gets the analys
 
 The webhook route has its own per-address limit (`PERFECT_CORP_WEBHOOK_LIMITER`, 300 a minute) and refuses a body over 64 KB. The tests never reach Perfect
 Corp: they stub `fetch`.
+
+### Showing a face scan result (for the app)
+
+`GET /api/v1/scans/faces/{id}` (and the create and retake answers) carry `result`: null until `state` is `ready`. Render it as it is: `result.seen` is the
+goal's concerns that can be seen now (at most 3, goal order; `words` is the text to show, `concern` an id such as `glow` or `spots`), or show
+`result.nothingStandsOut` when `seen` is empty. `skinType` and `skinAge.words` are plain facts, and `sinceDayOne` (null for the first scan under a goal)
+has the `words` for how each concern moved. Never show a number or invent wording of your own: there is no score, diagnosis or Fitzpatrick type in the
+result by design. `overlay.url` is a signed link to a PNG mask of where the concern shows and **expires after 5 minutes**: when it has, fetch the scan
+again for fresh links. Field details are in `docs/openapi.json` (`FaceScanResult`).
+
+`GET /api/v1/scans/faces` lists the profile's face scans, latest first, at most 20, in every state (`{ faceScans }`, each the same as `GET /scans/faces/{id}`).
+Use it to find a scan without remembering its id, or to offer a retake of one that `needs-retake`. It is empty (200) before the first scan and keeps working after
+the face consent is withdrawn, so the user can still find and delete their scans.
+
+A face scan sends a push when it becomes `ready` (`data.kind` `face-scan-ready`, `data.url` `/scans/faces/{faceScanId}`) and when its front photo needs a retake
+(`face-scan-needs-retake`, `/scans/faces/{faceScanId}/retake`, with `data.reason`), once per transition; a failed scan sends none. The app needs those two
+screens. The server always sends, so if the user is watching that scan's live stream (`GET /scans/faces/{id}/events`) when the push lands, the app should
+suppress the foreground notification.
 
 ## ZeptoMail setup
 
@@ -396,7 +414,7 @@ There are only two long-lived branches. "production" is the name of the deploy t
 (the GitHub environment and `env.production` in `wrangler.jsonc`), never a branch.
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
-unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
+unit, integration (four parallel shards behind one `Integration` check), typecheck, architecture rules, the API contract (`docs/openapi.json` is current
 and valid), the prompts (CI regenerates `src/prompts/prompts.generated.ts` and fails if it is stale),
 and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.

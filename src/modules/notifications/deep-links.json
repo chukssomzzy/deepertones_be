@@ -1,5 +1,7 @@
 {
   "scan-finished": "/scans/{scanId}",
   "scan-needs-you": "/scans/{scanId}/items/{itemId}",
-  "new-sign-in": "/settings/security"
+  "new-sign-in": "/settings/security",
+  "face-scan-ready": "/scans/faces/{faceScanId}",
+  "face-scan-needs-retake": "/scans/faces/{faceScanId}/retake"
 }

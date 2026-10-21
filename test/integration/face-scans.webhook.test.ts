@@ -92,6 +92,19 @@ describe('POST /api/v1/webhooks/perfect-corp: a delivery that checks out', () =>
     expect(at).toBeLessThanOrEqual(Date.now())
   })
 
+  it('queues the fetch step for a delivery in camelCase, taskId and taskStatus, which is how Perfect Corp really sends the body', async () => {
+    const analysis = taskId('skin')
+    const scan = await scanWithTasks({ analysis })
+    const real = JSON.stringify({ created_at: Math.floor(Date.now() / 1000), data: { taskId: analysis, taskStatus: 'success' } })
+    const delivery = await signedWebhook(analysis, { body: real })
+
+    const res = await deliver(delivery)
+
+    expect(res.status).toBe(200)
+    expect(await receivedOf(res)).toBe(true)
+    expect(queue.messages).toEqual([{ faceScanId: scan.id, step: 'fetch', at: expect.any(Number), webhookId: delivery.webhookId }])
+  })
+
   it('queues the fitzpatrick step for the scan whose Fitzpatrick task it is', async () => {
     const fitzpatrick = taskId('fitz')
     const scan = await scanWithTasks({ analysis: taskId('skin'), fitzpatrick })

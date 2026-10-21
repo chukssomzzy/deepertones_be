@@ -65,6 +65,8 @@ export type SkinAnalysisResult =
       skinAge: number | null
       /** The overall score. Kept for the routine stage; it is never shown. */
       all: number | null
+      /** The `hd_*` items left out of `concerns` because a score was missing, by type (only when it is an hd code), for the log. */
+      skipped: { type: string; problem: 'no-scores' }[]
     }
 
 export const FITZPATRICK_TYPES = ['I', 'II', 'III', 'IV', 'V', 'VI'] as const
@@ -74,6 +76,35 @@ export type FitzpatrickResult = { status: 'running' } | { status: 'success'; fit
 
 /** A delivery whose signature checked out. `running` is never sent: the vendor calls only when a task ends. */
 export type VerifiedWebhook = { webhookId: string; taskId: string; taskStatus: 'success' | 'error' }
+
+/**
+ * Why a webhook delivery was refused. For the log, so it holds a reason, counts, yes-or-no flags and key names, and never the secret,
+ * a signature, a header value or a value from the body (but for an enum-like task status, see `bad-task-status`).
+ */
+export type WebhookRejection =
+  | { reason: 'missing-headers'; missing: ('webhook-id' | 'webhook-timestamp' | 'webhook-signature')[] }
+  /** `webhook-timestamp` is not digits only. */
+  | { reason: 'bad-timestamp' }
+  /** `skewSeconds` is positive for a timestamp in the past. `signatureValid` says whether a v1 signature matched anyway, so a wrong clock or unit is told from a wrong secret. */
+  | { reason: 'stale-timestamp'; skewSeconds: number; skewIfMilliseconds: number | null; signatureValid: boolean }
+  /** Our configured secret cannot be decoded. */
+  | { reason: 'unreadable-secret' }
+  /** The `would match` flags say which wrong reading of the secret or the id (the id up to its first `:`) the sender used. */
+  | {
+      reason: 'signature-mismatch'
+      versions: string[]
+      signatureCount: number
+      undecodedSecretWouldMatch: boolean
+      idWithoutSuffixWouldMatch: boolean
+      undecodedAndIdWithoutSuffixWouldMatch: boolean
+      topLevelKeys: string[]
+      dataKeys: string[]
+    }
+  | { reason: 'bad-shape'; problem: 'not-json' | 'no-data' | 'no-task-id'; topLevelKeys: string[]; dataKeys: string[] }
+  /** `taskStatusValue` is the status as sent, only when it is an enum-like word (letters, `_` and `-`, up to 20), so it is safe to log. */
+  | { reason: 'bad-shape'; problem: 'bad-task-status'; taskStatusValue?: string; topLevelKeys: string[]; dataKeys: string[] }
+
+export type WebhookCheck = { ok: true; delivery: VerifiedWebhook } | { ok: false; rejection: WebhookRejection }
 
 export interface PerfectCorpClient {
   /** Uploads a photo and resolves to the file id the tasks take. No link to our own storage is ever given to the vendor. */
@@ -87,6 +118,6 @@ export interface PerfectCorpClient {
   /** Their copy of the photo and the results goes with the task. */
   deleteTask(taskId: string): Promise<void>
   downloadMask(url: string): Promise<Uint8Array>
-  /** The Standard Webhooks check on the RAW body. Resolves to null for anything that is not a fresh, correctly signed, readable delivery; never throws on bad input. */
-  verifyWebhook(body: string, headers: Headers): Promise<VerifiedWebhook | null>
+  /** The Standard Webhooks check on the RAW body. Never throws on bad input. A rejection says why, with nothing secret and nothing from the body but key names. */
+  checkWebhook(body: string, headers: Headers): Promise<WebhookCheck>
 }

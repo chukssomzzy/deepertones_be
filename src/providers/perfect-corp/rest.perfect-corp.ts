@@ -14,7 +14,8 @@ import {
   PerfectCorpUnavailableError,
   type RejectedPhotoReason,
   type SkinAnalysisResult,
-  type VerifiedWebhook,
+  type WebhookCheck,
+  type WebhookRejection,
 } from './perfect-corp.provider'
 
 export type RestPerfectCorpClientConfig = {
@@ -52,8 +53,12 @@ type Json = Record<string, unknown>
  * does. Errors carry a class, an HTTP status or a code-shaped vendor error code, and nothing else of what the vendor said: its free text
  * can echo a photo address or a key. Nothing is logged.
  *
+ * The webhook body is verified against a real staging delivery: `data.taskId` and `data.taskStatus` in camelCase (the snake_case
+ * `task_id` and `task_status` of the documentation are still accepted).
+ *
  * UNVERIFIED VENDOR SHAPES, pinned from the brief and Perfect Corp's docs and to be checked against a real staging response: the result
- * of a skin analysis (`data.results.output`), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the error body (`error_code`),
+ * of a skin analysis (`data.results.output`; an `hd_*` item with no string `region` is read as `whole`, since the reference gives hd_age_spot and
+ * others no subcategories), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the error body (`error_code`),
  * and the GET and delete paths.
  */
 export class RestPerfectCorpClient implements PerfectCorpClient {
@@ -63,6 +68,17 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
   private static readonly SECRET_PREFIX = 'whsec_'
   // Vendor codes go into our error messages, so accept only code-shaped strings.
   private static readonly CODE_SHAPE = /^[A-Za-z0-9_]{1,64}$/
+  // A body's key names go into the log of a rejected webhook, so only plain identifier-shaped ones, and few.
+  private static readonly KEY_NAME_SHAPE = /^[A-Za-z0-9_]{1,40}$/
+  private static readonly MAX_LOGGED_KEYS = 20
+  // A rejected task status is logged as written, so only an enum-like word.
+  private static readonly STATUS_SHAPE = /^[A-Za-z_-]{1,20}$/
+  // A skipped item's type is logged as written, so only an hd code.
+  private static readonly HD_TYPE_SHAPE = /^hd_[a-z_]{1,40}$/
+  private static readonly WHOLE_FACE = 'whole'
+  private static readonly WEBHOOK_HEADERS = ['webhook-id', 'webhook-timestamp', 'webhook-signature'] as const
+  // A timestamp above this cannot be seconds before the year 5138, so the sender is counting milliseconds.
+  private static readonly MILLISECOND_TIMESTAMP_FROM = 1e11
 
   // `#`, not `private`: these hold secrets, and a runtime-private field stays out of JSON.stringify and spreads.
   readonly #apiKey: string
@@ -115,6 +131,7 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
     if (!Array.isArray(output)) throw new PerfectCorpUnavailableError('Perfect Corp sent a skin analysis with no results')
 
     const concerns: ConcernScore[] = []
+    const skipped: { type: string; problem: 'no-scores' }[] = []
     const skinTypes: { region: string; skinType: string }[] = []
     let skinAge: number | null = null
     let all: number | null = null
@@ -127,14 +144,19 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
         if (typeof item.score === 'number') skinAge = item.score
       } else if (type === 'all') {
         if (typeof item.score === 'number') all = item.score
-      } else if (typeof type === 'string' && type.startsWith('hd_') && typeof item.region === 'string') {
-        // An item without both scores is skipped: it is a thing the vendor did not measure, not a measurement of zero.
-        if (typeof item.raw_score !== 'number' || typeof item.ui_score !== 'number') continue
+      } else if (typeof type === 'string' && type.startsWith('hd_')) {
+        // An item without both scores is left out: it is a thing the vendor did not measure, not a measurement of zero. Its type is reported, once, for the log.
+        if (typeof item.raw_score !== 'number' || typeof item.ui_score !== 'number') {
+          if (RestPerfectCorpClient.HD_TYPE_SHAPE.test(type)) skipped.push({ type, problem: 'no-scores' })
+          continue
+        }
         const maskUrls = Array.isArray(item.mask_urls) ? item.mask_urls.filter((url): url is string => typeof url === 'string') : []
-        concerns.push({ concern: type, region: item.region, rawScore: item.raw_score, uiScore: item.ui_score, maskUrls })
+        // The reference gives hd_age_spot, hd_redness, hd_radiance and others no subcategories, so their items carry no region: that is the whole face.
+        const region = typeof item.region === 'string' ? item.region : RestPerfectCorpClient.WHOLE_FACE
+        concerns.push({ concern: type, region, rawScore: item.raw_score, uiScore: item.ui_score, maskUrls })
       }
     }
-    return { status: 'success', concerns, skinTypes, skinAge, all }
+    return { status: 'success', concerns, skinTypes, skinAge, all, skipped }
   }
 
   async getFitzpatrick(taskId: string): Promise<FitzpatrickResult> {
@@ -168,49 +190,144 @@ export class RestPerfectCorpClient implements PerfectCorpClient {
     return response.bytes
   }
 
-  async verifyWebhook(body: string, headers: Headers): Promise<VerifiedWebhook | null> {
+  async checkWebhook(body: string, headers: Headers): Promise<WebhookCheck> {
     const webhookId = headers.get('webhook-id')
     const timestamp = headers.get('webhook-timestamp')
     const signatures = headers.get('webhook-signature')
-    if (!webhookId || !timestamp || !signatures) return null
+    const reject = (rejection: WebhookRejection): WebhookCheck => ({ ok: false, rejection })
+
+    const missing = RestPerfectCorpClient.WEBHOOK_HEADERS.filter((name) => !headers.get(name))
+    if (missing.length > 0 || !webhookId || !timestamp || !signatures) return reject({ reason: 'missing-headers', missing })
     // Digits only: Number() would read "0x10" as 16 and "" as 0.
-    if (!/^\d+$/.test(timestamp)) return null
-    if (Math.abs(this.now().getTime() / 1000 - Number(timestamp)) > RestPerfectCorpClient.WEBHOOK_TOLERANCE_SECONDS) return null
+    if (!/^\d+$/.test(timestamp)) return reject({ reason: 'bad-timestamp' })
 
-    const expected = await this.sign(`${webhookId}.${timestamp}.${body}`)
-    if (expected === null) return null
-    // Every candidate is compared, so which one matched is not a matter of timing. Only version v1 is known.
-    let matched = false
-    for (const entry of signatures.split(' ')) {
-      const comma = entry.indexOf(',')
-      if (comma === -1 || entry.slice(0, comma) !== 'v1') continue
-      if (timingSafeEqual(expected, entry.slice(comma + 1))) matched = true
+    const entries = signatures.split(' ').filter((entry) => entry !== '')
+    const keyBytes = RestPerfectCorpClient.decodedSecret(this.#webhookSecret)
+    const signed = (id: string) => `${id}.${timestamp}.${body}`
+
+    const nowSeconds = this.now().getTime() / 1000
+    const sentSeconds = Number(timestamp)
+    if (Math.abs(nowSeconds - sentSeconds) > RestPerfectCorpClient.WEBHOOK_TOLERANCE_SECONDS) {
+      return reject({
+        reason: 'stale-timestamp',
+        skewSeconds: Math.round(nowSeconds - sentSeconds),
+        // A sender that counts in milliseconds looks about 1000 times too far ahead; this is the skew it would have in seconds.
+        skewIfMilliseconds: sentSeconds > RestPerfectCorpClient.MILLISECOND_TIMESTAMP_FROM ? Math.round(nowSeconds - sentSeconds / 1000) : null,
+        signatureValid: keyBytes !== null && RestPerfectCorpClient.anyV1Matches(entries, await RestPerfectCorpClient.hmac(keyBytes, signed(webhookId))),
+      })
     }
-    if (!matched) return null
 
-    let payload: unknown
+    if (keyBytes === null) return reject({ reason: 'unreadable-secret' })
+    if (!RestPerfectCorpClient.anyV1Matches(entries, await RestPerfectCorpClient.hmac(keyBytes, signed(webhookId)))) {
+      return reject(await this.mismatch(entries, body, webhookId, signed, keyBytes))
+    }
+
+    const payload = RestPerfectCorpClient.parseJson(body)
+    const keys = RestPerfectCorpClient.layout(payload)
+    if (payload === undefined) return reject({ reason: 'bad-shape', problem: 'not-json', ...keys })
+    const data = RestPerfectCorpClient.isObject(payload) ? payload.data : undefined
+    if (!RestPerfectCorpClient.isObject(data)) return reject({ reason: 'bad-shape', problem: 'no-data', ...keys })
+    // Perfect Corp sends camelCase; the documentation says snake_case. snake_case wins per field when it is usable.
+    const taskId = typeof data.task_id === 'string' && data.task_id !== '' ? data.task_id : data.taskId
+    // A status that is there but wrong does not fall back: it would let a stale spelling hide the real one.
+    const taskStatus = data.task_status !== undefined ? data.task_status : data.taskStatus
+    if (typeof taskId !== 'string' || taskId === '') return reject({ reason: 'bad-shape', problem: 'no-task-id', ...keys })
+    if (taskStatus !== 'success' && taskStatus !== 'error') {
+      const enumLike = typeof taskStatus === 'string' && RestPerfectCorpClient.STATUS_SHAPE.test(taskStatus)
+      return reject({ reason: 'bad-shape', problem: 'bad-task-status', ...(enumLike ? { taskStatusValue: taskStatus } : {}), ...keys })
+    }
+    return { ok: true, delivery: { webhookId, taskId, taskStatus } }
+  }
+
+  /**
+   * Why no v1 signature matched: which other readings of the secret and the id WOULD have matched, and the layout of the body. Only
+   * yes or no and key names come out, never a signature, so this tells a sender's mistake apart without handing anything over.
+   */
+  private async mismatch(entries: string[], body: string, webhookId: string, signed: (id: string) => string, keyBytes: Uint8Array): Promise<WebhookRejection> {
+    const secret = this.#webhookSecret
+    const unprefixed = secret.startsWith(RestPerfectCorpClient.SECRET_PREFIX) ? secret.slice(RestPerfectCorpClient.SECRET_PREFIX.length) : secret
+    const textKeys = [...new Set([secret, unprefixed])].map((text) => new TextEncoder().encode(text))
+    const colon = webhookId.indexOf(':')
+    const bareId = colon === -1 ? null : webhookId.slice(0, colon)
+
+    const matches = async (keys: Uint8Array[], id: string | null) => {
+      if (id === null) return false
+      let matched = false
+      for (const key of keys) if (RestPerfectCorpClient.anyV1Matches(entries, await RestPerfectCorpClient.hmac(key, signed(id)))) matched = true
+      return matched
+    }
+    const versions = entries.map((entry) => {
+      const version = entry.includes(',') ? entry.slice(0, entry.indexOf(',')) : ''
+      return /^v\d{1,3}$/.test(version) ? version : 'other'
+    })
+    return {
+      reason: 'signature-mismatch',
+      versions: [...new Set(versions)].sort(),
+      signatureCount: entries.length,
+      undecodedSecretWouldMatch: await matches(textKeys, webhookId),
+      idWithoutSuffixWouldMatch: await matches([keyBytes], bareId),
+      undecodedAndIdWithoutSuffixWouldMatch: await matches(textKeys, bareId),
+      ...RestPerfectCorpClient.layout(RestPerfectCorpClient.parseJson(body)),
+    }
+  }
+
+  /** The secret as the bytes it keys the HMAC with: `whsec_` stripped when present, then base64-decoded. Null when it cannot be read. */
+  private static decodedSecret(secret: string): Uint8Array | null {
     try {
-      payload = JSON.parse(body)
+      const encoded = secret.startsWith(RestPerfectCorpClient.SECRET_PREFIX) ? secret.slice(RestPerfectCorpClient.SECRET_PREFIX.length) : secret
+      const bytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))
+      // An empty key is no key: WebCrypto refuses to import one.
+      return bytes.length > 0 ? bytes : null
     } catch {
       return null
     }
-    const data = (payload as { data?: unknown } | null)?.data
-    const { task_id: taskId, task_status: taskStatus } = (typeof data === 'object' && data !== null ? data : {}) as Json
-    if (typeof taskId !== 'string' || taskId === '' || (taskStatus !== 'success' && taskStatus !== 'error')) return null
-    return { webhookId, taskId, taskStatus }
   }
 
-  /** The Standard Webhooks signature as base64: HMAC-SHA-256 keyed with the DECODED secret. Null when the secret cannot be read. */
-  private async sign(message: string): Promise<string | null> {
+  /** HMAC-SHA-256 of the message as base64. Null when the runtime refuses the key, which no signature can then match. */
+  private static async hmac(keyBytes: Uint8Array, message: string): Promise<string | null> {
     try {
-      const secret = this.#webhookSecret
-      const encoded = secret.startsWith(RestPerfectCorpClient.SECRET_PREFIX) ? secret.slice(RestPerfectCorpClient.SECRET_PREFIX.length) : secret
-      const keyBytes = Uint8Array.from(atob(encoded), (char) => char.charCodeAt(0))
       const key = await crypto.subtle.importKey('raw', keyBytes, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
       return base64Of(new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(message))))
     } catch {
       return null
     }
+  }
+
+  /** Whether any `v1,<signature>` entry equals the expected one. Every entry is compared, so which one matched is not a matter of timing. Only v1 is known. */
+  private static anyV1Matches(entries: string[], expected: string | null): boolean {
+    if (expected === null) return false
+    let matched = false
+    for (const entry of entries) {
+      const comma = entry.indexOf(',')
+      if (comma === -1 || entry.slice(0, comma) !== 'v1') continue
+      if (timingSafeEqual(expected, entry.slice(comma + 1))) matched = true
+    }
+    return matched
+  }
+
+  /** The parsed body, or undefined when it is not JSON (JSON.parse never gives undefined). */
+  private static parseJson(body: string): unknown {
+    try {
+      return JSON.parse(body)
+    } catch {
+      return undefined
+    }
+  }
+
+  private static isObject(value: unknown): value is Json {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+  }
+
+  /** The key names of the body and of its `data`, for the log: only code-shaped names, sorted, at most 20 each. Empty at a level that is not an object. */
+  private static layout(payload: unknown): { topLevelKeys: string[]; dataKeys: string[] } {
+    const names = (value: unknown) =>
+      RestPerfectCorpClient.isObject(value)
+        ? Object.keys(value)
+            .filter((key) => RestPerfectCorpClient.KEY_NAME_SHAPE.test(key))
+            .sort()
+            .slice(0, RestPerfectCorpClient.MAX_LOGGED_KEYS)
+        : []
+    return { topLevelKeys: names(payload), dataKeys: names(RestPerfectCorpClient.isObject(payload) ? payload.data : undefined) }
   }
 
   private async createTask(path: string, body: unknown): Promise<string> {

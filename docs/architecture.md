@@ -679,17 +679,20 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 `check-push-receipts` on `push-receipts`. That is four more queues per environment, in all three `wrangler.jsonc` blocks
 (env blocks do not inherit), created before the first deploy that binds them (README, "Before the first deploy").
 
-- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou` and `newSignIn` queue a `send-push` job
-  and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId? }` and return: a scan step or a sign-in must not fail
+- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake` and `newSignIn` queue a `send-push` job
+  and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId?, faceScanId? }` and return: a scan step or a sign-in must not fail
   because a push could not be queued. (Who calls them, and when, is in "What triggers a push".)
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
-  `back-photo`, `confirm` or `identify`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
+  `back-photo`, `confirm` or `identify`, optional `ask`), `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
+  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
   `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
-  first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
+  first ask); `new-sign-in:<eventId>`; `face-scan-ready:<faceScanId>` (a scan becomes ready once);
+  `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
+  notification). `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
   deduplicated by the key. The receipt job's key is its ticket ids.
 - **What triggers a push.** Only a guarded update that APPLIED notifies, and the call comes after the update (never inside it), so a repeated or
@@ -702,9 +705,11 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
   | `labelUnreadable` | the item moved back to `needs-identification` when it has no product, else to `needs-back-photo` | `scanNeedsYou({ need: 'identify' \| 'back-photo', ask: n })` (`identify` when it has no product), `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
+  | `FaceScanService.copyResults` | `completeFaceScan` returned true | `faceScanReady()` | `face-scan-ready:<faceScanId>` |
+  | `FaceScanService.needRetake` | the conditional `analysing` to `needs-retake` update applied (upload or fetch step) | `faceScanNeedsRetake({ reason, at })` | `face-scan-needs-retake:<faceScanId>:<at>` |
   | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
 
-  An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
+  A face scan that ends `failed` (any path) notifies nothing, nor does the Fitzpatrick step, a retake or a create. An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
   rest), linking to the first item that asked.
   - **Keys.** `userId` and `profileId` are the scan row's (a step runs as a system actor, so there is no session to take them from).
     `notifyNeedsYou` reads the scan for them after the update; that read is guarded (a failure is logged as
@@ -721,9 +726,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   - **Sign-in.** `AuthService.verifyOtp` calls `guestSignedIn` (deletes the guest's rows and answers the platform of the phone it deleted: the
     most recently updated row's, null if none), then `newSignIn` with that platform and `at` = the injected clock's now. The alert fires only when the caller was a
     guest and the outcome is `existing`; promotion in place and a verified user signing in again do not.
-- **Targeting is decided at send time.** Scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
+- **Targeting is decided at send time.** Scan and face scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
   account the message names); the sign-in alert goes to the account's phones (`forUser`), on any profile, EXCEPT the phone that signed
-  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on); the sign-in alert has no switch.
+  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on): `scan-finished` and `face-scan-ready` follow `scanFinished`, `scan-needs-you` and `face-scan-needs-retake` follow `scanNeedsYou`; the sign-in alert has no switch.
 - **The sign-in alert skips the phone that signed in, by time.** The body carries `at`, when the sign-in happened (epoch ms; `newSignIn`
   defaults it to now). `deliver` alerts only the account's rows with `createdAt < at`. Why: the signing-in phone gets a session first and
   registers its push token after, so any row created at or after `at` is that phone registering under the account (a guest's row is
@@ -732,9 +737,10 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   Scan notifications ignore `at`.
 - **The text is generic** and is built in the service: it shows on a lock screen, so it names no product and no skin detail ("Your scan
   is ready", "3 products analysed", "We need a photo of the back of a product", "New sign-in to your Deeper Tones account", "on an
-  iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, profileId? }`; the sign-in alert has only `url` and `kind`.
+  iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, faceScanId?, reason?, profileId? }`; the sign-in alert has only `url` and `kind`. The face scan pushes say "Your face scan is ready" / "Open the app to see what we noticed"
+  and "Your face photo needs a retake" with one line per retake reason ("Find more light and take it again", "We couldn't find a face. Take it again", ...): no condition word, score, digit or lightness word.
 - **Deep links are a JSON file.** `deep-links.json` maps each kind to an Expo Router path template (`/scans/{scanId}`,
-  `/scans/{scanId}/items/{itemId}`, `/settings/security`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
+  `/scans/{scanId}/items/{itemId}`, `/settings/security`, `/scans/faces/{faceScanId}`, `/scans/faces/{faceScanId}/retake`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
   with the URL-encoded id, so an id cannot add a path segment or a query. Changing a path is a PR and goes live with the next deploy.
   `deep-links.test.ts` fails when a kind has no path, a path starts without `/`, or it uses a placeholder its kind does not provide;
   adding a kind means updating that test's table on purpose.
@@ -1138,7 +1144,7 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 
 - **The port.** `uploadFile` (a slot request, then a PUT of the bytes to the slot's own address, method and headers, without our key),
   `createSkinAnalysis` (HD actions, `format: json`), `createFitzpatrick`, `getSkinAnalysis`, `getFitzpatrick`, `deleteTask`,
-  `downloadMask` (capped, no redirects, no key) and `verifyWebhook`. A task read answers `running` or `success` with the parsed result;
+  `downloadMask` (capped, no redirects, no key) and `checkWebhook`. A task read answers `running` or `success` with the parsed result;
   a task that ended on an error throws.
 - **Error mapping.** Four classes, so a caller chooses by class and never reads vendor text:
   - `PerfectCorpUnavailableError`: no connection, a timeout, HTTP 5xx, 429 or 408, a reply that cannot be read (no task id, no results, a
@@ -1153,15 +1159,20 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
     answered with a redirect.
   Error messages carry the class, an HTTP status or a code-shaped vendor code, and nothing the vendor wrote: its free text can echo an
   address with a signature in it.
-- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `verifyWebhook(rawBody, headers)` needs `webhook-id`,
+- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `checkWebhook(rawBody, headers)` needs `webhook-id`,
   `webhook-timestamp` (seconds, digits only, within 5 minutes either way) and `webhook-signature` (space-separated `v1,<base64>`
   entries; any one may match, other versions are ignored). The signature is HMAC-SHA-256 over `id.timestamp.body` with `crypto.subtle`,
   keyed with the base64-DECODED secret (`whsec_` stripped when present), compared in constant time. Only after that is the body read: it
-  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to `null` (never throws), and the route
-  answers 401. The clock is injected.
+  needs `data.taskId` and a `data.taskStatus` (what Perfect Corp sends) or the documented `data.task_id` and `data.task_status` (snake_case wins per field when
+  usable), the status being `success` or `error`. A rejected status that is an enum-like word is logged as `taskStatusValue`. Anything else resolves to a rejection naming the reason (never throws), and the route
+  answers 401. A rejected delivery is logged as `perfect-corp-webhook-rejected` with that reason (read with `npx wrangler tail --env staging`), never the
+  secret, a signature or the body. The clock is injected.
 - **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
   `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
   and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
+  An `hd_*` item with both scores but no string `region` (the reference gives hd_age_spot, hd_redness, hd_radiance and others no subcategories) is read
+  as region `whole`; one missing a score is left out and reported in the result's `skipped` (type and `no-scores` only). `FaceScanService` logs
+  `face-scan-concern-missing` (concern, the concern names that did come back, `skipped`; no scores, links or photo) once per goal concern absent from a stored result.
 - **The memory fake** logs every call in order with its arguments (a scripted failure too, since the call was made), and `script(method,
   ...answers)` queues answers handed out one per call (an `Error` is thrown as itself). Its defaults keep a service waiting (tasks are
   `running`) and fail a webhook closed.
@@ -1187,12 +1198,13 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
 
 ### Face scans
-`modules/face-scans` is the face scan (#112), built as four stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
-provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), and this one (3 of 4) is the **analysis
+`modules/face-scans` is the face scan (#112), built as five stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
+provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), the third the **analysis
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
-check, the live stream and the spend. The result view (which concerns are shown, their wording, the change since day one, the mask links) comes after.
+check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
+notifications** (see "Pushes" below).
 `FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
-store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events and the ops alerts (`Pick<OpsAlertsService,
+store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
 - **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
@@ -1201,7 +1213,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   timestamps; indexed on `(profile_id, created_at)`; migration 0030 adds `reaper_checked_at` and indexes on both task-id columns and on
   `(state, updated_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
   and, filled by the analysis, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
-  `profile_fitzpatrick` (`I` to `VI` and the task id). No route shows those last three yet. `reason` is `unavailable` or `consent-withdrawn` for a
+  `profile_fitzpatrick` (`I` to `VI` and the task id). The view shows the scores' words and the mask links, never the scores, and never the Fitzpatrick type. `reason` is `unavailable` or `consent-withdrawn` for a
   failed scan, and for a scan that needs a retake one of `REJECTED_PHOTO_REASONS` (`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`,
   `no-face`, `image-size`); the column is plain text and the enum is the TypeScript table's.
 - **Consent.** `CURRENT_FACE_CONSENT_VERSION` (1) is the version of the wording; bump it and every earlier consent stops counting.
@@ -1229,16 +1241,41 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   taken under another goal, and otherwise refuses with `already-scanned-for-goal`. The latest scan is the newest that has **not failed** (a
   failed scan gave the profile nothing to look at), and ties go to the one written last. A later check-in schedule adds a third reason.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
-  per photo, `rescanSuggested`) and no result yet. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
+  per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
   a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
   service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
   `mask-<concern>.png` of its goal's concerns) once more, so a mask written by an analysis that committed between the key read and the row delete does not
   stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
+- **The result view.** `view()` fills `result` only when `state` is `ready` (create and retake answers always have `result: null`). It is built when the
+  scan is read, from the stored rows, by the pure `resultView` in `face-scans.tables.ts`, so a change to the wording tables reaches scans already stored;
+  `tablesVersion` in the view is the version in force now, not the one the scan was stored under (`face_scans.tables_version` still says which wrote it).
+  - **Seen.** For each of the goal's three concerns, in goal order, the `raw_score` of its `whole` region row (else the first region by name), through
+    `bandFor`; a concern with no row or that is not visible is left out. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`, `marks`, `redness`,
+    `glow`, `texture`, `under-eyes`, `dryness`), never Perfect Corp's `hd_*` names. `nothingStandsOut` is `NOTHING_STANDS_OUT` when nothing is seen.
+  - **Overlays.** A shown concern's mask key is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a photo, so
+    `GET /scans/faces/photos/{token}` serves it. A concern that is not shown gets no link, and none is signed; one with no stored mask has `overlay: null`.
+  - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
+    another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
+    day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
+    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`; the
+    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`. The
+    cut-off and the upper bound are by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a
+    millisecond in practice, and `scanId` is kept for the tie-break should one be needed.
+  - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
+    worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
+    `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
+  - **Never** in the view: a score (`raw_score`, `ui_score` or the overall `all`), a Perfect Corp concern name, a condition name, the Fitzpatrick type, or a
+    word about lightness. The tables test scans every string, and the pipeline and route tests scan the serialised view.
 - **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET
   /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
   other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
   product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
+- **The list.** `GET /scans/faces` (`listFaceScans`, `signedIn`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
+  like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
+  consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
+  about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
+  is read once per list).
 - **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters
@@ -1283,7 +1320,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     dead-letters it); `PerfectCorpBadRequestError` does the same without the alert. A webhook that says the task ended in an error still queues `fetch`:
     the provider's mapping on `getSkinAnalysis` decides whether that is a retake or an outage.
 - **The webhook.** `POST /webhooks/perfect-corp` (under the API prefix) is public (`security: []`): the Standard Webhooks signature on the RAW body is the
-  credential (`RestPerfectCorpClient.verifyWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
+  credential (`RestPerfectCorpClient.checkWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
   (300 a minute per address; namespace ids 1028/2028/3028) then `bodyLimit` (64 KB, so an oversized body is 413 before any signature work). The route reads
   `c.req.text()` and calls `receiveWebhook`: a bad signature is 401 `WEBHOOK_SIGNATURE_INVALID`; otherwise `findByTaskId` (both task-id columns are
   indexed) finds the scan, and a task of another environment (`pc_environment` is not this one) or of a deleted scan is ignored; a match queues `fetch` (its
@@ -1308,6 +1345,14 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
   scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
   change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
+- **Pushes.** A face scan notifies the person's phone at most once when it is ready and once for each rejected front photo, through the same `NotificationsService` and `send-push` job as the product scans
+  (see "Sending push notifications"). `copyResults` calls `faceScanReady` once `completeFaceScan` returned true (a completion that lost, or a second fetch of a
+  ready scan, says nothing), before the steps after the write that can still throw, so a retry cannot lose it. `needRetake` calls `faceScanNeedsRetake` once the
+  conditional `analysing` to `needs-retake` update applied, in the upload or the fetch step, with the `updatedAt` it wrote as `at`: a step delivered again finds
+  the scan no longer `analysing` and queues nothing, and a retaken photo that is refused again is a new notification under a new key. Nothing is sent for
+  `failed` (credit, bad request, consent withdrawn, the reaper, the dead letter), the Fitzpatrick step, a retake or a create. The switches are the account's
+  `scanFinished` (ready) and `scanNeedsYou` (needs a retake). The enqueue never throws, so a push that cannot be queued never fails or retries the step.
+  The server always sends: the app suppresses the foreground notification when it is watching the scan's live stream.
 - **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), as soon as Perfect Corp reports a task successful (before our copy of the result is
   stored: they bill on success), and a failure to record it is logged and does not fail the step.
 - **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket

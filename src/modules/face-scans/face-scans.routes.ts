@@ -9,6 +9,7 @@ import {
   FaceConsentGivenResponse,
   FaceConsentResponse,
   FacePhotoLinkParams,
+  FaceScanListResponse,
   FaceScanParams,
   FaceScanResponse,
   PerfectCorpWebhookResponse,
@@ -84,6 +85,21 @@ const createFaceScan = defineRoute({
   middleware: [rateLimit('FACE_SCAN_IP_LIMITER', 'ip'), signedIn(), rateLimit('FACE_SCAN_USER_LIMITER', 'user'), bodyLimit({ maxSize: MAX_FACE_SCAN_BODY_BYTES })],
   request: { body: multipartBody(CreateFaceScanBody) },
   responses: { 202: success(FaceScanResponse, 'The scan, analysing'), ...errorResponses(401, 409, 413, 429) },
+})
+
+const listFaceScans = defineRoute({
+  method: 'get',
+  path: '/',
+  operationId: 'listFaceScans',
+  tags: ['Face scans'],
+  summary: 'The profile\'s face scans, latest first',
+  description:
+    'The current profile\'s scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, ' +
+    'with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. ' +
+    'Another profile\'s scans, of this account or any other, are never listed.',
+  security: bearer,
+  middleware: [signedIn()],
+  responses: { 200: success(FaceScanListResponse, 'The scans'), ...errorResponses(401) },
 })
 
 const getFaceScan = defineRoute({
@@ -195,6 +211,7 @@ export const faceScanRoutes = openapiApp()
     })
     return ok(c, toFaceScanResponse(scan), 'Face scan started', 202)
   })
+  .openapi(listFaceScans, async (c) => ok(c, { faceScans: (await c.var.services.faceScans.listFaceScans()).map(toFaceScanResponse) }, 'Face scans found'))
   .openapi(getFaceScan, async (c) => ok(c, toFaceScanResponse(await c.var.services.faceScans.getFaceScan(c.req.valid('param').id)), 'Face scan found'))
   .openapi(watchFaceScan, async (c) => c.var.services.faceScans.watch(c.req.valid('param').id))
   .openapi(retakeFaceScan, async (c) => {

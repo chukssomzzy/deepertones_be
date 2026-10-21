@@ -93,6 +93,7 @@ describe('the versioned API', () => {
     ['GET', '/api/v1/me/face-consent'],
     ['PUT', '/api/v1/me/face-consent'],
     ['DELETE', '/api/v1/me/face-consent'],
+    ['GET', '/api/v1/scans/faces'],
     ['GET', `/api/v1/scans/faces/${SCAN_ID}`],
     ['DELETE', `/api/v1/scans/faces/${SCAN_ID}`],
   ])('answers %s %s without a token with 401 AUTH_REQUIRED', async (method, path) => {
@@ -165,6 +166,7 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label',
         'GET /api/v1/scans/products/photos/{token}',
         'POST /api/v1/scans/faces',
+        'GET /api/v1/scans/faces',
         'GET /api/v1/scans/faces/{id}',
         'DELETE /api/v1/scans/faces/{id}',
         'GET /api/v1/scans/faces/photos/{token}',
@@ -248,6 +250,7 @@ describe('the OpenAPI document: face scans', () => {
       getFaceConsent: paths[CONSENT]?.get,
       withdrawFaceConsent: paths[CONSENT]?.delete,
       createFaceScan: paths[FACES]?.post,
+      listFaceScans: paths[FACES]?.get,
       getFaceScan: paths[`${FACES}/{id}`]?.get,
       deleteFaceScan: paths[`${FACES}/{id}`]?.delete,
       getFaceScanPhoto: paths[`${FACES}/photos/{token}`]?.get,
@@ -270,7 +273,7 @@ describe('the OpenAPI document: face scans', () => {
     const { paths } = await faceDocumentOf()
 
     expect(paths[`${FACES}/photos/{token}`]?.get?.security).toEqual([])
-    for (const operation of [paths[CONSENT]?.put, paths[CONSENT]?.get, paths[CONSENT]?.delete, paths[FACES]?.post, paths[`${FACES}/{id}`]?.get, paths[`${FACES}/{id}`]?.delete]) {
+    for (const operation of [paths[CONSENT]?.put, paths[CONSENT]?.get, paths[CONSENT]?.delete, paths[FACES]?.post, paths[FACES]?.get, paths[`${FACES}/{id}`]?.get, paths[`${FACES}/{id}`]?.delete]) {
       expect(operation?.security).toEqual([{ bearerAuth: [] }])
     }
   })

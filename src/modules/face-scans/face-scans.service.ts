@@ -21,13 +21,14 @@ import type { ProductImage } from '../../providers/product-analysis/product-anal
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { facePhotoUrl } from '../scans/scans.paths'
 import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -40,6 +41,9 @@ export type FaceScanPolicy = {
 // The longest side is capped at 4096 px by readImageHeader, which reads a larger header as no image at all.
 export const FACE_SCAN_POLICY: FaceScanPolicy = { maxPhotoBytes: 6_000_000, minShortSide: 1080 }
 
+/** How many scans `listFaceScans` returns: the latest ones. Face scans are rare (one per goal or check-in), so this covers years. */
+export const FACE_SCAN_LIST_LIMIT = 20
+
 /** The photos of a scan, by position. Only the front one is required. */
 export type FacePhotos = { front: ProductImage; right?: ProductImage; left?: ProductImage }
 
@@ -48,7 +52,7 @@ export type FaceConsentGiven = { version: number; givenAt: Date }
 /** `current` is true while the consent is for the current wording and not withdrawn. */
 export type FaceConsentView = { version: number; givenAt: Date; withdrawnAt: Date | null; current: boolean }
 
-/** What the app shows for a face scan. There is no result in it yet: the result view is a later change. */
+/** What the app shows for a face scan. `result` is there once the scan is ready and null before. */
 export type FaceScanView = {
   id: string
   state: FaceScanState
@@ -59,6 +63,7 @@ export type FaceScanView = {
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
   /** True when the profile's latest scan was taken under a goal other than its current one. Worked out when read, never stored. */
   rescanSuggested: boolean
+  result: ResultView | null
 }
 
 /** The view of a scan that was retaken: it always has its front photo. */
@@ -74,6 +79,8 @@ export type FaceScanServiceDeps = {
   aiUsage: VendorSpendLedger
   /** Tells whoever is watching a scan that it changed. */
   events: ScanEvents
+  /** Tells the person's phone when a scan is ready or needs a retake. Never throws: a push that cannot be queued does not fail a step. */
+  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
   /** Signs the photo links. photo-link.ts derives its own key from it. */
@@ -111,6 +118,7 @@ export class FaceScanService {
   private readonly perfectCorp: PerfectCorpClient
   private readonly aiUsage: VendorSpendLedger
   private readonly events: ScanEvents
+  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
@@ -126,6 +134,7 @@ export class FaceScanService {
     this.perfectCorp = deps.perfectCorp
     this.aiUsage = deps.aiUsage
     this.events = deps.events
+    this.notifications = deps.notifications
     this.opsAlerts = deps.opsAlerts
     this.#photoLinkSecret = deps.photoLinkSecret
     this.environment = deps.environment
@@ -227,6 +236,20 @@ export class FaceScanService {
   }
 
   /**
+   * The profile's latest scans, newest first, in every state, each the view `getFaceScan` gives. Needs no consent and no goal, so it still works after the consent
+   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
+   */
+  async listFaceScans(): Promise<FaceScanView[]> {
+    const { profileId } = requireUser()
+    const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
+    if (scans.length === 0) return []
+    const rescanSuggested = await this.rescanSuggested(profileId)
+    // Scans under one goal share a day one, so its scores are read once for the list.
+    const dayOneResults = new Map<string, Promise<FaceResult[]>>()
+    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults)))
+  }
+
+  /**
    * Deletes the scan's photos and masks from the bucket, then its rows, so a bucket that fails leaves the scan to delete again. The keys a scan can have are
    * fixed, so they are deleted once more after the rows: an analysis that committed its masks after the keys were read has rows no longer, and its masks
    * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
@@ -284,12 +307,16 @@ export class FaceScanService {
 
   /**
    * Queues the step a verified Perfect Corp webhook is for: `fetch` for a scan's analysis task, `fitzpatrick` for its Fitzpatrick task. The signature is
-   * checked on the raw body first (401 WEBHOOK_SIGNATURE_INVALID). A task no scan of this environment holds is answered and ignored. A step that cannot be
-   * queued is 503, so Perfect Corp sends the webhook again.
+   * checked on the raw body first (401 WEBHOOK_SIGNATURE_INVALID, with the reason logged as `perfect-corp-webhook-rejected`, never the body, a header value or a
+   * secret). A task no scan of this environment holds is answered and ignored. A step that cannot be queued is 503, so Perfect Corp sends the webhook again.
    */
   async receiveWebhook(rawBody: string, headers: Headers): Promise<void> {
-    const delivery = await this.perfectCorp.verifyWebhook(rawBody, headers)
-    if (!delivery) throw new UnauthorizedError('WEBHOOK_SIGNATURE_INVALID', 'The webhook signature is not valid')
+    const check = await this.perfectCorp.checkWebhook(rawBody, headers)
+    if (!check.ok) {
+      console.warn({ outcome: 'perfect-corp-webhook-rejected', ...check.rejection, bodyBytes: rawBody.length })
+      throw new UnauthorizedError('WEBHOOK_SIGNATURE_INVALID', 'The webhook signature is not valid')
+    }
+    const { delivery } = check
     const scan = await this.repository.findByTaskId(delivery.taskId)
     if (!scan || scan.pcEnvironment !== this.environment) return
     const step = scan.pcAnalysisTaskId === delivery.taskId ? 'fetch' : 'fitzpatrick'
@@ -488,9 +515,21 @@ export class FaceScanService {
       await this.deleteMasks(masks)
       throw error
     }
+    FaceScanService.warnMissingConcerns(scan, analysis)
+    // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. At most once: a push lost here (the worker dies, or the queue refuses it) is not sent again.
+    await this.notifications.faceScanReady({ userId, profileId, faceScanId: id })
     await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)
     await this.publishFrame(id, 'ready', null, { done: true })
+  }
+
+  /** A goal concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores, links or photo. */
+  private static warnMissingConcerns(scan: FaceScan, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): void {
+    const present = new Set(analysis.concerns.map((item) => item.concern))
+    const returned = [...present].sort()
+    for (const concern of concernsForGoal(scan.goalAtScan)) {
+      if (!present.has(concern)) console.warn({ outcome: 'face-scan-concern-missing', faceScanId: scan.id, concern, returned, skipped: analysis.skipped })
+    }
   }
 
   /** The Fitzpatrick webhook may have been lost, and nothing else asks for that task again: when the analysis is in and the profile still has no type, ask now. */
@@ -547,7 +586,7 @@ export class FaceScanService {
       await work()
     } catch (error) {
       if (error instanceof PerfectCorpRejectedPhotoError) {
-        await this.needRetake(scan.id, error.reason)
+        await this.needRetake(scan, error.reason)
       } else if (error instanceof PerfectCorpCreditError) {
         await this.opsAlerts.raise('face-scan-account')
         await this.fail(scan.id, 'unavailable')
@@ -561,8 +600,12 @@ export class FaceScanService {
     }
   }
 
-  private async needRetake(id: string, reason: RejectedPhotoReason): Promise<void> {
-    if (await this.repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason, updatedAt: this.now() })) {
+  private async needRetake(scan: FaceScan, reason: RejectedPhotoReason): Promise<void> {
+    const { id, userId, profileId } = scan
+    const at = this.now()
+    if (await this.repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason, updatedAt: at })) {
+      // Only the step that wins this conditional update gets here, so a redelivered step cannot send it twice; `at` keeps each rejection of the scan apart.
+      await this.notifications.faceScanNeedsRetake({ userId, profileId, faceScanId: id, reason, at: at.getTime() })
       await this.publishFrame(id, 'needs-retake', reason, { done: true })
       // The photo will be replaced, so the analysis task is dead weight. A Fitzpatrick task is kept while the profile has no type: it is a read of the same face,
       // it may still complete, and its own step deletes it.
@@ -684,14 +727,13 @@ export class FaceScanService {
     return { bytes: photo.bytes, mediaType: 'image/jpeg' }
   }
 
-  private async view(scan: FaceScan, photos: FaceScanPhoto[]): Promise<FaceScanView> {
+  /** `rescanSuggested` and `dayOneResults` (the day-one scans' scores read so far, by scan id) are worked out here unless the caller, building many views for one profile, shares them. */
+  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean, dayOneResults?: Map<string, Promise<FaceResult[]>>): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
+    const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
     const links: FaceScanView['photos'] = {}
-    for (const photo of photos) {
-      const token = await signPhotoLink({ key: photo.photoKey, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now)
-      links[photo.position] = { url: facePhotoUrl(token) }
-    }
+    for (const photo of photos) links[photo.position] = { url: await link(photo.photoKey) }
     return {
       id: scan.id,
       state: scan.state,
@@ -699,8 +741,40 @@ export class FaceScanService {
       goal: scan.goalAtScan,
       createdAt: scan.createdAt,
       photos: links,
-      rescanSuggested: await this.rescanSuggested(scan.profileId),
+      rescanSuggested: rescanSuggested ?? (await this.rescanSuggested(scan.profileId)),
+      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map()) : null,
     }
+  }
+
+  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest, which is no day one to compare with. */
+  private async result(scan: FaceScan, link: (key: string) => Promise<string>, dayOneResults: Map<string, Promise<FaceResult[]>>): Promise<ResultView> {
+    const [results, masks, found] = await Promise.all([
+      this.repository.resultsOf(scan.id),
+      this.repository.masksOf(scan.id),
+      this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
+    ])
+    // Only the concerns that are shown get a link: a signature per mask that is then dropped is work for nothing.
+    const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
+    const overlays: Record<string, { url: string }> = {}
+    for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
+    const dayOne = found && found.id !== scan.id ? found : null
+    return resultView({
+      goal: scan.goalAtScan,
+      results,
+      overlays,
+      skinType: scan.skinType,
+      skinAge: scan.skinAge,
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.dayOneResultsOf(dayOne.id, dayOneResults), skinAge: dayOne.skinAge },
+    })
+  }
+
+  private dayOneResultsOf(id: string, cache: Map<string, Promise<FaceResult[]>>): Promise<FaceResult[]> {
+    let read = cache.get(id)
+    if (!read) {
+      read = this.repository.resultsOf(id)
+      cache.set(id, read)
+    }
+    return read
   }
 
   /** Whether the profile's latest scan was taken under another goal than the one it has now. No goal, or typed words nobody sorted into one, suggests nothing. */

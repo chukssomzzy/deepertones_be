@@ -296,6 +296,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         // Perfect Corp's units go in the same ledger as the Claude calls: one table, one daily figure, one alert.
         aiUsage: aiUsage(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        notifications: notifications(),
         opsAlerts: opsAlerts(),
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
