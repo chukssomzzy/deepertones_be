@@ -170,6 +170,12 @@ The country a profile buys its products in, confirmed by the user once (suggeste
 Only products sold there are recommended.
 _Avoid_: Location, region, country (alone)
 
+**Budget band**:
+A rough, optional answer to how much a user can spend on one new product, in bands of their shopping country's currency.
+Candidates above it are not suggested; with no answer, cheaper candidates come first. Never shown as judging what they can
+afford.
+_Avoid_: Income, price limit, affordability
+
 ### Skin and products
 
 **Skin concern**:
