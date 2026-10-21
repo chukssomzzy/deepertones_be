@@ -1152,7 +1152,9 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
   - `PerfectCorpRejectedPhotoError` (with a fixed `reason`): a task error that a retake fixes. `error_lighting_dark` is `too-dark`;
     `error_pose` and the three `error_face_angle_*` are `turn-to-camera`; `error_src_face_too_small` is `move-closer`;
     `error_src_face_out_of_bound` is `face-not-centred`; `error_no_face` is `no-face`; `error_below_min_image_size` and
-    `error_exceed_max_image_size` are `image-size`. Exact matches only. Perfect Corp charges only on success, so a rejection costs nothing.
+    `error_exceed_max_image_size` are `image-size`; the Fitzpatrick analyzer's own codes are `error_insufficient_lighting` (`too-dark`),
+    `error_face_angle_invalid` (`turn-to-camera`), `error_face_position_too_small` (`move-closer`) and `error_face_position_invalid` and
+    `error_face_position_out_of_boundary` (`face-not-centred`). Exact matches only. Perfect Corp charges only on success, so a rejection costs nothing.
   - `PerfectCorpCreditError`: HTTP 400 with `error_code` `CreditInsufficiency` (on a 400 only). Not retried: an ops alert, not a retry storm.
   - `PerfectCorpBadRequestError`: every other 4xx, a mask address that is not an absolute `https:` URL (refused before any request is made:
     the address comes from the vendor's reply, so a plain, local or odd scheme is never fetched), a mask over the size cap, and a mask
@@ -1302,6 +1304,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
     the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
+    The step also logs, to learn what Perfect Corp really sends (no address, score or pixel): `{ outcome: 'front-photo-read', faceScanId, width, height }` once
+    per read (null when the stored photo cannot be read) and per mask `{ outcome: 'mask-read', faceScanId, concern, format: 'png' | 'jpeg' | 'other', width, height, bytes }`
+    (`describeImageBytes`, from the magic bytes and the PNG or JPEG header; null size when unknown).
   - `fitzpatrick`: stores the type for the profile (insert, first read stands) and records 10 units keyed by the task, then deletes their copy. It never
     changes the scan and is never shown. A task that already gave the profile its type only has its copy deleted again; a task that succeeds after another
     one gave the profile its type is still charged, so its spend is recorded (a ledger failure is logged, not retried) before its copy is deleted.

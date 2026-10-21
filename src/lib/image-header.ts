@@ -41,6 +41,18 @@ export const readImageHeader = (bytes: Uint8Array): (Size & { mediaType: ImageMe
   return { mediaType, ...size }
 }
 
+export type ImageBytesDescription = { format: 'png' | 'jpeg' | 'other'; width: number | null; height: number | null }
+
+/**
+ * What the bytes look like, for a log: the format by signature and the size from the header, each null when it cannot be read. Unlike
+ * `readImageHeader` it accepts any size and any format (WebP and the rest are `other`), because its job is to say what arrived, not to vet it.
+ */
+export const describeImageBytes = (bytes: Uint8Array): ImageBytesDescription => {
+  const format = startsWith(bytes, PNG) ? 'png' : startsWith(bytes, JPEG) ? 'jpeg' : 'other'
+  const size = format === 'png' ? pngSize(bytes) : format === 'jpeg' ? jpegSize(bytes) : null
+  return size && size.width > 0 && size.height > 0 ? { format, ...size } : { format, width: null, height: null }
+}
+
 // IHDR is the first chunk: 8 signature bytes, 4 length, 4 type, then width and height.
 const pngSize = (bytes: Uint8Array): Size | null => (bytes.length < 24 ? null : { width: u32be(bytes, 16), height: u32be(bytes, 20) })
 
