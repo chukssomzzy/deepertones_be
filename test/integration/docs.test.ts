@@ -15,6 +15,24 @@ describe('API docs, where DOCS_ENABLED is "true"', () => {
     expect(spec.paths).toHaveProperty('/health')
   })
 
+  it('keep the never-list on the face scan result, and make only the result field nullable', async () => {
+    const res = await fetchWorker('/openapi.json')
+    const spec = await res.json<{ components: { schemas: Record<string, { type?: unknown; description?: string; properties?: Record<string, unknown> }> } }>()
+    const { FaceScanResult, FaceScanResponse } = spec.components.schemas
+
+    expect(FaceScanResult?.type).toBe('object')
+    expect(FaceScanResult?.description).toMatch(/never holds a score or any number but the skin age in years/)
+    expect(FaceScanResult?.description).toMatch(/never a condition name/)
+    expect(FaceScanResult?.description).toMatch(/never a Perfect Corp name/)
+    expect(FaceScanResult?.description).toMatch(/never a Fitzpatrick type/)
+    expect(FaceScanResult?.description).toMatch(/never a word about lightness/)
+
+    const result = JSON.stringify(FaceScanResponse?.properties?.result)
+    expect(result).toContain('#/components/schemas/FaceScanResult')
+    expect(result).toContain('"null"')
+    expect(result).toContain('filled when `state` is `ready`, null otherwise')
+  })
+
   it('list the origin they are served from first, so "Try it out" never targets production by accident', async () => {
     const serversAt = async (origin: string) => {
       const res = await exports.default.fetch(new Request(`${origin}/openapi.json`))

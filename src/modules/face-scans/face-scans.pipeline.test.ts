@@ -29,7 +29,8 @@ import { jpegPhoto } from '../scans/scans.photos.fake'
 import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { analyseFaceScanSpec } from './face-scans.job-specs'
 import { FakeFaceScansRepository } from './face-scans.repository.fake'
-import { FaceScanService } from './face-scans.service'
+import { FACE_SCAN_LIST_LIMIT, FaceScanService } from './face-scans.service'
+import { TABLES_VERSION } from './face-scans.tables'
 import { FakeVendorSpendLedger } from './face-scans.vendor-spend.fake'
 
 // The face scan's analysis pipeline through FaceScanService: the three job steps (advance), the webhook (receiveWebhook), the retake, the
@@ -112,6 +113,16 @@ class HookedRepository extends FakeFaceScansRepository {
     const hook = this[name]
     this[name] = undefined
     await hook?.()
+  }
+}
+
+/** A repository that notes which scans' stored scores were read, to count the reads a list makes. */
+class ReadCountingRepository extends FakeFaceScansRepository {
+  readonly resultsRead: string[] = []
+
+  override async resultsOf(faceScanId: string) {
+    this.resultsRead.push(faceScanId)
+    return super.resultsOf(faceScanId)
   }
 }
 
@@ -1729,5 +1740,670 @@ describe('FaceScanService.watch: the live stream', () => {
     const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.watch(id)))
 
     expect(error).toBeInstanceOf(UnauthorizedError)
+  })
+})
+
+// --- PR 4: the result view ---
+//
+// A ready scan shows what the analysis stored: the goal's concerns that can be seen, with links to their masks, the skin type and skin age, and
+// how each concern has moved since day one. Everything is worked out when the scan is read, from the stored rows. Scans here are made ready the
+// real way (the upload step, then the fetch step over a scripted Perfect Corp result), so every row is one the product would have written.
+//
+// Two scans under the SAME goal cannot follow one another (a scan is not due again until the goal changes), so the way to a second scan under a goal
+// is the way a person takes it: change the goal, take a scan under it that is not finished (or never will be), change it back, and scan again.
+
+const DAY = 24 * HOUR
+const PHOTO_LINK_LIFETIME = 5 * MINUTE
+const LINK = /\/photos\/([A-Za-z0-9_-]+)$/
+
+/** Perfect Corp's whole-face answer for the concerns given (HD name to raw_score), each with a mask named for the concern. */
+const analysisOf = (scores: Record<string, number>, over: Partial<Extract<SkinAnalysisResult, { status: 'success' }>> = {}): SkinAnalysisResult =>
+  analysed({
+    concerns: Object.entries(scores).map(([concern, rawScore]) => ({ concern, region: 'whole', rawScore, uiScore: rawScore + 10, maskUrls: [maskUrl(concern.replace('hd_', ''))] })),
+    ...over,
+  })
+const glowScores = (radiance: number, moisture: number, texture: number) => ({ hd_radiance: radiance, hd_moisture: moisture, hd_texture: texture })
+const brighterScores = (radiance: number, darkCircle: number, ageSpot: number) => ({ hd_radiance: radiance, hd_dark_circle: darkCircle, hd_age_spot: ageSpot })
+
+/** A scan under `goal` taken a day after the last, and sent to Perfect Corp: analysing, with its task. */
+const takenUnder = async (ctx: Ctx, goal: Goal): Promise<string> => {
+  ctx.advanceClock(DAY)
+  return (await uploaded(ctx, goal)).id
+}
+/** A scan under `goal` taken a day after the last, and made ready from `analysis`. */
+const readyUnder = async (ctx: Ctx, goal: Goal, analysis: SkinAnalysisResult): Promise<string> => {
+  const id = await takenUnder(ctx, goal)
+  ctx.perfectCorp.script('getSkinAnalysis', analysis)
+  await fetchStep(ctx, id)
+  return id
+}
+const failScan = (ctx: Ctx, id: string) => asSystem(() => ctx.service.markFailed(id))
+const resultOf = async (ctx: Ctx, id: string) => (await getScan(ctx, id)).result
+const tokenOfLink = (url: string) => LINK.exec(url)![1]!
+const bytesBehind = async (ctx: Ctx, url: string) => new TextDecoder().decode((await asUser(() => ctx.service.photoForLink(tokenOfLink(url)))).bytes)
+
+describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
+  it('shows what can be seen for the goal, with the skin type and skin age, and no change since day one for the first scan', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx, 'glow')
+
+    const view = await getScan(ctx, id)
+
+    // analysed(): radiance 41.5 is "some", moisture 62 is not visible, texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
+    expect(view.result).toEqual({
+      seen: [
+        { concern: 'glow', region: 'whole', words: 'Less glow across the face', overlay: { url: expect.stringMatching(LINK) } },
+        { concern: 'texture', region: 'whole', words: 'A little roughness in places', overlay: null },
+      ],
+      nothingStandsOut: null,
+      skinType: 'dry',
+      skinAge: { years: 31, words: 'Your skin looks about 31' },
+      sinceDayOne: null,
+      tablesVersion: TABLES_VERSION,
+    })
+  })
+
+  it('gives each shown concern a link that opens to the bytes of its own mask', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx, 'glow')
+
+    const { seen } = (await getScan(ctx, id)).result
+
+    expect(await bytesBehind(ctx, seen[0].overlay.url)).toBe(maskUrl('radiance'))
+    const opened = await asUser(() => ctx.service.photoForLink(tokenOfLink(seen[0].overlay.url)))
+    expect(opened.mediaType).toBe('image/png')
+  })
+
+  it('gives the overlay links the life of a photo link: good for 5 minutes, then PHOTO_NOT_FOUND', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx, 'glow')
+    const { url } = (await getScan(ctx, id)).result.seen[0].overlay
+
+    ctx.advanceClock(PHOTO_LINK_LIFETIME - SECOND)
+    await expect(asUser(() => ctx.service.photoForLink(tokenOfLink(url)))).resolves.toMatchObject({ mediaType: 'image/png' })
+
+    ctx.advanceClock(2 * SECOND)
+    const error = await errorOf(asUser(() => ctx.service.photoForLink(tokenOfLink(url))))
+    expect(error).toBeInstanceOf(NotFoundError)
+    expect(error.code).toBe('PHOTO_NOT_FOUND')
+  })
+
+  it('links no mask of a concern that is not shown: of the links in the view, none opens the mask of hd_moisture (visible score 62 is above the line)', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx, 'glow')
+
+    const view = await getScan(ctx, id)
+
+    const links = [...JSON.stringify(view).matchAll(/\/photos\/([A-Za-z0-9_-]+)/g)].map((match) => match[1]!)
+    expect(links.length).toBeGreaterThanOrEqual(2)
+    const opened = await Promise.all(links.map(async (token) => new TextDecoder().decode((await asUser(() => ctx.service.photoForLink(token))).bytes)))
+    expect(opened).toContain(maskUrl('radiance'))
+    expect(opened).not.toContain(maskUrl('moisture'))
+    expect(opened).not.toContain(maskUrl('acne'))
+  })
+
+  it('says nothing stands out, and links no mask, when no concern of the goal can be seen', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(61, 90, 100)))
+
+    const result = await resultOf(ctx, id)
+
+    expect(result.seen).toEqual([])
+    expect(result.nothingStandsOut).toBe('Nothing stands out for your goal right now')
+    expect(JSON.stringify(result)).not.toMatch(LINK)
+  })
+
+  it('has no skin type and no skin age when Perfect Corp read none, and is still ready', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysed({ skinTypes: [], skinAge: null }))
+
+    const view = await getScan(ctx, id)
+
+    expect(view.state).toBe('ready')
+    expect(view.result).toMatchObject({ skinType: null, skinAge: null })
+    expect(view.result.seen.length).toBeGreaterThan(0)
+  })
+
+  it('rounds the skin age to a whole number of years', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysed({ skinAge: 28.6 }))
+
+    expect((await resultOf(ctx, id)).skinAge).toEqual({ years: 29, words: 'Your skin looks about 29' })
+  })
+
+  it('reads the whole-face score for a concern that Perfect Corp also scored by region', async () => {
+    const ctx = setup()
+    const id = await readyUnder(
+      ctx,
+      'glow',
+      analysed({
+        concerns: [
+          { concern: 'hd_radiance', region: 'left_cheek', rawScore: 20, uiScore: 25, maskUrls: [] },
+          { concern: 'hd_radiance', region: 'whole', rawScore: 55, uiScore: 60, maskUrls: [maskUrl('radiance')] },
+        ],
+      }),
+    )
+
+    expect((await resultOf(ctx, id)).seen).toEqual([{ concern: 'glow', region: 'whole', words: 'A little less glow in places', overlay: { url: expect.stringMatching(LINK) } }])
+  })
+
+  it('names the version of the rules in force now, not the one the scan was stored under: the words are worked out when read', async () => {
+    const ctx = setup()
+    const { id } = await finished(ctx, 'glow')
+    await ctx.repository.updateFaceScan(id, 'ready', { tablesVersion: 'concerns:0,visibility:0,wording:0,skin-type:0,change:0', updatedAt: ctx.now() })
+
+    expect((await resultOf(ctx, id)).tablesVersion).toBe(TABLES_VERSION)
+  })
+
+  it.each([
+    ['analysing', async (ctx: Ctx) => (await uploaded(ctx)).id],
+    ['needs-retake', async (ctx: Ctx) => {
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await fetchStep(ctx, id)
+      return id
+    }],
+    ['failed', async (ctx: Ctx) => {
+      const { id } = await uploaded(ctx)
+      await failScan(ctx, id)
+      return id
+    }],
+  ] as const)('has result null for a scan that is %s', async (state, make) => {
+    const ctx = setup()
+    const id = await make(ctx)
+
+    const view = await getScan(ctx, id)
+
+    expect(view.state).toBe(state)
+    expect(view.result).toBeNull()
+  })
+
+  it('answers a new scan with result null, and a retaken one too', async () => {
+    const ctx = setup()
+    await giveConsent(ctx)
+    await setGoal(ctx, 'glow')
+    const created = await asUser(() => ctx.service.create({ front: face(1) }))
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+    await upload(ctx, created.id)
+
+    const retaken = await retake(ctx, created.id, face(9))
+
+    expect(created).toHaveProperty('result', null)
+    expect(retaken).toHaveProperty('result', null)
+  })
+})
+
+describe('FaceScanService.getFaceScan: the change since day one', () => {
+  // Day one is the profile's earliest READY scan under the scan's goal, with no ready scan under another goal between it and this one.
+
+  it('has no change for the first ready scan, and has one for a later scan under the same goal, worked out against the first', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
+    // readyUnder moves the clock on a day before it makes the scan.
+    const firstAt = new Date(T0.getTime() + DAY)
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }))
+
+    expect((await resultOf(ctx, first)).sinceDayOne).toBeNull()
+    expect((await resultOf(ctx, second)).sinceDayOne).toEqual({
+      dayOneScanId: first,
+      dayOneAt: firstAt,
+      concerns: [
+        { concern: 'glow', change: 'fainter', words: 'More glow than on day one' },
+        { concern: 'dryness', change: 'more-visible', words: 'Skin looks drier than on day one' },
+        { concern: 'texture', change: 'no-clear-change', words: 'No clear change in smoothness since day one' },
+      ],
+      skinAge: { change: 'older', words: 'Your skin looks about 3 years older than on day one' },
+    })
+  })
+
+  it('does not change the first scan\'s own view when a later one is taken', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const before = await getScan(ctx, first)
+    // A link lives 5 minutes from its read and the later scans are days on, so what the earlier links open is read now, while they are good.
+    const bytesBefore = await Promise.all(before.result.seen.map(async (item: { overlay: { url: string } }) => bytesBehind(ctx, item.overlay.url)))
+    await takenUnder(ctx, 'brighter')
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+
+    const after = await getScan(ctx, first)
+
+    // Each read signs fresh overlay links that live 5 minutes from that read, so only the token differs; everything the links point to stays.
+    const withoutTokens = (result: unknown) => JSON.parse(JSON.stringify(result).replace(/\/photos\/[A-Za-z0-9_-]+/g, '/photos/<token>')) as unknown
+    expect(withoutTokens(after.result)).toEqual(withoutTokens(before.result))
+    // The stripped comparison cannot tell a link to the right mask from a link to another one: open both and compare the bytes.
+    const overlaid = before.result.seen.filter((item: { overlay: unknown }) => item.overlay !== null)
+    expect(overlaid.length).toBeGreaterThan(0)
+    for (const [index, item] of before.result.seen.entries()) {
+      expect(after.result.seen[index].concern).toBe(item.concern)
+      if (item.overlay === null) {
+        expect(after.result.seen[index].overlay).toBeNull()
+        continue
+      }
+      expect(await bytesBehind(ctx, after.result.seen[index].overlay.url)).toBe(bytesBefore[index])
+    }
+  })
+
+  it('reads all three of the goal\'s concerns, shown now or not, and leaves out one that is missing on either scan', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf({ hd_radiance: 50, hd_texture: 50 }))
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf({ hd_radiance: 80, hd_moisture: 20 }))
+
+    const { sinceDayOne } = await resultOf(ctx, second)
+
+    expect(sinceDayOne.dayOneScanId).toBe(first)
+    expect(sinceDayOne.concerns).toEqual([{ concern: 'glow', change: 'fainter', words: 'More glow than on day one' }])
+  })
+
+  it('has no skin age change when the day-one scan had no skin age', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: null }))
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }))
+
+    const { sinceDayOne } = await resultOf(ctx, second)
+
+    expect(sinceDayOne.skinAge).toBeNull()
+    expect(sinceDayOne.concerns).toHaveLength(3)
+  })
+
+  it('counts a change of exactly the noise as no clear change, and one point more as a change', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
+    await takenUnder(ctx, 'brighter')
+    // radiance +5 exactly, moisture -5.5, texture +5.5; skin age +2 exactly.
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(45, 44.5, 60.5), { skinAge: 33 }))
+
+    const { sinceDayOne } = await resultOf(ctx, second)
+
+    expect(sinceDayOne.concerns.map((concern: { change: string }) => concern.change)).toEqual(['no-clear-change', 'more-visible', 'fainter'])
+    expect(sinceDayOne.skinAge).toEqual({ change: 'no-clear-change', words: 'No clear change in skin age since day one' })
+  })
+
+  it('does not count a scan that is still analysing, or one that failed, as a day one or as a break in the run', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const other = await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+
+    // Still analysing, then failed: both leave the second scan compared with the first.
+    expect((await resultOf(ctx, second)).sinceDayOne.dayOneScanId).toBe(first)
+    await failScan(ctx, other)
+    expect((await resultOf(ctx, second)).sinceDayOne.dayOneScanId).toBe(first)
+  })
+
+  it('does not count a scan that needs a retake as a break in the run', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const other = await takenUnder(ctx, 'brighter')
+    ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('turn-to-camera'))
+    await fetchStep(ctx, other)
+    expect(await rowOf(ctx, other)).toMatchObject({ state: 'needs-retake' })
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+
+    expect((await resultOf(ctx, second)).sinceDayOne.dayOneScanId).toBe(first)
+  })
+
+  it('never takes a failed scan for the day one: the first scan that is ready is its own', async () => {
+    const ctx = setup()
+    const failed = await takenUnder(ctx, 'glow')
+    await failScan(ctx, failed)
+    const ready = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+
+    expect((await rowOf(ctx, failed)).state).toBe('failed')
+    expect((await resultOf(ctx, ready)).sinceDayOne).toBeNull()
+  })
+
+  it('starts a new day one when the goal changes: a scan under the new goal has none to compare with, and nor has one after going back', async () => {
+    const ctx = setup()
+    const glowFirst = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const brighter = await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+    const glowAgain = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+
+    expect((await resultOf(ctx, glowFirst)).sinceDayOne).toBeNull()
+    expect((await resultOf(ctx, brighter)).sinceDayOne).toBeNull()
+    // A ready scan under another goal came between, so the first glow scan is not this one's day one: it is its own.
+    expect((await resultOf(ctx, glowAgain)).sinceDayOne).toBeNull()
+  })
+
+  it('compares a scan taken after going back to an earlier goal with the first scan of that second run, not with the first run', async () => {
+    const ctx = setup()
+    // The first run under glow is far from the later ones, so a comparison with it would read differently.
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(90, 90, 90)))
+    await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+    const secondRun = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    await takenUnder(ctx, 'brighter')
+    const latest = await readyUnder(ctx, 'glow', analysisOf(glowScores(50, 50, 55)))
+
+    const { sinceDayOne } = await resultOf(ctx, latest)
+
+    expect(sinceDayOne.dayOneScanId).toBe(secondRun)
+    expect(sinceDayOne.concerns[0]).toEqual({ concern: 'glow', change: 'fainter', words: 'More glow than on day one' })
+  })
+
+  it('makes the next scan under the goal the day one when the day-one scan is deleted, and none at all when none is left before it', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(90, 90, 90)))
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    await takenUnder(ctx, 'brighter')
+    const third = await readyUnder(ctx, 'glow', analysisOf(glowScores(50, 50, 55)))
+    expect((await resultOf(ctx, third)).sinceDayOne.dayOneScanId).toBe(first)
+
+    await asUser(() => ctx.service.deleteFaceScan(first))
+
+    expect((await resultOf(ctx, third)).sinceDayOne.dayOneScanId).toBe(second)
+    expect((await resultOf(ctx, third)).sinceDayOne.concerns[0]).toEqual({ concern: 'glow', change: 'fainter', words: 'More glow than on day one' })
+    // The second scan has become its own day one.
+    expect((await resultOf(ctx, second)).sinceDayOne).toBeNull()
+
+    await asUser(() => ctx.service.deleteFaceScan(second))
+
+    expect((await resultOf(ctx, third)).sinceDayOne).toBeNull()
+  })
+
+  it('does not compare with another profile\'s scan', async () => {
+    const ctx = setup()
+    // Another profile of the same account has a ready scan under the same goal, taken earlier.
+    await giveConsent(ctx, OTHER_PROFILE)
+    ctx.advanceClock(DAY)
+    await setGoal(ctx, 'glow', OTHER_PROFILE)
+    const others = (await asUser(() => ctx.service.create({ front: face(5) }), OTHER_PROFILE)).id
+    await upload(ctx, others)
+    ctx.perfectCorp.script('getSkinAnalysis', analysisOf(glowScores(40, 50, 55)))
+    await fetchStep(ctx, others)
+    expect((await rowOf(ctx, others)).state).toBe('ready')
+
+    const mine = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+
+    expect((await resultOf(ctx, mine)).sinceDayOne).toBeNull()
+  })
+})
+
+describe('FaceScanService.getFaceScan: what the result never shows', () => {
+  /** Every number in a value, by where it is. */
+  const numbersIn = (value: unknown, path = ''): string[] =>
+    typeof value === 'number'
+      ? [path]
+      : value !== null && typeof value === 'object'
+        ? Object.entries(value).flatMap(([key, inner]) => numbersIn(inner, `${path}.${key}`))
+        : []
+
+  /** A scan with a change since day one, a skin age change, a skin type, masks, and a Fitzpatrick type of 'V' on the profile. */
+  const withEverything = async (ctx: Ctx) => {
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31, all: 63 }))
+    ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'V' })
+    await fitzpatrickStep(ctx, first)
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34, all: 71 }))
+    expect((await ctx.repository.fitzpatrickOf(PROFILE))?.fitzpatrick).toBe('V')
+    return second
+  }
+
+  it('holds no Perfect Corp name, no score, no overall score, no Fitzpatrick type and no condition anywhere in the view', async () => {
+    const ctx = setup()
+    const id = await withEverything(ctx)
+
+    const view = await getScan(ctx, id)
+    // The link tokens are random base64url text, which could hold "hd_" by chance; they are not what is being looked at.
+    const text = JSON.stringify(view).replace(/\/photos\/[A-Za-z0-9_-]+/g, '/photos/<token>')
+
+    expect(view.result.sinceDayOne).not.toBeNull()
+    expect(text).not.toMatch(/hd_|raw_?score|ui_?score|fitzpatrick|skin_?type_?label/i)
+    expect(text).not.toMatch(/"all"/)
+    expect(text).not.toMatch(/"(?:I|II|III|IV|V|VI)"/)
+    expect(text).not.toMatch(/you have|diagnos|melasma|rosacea|acne|eczema/i)
+  })
+
+  it('holds no number but the skin age in years', async () => {
+    const ctx = setup()
+    const id = await withEverything(ctx)
+
+    const view = JSON.parse(JSON.stringify(await getScan(ctx, id)))
+
+    expect(numbersIn(view.result)).toEqual(['.skinAge.years'])
+  })
+
+  it('puts no digit in the seen-words, in the change words or in nothing-stands-out', async () => {
+    const ctx = setup()
+    const id = await withEverything(ctx)
+    const { result } = await getScan(ctx, id)
+
+    const words = [...result.seen.map((seen: { words: string }) => seen.words), ...result.sinceDayOne.concerns.map((concern: { words: string }) => concern.words)]
+
+    expect(words.length).toBeGreaterThan(2)
+    for (const text of words) expect(text).not.toMatch(/\d/)
+    expect(JSON.stringify(result.seen.map((seen: { region: string }) => seen.region))).not.toMatch(/\d/)
+  })
+
+  it('names each concern by its public id and nothing else', async () => {
+    const ctx = setup()
+    const id = await withEverything(ctx)
+    const { result } = await getScan(ctx, id)
+
+    expect(result.seen.map((seen: { concern: string }) => seen.concern)).toEqual(['glow', 'dryness', 'texture'])
+    expect(result.sinceDayOne.concerns.map((concern: { concern: string }) => concern.concern)).toEqual(['glow', 'dryness', 'texture'])
+  })
+})
+
+
+// --- the profile's list of face scans ---
+//
+// `listFaceScans()` is `GET /scans/faces`: the current profile's scans, latest first, each the very view `getFaceScan` gives, every state included, cut
+// at 20. Scans are made the way a person makes them (the goal changes between two scans, because a scan under the goal of the latest one is not due), and
+// brought to the state a test needs by the pipeline's own steps.
+
+/** The cap the brief sets: the latest 20 scans. Written out here so the test does not take it from the code it checks. */
+const LIST_CAP = 20
+const OTHER_USER = 'user-2'
+const OTHER_ACCOUNT_PROFILE = 'profile-3'
+
+const listScans = (ctx: Ctx, profileId = PROFILE): Promise<any[]> => asUser(() => ctx.service.listFaceScans(), profileId)
+const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'anonymous', profileId: OTHER_ACCOUNT_PROFILE }, fn)
+/** A scan by a profile of the account (`profileId`) under `goal`: consent, the goal and the front photo, the way the create route takes it. Resolves to the scan's id. */
+const startedBy = async (ctx: Ctx, profileId: string, goal: Goal): Promise<string> => {
+  await giveConsent(ctx, profileId)
+  await setGoal(ctx, goal, profileId)
+  return (await asUser(() => ctx.service.create({ front: face(5) }), profileId)).id
+}
+const GOAL_CYCLE: Goal[] = ['glow', 'brighter']
+/** `count` scans under alternating goals, a day apart and none finished, oldest first. Resolves to their ids. */
+const manyScans = async (ctx: Ctx, count: number): Promise<string[]> => {
+  const ids: string[] = []
+  for (let n = 0; n < count; n += 1) ids.push(await takenUnder(ctx, GOAL_CYCLE[n % GOAL_CYCLE.length]!))
+  return ids
+}
+/** One scan in each state, oldest first: ready (glow), failed (brighter), needs-retake (clear-skin) and analysing (even-tone). */
+const oneInEachState = async (ctx: Ctx) => {
+  const ready = await readyUnder(ctx, 'glow', analysed())
+  const failed = await takenUnder(ctx, 'brighter')
+  await failScan(ctx, failed)
+  const needsRetake = await takenUnder(ctx, 'clear-skin')
+  ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+  await fetchStep(ctx, needsRetake)
+  const analysing = await takenUnder(ctx, 'even-tone')
+  return { ready, failed, needsRetake, analysing }
+}
+
+describe('FaceScanService.listFaceScans', () => {
+  it('lists the latest 20 scans, and the cap is exported as FACE_SCAN_LIST_LIMIT from the service module', () => {
+    expect(FACE_SCAN_LIST_LIMIT).toBe(LIST_CAP)
+  })
+
+  it('lists nothing, without an error, for a profile that has no scans, no consent and no goal', async () => {
+    const ctx = setup()
+
+    expect(await listScans(ctx)).toEqual([])
+  })
+
+  it('refuses a caller who is not signed in with 401 AUTH_REQUIRED', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.listFaceScans()))
+
+    expect(error).toBeInstanceOf(UnauthorizedError)
+    expect(error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('lists the profile\'s scans latest first', async () => {
+    const ctx = setup()
+    const [first, second, third] = await manyScans(ctx, 3)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([third, second, first])
+    expect(listed.map((scan) => scan.goal)).toEqual(['glow', 'brighter', 'glow'])
+  })
+
+  it('lists exactly 20 scans when there are 20, and only the latest 20 when a 21st is taken: the oldest drops off', async () => {
+    const ctx = setup()
+    const ids = await manyScans(ctx, LIST_CAP)
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([...ids].reverse())
+
+    ids.push(await takenUnder(ctx, GOAL_CYCLE[LIST_CAP % GOAL_CYCLE.length]!))
+
+    const listed = (await listScans(ctx)).map((scan) => scan.id)
+    expect(listed).toHaveLength(LIST_CAP)
+    expect(listed).toEqual(ids.slice(1).reverse())
+    expect(listed).not.toContain(ids[0])
+  })
+
+  it('lists a scan whatever state it is in: ready with its result, needs-retake and failed with their reasons, analysing with none', async () => {
+    const ctx = setup()
+    const { ready, failed, needsRetake, analysing } = await oneInEachState(ctx)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => [scan.id, scan.state, scan.reason])).toEqual([
+      [analysing, 'analysing', null],
+      [needsRetake, 'needs-retake', 'too-dark'],
+      [failed, 'failed', 'unavailable'],
+      [ready, 'ready', null],
+    ])
+    expect(listed.map((scan) => scan.result !== null)).toEqual([false, false, false, true])
+    expect(listed[3].result.seen.length).toBeGreaterThan(0)
+  })
+
+  it('shows each scan as getFaceScan shows it, links and rescanSuggested included', async () => {
+    const ctx = setup()
+    await oneInEachState(ctx)
+    // The profile moves on to a goal none of its scans were taken under, so every view says a rescan is worth it.
+    await setGoal(ctx, 'calm-repair')
+
+    const listed = await listScans(ctx)
+
+    expect(listed).toHaveLength(4)
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+    expect(listed.map((scan) => scan.rescanSuggested)).toEqual([true, true, true, true])
+    expect(Object.keys(listed[0]).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
+  })
+
+  it('shows rescanSuggested false on every scan while the goal is the one the latest scan was taken under', async () => {
+    const ctx = setup()
+    await manyScans(ctx, 3)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.rescanSuggested)).toEqual([false, false, false])
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+  })
+
+  it('shows the change since day one on a ready scan as getFaceScan does', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }))
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([second, expect.any(String), first])
+    expect(listed[0].result.sinceDayOne).toMatchObject({ dayOneScanId: first })
+    expect(listed[0]).toEqual(await getScan(ctx, second))
+    expect(listed[2].result.sinceDayOne).toBeNull()
+  })
+
+  it('reads the day-one scan\'s scores once for the whole list, not once per scan, and shows each scan as getFaceScan does', async () => {
+    const repository = new ReadCountingRepository()
+    const ctx = setup({ repository })
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    for (const radiance of [44, 46, 48]) {
+      await takenUnder(ctx, 'brighter')
+      await readyUnder(ctx, 'glow', analysisOf(glowScores(radiance, 44, 55)))
+    }
+    repository.resultsRead.length = 0
+
+    const listed = await listScans(ctx)
+
+    // Once for the day-one scan's own view, and once for the three later scans together.
+    expect(repository.resultsRead.filter((id) => id === dayOne)).toHaveLength(2)
+    expect(listed.filter((scan) => scan.result?.sinceDayOne?.dayOneScanId === dayOne)).toHaveLength(3)
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+  })
+
+  it('gives overlay and photo links that open, for the bytes of the mask and of the photo', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysed())
+
+    const [scan] = await listScans(ctx)
+
+    expect(scan.id).toBe(id)
+    expect(await bytesBehind(ctx, scan.result.seen[0].overlay.url)).toBe(maskUrl('radiance'))
+    const photo = await asUser(() => ctx.service.photoForLink(tokenOfLink(scan.photos.front.url)))
+    expect(photo.mediaType).toBe('image/jpeg')
+  })
+
+  it('lists only the current profile\'s scans: neither the account\'s other profile\'s nor another account\'s', async () => {
+    const ctx = setup()
+    const mine = await startedBy(ctx, PROFILE, 'glow')
+    const sisters = await startedBy(ctx, OTHER_PROFILE, 'glow')
+    await asOtherAccount(() => ctx.service.giveConsent(CURRENT_FACE_CONSENT_VERSION))
+    await asOtherAccount(() => ctx.goals.set({ goal: 'glow' }))
+    const strangers = (await asOtherAccount(() => ctx.service.create({ front: face(6) }))).id
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([mine])
+    expect((await listScans(ctx, OTHER_PROFILE)).map((scan) => scan.id)).toEqual([sisters])
+    expect((await asOtherAccount(() => ctx.service.listFaceScans())).map((scan: { id: string }) => scan.id)).toEqual([strangers])
+  })
+
+  it('does not let another profile\'s scans use up the cap', async () => {
+    const ctx = setup()
+    const mine = await manyScans(ctx, 1)
+    for (let n = 0; n < LIST_CAP + 1; n += 1) {
+      ctx.advanceClock(DAY)
+      await startedBy(ctx, OTHER_PROFILE, GOAL_CYCLE[n % GOAL_CYCLE.length]!)
+    }
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual(mine)
+  })
+
+  it('still lists the scans after the consent is withdrawn, so the user can find them and delete them', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+    await asUser(() => ctx.service.withdrawConsent())
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([second, first])
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+  })
+
+  it('still lists the scans when the profile\'s goal is typed words nobody sorted into a goal, with rescanSuggested false', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+    await asUser(() => ctx.goals.set({ text: 'something the reader finds no goal in' }))
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => [scan.id, scan.rescanSuggested])).toEqual([[second, false], [first, false]])
+  })
+
+  it('lists a scan no more once the user deletes it', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+
+    await asUser(() => ctx.service.deleteFaceScan(second!))
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([first])
   })
 })
