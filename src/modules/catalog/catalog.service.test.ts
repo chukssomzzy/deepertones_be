@@ -259,7 +259,8 @@ describe('ProductCatalogService.resolve', () => {
 
 describe('ProductCatalogService.resolve near misses', () => {
   const ACME = 'Acme'
-  // Word overlap with TARGET (Jaccard): A 3/5 = 0.6 (exactly the threshold), B 4/5, C 5/6, D 5/5, E 3/8 (and TARGET's words are not all inside it).
+  // Word overlap with TARGET (Jaccard): A 3/5 = 0.6 (exactly the threshold), B 4/5, C 5/6, D 5/5, E 3/8 (and TARGET's words are not all inside it),
+  // F 4/6 (neither inside TARGET nor holding all of it).
   const TARGET = identity({ brand: ACME, name: 'Radiance Serum Vitamin Glow Booster' })
   const NAMES = {
     A: 'Radiance Serum Vitamin',
@@ -267,6 +268,7 @@ describe('ProductCatalogService.resolve near misses', () => {
     C: 'Radiance Serum Vitamin Glow Booster Night',
     D: 'Booster Glow Vitamin Serum Radiance',
     E: 'Radiance Serum Hydra Mist',
+    F: 'Radiance Serum Vitamin Glow Elixir',
   }
 
   /** Creates the products one after another, so each is newer than the last. Returns their ids by letter. */
@@ -305,7 +307,8 @@ describe('ProductCatalogService.resolve near misses', () => {
 
   it('asks about at most nearMissLimit candidates, always as (the scanned label, the candidate), and makes a new product when all are different', async () => {
     const ctx = setup()
-    const ids = await catalogued(ctx, ['A', 'B', 'C', 'D'])
+    // No candidate says more than TARGET (C would, and then the vaguer A and B are never asked: a partial read is not judged against a vaguer row).
+    const ids = await catalogued(ctx, ['A', 'B', 'F', 'D'])
     const before = ctx.analyst.calls.sameProduct.length
 
     const result = await ctx.service.resolve(TARGET)
@@ -4538,6 +4541,101 @@ describe('ProductCatalogService.resolve: spellings, % names and range-less readi
 
       expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
       expect(result.productId).toBe(shea.productId)
+    })
+  })
+
+  describe('a reading less specific than one of its candidates', () => {
+    /** The product the reading is probably a partial read of: the AM/PM-style word on the label went unread. */
+    const SPECIFIC = { brand: 'Glowco', name: 'Night Facial Moisturizing Lotion', form: 'lotion', category: 'skin' } as const
+    /** A vaguer row of the same brand, UK spelling, that the reading says MORE than: landing on it would be a guess. */
+    const VAGUER = { brand: 'Glowco', name: 'Moisturising Lotion', form: 'lotion', category: 'skin' } as const
+    const READING = { brand: 'Glowco', name: 'Facial Moisturizing Lotion', form: 'lotion', category: 'skin' } as const
+    const SPECIFIC_ID = 'specific-row'
+    const VAGUER_ID = 'vaguer-row'
+
+    /**
+     * Seeded through the repository, not `resolve`: these two rows are near misses of each other (Jaccard exactly at the
+     * threshold), so creating the second through the service would spend a judge call and hide the one under test.
+     */
+    const row = (ctx: Ctx, id: string, who: ProductIdentity) =>
+      ctx.repository.createProduct({
+        id,
+        identityKey: identityKey(who),
+        brandKey: brandKey(who.brand),
+        kind: 'named',
+        brand: who.brand,
+        name: who.name,
+        variant: who.variant ?? null,
+        form: who.form ?? null,
+        category: who.category,
+        createdAt: T0,
+      })
+
+    /** The candidate each judge call was about, in order. */
+    const asked = (ctx: Ctx) => ctx.analyst.calls.sameProduct.map(([, candidate]) => candidate.name)
+
+    it('puts only the more specific candidate to the judge, and a "yes" lands on it', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
+    })
+
+    it('makes a new product when the judge says no to the more specific candidate, without ever asking about the vaguer row', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith((_reading, candidate) => candidate.name !== SPECIFIC.name)
+      const scanned = identity(READING)
+
+      const result = await ctx.service.resolve(scanned)
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect([SPECIFIC_ID, VAGUER_ID]).not.toContain(result.productId)
+      expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
+    })
+
+    it('skips the vaguer row even when it is the closer near miss, so candidate order does not decide the merge', async () => {
+      const ctx = setup()
+      // Two words beyond the reading, so this row scores BELOW the vaguer one and is offered second.
+      const furtherOff = identity({ ...SPECIFIC, name: 'Night Time Facial Moisturizing Lotion' })
+      await row(ctx, SPECIFIC_ID, furtherOff)
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([furtherOff.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
+    })
+
+    // Guards behaviour that already holds: with nothing more specific to be a partial read of, the vaguer row is still judged.
+    it('is still judged against the vaguer row, and lands on it, when that is the only candidate', async () => {
+      const ctx = setup()
+      await row(ctx, VAGUER_ID, identity(VAGUER))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([VAGUER.name])
+      expect(result.productId).toBe(VAGUER_ID)
+    })
+
+    // Guards behaviour that already holds: the more specific candidate is judged as before.
+    it('is judged against the more specific candidate, and lands on it, when that is the only candidate', async () => {
+      const ctx = setup()
+      await row(ctx, SPECIFIC_ID, identity(SPECIFIC))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(asked(ctx)).toEqual([SPECIFIC.name])
+      expect(result.productId).toBe(SPECIFIC_ID)
     })
   })
 })

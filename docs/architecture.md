@@ -1463,6 +1463,11 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   and any candidate the reading is not less specific than, is judged as usual ("Cocoa Butter Formula" (oil) against "Cocoa
   Butter Formula Body Oil" (oil) and "Cocoa Butter Formula Solid Jar" (no form) judges only the oil). Two or more less-specific
   candidates sharing the reading's form are still held back, and a reading that gives no form is unaffected by either rule.
+  **A partial read is not judged against a vaguer row:** when the reading is less specific than at least one candidate (by the
+  same `lessSpecificForNearMiss` test), the candidates less specific than the reading on full words are not asked about ("Facial
+  Moisturizing Lotion" with "PM Facial Moisturizing Lotion" and "Moisturising Lotion" stored asks only about the PM lotion, and a "no"
+  makes a new row): the reading is most likely the more specific product read in part, so landing it on a row vaguer still would be a
+  guess. Equal candidates are never vaguer, so they are unaffected.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
   (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
   missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this

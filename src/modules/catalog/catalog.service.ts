@@ -350,7 +350,13 @@ export class ProductCatalogService {
     // as before, equal ones first (they sort first by similarity).
     const equal = candidates.filter((c) => sameWords(identity, c))
     const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable, this.policy.nearMissThreshold)
-    const toJudge = filtered.length === 0 ? equal : [...equal, ...filtered.filter((c) => !equal.includes(c))]
+    // A reading that says less than one candidate ("Facial Moisturizing Lotion" against "PM Facial Moisturizing Lotion") is most likely a
+    // partial read of it: landing it on a row vaguer still ("Moisturizing Lotion") would be a guess, so that row is not asked about.
+    // "Says more than the reading" is weighed as the guard weighs it, so a candidate the reading says less than is never also its vaguer row.
+    const saysMore = new Set(candidates.filter((c) => lessSpecificForNearMiss(identity, c, comparable, this.policy.nearMissThreshold)))
+    const vaguer = (c: Product) => saysMore.size > 0 && !saysMore.has(c) && lessSpecific(c, identity)
+    const others = filtered.filter((c) => !equal.includes(c) && !vaguer(c))
+    const toJudge = filtered.length === 0 ? equal : [...equal, ...others]
     for (const candidate of toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         // A reading that says less than the product ("Hydro Boost"), or more than a vague row, or prints no form where the product does, would as an alias claim a
