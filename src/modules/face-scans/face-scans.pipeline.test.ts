@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { PermanentJobError } from '../../jobs/job'
 import { runAs } from '../../lib/context'
 import { ConflictError, NotFoundError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
@@ -7,6 +7,7 @@ import { MemoryGoalReader } from '../../providers/goal-reading/memory.goal-reade
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryMentionReader } from '../../providers/mention-reading/memory.mention-reader'
 import { MemoryPerfectCorpClient } from '../../providers/perfect-corp/memory.perfect-corp'
+import { MemoryPushSender } from '../../providers/push/memory.push'
 import {
   PerfectCorpBadRequestError,
   PerfectCorpCreditError,
@@ -21,6 +22,10 @@ import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events
 import { FakeGoalsRepository } from '../goals/goals.repository.fake'
 import { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
+import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
+import { NotificationsService } from '../notifications/notifications.service'
+import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
 import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { FakeSafetyRepository } from '../safety/safety.repository.fake'
@@ -157,6 +162,16 @@ const setup = (options: SetupOptions = {}) => {
   const events = options.events ?? new MemoryScanEvents()
   const alertJobs = new MemoryJobQueue()
   const opsAlerts = new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: alertJobs, email: new MemoryEmailSender(), recipient: '', environment, now: () => clock })
+  // The push jobs go to a queue of their own: `queuedSteps` and `clearQueue` read `jobs` as the scan's steps.
+  const pushJobs = new MemoryJobQueue()
+  const notifications = new NotificationsService({
+    pushTokens: new FakePushTokensRepository(),
+    settings: new FakeNotificationSettingsRepository(),
+    push: new MemoryPushSender(),
+    jobs: pushJobs,
+    deviceIdKey: 'device-key-for-tests',
+    now: () => clock,
+  })
   const service = new FaceScanService({
     repository,
     goals,
@@ -165,6 +180,7 @@ const setup = (options: SetupOptions = {}) => {
     perfectCorp,
     aiUsage,
     events,
+    notifications,
     opsAlerts,
     photoLinkSecret: PHOTO_SECRET,
     environment,
@@ -177,6 +193,7 @@ const setup = (options: SetupOptions = {}) => {
     goals,
     photos,
     jobs,
+    pushJobs,
     perfectCorp,
     aiUsage,
     events,
@@ -2636,5 +2653,382 @@ describe('FaceScanService.listFaceScans', () => {
     await asUser(() => ctx.service.deleteFaceScan(second!))
 
     expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([first])
+  })
+})
+
+describe('FaceScanService: push notifications', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const pushes = (ctx: Ctx) => ctx.pushJobs.enqueued.map((entry) => entry.body as SendPushMessage)
+  const pushKeys = (ctx: Ctx) => pushes(ctx).map((body) => sendPushSpec.key(body))
+  const kinds = (ctx: Ctx) => pushes(ctx).map((body) => body.kind)
+  const quiet = () => (['log', 'error'] as const).map((level) => vi.spyOn(console, level).mockImplementation(() => undefined))
+  const REASONS = ['too-dark', 'turn-to-camera', 'move-closer', 'face-not-centred', 'no-face', 'image-size'] as const
+
+  /** What a needs-retake push for `id` must carry, `at` being the instant the transition was stored. */
+  const retakePush = (id: string, reason: (typeof REASONS)[number], at: number) => ({ kind: 'face-scan-needs-retake', userId: USER, profileId: PROFILE, faceScanId: id, reason, at })
+
+  describe('when the scan becomes ready', () => {
+    it('queues one face-scan-ready push for the scan\'s profile, keyed by the scan, when the fetch completes it', async () => {
+      const ctx = setup()
+
+      const { id } = await finished(ctx)
+
+      expect(pushes(ctx)).toEqual([{ kind: 'face-scan-ready', userId: USER, profileId: PROFILE, faceScanId: id }])
+      expect(pushKeys(ctx)).toEqual([`face-scan-ready:${id}`])
+      expect(ctx.pushJobs.enqueued[0]!.job).toBe('send-push')
+    })
+
+    it('queues nothing before the scan is ready: not on create, not after the upload, not while the analysis is still running', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      expect(pushes(ctx)).toEqual([])
+
+      await upload(ctx, id)
+      expect(pushes(ctx)).toEqual([])
+
+      await fetchStep(ctx, id)
+      expect((await rowOf(ctx, id)).state).toBe('analysing')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('queues no second push when a ready scan is fetched again (a webhook that comes twice)', async () => {
+      const ctx = setup()
+      const { id } = await finished(ctx)
+
+      await fetchStep(ctx, id, 'wh-late-duplicate')
+      await fetchStep(ctx, id, 'wh-late-duplicate-2')
+
+      expect(kinds(ctx)).toEqual(['face-scan-ready'])
+    })
+
+    it('queues nothing when the completion loses because the user deleted the scan while the masks were being fetched', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      ctx.perfectCorp.duringDownload = () => asUser(() => ctx.service.deleteFaceScan(id))
+
+      await fetchStep(ctx, id)
+
+      expect(await ctx.repository.findFaceScan(id)).toBeNull()
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('queues nothing when the completion loses because the scan failed while the masks were being fetched', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      ctx.perfectCorp.duringDownload = () => ctx.service.markFailed(id)
+
+      await fetchStep(ctx, id)
+
+      expect((await rowOf(ctx, id)).state).toBe('failed')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('queues the push once, by the retry, when a first fetch attempt failed before the scan was complete', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed(), analysed())
+      ctx.perfectCorp.script('downloadMask', new PerfectCorpUnavailableError('down'))
+
+      expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PerfectCorpUnavailableError)
+      expect(pushes(ctx)).toEqual([])
+      await fetchStep(ctx, id)
+
+      expect(pushKeys(ctx)).toEqual([`face-scan-ready:${id}`])
+    })
+  })
+
+  describe('when the photo needs a retake', () => {
+    it.each([
+      ['uploadFile', 'image-size'],
+      ['createSkinAnalysis', 'no-face'],
+    ] as const)('queues one face-scan-needs-retake push, stamped with the stored update time, when the upload step is refused at %s', async (method, reason) => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.advanceClock(3 * MINUTE)
+      ctx.perfectCorp.script(method, new PerfectCorpRejectedPhotoError(reason))
+
+      await upload(ctx, id)
+
+      const stored = (await rowOf(ctx, id)).updatedAt.getTime()
+      expect(stored).toBe(T0.getTime() + 3 * MINUTE)
+      expect(pushes(ctx)).toEqual([retakePush(id, reason, stored)])
+      expect(pushKeys(ctx)).toEqual([`face-scan-needs-retake:${id}:${stored}`])
+    })
+
+    it.each(REASONS)('queues one face-scan-needs-retake push carrying %s, stamped with the stored update time, when the fetch step is refused', async (reason) => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.advanceClock(7 * MINUTE)
+      ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError(reason))
+
+      await fetchStep(ctx, id, 'wh-error')
+
+      const stored = (await rowOf(ctx, id)).updatedAt.getTime()
+      expect(stored).toBe(T0.getTime() + 7 * MINUTE)
+      expect(pushes(ctx)).toEqual([retakePush(id, reason, stored)])
+      expect(pushKeys(ctx)).toEqual([`face-scan-needs-retake:${id}:${stored}`])
+    })
+
+    it('queues nothing when a step is delivered again after the scan went to needs-retake (a message taken over after its lease)', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await fetchStep(ctx, id, 'wh-error')
+      expect(pushes(ctx)).toHaveLength(1)
+
+      await fetchStep(ctx, id, 'wh-error')
+      await upload(ctx, id)
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('queues nothing when an upload step is delivered again after its first delivery was refused', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+      await upload(ctx, id)
+
+      await upload(ctx, id)
+
+      expect(pushes(ctx)).toHaveLength(1)
+    })
+
+    it('queues one push, from the step that wins the transition, when two fetch steps of one scan are both refused', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'), new PerfectCorpRejectedPhotoError('too-dark'))
+
+      await Promise.all([fetchStep(ctx, id, 'wh-a'), fetchStep(ctx, id, 'wh-b')])
+
+      expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'too-dark' })
+      expect(kinds(ctx)).toEqual(['face-scan-needs-retake'])
+    })
+
+    it('queues a second push, under its own key, when the retaken photo is refused again', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await upload(ctx, id)
+      const firstAt = (await rowOf(ctx, id)).updatedAt.getTime()
+      ctx.advanceClock(4 * MINUTE)
+      await retake(ctx, id, face(9))
+      expect(pushes(ctx)).toHaveLength(1)
+      ctx.advanceClock(1 * MINUTE)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+
+      await upload(ctx, id)
+
+      const secondAt = (await rowOf(ctx, id)).updatedAt.getTime()
+      expect(secondAt).toBe(firstAt + 5 * MINUTE)
+      expect(pushes(ctx)).toEqual([retakePush(id, 'too-dark', firstAt), retakePush(id, 'no-face', secondAt)])
+      expect(pushKeys(ctx)).toEqual([`face-scan-needs-retake:${id}:${firstAt}`, `face-scan-needs-retake:${id}:${secondAt}`])
+    })
+
+    it('queues no push for the retake itself, and then the ready push when the retaken photo is accepted', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await upload(ctx, id)
+      ctx.advanceClock(2 * MINUTE)
+
+      await retake(ctx, id, face(9))
+      expect(kinds(ctx)).toEqual(['face-scan-needs-retake'])
+      await upload(ctx, id)
+      expect(kinds(ctx)).toEqual(['face-scan-needs-retake'])
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+
+      expect(kinds(ctx)).toEqual(['face-scan-needs-retake', 'face-scan-ready'])
+    })
+  })
+
+  describe('when the scan fails', () => {
+    // Every way a scan reaches `failed`: each is driven through the step or sweep that does it, and none may queue a push.
+    it.each([
+      [
+        'Perfect Corp has no credit at the upload',
+        async (ctx: Ctx, id: string) => {
+          ctx.perfectCorp.script('uploadFile', new PerfectCorpCreditError('no units'))
+          expect(await errorOf(upload(ctx, id))).toBeInstanceOf(PermanentJobError)
+        },
+      ],
+      [
+        'Perfect Corp calls the upload request bad',
+        async (ctx: Ctx, id: string) => {
+          ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpBadRequestError('bad'))
+          expect(await errorOf(upload(ctx, id))).toBeInstanceOf(PermanentJobError)
+        },
+      ],
+      [
+        'the consent was withdrawn before the upload',
+        async (ctx: Ctx, id: string) => {
+          await asUser(() => ctx.service.withdrawConsent())
+          await upload(ctx, id)
+        },
+      ],
+      [
+        'the front photo is gone from the bucket',
+        async (ctx: Ctx, id: string) => {
+          await ctx.photos.delete(frontKey(ctx, id))
+          await upload(ctx, id)
+        },
+      ],
+      [
+        'the queue gives up on the upload step (the dead letter)',
+        async (ctx: Ctx, id: string) => {
+          await asSystem(() => ctx.service.giveUp({ faceScanId: id, step: 'upload', at: T0.getTime() }))
+        },
+      ],
+      [
+        'the reaper gives up after 2 hours',
+        async (ctx: Ctx) => {
+          await reap(ctx, new Date(T0.getTime() + FAIL_AFTER + 1))
+        },
+      ],
+      [
+        'the scan is marked failed',
+        async (ctx: Ctx, id: string) => {
+          await ctx.service.markFailed(id)
+        },
+      ],
+    ])('queues no push when %s', async (_label, fail) => {
+      const ctx = setup()
+      const id = await started(ctx)
+
+      await fail(ctx, id)
+
+      expect((await rowOf(ctx, id)).state).toBe('failed')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it.each([
+      [
+        'Perfect Corp has no credit at the fetch',
+        async (ctx: Ctx, id: string) => {
+          ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpCreditError('no units'))
+          expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PermanentJobError)
+        },
+      ],
+      [
+        'Perfect Corp calls the fetch request bad',
+        async (ctx: Ctx, id: string) => {
+          ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpBadRequestError('expired'))
+          expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PermanentJobError)
+        },
+      ],
+      [
+        'the queue gives up on the fetch step (the dead letter)',
+        async (ctx: Ctx, id: string) => {
+          await asSystem(() => ctx.service.giveUp({ faceScanId: id, step: 'fetch', at: T0.getTime() }))
+        },
+      ],
+      [
+        'the reaper gives up after 2 hours',
+        async (ctx: Ctx) => {
+          await reap(ctx, new Date(T0.getTime() + FAIL_AFTER + 1))
+        },
+      ],
+    ])('queues no push for an uploaded scan when %s', async (_label, fail) => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+
+      await fail(ctx, id)
+
+      expect((await rowOf(ctx, id)).state).toBe('failed')
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('queues no push when the retaken scan fails, and its earlier needs-retake push stays the only one', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await upload(ctx, id)
+      await retake(ctx, id, face(9))
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpBadRequestError('bad'))
+
+      expect(await errorOf(upload(ctx, id))).toBeInstanceOf(PermanentJobError)
+
+      expect((await rowOf(ctx, id)).state).toBe('failed')
+      expect(kinds(ctx)).toEqual(['face-scan-needs-retake'])
+    })
+  })
+
+  describe('the fitzpatrick step', () => {
+    it('queues no push whatever it finds: not when it stores the type, not when it is refused for credit, not on a ready scan', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+
+      ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'IV' })
+      await fitzpatrickStep(ctx, id)
+      expect(pushes(ctx)).toEqual([])
+
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+      expect(kinds(ctx)).toEqual(['face-scan-ready'])
+
+      await fitzpatrickStep(ctx, id)
+      expect(kinds(ctx)).toEqual(['face-scan-ready'])
+    })
+
+    it('queues no push when the read is refused for credit or for the photo, and the scan stays as it was', async () => {
+      const ctx = setup()
+      const { id } = await uploaded(ctx)
+      ctx.perfectCorp.script('getFitzpatrick', new PerfectCorpCreditError('no units'), new PerfectCorpRejectedPhotoError('too-dark'))
+
+      await fitzpatrickStep(ctx, id)
+      await fitzpatrickStep(ctx, id)
+
+      expect((await rowOf(ctx, id)).state).toBe('analysing')
+      expect(pushes(ctx)).toEqual([])
+    })
+  })
+
+  describe('when the push cannot be queued', () => {
+    it('leaves the ready scan exactly as it is, and the step does not throw', async () => {
+      const ctx = setup()
+      const { id, analysisTask } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      ctx.pushJobs.failNextWith(new Error('push queue is down'))
+      quiet()
+
+      await expect(fetchStep(ctx, id)).resolves.toBeUndefined()
+
+      expect(await rowOf(ctx, id)).toMatchObject({ state: 'ready', reason: null, skinAge: 31 })
+      expect(ctx.events.eventsFor(id).slice(-2)).toEqual([{ type: 'face', faceScan: { id, state: 'ready', reason: null } }, { type: 'done' }])
+      expect(deletedTasks(ctx)).toContain(analysisTask)
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('leaves the scan at needs-retake exactly as it is, and the step does not throw', async () => {
+      const ctx = setup()
+      const { id, analysisTask } = await uploaded(ctx)
+      ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('move-closer'))
+      ctx.pushJobs.failNextWith(new Error('push queue is down'))
+      quiet()
+
+      await expect(fetchStep(ctx, id)).resolves.toBeUndefined()
+
+      expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'move-closer' })
+      expect(ctx.events.eventsFor(id).slice(-2)).toEqual([{ type: 'face', faceScan: { id, state: 'needs-retake', reason: 'move-closer' } }, { type: 'done' }])
+      expect(deletedTasks(ctx)).toEqual([analysisTask])
+      expect(pushes(ctx)).toEqual([])
+    })
+
+    it('does not fail or retry an upload step that was refused: it resolves with the scan at needs-retake', async () => {
+      const ctx = setup()
+      const id = await started(ctx)
+      ctx.perfectCorp.script('uploadFile', new PerfectCorpRejectedPhotoError('image-size'))
+      ctx.pushJobs.failNextWith(new Error('push queue is down'))
+      quiet()
+
+      await expect(upload(ctx, id)).resolves.toBeUndefined()
+
+      expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake', reason: 'image-size' })
+    })
   })
 })

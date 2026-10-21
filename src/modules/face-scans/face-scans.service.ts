@@ -21,6 +21,7 @@ import type { ProductImage } from '../../providers/product-analysis/product-anal
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { facePhotoUrl } from '../scans/scans.paths'
 import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
@@ -78,6 +79,8 @@ export type FaceScanServiceDeps = {
   aiUsage: VendorSpendLedger
   /** Tells whoever is watching a scan that it changed. */
   events: ScanEvents
+  /** Tells the person's phone when a scan is ready or needs a retake. Never throws: a push that cannot be queued does not fail a step. */
+  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
   /** Signs the photo links. photo-link.ts derives its own key from it. */
@@ -115,6 +118,7 @@ export class FaceScanService {
   private readonly perfectCorp: PerfectCorpClient
   private readonly aiUsage: VendorSpendLedger
   private readonly events: ScanEvents
+  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
@@ -130,6 +134,7 @@ export class FaceScanService {
     this.perfectCorp = deps.perfectCorp
     this.aiUsage = deps.aiUsage
     this.events = deps.events
+    this.notifications = deps.notifications
     this.opsAlerts = deps.opsAlerts
     this.#photoLinkSecret = deps.photoLinkSecret
     this.environment = deps.environment
@@ -511,6 +516,8 @@ export class FaceScanService {
       throw error
     }
     FaceScanService.warnMissingConcerns(scan, analysis)
+    // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. At most once: a push lost here (the worker dies, or the queue refuses it) is not sent again.
+    await this.notifications.faceScanReady({ userId, profileId, faceScanId: id })
     await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)
     await this.publishFrame(id, 'ready', null, { done: true })
@@ -579,7 +586,7 @@ export class FaceScanService {
       await work()
     } catch (error) {
       if (error instanceof PerfectCorpRejectedPhotoError) {
-        await this.needRetake(scan.id, error.reason)
+        await this.needRetake(scan, error.reason)
       } else if (error instanceof PerfectCorpCreditError) {
         await this.opsAlerts.raise('face-scan-account')
         await this.fail(scan.id, 'unavailable')
@@ -593,8 +600,12 @@ export class FaceScanService {
     }
   }
 
-  private async needRetake(id: string, reason: RejectedPhotoReason): Promise<void> {
-    if (await this.repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason, updatedAt: this.now() })) {
+  private async needRetake(scan: FaceScan, reason: RejectedPhotoReason): Promise<void> {
+    const { id, userId, profileId } = scan
+    const at = this.now()
+    if (await this.repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason, updatedAt: at })) {
+      // Only the step that wins this conditional update gets here, so a redelivered step cannot send it twice; `at` keeps each rejection of the scan apart.
+      await this.notifications.faceScanNeedsRetake({ userId, profileId, faceScanId: id, reason, at: at.getTime() })
       await this.publishFrame(id, 'needs-retake', reason, { done: true })
       // The photo will be replaced, so the analysis task is dead weight. A Fitzpatrick task is kept while the profile has no type: it is a read of the same face,
       // it may still complete, and its own step deletes it.

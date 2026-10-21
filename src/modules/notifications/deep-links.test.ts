@@ -10,6 +10,8 @@ const PROVIDED_IDS: Record<(typeof NOTIFICATION_KINDS)[number], string[]> = {
   'scan-finished': ['scanId'],
   'scan-needs-you': ['scanId', 'itemId'],
   'new-sign-in': [],
+  'face-scan-ready': ['faceScanId'],
+  'face-scan-needs-retake': ['faceScanId'],
 }
 
 const templates = deepLinks as Record<string, string>
@@ -37,6 +39,13 @@ describe('the deep-link table (deep-links.json)', () => {
     expect(placeholdersOf(templates['scan-finished']!)).toEqual(['scanId'])
     expect(placeholdersOf(templates['scan-needs-you']!).sort()).toEqual(['itemId', 'scanId'])
     expect(placeholdersOf(templates['new-sign-in']!)).toEqual([])
+    expect(placeholdersOf(templates['face-scan-ready']!)).toEqual(['faceScanId'])
+    expect(placeholdersOf(templates['face-scan-needs-retake']!)).toEqual(['faceScanId'])
+  })
+
+  it('writes the face scan paths exactly as the app routes them', () => {
+    expect(templates['face-scan-ready']).toBe('/scans/faces/{faceScanId}')
+    expect(templates['face-scan-needs-retake']).toBe('/scans/faces/{faceScanId}/retake')
   })
 })
 
@@ -51,6 +60,23 @@ describe('deepLinkFor', () => {
 
   it('opens the security settings for a new sign-in, with no ids', () => {
     expect(deepLinkFor('new-sign-in', {})).toBe('/settings/security')
+  })
+
+  it('opens the face scan for a face scan that is ready', () => {
+    expect(deepLinkFor('face-scan-ready', { faceScanId: 'face-1' })).toBe('/scans/faces/face-1')
+  })
+
+  it('opens the retake screen of the face scan for a photo that needs a retake', () => {
+    expect(deepLinkFor('face-scan-needs-retake', { faceScanId: 'face-1' })).toBe('/scans/faces/face-1/retake')
+  })
+
+  it('URL-encodes the face scan id too, so it can never add a path segment or a query', () => {
+    expect(deepLinkFor('face-scan-ready', { faceScanId: 'a b/c?d' })).toBe('/scans/faces/a%20b%2Fc%3Fd')
+    expect(deepLinkFor('face-scan-needs-retake', { faceScanId: '../x' })).toBe('/scans/faces/..%2Fx/retake')
+  })
+
+  it('refuses to build a face scan link when the notification carries no face scan id', () => {
+    expect(() => deepLinkFor('face-scan-ready', { scanId: 'scan-1' })).toThrow(/faceScanId/)
   })
 
   it('URL-encodes each filled value, so an id can never add a path segment or a query', () => {

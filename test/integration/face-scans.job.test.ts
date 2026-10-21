@@ -22,7 +22,9 @@ const DEAD_LETTER = `deepertones-face-scans-dlq-${env.ENVIRONMENT}`
 const JOB = 'analyse-face-scan'
 
 const recorder = queueRecorder()
-const WORKER_ENV = { ...env, FACE_SCANS_QUEUE: recorder.queue }
+// The push-delivery queue's producer is a recorder too: what the steps queue for the phone is read back from it (sending it is push.background.test.ts's concern).
+const pushRecorder = queueRecorder()
+const WORKER_ENV = { ...env, FACE_SCANS_QUEUE: recorder.queue, PUSH_DELIVERY_QUEUE: pushRecorder.queue }
 const db = createDb(env.DB)
 const faces = new D1FaceScansRepository(db)
 const runs = new D1JobRunsRepository(db)
@@ -36,6 +38,8 @@ afterEach(() => {
   vi.restoreAllMocks()
   recorder.messages.length = 0
   recorder.state.failing = false
+  pushRecorder.messages.length = 0
+  pushRecorder.state.failing = false
 })
 
 const dispatch = async (queue: string, message: { id?: string; attempts?: number; body: unknown }) => {
@@ -408,6 +412,46 @@ describe('the analyse-face-scan job on messages that no longer fit', () => {
 
     expect(await runs.get(JOB, `${scan.id}:fetch:wh:msg_dup`)).toMatchObject({ status: 'done' })
     expect(await countOf('ai_usage', 'id', `perfect-corp:${scan.analysisTask}`)).toBe(1)
+  })
+})
+
+describe('the push notifications the steps queue, through the queue handler', () => {
+  it('queues a face-scan-ready push for the scan\'s profile when the fetch step makes the scan ready, and none before', async () => {
+    const scan = await uploaded()
+    expect(pushRecorder.messages).toEqual([])
+    perfectCorp.answerSkin(scan.analysisTask, () => skinSuccess(glowOutput()))
+
+    const result = await dispatch(MAIN, { id: 'fetch', body: message(scan, 'fetch') })
+
+    expect(result.explicitAcks).toEqual(['fetch'])
+    expect((await rowOf(scan)).state).toBe('ready')
+    expect(pushRecorder.messages).toEqual([{ kind: 'face-scan-ready', userId: scan.userId, profileId: scan.profileId, faceScanId: scan.id }])
+  })
+
+  it('queues a face-scan-needs-retake push, stamped with the update time stored in D1, when the task ended on a photo problem', async () => {
+    const scan = await uploaded()
+    perfectCorp.answerSkin(scan.analysisTask, () => taskError('error_lighting_dark'))
+
+    await dispatch(MAIN, { id: 'fetch', body: message(scan, 'fetch') })
+
+    const row = await rowOf(scan)
+    expect(row).toMatchObject({ state: 'needs-retake', reason: 'too-dark' })
+    expect(pushRecorder.messages).toEqual([
+      { kind: 'face-scan-needs-retake', userId: scan.userId, profileId: scan.profileId, faceScanId: scan.id, reason: 'too-dark', at: row.updatedAt.getTime() },
+    ])
+  })
+
+  it('does not fail or retry the step when the push cannot be queued: the scan is still ready and the message is acked', async () => {
+    const scan = await uploaded()
+    perfectCorp.answerSkin(scan.analysisTask, () => skinSuccess(glowOutput()))
+    pushRecorder.state.failing = true
+
+    const result = await dispatch(MAIN, { id: 'fetch', body: message(scan, 'fetch') })
+
+    expect(result.explicitAcks).toEqual(['fetch'])
+    expect(result.retryMessages).toEqual([])
+    expect((await rowOf(scan)).state).toBe('ready')
+    expect(pushRecorder.messages).toEqual([])
   })
 })
 

@@ -3,6 +3,7 @@ import { hmacSha256Hex, sha256Hex } from '../../lib/crypto'
 import { requireUser } from '../../lib/context'
 import { ValidationError } from '../../lib/errors'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
+import type { RejectedPhotoReason } from '../../providers/perfect-corp/perfect-corp.provider'
 import { type PushMessage, type PushSender, PushUnavailableError, isExpoPushToken } from '../../providers/push/push.provider'
 import { deepLinkFor } from './deep-links'
 import { type CheckPushReceiptsMessage, type SendPushMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
@@ -31,6 +32,16 @@ export type ScanNotificationSettings = Pick<NotificationSettings, 'scanFinished'
 export class NotificationsService {
   // Expo needs a while to hand a message to Apple or Google before it has a receipt to give.
   private static readonly RECEIPT_DELAY_SECONDS = 15 * 60
+
+  // Generic by decision, like every push: no word about the skin, the light on it, or a score.
+  private static readonly RETAKE_TEXT: Record<RejectedPhotoReason, string> = {
+    'too-dark': 'Find more light and take it again',
+    'turn-to-camera': 'Face the camera and take it again',
+    'move-closer': 'Move a little closer and take it again',
+    'face-not-centred': 'Centre your face in the frame and take it again',
+    'no-face': "We couldn't find a face. Take it again",
+    'image-size': 'Take it again at full size',
+  }
 
   private readonly pushTokens: PushTokensRepository
   private readonly settingsRepository: NotificationSettingsRepository
@@ -124,6 +135,19 @@ export class NotificationsService {
    */
   async scanNeedsYou(input: { userId: string; profileId: string; scanId: string; itemId: string; need: 'back-photo' | 'confirm' | 'identify'; ask?: number }): Promise<void> {
     await this.enqueue({ kind: 'scan-needs-you', ...input })
+  }
+
+  /** Queues "your face scan is ready" for the face scan's profile. A failed enqueue is logged and swallowed. */
+  async faceScanReady(input: { userId: string; profileId: string; faceScanId: string }): Promise<void> {
+    await this.enqueue({ kind: 'face-scan-ready', ...input })
+  }
+
+  /**
+   * Queues "your face photo needs a retake" for the face scan's profile. `at` is when the scan went to needs-retake (the `updatedAt`
+   * written), which makes each rejection of one scan its own notification. A failed enqueue is logged and swallowed.
+   */
+  async faceScanNeedsRetake(input: { userId: string; profileId: string; faceScanId: string; reason: RejectedPhotoReason; at: number }): Promise<void> {
+    await this.enqueue({ kind: 'face-scan-needs-retake', ...input })
   }
 
   /**
@@ -230,7 +254,7 @@ export class NotificationsService {
       await this.jobs.enqueue(sendPushSpec, body)
     } catch {
       // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
-      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}) })
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}) })
     }
   }
 
@@ -238,10 +262,17 @@ export class NotificationsService {
   private async wanted(body: SendPushMessage): Promise<boolean> {
     if (body.kind === 'new-sign-in') return true
     const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
-    return body.kind === 'scan-finished' ? switches.scanFinished : switches.scanNeedsYou
+    switch (body.kind) {
+      case 'scan-finished':
+      case 'face-scan-ready':
+        return switches.scanFinished
+      case 'scan-needs-you':
+      case 'face-scan-needs-retake':
+        return switches.scanNeedsYou
+    }
   }
 
-  /** Scan notifications go to the phones on the scan's profile; the sign-in alert goes to every phone of the account. */
+  /** Scan and face scan notifications go to the phones on the scan's profile; the sign-in alert goes to every phone of the account. */
   private async phonesFor(body: SendPushMessage): Promise<PushToken[]> {
     // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
     if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
@@ -270,6 +301,18 @@ export class NotificationsService {
           data: { url: deepLinkFor(body.kind, { scanId: body.scanId, itemId: body.itemId }), kind: body.kind, scanId: body.scanId, itemId: body.itemId, profileId: body.profileId },
         }
       }
+      case 'face-scan-ready':
+        return {
+          title: 'Your face scan is ready',
+          body: 'Open the app to see what we noticed',
+          data: { url: deepLinkFor(body.kind, { faceScanId: body.faceScanId }), kind: body.kind, faceScanId: body.faceScanId, profileId: body.profileId },
+        }
+      case 'face-scan-needs-retake':
+        return {
+          title: 'Your face photo needs a retake',
+          body: NotificationsService.RETAKE_TEXT[body.reason],
+          data: { url: deepLinkFor(body.kind, { faceScanId: body.faceScanId }), kind: body.kind, faceScanId: body.faceScanId, reason: body.reason, profileId: body.profileId },
+        }
       case 'new-sign-in': {
         const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''
         return {
