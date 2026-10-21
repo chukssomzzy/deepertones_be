@@ -12,7 +12,17 @@ const SIZE = /\b(\d+(?:\.\d+)?)\s*(fl\s*oz|floz|ml|kg|mg|oz|l|g)\b/gi
 export const stripSizes = (text: string): string =>
   text.replace(SIZE, (match, amount: string, unit: string) => (/^[gl]$/i.test(unit) && Number(amount) < 10 ? match : ' '))
 
-const comparable = (raw: string | null | undefined): string => stripSizes(normaliseText(raw ?? '')).replace(/\s+/g, ' ').trim()
+const PERCENT_NUMBER = /(\d+(?:\.\d+)?)\s*%/g
+
+// A "%" glues its number to a letter-only suffix before normalising, so "100%" (or "100 %", a space before the
+// sign) never reads as "100" next to a bare "l" or "g" word (which stripSizes would then take for litres or grams)
+// once the "%" itself is normalised to a space. "pct" is removed again once stripSizes has run, so the key ends up
+// with the plain number, as if there had been no size.
+const guardPercent = (text: string): string => text.replace(PERCENT_NUMBER, '$1pct ')
+const unguardPercent = (text: string): string => text.replace(/(\d+(?:\.\d+)?)pct\b/g, '$1')
+
+const comparable = (raw: string | null | undefined): string =>
+  unguardPercent(stripSizes(normaliseText(guardPercent(raw ?? '')))).replace(/\s+/g, ' ').trim()
 
 type Named = { name: string; variant?: string | null; brand?: string }
 type Branded = Named & { brand: string; form?: string | null }
@@ -29,8 +39,43 @@ export const sameBrandFamily = (brandA: string, brandB: string): boolean => bran
 export const identityKey = (product: Branded): string =>
   `${brandKey(product.brand)}|${comparable(product.name)}|${comparable(product.variant)}|${product.form ?? ''}`
 
+// A fixed, reviewed list of whole-word UK/US spelling pairs, for near-miss scoring only (nameSimilarity, the
+// containment relation, the edition check); identityKey never folds, so a UK and a US reading keep different keys
+// until the judge is asked. No generic suffix rule: "rise", "wise", "promise" and "anise" are not -ise words and
+// must not fold, and "greyhound" and "centred" are whole other words, not "grey" or "centre" with a suffix.
+const UK_TO_US_SPELLING: Readonly<Record<string, string>> = {
+  moisturise: 'moisturize',
+  moisturised: 'moisturized',
+  moisturiser: 'moisturizer',
+  moisturisers: 'moisturizers',
+  moisturising: 'moisturizing',
+  moisturisation: 'moisturization',
+  sanitise: 'sanitize',
+  sanitised: 'sanitized',
+  sanitiser: 'sanitizer',
+  sanitisers: 'sanitizers',
+  sanitising: 'sanitizing',
+  sanitisation: 'sanitization',
+  normalise: 'normalize',
+  normalised: 'normalized',
+  normaliser: 'normalizer',
+  normalisers: 'normalizers',
+  normalising: 'normalizing',
+  normalisation: 'normalization',
+  colour: 'color',
+  colours: 'colors',
+  coloured: 'colored',
+  colouring: 'coloring',
+  centre: 'center',
+  centres: 'centers',
+  grey: 'gray',
+}
+
+/** A whole word's UK spelling as its US one, from the reviewed list above; any other word passes through unchanged. */
+const foldSpelling = (word: string): string => UK_TO_US_SPELLING[word] ?? word
+
 const words = (product: Named): Set<string> =>
-  new Set(comparable(`${product.brand ?? ''} ${product.name} ${product.variant ?? ''}`).split(' ').filter(Boolean))
+  new Set(comparable(`${product.brand ?? ''} ${product.name} ${product.variant ?? ''}`).split(' ').filter(Boolean).map(foldSpelling))
 
 /** Jaccard ratio of the words in the brand, name and variant, pooled so a word may sit in any of them: 1 for the same words, 0 for none shared. */
 export const nameSimilarity = (a: Named, b: Named): number => {
@@ -64,7 +109,7 @@ export const lessSpecific = (reading: Named, product: Named): boolean => relatio
 export const namesAnotherEdition = (label: Named, product: Named): boolean => {
   if (product.variant) return false
   const held = words(product)
-  return comparable(label.variant).split(' ').some((w) => w !== '' && !held.has(w))
+  return comparable(label.variant).split(' ').map(foldSpelling).some((w) => w !== '' && !held.has(w))
 }
 
 /**
@@ -127,7 +172,7 @@ export const pagesByNameMatch = (pages: string[], product: Named & { brand: stri
 const contains = (a: Branded, b: Branded): boolean => {
   const [wa, wb] = [words(a), words(b)]
   const beyond = (p: Branded, w: Set<string>, ignore: Set<string> = new Set()): boolean => {
-    const brand = new Set(comparable(p.brand).split(' '))
+    const brand = new Set(comparable(p.brand).split(' ').map(foldSpelling))
     return !['subset', 'equal'].includes(relation(w, new Set([...brand, ...ignore])))
   }
   if (!beyond(a, wa) || !beyond(b, wb)) return false
@@ -138,8 +183,10 @@ const contains = (a: Branded, b: Branded): boolean => {
 /**
  * Products of the same brand family (first word) whose words nearly match (Jaccard at the threshold, or one reading's words all inside
  * the other's) but whose identity key differs: the cases for the model to decide (same product or not). Best first, equal similarity by id.
+ * A row's own stored key stands even when recomputing its fields today would no longer produce it: a key rule change (the % fix) must
+ * not hide an old row from the judge, or it becomes a silent duplicate. A row without a stored key falls back to the recomputed one.
  */
-export const nearMissCandidates = <P extends Branded & { id: string }>(
+export const nearMissCandidates = <P extends Branded & { id: string; identityKey?: string }>(
   target: Branded,
   products: P[],
   options: { threshold?: number; limit?: number } = {},
@@ -147,7 +194,7 @@ export const nearMissCandidates = <P extends Branded & { id: string }>(
   const { threshold = 0.6, limit = 3 } = options
   const targetKey = identityKey(target)
   return products
-    .filter((p) => sameBrandFamily(p.brand, target.brand) && identityKey(p) !== targetKey)
+    .filter((p) => sameBrandFamily(p.brand, target.brand) && (p.identityKey ?? identityKey(p)) !== targetKey)
     .map((p) => ({ product: p, similarity: nameSimilarity(target, p) }))
     .filter((c) => c.similarity >= threshold || contains(target, c.product))
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))
