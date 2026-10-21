@@ -7,7 +7,7 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal and read-mentions.
+// The same mapping as the container: vision covers image-check, recognize, recognize-shelf-product and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal and read-mentions.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
@@ -15,6 +15,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'image-check': 'ANTHROPIC_MODEL_VISION',
   recognize: 'ANTHROPIC_MODEL_VISION',
   'recognize-shelf': 'ANTHROPIC_MODEL_RECOGNIZE_SHELF',
+  'recognize-shelf-product': 'ANTHROPIC_MODEL_VISION',
   'read-label': 'ANTHROPIC_MODEL_VISION',
   'split-name': 'ANTHROPIC_MODEL_JUDGE',
   'read-goal': 'ANTHROPIC_MODEL_JUDGE',

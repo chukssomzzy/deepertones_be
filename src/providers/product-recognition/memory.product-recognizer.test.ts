@@ -51,7 +51,7 @@ describe('MemoryProductRecognizer', () => {
 
 const SHELF: ShelfRecognition = {
   classification: 'beauty-product',
-  products: [{ brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin', confidence: 0.9 }],
+  products: [{ position: 'left', brand: 'Glow Co', name: 'Bright Tone Serum', category: 'skin', confidence: 0.9 }],
   excluded: { otherProducts: 1, unreadable: 0 },
 }
 
@@ -116,5 +116,73 @@ describe('MemoryProductRecognizer recognizeShelf', () => {
 
     await expect(recognizer.recognizeShelf(IMAGE)).rejects.toBe(failure)
     await expect(recognizer.recognize(IMAGE)).resolves.toEqual({ classification: 'unreadable' })
+  })
+})
+
+const TARGET = { position: 'orange jar, bottom right', hint: { brand: 'Glow Co', name: 'Bright Tone' } }
+
+describe('MemoryProductRecognizer recognizeShelfProduct', () => {
+  it('says unreadable until told otherwise', async () => {
+    const recognizer = new MemoryProductRecognizer()
+
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).resolves.toStrictEqual({ classification: 'unreadable' })
+  })
+
+  it('answers with what the function given to respondToShelfProductWith computes from the image and the target', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    recognizer.respondToShelfProductWith((image, target) => (target.position === 'orange jar, bottom right' && image.mediaType === 'image/webp' ? SERUM : { classification: 'other-product' }))
+
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).resolves.toEqual(SERUM)
+    await expect(recognizer.recognizeShelfProduct(IMAGE, { ...TARGET, position: 'elsewhere' })).resolves.toEqual({ classification: 'other-product' })
+  })
+
+  it('records every image and target it was shown in shelfProductCalls, in order, apart from calls and shelfCalls', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    const other: ProductImage = { bytes: new Uint8Array([9]), mediaType: 'image/jpeg' }
+    const second = { position: 'blue tube, left', hint: { brand: 'Nuxe', name: 'Huile', variant: 'Néroli' } }
+
+    await recognizer.recognizeShelfProduct(IMAGE, TARGET)
+    await recognizer.recognizeShelfProduct(other, second)
+
+    expect(recognizer.shelfProductCalls).toEqual([
+      { image: IMAGE, target: TARGET },
+      { image: other, target: second },
+    ])
+    expect(recognizer.calls).toEqual([])
+    expect(recognizer.shelfCalls).toEqual([])
+  })
+
+  it('does not change what recognize or recognizeShelf answer, and they do not change the second look', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    recognizer.respondWith(() => SERUM)
+    recognizer.respondToShelfWith(() => SHELF)
+    recognizer.respondToShelfProductWith(() => ({ classification: 'face-or-person' }))
+
+    await expect(recognizer.recognize(IMAGE)).resolves.toEqual(SERUM)
+    await expect(recognizer.recognizeShelf(IMAGE)).resolves.toEqual(SHELF)
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).resolves.toEqual({ classification: 'face-or-person' })
+  })
+
+  it('failNextWith rejects the next second look only, records nothing for it, then recovers', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    recognizer.respondToShelfProductWith(() => SERUM)
+    const failure = new Error('boom')
+    recognizer.failNextWith(failure)
+
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).rejects.toBe(failure)
+    expect(recognizer.shelfProductCalls).toEqual([])
+
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).resolves.toEqual(SERUM)
+    expect(recognizer.shelfProductCalls).toEqual([{ image: IMAGE, target: TARGET }])
+  })
+
+  it('failNextWith fails whichever method is called next, and only once across all three', async () => {
+    const recognizer = new MemoryProductRecognizer()
+    const failure = new Error('boom')
+    recognizer.failNextWith(failure)
+
+    await expect(recognizer.recognizeShelfProduct(IMAGE, TARGET)).rejects.toBe(failure)
+    await expect(recognizer.recognize(IMAGE)).resolves.toEqual({ classification: 'unreadable' })
+    await expect(recognizer.recognizeShelf(IMAGE)).resolves.toMatchObject({ classification: 'unreadable' })
   })
 })

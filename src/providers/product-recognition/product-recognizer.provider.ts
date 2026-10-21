@@ -13,8 +13,14 @@ export type Recognition =
   /** Nothing usable: blurry, dark, no product, or an answer that could not be accepted. */
   | { classification: 'unreadable' }
 
-/** One beauty or personal-care product read on a shelf. `confidence` is 0 to 1. */
-export type ShelfProduct = { brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory; confidence: number }
+/**
+ * One beauty or personal-care product read on a shelf. `confidence` is 0 to 1. `position` is a few words on where it sits in the photo
+ * ("orange jar, bottom right"), only to aim a second look at it: never shown to the user, empty when it was not given or was out of bounds.
+ */
+export type ShelfProduct = { position: string; brand: string; name: string; variant?: string; form?: ProductForm; category: ProductCategory; confidence: number }
+
+/** Which product of a shelf photo to read again, and what the first read of the whole shelf said about it. */
+export type ShelfProductTarget = { position: string; hint: { brand: string; name: string; variant?: string } }
 
 /** What a shelf photo holds. Products are the readable beauty or personal-care ones, at most 5, most confident first. */
 export type ShelfRecognition = {
@@ -33,4 +39,6 @@ export interface ProductRecognizer {
   recognize(image: ProductImage): Promise<Recognition>
   /** Lists the products on a shelf photo. */
   recognizeShelf(image: ProductImage): Promise<ShelfRecognition>
+  /** Reads the one product of a shelf photo at `target.position`. `target.hint` is the shelf call's reading of it, possibly incomplete or wrong. */
+  recognizeShelfProduct(image: ProductImage, target: ShelfProductTarget): Promise<Recognition>
 }

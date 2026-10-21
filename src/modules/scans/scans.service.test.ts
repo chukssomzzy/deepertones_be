@@ -6523,7 +6523,7 @@ describe('ScanService: push notifications', () => {
 const createShelf = (ctx: Ctx, photos: ProductImage[] = [markedJpeg(1)], over: { ip?: string; userId?: string; profileId?: string } = {}): Promise<any> =>
   asUser(() => ctx.service.createShelf({ photos, clientIp: over.ip ?? IP }), over.userId ?? USER, over.profileId ?? PROFILE)
 
-const shelfProduct = (name: string, confidence = 0.9, over: Partial<ShelfProduct> = {}): ShelfProduct => ({ brand: 'Glow Co', name, category: 'skin', confidence, ...over })
+const shelfProduct = (name: string, confidence = 0.9, over: Partial<ShelfProduct> = {}): ShelfProduct => ({ position: '', brand: 'Glow Co', name, category: 'skin', confidence, ...over })
 const shelfRead = (products: ShelfProduct[], over: Partial<ShelfRecognition> = {}): ShelfRecognition => ({
   classification: 'beauty-product',
   products,

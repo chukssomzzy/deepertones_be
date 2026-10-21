@@ -1,5 +1,5 @@
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
-import type { ProductRecognizer, Recognition, ShelfRecognition } from './product-recognizer.provider'
+import type { ProductRecognizer, Recognition, ShelfProductTarget, ShelfRecognition } from './product-recognizer.provider'
 
 /** Answers from a function you set ("unreadable" until then), and records the images it was shown. For tests. */
 export class MemoryProductRecognizer implements ProductRecognizer {
@@ -7,6 +7,8 @@ export class MemoryProductRecognizer implements ProductRecognizer {
   private answer: (image: ProductImage) => Recognition = () => ({ classification: 'unreadable' })
   readonly shelfCalls: ProductImage[] = []
   private shelfAnswer: (image: ProductImage) => ShelfRecognition = () => ({ classification: 'unreadable', products: [], excluded: { otherProducts: 0, unreadable: 0 } })
+  readonly shelfProductCalls: { image: ProductImage; target: ShelfProductTarget }[] = []
+  private shelfProductAnswer: (image: ProductImage, target: ShelfProductTarget) => Recognition = () => ({ classification: 'unreadable' })
   private failure: Error | undefined
 
   respondWith(answer: (image: ProductImage) => Recognition) {
@@ -17,7 +19,11 @@ export class MemoryProductRecognizer implements ProductRecognizer {
     this.shelfAnswer = answer
   }
 
-  /** The next recognize() or recognizeShelf(), whichever comes first, rejects with `error` and records nothing. */
+  respondToShelfProductWith(answer: (image: ProductImage, target: ShelfProductTarget) => Recognition) {
+    this.shelfProductAnswer = answer
+  }
+
+  /** The next recognize(), recognizeShelf() or recognizeShelfProduct(), whichever comes first, rejects with `error` and records nothing. */
   failNextWith(error: Error) {
     this.failure = error
   }
@@ -32,6 +38,12 @@ export class MemoryProductRecognizer implements ProductRecognizer {
     this.throwIfFailing()
     this.shelfCalls.push(image)
     return this.shelfAnswer(image)
+  }
+
+  async recognizeShelfProduct(image: ProductImage, target: ShelfProductTarget): Promise<Recognition> {
+    this.throwIfFailing()
+    this.shelfProductCalls.push({ image, target })
+    return this.shelfProductAnswer(image, target)
   }
 
   private throwIfFailing() {

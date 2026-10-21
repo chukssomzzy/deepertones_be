@@ -1,11 +1,11 @@
 import { z } from 'zod'
 import { base64Of } from '../../lib/base64'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
-import { productRecognizerRecognizePrompt, productRecognizerRecognizeShelfPrompt } from '../../prompts/prompts.generated'
+import { productRecognizerRecognizePrompt, productRecognizerRecognizeShelfPrompt, productRecognizerRecognizeShelfProductPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
 import { PRODUCT_FORMS, type ProductCategory, type ProductForm } from '../product-research/product-researcher.provider'
-import type { ProductRecognizer, Recognition, ShelfProduct, ShelfRecognition } from './product-recognizer.provider'
+import type { ProductRecognizer, Recognition, ShelfProduct, ShelfProductTarget, ShelfRecognition } from './product-recognizer.provider'
 
 type Answer = {
   classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable' | 'label-not-visible'
@@ -19,7 +19,7 @@ type Answer = {
 
 type ShelfAnswer = {
   classification: 'beauty-product' | 'other-product' | 'face-or-person' | 'unreadable'
-  products: Omit<Answer, 'classification'>[]
+  products: (Omit<Answer, 'classification'> & { position: string })[]
   excluded: { otherProducts: number; unreadable: number }
 }
 
@@ -59,7 +59,12 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
 
   private static readonly SHELF_SCHEMA = z.object({
     classification: z.enum(['beauty-product', 'other-product', 'face-or-person', 'unreadable']),
-    products: z.array(z.object(AnthropicProductRecognizer.PRODUCT_FIELDS)),
+    products: z.array(
+      z.object({
+        position: AnthropicProductRecognizer.orEmpty(z.string().describe('Where the product sits in the photo, in a few words')),
+        ...AnthropicProductRecognizer.PRODUCT_FIELDS,
+      }),
+    ),
     excluded: z.object({
       otherProducts: z.number().describe('Products that are not beauty or personal care'),
       unreadable: z.number().describe('Beauty or personal-care products whose brand or name cannot be read'),
@@ -114,6 +119,34 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     return AnthropicProductRecognizer.acceptShelf(answer)
   }
 
+  async recognizeShelfProduct(image: ProductImage, target: ShelfProductTarget): Promise<Recognition> {
+    // JSON.stringify, so a quote or newline in the position or hint cannot break out of the sentence.
+    const text = `Read the product at this position: ${JSON.stringify(target.position)}. A quick read of the shelf gave: ${JSON.stringify(AnthropicProductRecognizer.hintOf(target.hint))}.`
+    const answer = await this.client.structured(
+      {
+        max_tokens: AnthropicProductRecognizer.MAX_TOKENS,
+        system: productRecognizerRecognizeShelfProductPrompt.text,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { type: 'image', source: { type: 'base64', media_type: image.mediaType, data: base64Of(image.bytes) } },
+              { type: 'text', text },
+            ],
+          },
+        ],
+      },
+      AnthropicProductRecognizer.SCHEMA,
+      { job: productRecognizerRecognizeShelfProductPrompt.job },
+    )
+    return AnthropicProductRecognizer.accept(answer)
+  }
+
+  /** The hint's fields in a fixed order, the variant left out when absent. */
+  private static hintOf(hint: ShelfProductTarget['hint']) {
+    return { brand: hint.brand, name: hint.name, ...(hint.variant === undefined ? {} : { variant: hint.variant }) }
+  }
+
   private static orEmpty<T extends z.ZodType<string>>(schema: T) {
     return z.preprocess((value) => value ?? '', schema)
   }
@@ -129,16 +162,21 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
   private static accept(answer: Answer): Recognition {
     if (answer.classification !== 'beauty-product') return { classification: answer.classification }
     const product = AnthropicProductRecognizer.acceptProduct(answer)
-    return product ? { classification: 'beauty-product', ...product } : AnthropicProductRecognizer.UNREADABLE
+    if (!product) return AnthropicProductRecognizer.UNREADABLE
+    // A single scan has no position to give.
+    const { position: _position, ...read } = product
+    return { classification: 'beauty-product', ...read }
   }
 
   /** The product with clean text and a clamped confidence, or undefined when any text field is out of bounds. */
-  private static acceptProduct(answer: Omit<Answer, 'classification'>): ShelfProduct | undefined {
+  private static acceptProduct(answer: Omit<Answer, 'classification'> & { position?: string }): ShelfProduct | undefined {
     const brand = AnthropicProductRecognizer.cleanText(answer.brand)
     const name = AnthropicProductRecognizer.cleanText(answer.name)
     const variant = AnthropicProductRecognizer.cleanText(answer.variant)
     if (!brand || !name || variant === undefined || Number.isNaN(answer.confidence)) return undefined
     return {
+      // Only aims a second look, so a bad one is blanked and the product kept.
+      position: AnthropicProductRecognizer.cleanText(answer.position ?? '') ?? '',
       brand,
       name,
       ...(variant === '' ? {} : { variant }),
