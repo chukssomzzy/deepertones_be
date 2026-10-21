@@ -8,6 +8,7 @@ import { jobs } from '../../src/jobs/registry'
 import { runAs } from '../../src/lib/context'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
+import { D1CatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
@@ -86,6 +87,7 @@ const catalogued = async (brand: string) => {
   researcher.respondWith(() => ({ found: true, ingredients: CLEAN, sourceUrl: SOURCE_URL }))
   const catalog = new ProductCatalogService({
     repository: new D1CatalogRepository(db),
+    workbook: new D1CatalogWorkbookRepository(db),
     researcher,
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),

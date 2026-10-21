@@ -1563,14 +1563,39 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   `db.batch`: delete the old traits, delete the old concerns, insert each concern (one statement per concern, under
   D1's 100-parameter limit), insert the traits (de-duplicated per concern), and set the versions on the formulation.
   A reader sees the old analysis or the new one, never half of either.
-- **The seed reference list** (`catalog.reference.ts`, `REFERENCE_VERSION`) is the deterministic safety net: the rule
-  checks (`flagFacts`) match each ingredient exactly against hand-compiled names and aliases, including the parts of
-  `Aqua (Water)`, `Parfum/Fragrance` and `Hydroquinone 4%`. **It is a seed, not the full CosIng annexes**, and
-  `REFERENCE_COVERAGE` is `'partial'`: the catalog service must carry that to users so a clean result never reads as
-  an all-clear. Banned substances and the named fragrance allergens carry an https regulation URL as their `source`;
-  commonly cited concerns (pore-clogging, sun sensitivity, irritation, pregnancy caution, undisclosed fragrance) have
-  a `null` source and say so in their rule, so a regulation is never shown as backing something no regulation says.
-  A `null` source is left out of the analyst's prompt.
+- **The ingredient rules are data in D1**, not code. `ingredient_rules` holds one row per rule: a stable `code`, the normalised `name` and
+  `aliases` (JSON), a `kind`, the `statement` the analyst is shown, an https `source_url` (or `null`), the skin concerns it `helps`, a `status` of
+  `draft`, `approved` or `retired`, who approved and audited it, and `updated_in_version`. **Only an approved rule is matched**: a draft applies to
+  nothing, and a retired row stays so its code is never reused. `catalog_versions` has one row per applied upload: an integer `version` that goes up by 1,
+  the `rules_version`, the `contract_version` it was written to, who uploaded it and the archive key (`null` for the seed). The **live rules version**
+  is the `rules_version` of the latest row. It is a string that changes only when the set of approved rules does, and it is what
+  `formulations.reference_version` and `analysis_attempts.reference_version` record; the column names are older than the table, and were not renamed.
+- **The seed** is the migration that created both tables (`0031_*`, from `npm run db:generate`, with the seed appended). It inserts one approved rule
+  for each entry of `REFERENCE` (`catalog.reference.ts`), signed `reference seed`, and catalog version 1 under the rules version `seed-2026-10`, which is
+  what `REFERENCE_VERSION` was when the rules lived in code, so no formulation analysed before the migration is analysed again. The SQL is written by
+  `scripts/catalog/seed-rules-sql.ts` and a test fails if the migration ends with anything else. A rule's code is `seedRuleCode(entry)`
+  (`catalog.workbook.seed.ts`): `ING-<NAME>-<KIND>`, in capitals, cut to 40. **`REFERENCE` is frozen**: it is the seed and the eval's fixture, never edited
+  to change a rule. The workbook is where a rule changes.
+- **`liveRules()`** (`CatalogWorkbookRepository`, in the catalog module) returns `{ version, entries }`: the latest rules version, and the approved rules
+  in the shape the matcher reads, in code order. It reads the latest version on every call, and keeps the entries per isolate, **keyed by that version**
+  (a version names one set of rules, so they are read again only when it moves). When the version has moved, it reads the version and the rule rows in ONE
+  `db.batch`, so an upload cannot land between them and leave new rules stored under the old version. `ProductCatalogService` reads it only where it needs
+  it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
+  formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
+  one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
+- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: four tabs, their columns, accepted values and
+  length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
+  value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
+  empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
+  pure and named `.schema.ts` because dependency-cruiser treats `*.contract.ts` as test-only. It has a `CONTRACT_VERSION` and a fingerprint of its
+  definitions; a test pins the released fingerprint, so a change to what a workbook may hold cannot go unversioned. **`docs/catalog-workbook-contract.md` is
+  generated** from it by `npm run catalog:contract-doc`, for the people who fill the workbook in, and a scripts test fails when it is stale.
+- **The reference coverage is still partial.** The seed is **not the full CosIng annexes**, and `REFERENCE_COVERAGE` is `'partial'`: the catalog service
+  must carry that to users so a clean result never reads as an all-clear. The `flagFacts` rule checks match each ingredient exactly against names and
+  aliases, including the parts of `Aqua (Water)`, `Parfum/Fragrance` and `Hydroquinone 4%`. Banned substances and the named fragrance allergens carry
+  an https regulation URL as their `source`; commonly cited concerns (pore-clogging, sun sensitivity, irritation, pregnancy caution, undisclosed
+  fragrance) have a `null` source and say so in their rule, so a regulation is never shown as backing something no regulation says. A `null` source is
+  left out of the analyst's prompt.
 - **Follow-ups:** a proper import of the public CosIng export; the expanded labelled-allergen list from Regulation
   (EU) 2023/1545 (about 80 substances, where the seed has the original 26); restricted substances with their limits
   and conditions of use; alias coverage, which is hand-built.
@@ -1592,7 +1617,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   finds it (a near miss goes to the model; a label with no category compares with the brand's products of every category, and a new product is
   filed under `other`), the product's own formulation for the list is used if it has one, else an unnamed product's is adopted, else a new label
   formulation is stored; if the adoption loses to another call, the product's own formulation is used or stored, never the other's. Without
-  both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and `REFERENCE_VERSION`) so the scan can
+  both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and live rules version) so the scan can
   skip the analyse step. Callers (the scan jobs) run one of these per step.
 - **search, namedProduct and choose** serve a user who names a product by hand (see "Product search" and `identifyByName`).
   `search(q)` normalises the query with `normaliseText` and returns at most 10 `{ id, brand, name, variant, category, imageUrl }`, or `[]` for a
@@ -1604,7 +1629,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   written. An id the catalog does not hold, and an unnamed product, are `NotFoundError('PRODUCT_NOT_FOUND')` for both.
 - **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest
   formulation as `found` when it is fresh, without calling the researcher or recording an attempt. `analyse` returns at
-  once when the formulation is already analysed by the current `ANALYSIS_VERSION` and `REFERENCE_VERSION`.
+  once when the formulation is already analysed by the current `ANALYSIS_VERSION` and live rules version.
 - **Concurrency converges through unique keys, not locks.** `createProduct` is insert-or-ignore on the identity key,
   `addAlias` on the alias key, and `createFormulation` on `(product_id, ingredients_key)` (a unique index, migration
   0007); each returns the stored row, so two writers of the same thing carry on with the same row. `storeFormulation`
@@ -1617,7 +1642,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   taken as lost to a crash and no longer shields the work. The check reads the last attempt and the started write
   follows it, so two calls in the same instant can still both pass; the window narrows the double spend, it is not a lock.
 - **Lazy re-analysis, not background re-analysis.** The issue asks for formulations to be re-analysed in the
-  background when `ANALYSIS_VERSION` (or `REFERENCE_VERSION`) is bumped. That is a deliberate deviation: a version
+  background when `ANALYSIS_VERSION` (or the live rules version) changes. That is a deliberate deviation: a version
   bump only makes `resolve` answer `needs-analysis` the next time that product is scanned, and the same goes for a
   formulation found more than `FRESH_FOR_DAYS` ago, which answers `needs-research` (a formulation of exactly
   `FRESH_FOR_DAYS` is still fresh). It is cheaper (products nobody scans again cost nothing, and a bump does not
@@ -2209,7 +2234,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
   `checkAnalysis`, exactly as the service does, and scores what would be stored: every flagged fact is covered by a
   concern of its kind naming its ingredient, and a banned substance is judged high. A case's expected facts are
-  checked against `flagFacts` in `cases.test.ts`, so a case cannot drift from the reference data.
+  checked against `flagFacts` over `REFERENCE` in `cases.test.ts`, so a case cannot drift from the seed rules.
 - **Research mode** runs `AnthropicProductResearcher` on real products sold in Nigeria and checks the product is found
   and the list holds the ingredients we expect. These check retrieval quality, not ground truth: a brand can
   reformulate, so a failing research case may need its data updated.

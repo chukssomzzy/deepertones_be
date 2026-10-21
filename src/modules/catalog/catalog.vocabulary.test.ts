@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { productAnalystAnalysePrompt } from '../../prompts/prompts.generated'
-import { ANALYSIS_VERSION, CATEGORIES, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } from './catalog.vocabulary'
+import { ANALYSIS_VERSION, BUDGET_BANDS, CATEGORIES, CONCERN_KINDS, FREQUENCIES, FRESH_FOR_DAYS, ORIGINS, ROUTINE_STEPS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 describe('catalog vocabulary', () => {
   it('lists the product categories', () => {
@@ -53,6 +53,23 @@ describe('catalog vocabulary', () => {
     ])
   })
 
+  // The recommendation catalog's own vocabularies (spec #115). The workbook contract accepts exactly these values, in these spellings.
+  it('lists the routine steps, in the order a routine is done', () => {
+    expect(ROUTINE_STEPS).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
+  })
+
+  it('lists how often a product is used', () => {
+    expect(FREQUENCIES).toEqual(['am', 'pm', 'am-pm', 'alternate-days', 'weekly', 'as-needed'])
+  })
+
+  it('lists the budget bands, cheapest first', () => {
+    expect(BUDGET_BANDS).toEqual(['low', 'mid', 'high'])
+  })
+
+  it('lists where a recommendation came from', () => {
+    expect(ORIGINS).toEqual(['sourced', 'brand-submitted'])
+  })
+
   it('starts the analysis at version 1 and keeps a formulation fresh for a year', () => {
     expect(ANALYSIS_VERSION).toBe(1)
     expect(FRESH_FOR_DAYS).toBe(365)
@@ -72,6 +89,10 @@ describe('catalog vocabulary', () => {
     ['CONCERN_KINDS', CONCERN_KINDS],
     ['SEVERITIES', SEVERITIES],
     ['TRAITS', TRAITS],
+    ['ROUTINE_STEPS', ROUTINE_STEPS],
+    ['FREQUENCIES', FREQUENCIES],
+    ['BUDGET_BANDS', BUDGET_BANDS],
+    ['ORIGINS', ORIGINS],
   ])('%s has no duplicates', (_name, list) => {
     expect(new Set(list).size).toBe(list.length)
   })

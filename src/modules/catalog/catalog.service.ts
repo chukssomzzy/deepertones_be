@@ -9,11 +9,12 @@ import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
 import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
-import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
+import { REFERENCE_COVERAGE } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
 import { flagFacts } from './catalog.rules'
 import type { Formulation, Product } from './catalog.types'
 import { ANALYSIS_VERSION, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } from './catalog.vocabulary'
+import type { CatalogWorkbookRepository } from './catalog.workbook.repository'
 
 export type CatalogPolicy = {
   dailyResearchBudget: number
@@ -69,6 +70,8 @@ export class CatalogBusyError extends UnavailableError {
 
 export type ProductCatalogServiceDeps = {
   repository: CatalogRepository
+  /** The live ingredient rules and the rules version they are under. */
+  workbook: CatalogWorkbookRepository
   researcher: ProductResearcher
   analyst: ProductAnalyst
   images: CatalogImageStore
@@ -218,6 +221,7 @@ export class ProductCatalogService {
   }
 
   private readonly repository: CatalogRepository
+  private readonly workbook: CatalogWorkbookRepository
   private readonly researcher: ProductResearcher
   private readonly analyst: ProductAnalyst
   private readonly images: CatalogImageStore
@@ -229,6 +233,7 @@ export class ProductCatalogService {
 
   constructor(deps: ProductCatalogServiceDeps) {
     this.repository = deps.repository
+    this.workbook = deps.workbook
     this.researcher = deps.researcher
     this.analyst = deps.analyst
     this.images = deps.images
@@ -366,7 +371,7 @@ export class ProductCatalogService {
     const last = await this.repository.lastResearchOutcome(productId)
     if (last?.outcome === 'started' && this.isInFlight(last.attemptedAt, now)) throw new ResearchInProgressError()
     if (last?.outcome === 'not-found' && now.getTime() - last.attemptedAt.getTime() < ProductCatalogService.WEEK) {
-      return { kind: 'not-found', ...this.fallbackFor(latest) }
+      return { kind: 'not-found', ...(await this.fallbackFor(latest)) }
     }
 
     const attempts = await this.repository.researchAttemptsSince(new Date(now.getTime() - ProductCatalogService.DAY))
@@ -386,7 +391,7 @@ export class ProductCatalogService {
     } catch (error) {
       // The eval's spend cap stopped the research (the real ledger never does): like an outage it settles as failed, so it is not cached as not-found and the next scan may try again.
       await this.settleAttempt(attemptId, 'failed')
-      if (error instanceof AiBudgetExceededError) return { kind: 'budget-exhausted', ...this.fallbackFor(latest) }
+      if (error instanceof AiBudgetExceededError) return { kind: 'budget-exhausted', ...(await this.fallbackFor(latest)) }
       throw error
     }
     // The list comes from a web page, so it is not stored if any entry carries a link or markup.
@@ -395,9 +400,9 @@ export class ProductCatalogService {
       // The researcher names pages even without a list, so the product can still get its picture.
       if (result.imagePages || result.searchPages) {
         const pages = [...(result.imagePages ?? []), ...this.rankedSearchPages(product, result.searchPages)]
-        return { kind: 'not-found', ...this.fallbackFor(latest), image: await this.importStockImage(product, pages, now) }
+        return { kind: 'not-found', ...(await this.fallbackFor(latest)), image: await this.importStockImage(product, pages, now) }
       }
-      return { kind: 'not-found', ...this.fallbackFor(latest) }
+      return { kind: 'not-found', ...(await this.fallbackFor(latest)) }
     }
 
     // Settled only once the ingredients are stored: until then the 'started' row keeps shielding the product from a concurrent call.
@@ -486,8 +491,8 @@ export class ProductCatalogService {
     return formulation
   }
 
-  private labelResult(productId: string, formulation: Formulation): LabelResult {
-    return { productId, formulationId: formulation.id, analysed: this.isAnalysed(formulation) }
+  private async labelResult(productId: string, formulation: Formulation): Promise<LabelResult> {
+    return { productId, formulationId: formulation.id, analysed: this.isAnalysed(formulation, (await this.workbook.liveRules()).version) }
   }
 
   /** The list trimmed, or LABEL_UNREADABLE when it is empty, over its bounds, or carries a link, markup or a control character. */
@@ -525,9 +530,11 @@ export class ProductCatalogService {
   async analyse(formulationId: string): Promise<void> {
     const formulation = await this.repository.findFormulation(formulationId)
     if (!formulation) throw new NotFoundError('FORMULATION_NOT_FOUND', 'Formulation not found')
-    if (this.isAnalysed(formulation)) return
+    // Read once: the facts the analyst is given and the version the analysis is stored under must be the same rules.
+    const rules = await this.workbook.liveRules()
+    if (this.isAnalysed(formulation, rules.version)) return
 
-    const rejections = await this.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, REFERENCE_VERSION)
+    const rejections = await this.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, rules.version)
     if (rejections >= ProductCatalogService.MAX_REJECTIONS) throw new PermanentJobError('The analysis was rejected too often at these versions')
     const now = this.now()
     const last = await this.repository.lastAnalysisAttempt(formulationId)
@@ -536,7 +543,7 @@ export class ProductCatalogService {
     if (attempts >= this.policy.dailyAnalysisBudget) await this.opsAlerts.raise('analysis-budget')
 
     const product = await this.requireProduct(formulation.productId)
-    const flaggedFacts = flagFacts(formulation.ingredients)
+    const flaggedFacts = flagFacts(formulation.ingredients, rules.entries)
     const attemptId = this.newId()
     await this.repository.recordAnalysisAttempt({
       id: attemptId,
@@ -544,7 +551,7 @@ export class ProductCatalogService {
       attemptedAt: now,
       outcome: 'started',
       analysisVersion: ANALYSIS_VERSION,
-      referenceVersion: REFERENCE_VERSION,
+      referenceVersion: rules.version,
     })
 
     let outcome: 'ok' | 'rejected' | 'failed' = 'failed'
@@ -565,7 +572,7 @@ export class ProductCatalogService {
         await this.repository.saveAnalysis(formulationId, {
           concerns: checked.concerns,
           analysisVersion: ANALYSIS_VERSION,
-          referenceVersion: REFERENCE_VERSION,
+          referenceVersion: rules.version,
           analysedAt: this.now(),
         })
       } else {
@@ -610,7 +617,7 @@ export class ProductCatalogService {
         traits: c.traits,
         sources: c.sources,
       })),
-      reference: { version: REFERENCE_VERSION, coverage: REFERENCE_COVERAGE },
+      reference: { version: (await this.workbook.liveRules()).version, coverage: REFERENCE_COVERAGE },
     }
   }
 
@@ -684,8 +691,9 @@ export class ProductCatalogService {
     const latest = await this.repository.latestFormulation(product.id)
     if (!latest || this.isStale(latest, this.now())) return { kind: 'needs-research', productId: product.id }
     const ids = { productId: product.id, formulationId: latest.id }
-    if (this.isAnalysed(latest)) return { kind: 'ready', ...ids }
-    const rejections = await this.repository.rejectedAnalyses(latest.id, ANALYSIS_VERSION, REFERENCE_VERSION)
+    const { version } = await this.workbook.liveRules()
+    if (this.isAnalysed(latest, version)) return { kind: 'ready', ...ids }
+    const rejections = await this.repository.rejectedAnalyses(latest.id, ANALYSIS_VERSION, version)
     return {
       kind: rejections >= ProductCatalogService.MAX_REJECTIONS ? 'analysis-failed' : 'needs-analysis',
       ...ids,
@@ -701,13 +709,14 @@ export class ProductCatalogService {
     return now.getTime() - formulation.foundAt.getTime() > FRESH_FOR_DAYS * ProductCatalogService.DAY
   }
 
-  private isAnalysed(formulation: Formulation): boolean {
-    return formulation.analysisVersion === ANALYSIS_VERSION && formulation.referenceVersion === REFERENCE_VERSION
+  private isAnalysed(formulation: Formulation, rulesVersion: string): boolean {
+    return formulation.analysisVersion === ANALYSIS_VERSION && formulation.referenceVersion === rulesVersion
   }
 
   /** The stale formulation to show when fresh research is not possible, if it is worth showing: analysed by the current versions. */
-  private fallbackFor(latest: Formulation | null): { fallbackFormulationId?: string } {
-    return latest && this.isAnalysed(latest) ? { fallbackFormulationId: latest.id } : {}
+  private async fallbackFor(latest: Formulation | null): Promise<{ fallbackFormulationId?: string }> {
+    if (!latest) return {}
+    return this.isAnalysed(latest, (await this.workbook.liveRules()).version) ? { fallbackFormulationId: latest.id } : {}
   }
 
   private async settleAttempt(attemptId: string, outcome: 'found' | 'not-found' | 'failed'): Promise<void> {

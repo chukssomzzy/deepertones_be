@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
+import { D1CatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { FakeOpsAlertsRepository } from '../../src/modules/ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
@@ -164,6 +165,7 @@ const cataloguedProduct = async (brand = freshBrand(), name = 'Hydrating Cleanse
   researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], sourceUrl: 'https://shop.example/product' }))
   const catalog = new ProductCatalogService({
     repository: new D1CatalogRepository(db),
+    workbook: new D1CatalogWorkbookRepository(db),
     researcher,
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
@@ -495,6 +497,7 @@ const analysedWithNoConcerns = () => messageResponse({ content: [textBlock(JSON.
 const catalogFor = (researcher = new MemoryProductResearcher()) =>
   new ProductCatalogService({
     repository: new D1CatalogRepository(db),
+    workbook: new D1CatalogWorkbookRepository(db),
     researcher,
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),

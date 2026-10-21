@@ -21,6 +21,7 @@
     "prompts": "tsx scripts/prompts.ts",
     "emails:preview": "tsx scripts/email-preview.ts",
     "assets:sync": "tsx scripts/sync-assets.ts",
+    "catalog:contract-doc": "tsx scripts/catalog-contract-doc.ts",
     "eval:catalog": "tsx scripts/eval-catalog.ts",
     "eval:shelf": "tsx scripts/eval/shelf.ts",
     "eval:matching": "tsx scripts/eval/matching.ts",

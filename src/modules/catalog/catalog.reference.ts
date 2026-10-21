@@ -1,3 +1,7 @@
+// FROZEN: edit the workbook, not this list. The live ingredient rules are the `ingredient_rules` table (the workbook's Ingredients tab); this list
+// is what the migration seeded it from, and the fixture the eval and the tests compare against. A change here reaches no user, and the tests that
+// say the seed equals this list would fail the day it differs from the migration.
+//
 // This is a SEED list, hand-compiled, not the full EU CosIng annexes. A proper import from the public CosIng
 // export is a follow-up, and until then a clean result here does not mean an ingredient is permitted or safe.
 //
@@ -21,7 +25,10 @@
 // ingredient with two concerns has two entries.
 import type { ConcernKind } from './catalog.vocabulary'
 
-/** Bumped whenever an entry is added, changed or removed, so analyses made against older data can be found. */
+/**
+ * The rules version the migrated database starts under (catalog version 1), and what REFERENCE was when the rules lived in code: analyses stored
+ * under it stay current the day the rules move to the database. The live rules and their version are read from `ingredient_rules` now.
+ */
 export const REFERENCE_VERSION = 'seed-2026-10'
 
 /**

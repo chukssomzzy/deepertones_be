@@ -7,6 +7,7 @@ import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
+import { D1CatalogWorkbookRepository } from './modules/catalog/catalog.workbook.repository'
 import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
 import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
 import { FaceScanService } from './modules/face-scans/face-scans.service'
@@ -137,6 +138,7 @@ export const buildContainer = (env: CloudflareBindings) => {
     () =>
       new ProductCatalogService({
         repository: new D1CatalogRepository(db()),
+        workbook: new D1CatalogWorkbookRepository(db()),
         researcher: new AnthropicProductResearcher(anthropic()),
         analyst: new AnthropicProductAnalyst(anthropic()),
         // The bucket is shared with the CI asset sync, which refuses any catalog/ key; the environment keeps staging and production apart.

@@ -9,6 +9,7 @@
 // Exit: 0 every case passed, 1 a case failed, 2 the run could not start (bad arguments, missing key, rejected key).
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { checkAnalysis } from '../src/modules/catalog/catalog.analysis'
+import { REFERENCE } from '../src/modules/catalog/catalog.reference'
 import { flagFacts } from '../src/modules/catalog/catalog.rules'
 import { CONCERN_KINDS, SEVERITIES, TRAITS } from '../src/modules/catalog/catalog.vocabulary'
 import type { AiJob } from '../src/providers/anthropic/ai-spend.provider'
@@ -111,7 +112,7 @@ const main = async (): Promise<number> => {
   try {
     if (args.mode === 'all' || args.mode === 'analysis') {
       report.analysis = await runEach(ANALYSIS_CASES.slice(0, args.limit), ledger, async (c) => {
-        const flaggedFacts = flagFacts(c.ingredients)
+        const flaggedFacts = flagFacts(c.ingredients, REFERENCE)
         const outcome = await attempt<AnalysisOutcome>(async () => {
           const drafts = await analyst.analyse({
             product: c.product,

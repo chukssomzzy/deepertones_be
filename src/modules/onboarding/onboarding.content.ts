@@ -1,5 +1,6 @@
 import { sha256Hex } from '../../lib/crypto'
 import { once } from '../../lib/once'
+import { stableJson } from '../../lib/stable-json'
 import { answerFor, type GoalAnswer } from '../goals/goals.answers'
 import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { SAFETY_CHOICES, type SafetyChoice } from '../safety/safety.vocabulary'
@@ -103,20 +104,6 @@ const withoutVersion = (locale: Locale): Omit<OnboardingContent, 'contentVersion
       choices: SAFETY_CHOICES.map((id) => ({ id, ...CHOICES[id] })),
     },
   }
-}
-
-/** JSON with object keys sorted, so the text (and so the hash) does not depend on the order fields are written in. Arrays keep their order. */
-const stableJson = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
-  if (value !== null && typeof value === 'object') {
-    // A key set to undefined is left out, as JSON.stringify leaves it out, so it hashes the same as a key that is not there.
-    return `{${Object.entries(value)
-      .filter(([, item]) => item !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableJson(item)}`)
-      .join(',')}}`
-  }
-  return JSON.stringify(value)
 }
 
 // Bump this when the SHAPE of the response changes without any copy changing (a field added, renamed or moved). The version is a hash of the

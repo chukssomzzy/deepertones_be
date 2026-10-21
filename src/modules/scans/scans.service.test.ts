@@ -21,6 +21,7 @@ import type { ProductIdentity } from '../../providers/product-research/product-r
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { identityKey } from '../catalog/catalog.identity'
 import { FakeCatalogRepository } from '../catalog/catalog.repository.fake'
+import { FakeCatalogWorkbookRepository } from '../catalog/catalog.workbook.repository.fake'
 import { AnalysisInProgressError, ProductCatalogService, ResearchInProgressError } from '../catalog/catalog.service'
 import { REFERENCE_VERSION } from '../catalog/catalog.reference'
 import { ANALYSIS_VERSION, FRESH_FOR_DAYS } from '../catalog/catalog.vocabulary'
@@ -107,6 +108,7 @@ const setup = (options: SetupOptions = {}) => {
   })
   const catalog = new ProductCatalogService({
     repository: catalogRepository,
+    workbook: new FakeCatalogWorkbookRepository(),
     researcher,
     analyst,
     images,

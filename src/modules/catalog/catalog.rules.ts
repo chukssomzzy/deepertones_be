@@ -1,5 +1,5 @@
 import { ingredientParts } from './catalog.ingredients'
-import { REFERENCE, type ReferenceEntry } from './catalog.reference'
+import type { ReferenceEntry } from './catalog.reference'
 import type { ConcernKind } from './catalog.vocabulary'
 
 /** A hard fact from the reference data that the analysis must explain. */
@@ -12,16 +12,33 @@ export type FlaggedFact = {
   source: string | null
 }
 
-const byLabel = new Map<string, ReferenceEntry[]>()
-for (const entry of REFERENCE) {
-  for (const label of [entry.name, ...entry.aliases]) byLabel.set(label, [...(byLabel.get(label) ?? []), entry])
+// The order an ingredient's facts come in when one name carries several kinds (hydroquinone is banned and a pregnancy caution; retinol is a sun
+// sensitiser and a pregnancy caution): what the law forbids or limits first, then the commonly cited concerns. The analyst is shown the facts in
+// this order and the eval's expected flags are written in it, so it must not depend on the order the rules happen to be read in (the database lists
+// them by code, REFERENCE in the order it was written). CONCERN_KINDS cannot serve: it puts a pregnancy caution before a banned substance.
+const KIND_RANK: Record<ConcernKind, number> = {
+  'banned-substance': 0,
+  'restricted-substance': 1,
+  allergen: 2,
+  interaction: 3,
+  'sun-sensitivity': 4,
+  'pregnancy-caution': 5,
+  'hyperpigmentation-risk': 6,
+  'pore-clogging': 7,
+  irritation: 8,
+  drying: 9,
 }
 
 /**
- * Checks each ingredient against the reference data, in label order. An ingredient is matched by its whole
- * name and by the parts either side of a bracket, and yields at most one fact per kind.
+ * Checks each ingredient against `rules` (the live approved ones; REFERENCE is the seed and the eval's fixture), in label order. An
+ * ingredient is matched by its whole name and by the parts either side of a bracket, and yields at most one fact per kind.
  */
-export const flagFacts = (ingredients: string[]): FlaggedFact[] => {
+export const flagFacts = (ingredients: string[], rules: readonly ReferenceEntry[]): FlaggedFact[] => {
+  const byLabel = new Map<string, ReferenceEntry[]>()
+  for (const entry of rules) {
+    for (const label of [entry.name, ...entry.aliases]) byLabel.set(label, [...(byLabel.get(label) ?? []), entry])
+  }
+  for (const entries of byLabel.values()) entries.sort((a, b) => KIND_RANK[a.kind] - KIND_RANK[b.kind])
   const facts: FlaggedFact[] = []
   for (const ingredient of ingredients) {
     const seen = new Set<ConcernKind>()
