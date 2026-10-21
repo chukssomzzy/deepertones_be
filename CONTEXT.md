@@ -160,6 +160,11 @@ The ordered daily and weekly steps the user follows to reach their goal, built m
 products added where the shelf has a gap.
 _Avoid_: Regimen, plan (alone)
 
+**Shopping country**:
+The country a profile buys its products in, confirmed by the user once (suggested from the phone's region) and changeable.
+Only products sold there are recommended.
+_Avoid_: Location, region, country (alone)
+
 ### Skin and products
 
 **Skin concern**:
