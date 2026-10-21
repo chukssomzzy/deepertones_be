@@ -198,6 +198,11 @@ The reviewed spreadsheet, with a Products tab and an Ingredients tab, that is th
 the ingredient rules. Each row has a stable code.
 _Avoid_: Dataset, master sheet, CSV
 
+**Draft**:
+A workbook row or cell an AI filled from cited sources, which nobody has approved yet. The team decides which products go in
+the workbook; the AI only fills in what is known about them.
+_Avoid_: Suggestion, AI recommendation
+
 **Approved**:
 A recommendation catalog row the team has signed off, which makes the product recommendable. It names who approved it and when.
 _Avoid_: Verified, certified, dermatologist-approved
