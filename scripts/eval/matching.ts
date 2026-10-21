@@ -2,19 +2,26 @@
 // Photos live in eval-photos/catalog/<product folder>/*.{jpg,jpeg,png,webp} (at least 2 per product), beside labels.json:
 //   { "<folder>": { "brand": "...", "name": "...", "variant"?: "...", "form"?: "<form>", "category": "skin|hair|body|makeup|other", "lookalikes"?: ["<folder>"] } }
 // and verdicts.json ({ "<sha256 of an image>": "right" | "wrong" }, written by --verdict). Look-alikes are declared on both sides. All git-ignored.
+// Shelf photos live in eval-photos/shelf/<file>.{jpg,jpeg,png,webp} (at most 2,000,000 bytes), beside labels.json:
+//   { "<file>": { "products": [ { "folder": "<catalog folder>" } | { "brand": "...", "name": "...", "variant"?: "...", "form"?: "...", "category": "..." } ] } }
+// listing every product whose brand and name a person can read. The shelf part needs the directory; `all` skips it when it is absent.
 // Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real, billed calls. Report-only: never part of `npm test`.
 //   matching  every photo is read once, then fed to a fresh in-memory catalog in 3 fixed random orders: do repeat photos of a product find its row?
 //   images    each product is created from its label and researched for real; the stock image it stores is saved for you to judge.
-//   --part matching|images|all   (default all)    --max-usd N   stop spending at N dollars (default 3)    --limit N   products to run
+//   shelf     photos of several products together are read once each; every product listed is resolved against a catalog seeded with the true
+//             rows of the single set and of the shelf photos' other products: did it find what is in the photo, invent nothing, land on the right rows?
+//   --part matching|images|shelf|all   (default all)    --max-usd N   stop spending at N dollars (default 3)    --limit N   products to run
+//   --limit does not cut the shelf photos: the catalog is seeded from the whole set.
 //   --model JOB=MODEL   run a job on another model (repeatable)
 //   --verdict HASH=right|wrong   record your verdict on a stored image (repeatable); makes no calls, spends nothing, then exits 0
 // Reports go to .eval/matching/<timestamp>/: report.json and contact-sheet.html (the stored images beside your photos, each with the
-// command that records your verdict). The report may hold what the model read from your labels; the console never does: it prints only
+// command that records your verdict; the shelf photos with what each listed product landed on). The report may hold what the model read from your labels; the console never does: it prints only
 // folder names, short row ids, codes, field names and numbers, never a prompt, the key or other model text.
 // Exit: 0 every target of the parts that ran was met, 1 one was missed, 2 the run could not start (photo set, verdicts, arguments, key).
 import { createHash } from 'node:crypto'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { brandKey, identityKey, normaliseText } from '../../src/modules/catalog/catalog.identity'
 import { FakeCatalogRepository } from '../../src/modules/catalog/catalog.repository.fake'
 import type { NewProduct, Product } from '../../src/modules/catalog/catalog.types'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
@@ -28,7 +35,7 @@ import { R2CatalogImageStore } from '../../src/providers/catalog-images/r2.catal
 import type { ProductAnalyst, ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
 import { AnthropicProductAnalyst } from '../../src/providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductRecognizer } from '../../src/providers/product-recognition/anthropic.product-recognizer'
-import type { Recognition } from '../../src/providers/product-recognition/product-recognizer.provider'
+import type { Recognition, ShelfRecognition } from '../../src/providers/product-recognition/product-recognizer.provider'
 import { AnthropicProductResearcher } from '../../src/providers/product-research/anthropic.product-researcher'
 import type { ProductIdentity } from '../../src/providers/product-research/product-researcher.provider'
 import { DEFAULT_MODELS } from './models'
@@ -46,9 +53,14 @@ import {
   type PhotoOutcome,
   scoreImages,
   scoreMatching,
+  scoreShelf,
+  type ShelfPhotoInput,
+  type ShelfScore,
 } from './matching-score'
 import {
+  type Label,
   loadPhotoSet,
+  loadShelfSet,
   loadVerdicts,
   parseVerdictFlag,
   type PhotoSet,
@@ -57,17 +69,20 @@ import {
   seededShuffle,
   type SetPhoto,
   type SetProduct,
+  type ShelfPhoto,
+  type ShelfSet,
   type Verdicts,
 } from './matching-set'
 import { loadEnv, parseArgs } from './score'
 
 const DIRECTORY = 'eval-photos/catalog'
+const SHELF_DIRECTORY = 'eval-photos/shelf'
 const DEFAULT_MAX_USD = 3
-const PARTS = ['matching', 'images', 'all'] as const
+const PARTS = ['matching', 'images', 'shelf', 'all'] as const
 type Part = (typeof PARTS)[number]
 const IDENTITY_FIELDS = ['brand', 'name', 'variant', 'form', 'category'] as const
 
-const USAGE = 'Usage: npm run eval:matching -- [--part matching|images|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--verdict HASH=right|wrong]...'
+const USAGE = 'Usage: npm run eval:matching -- [--part matching|images|shelf|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--verdict HASH=right|wrong]...'
 
 /** The run cannot go on and the numbers would say nothing about the code: exit 2, not 1. */
 class SetupError extends Error {}
@@ -118,7 +133,7 @@ const splitArgs = (argv: string[]): { part: Part; verdicts: string[]; rest: stri
 
 const readPhoto = (photo: SetPhoto): ProductImage => ({ bytes: readFileSync(photo.path), mediaType: photo.mediaType })
 
-const identityOfLabel = (product: SetProduct): ProductIdentity => {
+const identityOfLabel = (product: { label: Label }): ProductIdentity => {
   const { brand, name, variant, form, category } = product.label
   return { brand, name, category, ...(variant ? { variant } : {}), ...(form ? { form } : {}) }
 }
@@ -361,7 +376,7 @@ const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, re
   return details
 }
 
-const contactSheet = (products: SetProduct[], details: ImageDetail[], score: ReturnType<typeof scoreImages>): string => {
+const imageCards = (products: SetProduct[], details: ImageDetail[], score: ReturnType<typeof scoreImages>): string => {
   const cards = products.map((product) => {
     const detail = details.find((d) => d.folder === product.folder)!
     const verdict = score.perProduct.find((p) => p.folder === product.folder)?.verdict
@@ -378,11 +393,12 @@ const contactSheet = (products: SetProduct[], details: ImageDetail[], score: Ret
 ${detail.hash ? `<p>hash <code>${detail.hash}</code><br>right: <code>npm run eval:matching -- --verdict ${detail.hash}=right</code><br>wrong: <code>npm run eval:matching -- --verdict ${detail.hash}=wrong</code></p>` : ''}
 </section>`
   })
-  return `<!doctype html><meta charset="utf-8"><title>eval:matching contact sheet</title>
-<style>body{font:14px system-ui;margin:2rem}section{border-top:1px solid #ccc;padding:1rem 0}.pair{display:flex;gap:1rem}figure{margin:0}img{max-height:260px;max-width:320px;object-fit:contain;background:#eee}.none{width:260px;height:260px;display:grid;place-items:center;background:#eee}code{background:#f3f3f3;padding:2px 4px}</style>
-<h1>Stock images beside your photos</h1>
-${cards.join('\n')}`
+  return `<h1>Stock images beside your photos</h1>\n${cards.join('\n')}`
 }
+
+const sheetPage = (sections: string[]): string => `<!doctype html><meta charset="utf-8"><title>eval:matching contact sheet</title>
+<style>body{font:14px system-ui;margin:2rem}section{border-top:1px solid #ccc;padding:1rem 0}.pair{display:flex;gap:1rem}figure{margin:0}img{max-height:260px;max-width:320px;object-fit:contain;background:#eee}.shelf img{max-height:480px;max-width:640px}.none{width:260px;height:260px;display:grid;place-items:center;background:#eee}code{background:#f3f3f3;padding:2px 4px}</style>
+${sections.join('\n')}`
 
 const printImages = (score: ReturnType<typeof scoreImages>) => {
   console.log('\nImages')
@@ -394,10 +410,152 @@ const printImages = (score: ReturnType<typeof scoreImages>) => {
   console.log(`${score.stored}/${score.products} stored (coverage ${percent(score.coverage)}): ${counts.join(', ')}; ${score.right} right, ${score.wrong} wrong, ${score.unjudged} unjudged`)
 }
 
+// ---- shelf ----
+
+/** One product the shelf prompt listed, with what resolve did with it. The identity is model text: it stays in the report file. */
+type ShelfListedDetail = { identity: ProductIdentity; confidence: number; belowConfirmConfidence: boolean; landed: string | null; onCreatedRow?: true; questions: JudgeAnswer[] }
+type ShelfDetail = {
+  input: ShelfPhotoInput
+  /** The recognition's own classification and excluded counts; absent when it failed. */
+  classification?: ShelfRecognition['classification']
+  excluded?: ShelfRecognition['excluded']
+  listed: ShelfListedDetail[]
+}
+
+type ShelfSeed = { id: string; identity: ProductIdentity; inSet: boolean }
+
+/**
+ * The true identity of every product of the single set and of every out-of-set product labelled in a shelf photo, once each. Two
+ * different products with one identity key cannot both be a row, so the set is wrong and no number from it would mean anything.
+ */
+const shelfSeeds = (products: SetProduct[], shelf: ShelfSet): ShelfSeed[] => {
+  const byKey = new Map<string, ShelfSeed>()
+  const add = (seed: ShelfSeed, where: string) => {
+    const key = identityKey(seed.identity)
+    const other = byKey.get(key)
+    if (other && other.id !== seed.id) throw new SetupError(`${where}: ${seed.identity.brand} / ${seed.identity.name} has the same identity key as ${other.identity.brand} / ${other.identity.name}; one product cannot be two rows.`)
+    byKey.set(key, seed)
+  }
+  for (const product of products) add({ id: product.folder, identity: identityOfLabel(product), inSet: true }, product.folder)
+  for (const photo of shelf.photos) {
+    for (const product of photo.products) {
+      const identity = identityOfLabel(product)
+      add({ id: product.folder ?? `shelf:${identityKey(identity)}`, identity, inSet: product.folder !== undefined }, photo.name)
+    }
+  }
+  return [...byKey.values()]
+}
+
+/** Fills the catalog with the seeds exactly as findOrCreateProduct would write them, but without asking the judge: similar real products stay separate rows. */
+const seedCatalog = async (repository: ObservedRepository, seeds: ShelfSeed[]): Promise<Map<string, string>> => {
+  const rows = new Map<string, string>()
+  for (const { id, identity } of seeds) {
+    const row = await repository.createProduct({
+      id: `seed:${id}`,
+      identityKey: identityKey(identity),
+      brandKey: brandKey(identity.brand),
+      kind: 'named',
+      brand: identity.brand,
+      name: identity.name,
+      variant: identity.variant ?? null,
+      form: identity.form ?? null,
+      category: identity.category,
+      searchText: normaliseText(`${identity.brand} ${identity.name} ${identity.variant ?? ''}`),
+      createdAt: new Date(),
+    })
+    rows.set(id, row.id)
+  }
+  return rows
+}
+
+const runShelfPhoto = async (photo: ShelfPhoto, seeds: ShelfSeed[], recognizer: AnthropicProductRecognizer, analyst: ProductAnalyst): Promise<ShelfDetail> => {
+  const repository = new ObservedRepository()
+  const rows = await seedCatalog(repository, seeds)
+  let n = 0
+  const service = new ProductCatalogService({
+    repository,
+    researcher: { research: async () => { throw new Error('the shelf part must not research') } },
+    analyst: observedAnalyst(analyst, repository),
+    images: undefined as never,
+    imageKeyPrefix: 'catalog/eval',
+    opsAlerts: NO_ALERTS,
+    newId: () => `r${++n}`,
+  })
+  const labelled = photo.products.map((product) => {
+    const id = product.folder ?? `shelf:${identityKey(identityOfLabel(product))}`
+    return { id, rowId: rows.get(id)!, brand: product.label.brand, inSet: product.folder !== undefined }
+  })
+  const failed = (error: string): ShelfDetail => ({ input: { photo: photo.name, labelled, listed: [], error }, listed: [] })
+
+  let seen: ShelfRecognition
+  try {
+    seen = await withRetries(() => recognizer.recognizeShelf(readPhoto(photo)))
+  } catch (error) {
+    if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
+    if (error instanceof AiBudgetExceededError) throw new SetupError('The spend cap was reached while reading shelf photos; raise --max-usd.')
+    return failed(errorName(error))
+  }
+  const listed: ShelfListedDetail[] = []
+  // Rows this photo's own listings created: a later listing landing on one is the same product read twice.
+  const createdHere = new Set<string>()
+  for (const { brand, name, variant, form, category, confidence } of seen.products) {
+    const identity: ProductIdentity = { brand, name, category, ...(variant ? { variant } : {}), ...(form ? { form } : {}) }
+    repository.trace = { created: false, questions: [] }
+    try {
+      const resolved = await withRetries(() => service.resolve(identity))
+      const { created, questions } = repository.trace
+      const onCreatedRow = !created && createdHere.has(resolved.productId)
+      if (created) createdHere.add(resolved.productId)
+      listed.push({ identity, confidence, belowConfirmConfidence: confidence < SCAN_POLICY.confirmBelowConfidence, landed: created ? null : resolved.productId, ...(onCreatedRow ? { onCreatedRow: true as const } : {}), questions })
+    } catch (error) {
+      if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
+      if (errorName(error) === 'CatalogBusyError') throw new SetupError('The spend cap was reached while matching; raise --max-usd.')
+      return { ...failed(errorName(error)), classification: seen.classification, excluded: seen.excluded }
+    }
+  }
+  return { input: { photo: photo.name, labelled, listed: listed.map(({ identity, landed, onCreatedRow }) => ({ brand: identity.brand, landed, ...(onCreatedRow ? { onCreatedRow } : {}) })) }, classification: seen.classification, excluded: seen.excluded, listed }
+}
+
+const labelledName = (product: ShelfPhoto['products'][number]): string => product.folder ?? `${product.label.brand} / ${product.label.name}`
+
+const printShelf = (score: ShelfScore) => {
+  console.log('\nShelf')
+  for (const p of score.photos) {
+    console.log(`${p.photo}: labelled ${p.labelled}, expected ${p.expected}, found ${p.found}, missing ${p.missing.length}, misread ${p.misread}, invented ${p.invented}, wrong rows ${p.wrongRows}${p.error ? `, ERROR ${p.error}` : ''}`)
+  }
+  console.log(`Shelf overall: found ${percent(score.foundRate)} (${score.found}/${score.expected}), same row ${percent(score.sameRow)}, ${score.misread} misread, ${score.invented} invented, ${score.wrongRows} wrong rows, ${score.repeat} repeats`)
+  if (score.errors > 0) console.log(`  ERRORED photos: ${score.errors} (${score.errorNames.join(', ')}); they fail the run`)
+}
+
+const shelfCards = (shelf: ShelfSet, details: ShelfDetail[], score: ShelfScore): string => {
+  const cards = shelf.photos.map((photo, index) => {
+    const detail = details[index]!
+    const result = score.photos[index]!
+    const image = readPhoto(photo)
+    const labelled = photo.products.map((product, i) => {
+      const missing = result.missing.includes(detail.input.labelled[i]!.id)
+      return `<li>${escapeHtml(labelledName(product))}${product.folder ? '' : ' (not in the single set)'}: <b>${missing ? 'missing' : 'found'}</b></li>`
+    })
+    const listed = detail.listed.map((item, i) => {
+      const { brand, name, variant, form } = item.identity
+      return `<li><b>${result.outcomes[i]}</b>: ${escapeHtml([brand, name, variant, form].filter(Boolean).join(' / '))} (confidence ${item.confidence.toFixed(2)}${item.belowConfirmConfidence ? ', below the confirm threshold' : ''})</li>`
+    })
+    const { classification, excluded } = detail
+    return `<section class="shelf">
+<h2>${escapeHtml(photo.name)}</h2>
+${result.error ? `<p>recognition failed: <b>${escapeHtml(result.error)}</b></p>` : ''}
+<figure><img src="${dataUri(image.mediaType, image.bytes)}"></figure>
+<p>labelled in the photo:</p><ul>${labelled.join('')}</ul>
+<p>listed${classification ? ` (classification ${escapeHtml(classification)}, ${excluded?.otherProducts ?? 0} other products and ${excluded?.unreadable ?? 0} unreadable left out)` : ''}:</p><ul>${listed.join('') || '<li>nothing</li>'}</ul>
+</section>`
+  })
+  return `<h1>Shelf photos: what was listed</h1>\n${cards.join('\n')}`
+}
+
 // ---- run ----
 
 const main = async (): Promise<number> => {
-  let split, args, env, set: PhotoSet, verdicts: Verdicts
+  let split, args, env, set: PhotoSet, verdicts: Verdicts, shelfSet: ShelfSet | null = null, seeds: ShelfSeed[] = []
   try {
     split = splitArgs(process.argv.slice(2))
     if (split.verdicts.length > 0) {
@@ -410,6 +568,13 @@ const main = async (): Promise<number> => {
     // The set and verdicts first: a missing photo set must be the message, not a missing key.
     set = await loadPhotoSet(DIRECTORY)
     verdicts = await loadVerdicts(DIRECTORY)
+    if (split.part === 'shelf' || split.part === 'all') {
+      const catalogLabels = Object.fromEntries(set.products.map((p) => [p.folder, p.label]))
+      shelfSet = await loadShelfSet(SHELF_DIRECTORY, catalogLabels)
+      if (shelfSet) seeds = shelfSeeds(set.products, shelfSet)
+      else if (split.part === 'shelf') throw new SetupError(`${SHELF_DIRECTORY} does not exist: put your shelf photos and labels.json there (see the header of scripts/eval/matching.ts).`)
+      else console.log(`Shelf part skipped: ${SHELF_DIRECTORY} does not exist.`)
+    }
     env = await loadEnv()
   } catch (error) {
     console.error((error as Error).message)
@@ -424,23 +589,30 @@ const main = async (): Promise<number> => {
   const products = set.products.slice(0, args.limit)
   const labels = Object.fromEntries(products.map((p) => [p.folder, { lookalikes: p.label.lookalikes }]))
   const startedAt = new Date()
-  console.log(`Matching eval: part ${split.part}, ${products.length} products, ${products.reduce((n, p) => n + p.photos.length, 0)} photos, cap ${usd(ledger.capMicros)}`)
+  console.log(`Matching eval: part ${split.part}, ${products.length} products, ${products.reduce((n, p) => n + p.photos.length, 0)} photos${shelfSet ? `, ${shelfSet.photos.length} shelf photos` : ''}, cap ${usd(ledger.capMicros)}`)
   console.log(`Models: recognize ${models.recognize}, same-product ${models['same-product']}, research ${models.research}, image-check ${models['image-check']}`)
 
   let matching: MatchingScore | undefined
   let orders: { seed: number; photos: PhotoRecord[] }[] = []
   let images: ReturnType<typeof scoreImages> | undefined
   let imageDetails: ImageDetail[] = []
+  let shelf: ShelfScore | undefined
+  let shelfDetails: ShelfDetail[] = []
   try {
-    if (split.part !== 'images') {
+    if (split.part === 'matching' || split.part === 'all') {
       const recognised = await recogniseOnce(new AnthropicProductRecognizer(client), products)
       orders = []
       for (const seed of SEEDS) orders.push({ seed, photos: await runOrder(seed, recognised, analyst) })
       matching = scoreMatching(orders, labels)
     }
-    if (split.part !== 'matching') {
+    if (split.part === 'images' || split.part === 'all') {
       imageDetails = await runImages(products, analyst, new AnthropicProductResearcher(client))
       images = scoreImages(imageDetails, verdicts)
+    }
+    if (shelfSet) {
+      const recognizer = new AnthropicProductRecognizer(client)
+      for (const photo of shelfSet.photos) shelfDetails.push(await runShelfPhoto(photo, seeds, recognizer, analyst))
+      shelf = scoreShelf(shelfDetails.map((d) => d.input))
     }
   } catch (error) {
     if (!(error instanceof SetupError)) throw error
@@ -452,8 +624,9 @@ const main = async (): Promise<number> => {
   const unit = duplicateUnitCost(images ? ledger.entries : [])
   if (matching) printMatching(matching, orders, unit)
   if (images) printImages(images)
+  if (shelf) printShelf(shelf)
 
-  const verdict = judge({ matching, images })
+  const verdict = judge({ matching, images, shelf })
   console.log(`\n${verdict.summary}`)
   console.log(`Spent ${usd(ledger.spentMicros())} of ${usd(ledger.capMicros)}`)
 
@@ -470,13 +643,16 @@ const main = async (): Promise<number> => {
     spendCapReached: ledger.refused,
     matching: matching && { score: matching, photos: orders },
     images: images && { score: images, hashes: imageDetails.map(({ folder: name, stage, hash, error }) => ({ folder: name, stage, hash, error })) },
+    shelf: shelf && { score: shelf, photos: shelfDetails.map(({ input, classification, excluded, listed }) => ({ photo: input.photo, error: input.error, classification, excluded, labelled: input.labelled, listed })) },
     verdict,
   }
   writeFileSync(join(folder, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
   console.log(`Report: ${join(folder, 'report.json')}`)
-  if (images) {
-    writeFileSync(join(folder, 'contact-sheet.html'), contactSheet(products, imageDetails, images))
+  if (images || shelf) {
+    writeFileSync(join(folder, 'contact-sheet.html'), sheetPage([...(images ? [imageCards(products, imageDetails, images)] : []), ...(shelf && shelfSet ? [shelfCards(shelfSet, shelfDetails, shelf)] : [])]))
     console.log(`Contact sheet: ${join(folder, 'contact-sheet.html')}`)
+  }
+  if (images) {
     for (const p of images.perProduct.filter((x) => x.verdict === 'unjudged')) console.log(`  judge ${p.folder}: npm run eval:matching -- --verdict ${p.hash}=right|wrong`)
   }
   if (ledger.refused) {

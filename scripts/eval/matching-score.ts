@@ -1,4 +1,5 @@
 import type { StockImageOutcome } from '../../src/modules/catalog/catalog.service'
+import { sameBrandFamily } from '../../src/modules/catalog/catalog.identity'
 import type { Verdicts } from './matching-set'
 
 // Pure scoring for `npm run eval:matching` (see matching.ts): what the photos did to the catalog, and whether the targets held.
@@ -217,19 +218,147 @@ export const scoreImages = (outcomes: ImageOutcome[], verdicts: Verdicts): Image
   }
 }
 
+// ---- shelf ----
+
+/** A shelf photo holds at most this many listed products (the shelf prompt's cap), so a photo with more is not expected to find them all. */
+const SHELF_PRODUCT_CAP = 5
+
+/** A product labelled in a shelf photo: `rowId` is the row it was seeded as, `inSet` whether it is a product of the single set. */
+export type ShelfLabelled = { id: string; rowId: string; brand: string; inSet: boolean }
+/**
+ * A product the recognizer listed: the row it resolved to, or null when resolve created a row. `onCreatedRow` marks a row an earlier
+ * listing of the same photo created (the same product listed twice), which is a repeat, never a wrong merge.
+ */
+export type ShelfListed = { brand: string; landed: string | null; onCreatedRow?: true }
+/** One shelf photo's labels and what was listed, in run order. `error` is the class name of a failed recognition. */
+export type ShelfPhotoInput = { photo: string; labelled: ShelfLabelled[]; listed: ShelfListed[]; error?: string }
+
+/**
+ * found: landed on the row of a labelled product, the first time. repeat: on the row of one already found, or on a row an earlier
+ * listing of the photo created. wrong-row: on a seeded row
+ * of a product that is not in the photo (a wrong merge). misread / invented: a created row, with or without a labelled product of its
+ * brand family still to be found.
+ */
+export type ShelfOutcome = 'found' | 'repeat' | 'wrong-row' | 'misread' | 'invented'
+
+export type ShelfPhotoScore = {
+  photo: string
+  labelled: number
+  expected: number
+  found: number
+  repeat: number
+  misread: number
+  invented: number
+  wrongRows: number
+  /** Ids of the labelled products nobody found. */
+  missing: string[]
+  /** One per listed product, in listed order. */
+  outcomes: ShelfOutcome[]
+  error?: string
+}
+
+export type ShelfScore = {
+  photos: ShelfPhotoScore[]
+  /** Totals leave out a photo whose recognition errored: it measured nothing. */
+  labelled: number
+  expected: number
+  found: number
+  repeat: number
+  misread: number
+  invented: number
+  wrongRows: number
+  foundRate: number
+  /** Found in-set products over those plus the in-set products a created row was misread for; a wrong row cannot be attributed to one. */
+  sameRow: number
+  errors: number
+  errorNames: string[]
+  /** At least one photo was read. */
+  evidence: boolean
+}
+
+const scoreShelfPhoto = (input: ShelfPhotoInput): { score: ShelfPhotoScore; foundInSet: number; misreadInSet: number } => {
+  const { photo, labelled, listed } = input
+  const expected = Math.min(SHELF_PRODUCT_CAP, labelled.length)
+  if (input.error) {
+    return { score: { photo, labelled: labelled.length, expected, found: 0, repeat: 0, misread: 0, invented: 0, wrongRows: 0, missing: [], outcomes: [], error: input.error }, foundInSet: 0, misreadInSet: 0 }
+  }
+  const byRow = new Map(labelled.map((l) => [l.rowId, l]))
+  const found = new Set<string>()
+  // A misread product is attributed once, but stays missing unless a listed product finds it.
+  const misread = new Set<string>()
+  const outcomes: ShelfOutcome[] = listed.map((item): ShelfOutcome => {
+    if (item.landed === null) {
+      const target = labelled.find((l) => !found.has(l.id) && !misread.has(l.id) && sameBrandFamily(l.brand, item.brand))
+      if (!target) return 'invented'
+      misread.add(target.id)
+      return 'misread'
+    }
+    if (item.onCreatedRow) return 'repeat'
+    const hit = byRow.get(item.landed)
+    if (!hit) return 'wrong-row'
+    if (found.has(hit.id)) return 'repeat'
+    found.add(hit.id)
+    return 'found'
+  })
+  const count = (outcome: ShelfOutcome) => outcomes.filter((o) => o === outcome).length
+  const inSet = (ids: Set<string>) => labelled.filter((l) => l.inSet && ids.has(l.id)).length
+  return {
+    score: {
+      photo,
+      labelled: labelled.length,
+      expected,
+      found: count('found'),
+      repeat: count('repeat'),
+      misread: count('misread'),
+      invented: count('invented'),
+      wrongRows: count('wrong-row'),
+      missing: labelled.filter((l) => !found.has(l.id)).map((l) => l.id),
+      outcomes,
+    },
+    foundInSet: inSet(found),
+    misreadInSet: inSet(misread),
+  }
+}
+
+export const scoreShelf = (photos: ShelfPhotoInput[]): ShelfScore => {
+  const scored = photos.map(scoreShelfPhoto)
+  const read = scored.filter((s) => !s.score.error)
+  const total = (field: 'labelled' | 'expected' | 'found' | 'repeat' | 'misread' | 'invented' | 'wrongRows') => read.reduce((sum, s) => sum + s.score[field], 0)
+  const foundInSet = read.reduce((sum, s) => sum + s.foundInSet, 0)
+  const misreadInSet = read.reduce((sum, s) => sum + s.misreadInSet, 0)
+  const errorNames = [...new Set(scored.flatMap((s) => (s.score.error ? [s.score.error] : [])))].sort()
+  return {
+    photos: scored.map((s) => s.score),
+    labelled: total('labelled'),
+    expected: total('expected'),
+    found: total('found'),
+    repeat: total('repeat'),
+    misread: total('misread'),
+    invented: total('invented'),
+    wrongRows: total('wrongRows'),
+    foundRate: ratio(total('found'), total('expected')),
+    sameRow: ratio(foundInSet, foundInSet + misreadInSet),
+    errors: scored.length - read.length,
+    errorNames,
+    evidence: read.length > 0,
+  }
+}
+
 export type Target = { id: string; label: string; met: boolean; actual: string; goal: string }
 export type Verdict = { targets: Target[]; /** Stored images with no verdict yet. */ provisional: number; summary: string }
 
 const REPEAT_HIT_GOAL = 0.98
 const COVERAGE_GOAL = 0.8
+const SHELF_FOUND_GOAL = 0.9
+const SHELF_SAME_ROW_GOAL = 0.95
 // Ratios of whole numbers can land a hair under the goal in floating point (0.8 is not exact).
 const EPSILON = 1e-9
 const percent = (ratio: number): string => `${(ratio * 100).toFixed(1)}%`
 
 /** Judges each part that ran against its targets; a part that did not run has no targets. */
-export const judge = (parts: { matching?: MatchingScore; images?: ImagesScore }): Verdict => {
+export const judge = (parts: { matching?: MatchingScore; images?: ImagesScore; shelf?: ShelfScore }): Verdict => {
   const targets: Target[] = []
-  const { matching, images } = parts
+  const { matching, images, shelf } = parts
   if (matching) {
     targets.push(
       { id: 'matching-evidence', label: 'matching evidence', met: matching.evidence, actual: matching.evidence ? 'a repeat in every order' : 'no evidence: an order has no product with 2 readable photos', goal: 'a repeat in every order' },
@@ -243,6 +372,16 @@ export const judge = (parts: { matching?: MatchingScore; images?: ImagesScore })
       { id: 'images-evidence', label: 'images evidence', met: images.products > 0, actual: images.products > 0 ? `${images.products} products` : 'no evidence: no products ran', goal: '>= 1 product' },
       { id: 'images-coverage', label: 'image coverage', met: images.coverage >= COVERAGE_GOAL - EPSILON, actual: percent(images.coverage), goal: `>= ${percent(COVERAGE_GOAL)}` },
       { id: 'images-wrong', label: 'wrong images', met: images.wrong === 0, actual: String(images.wrong), goal: '0' },
+    )
+  }
+  if (shelf) {
+    targets.push(
+      { id: 'shelf-evidence', label: 'shelf evidence', met: shelf.evidence, actual: shelf.evidence ? `${shelf.photos.length - shelf.errors} photos read` : 'no evidence: no shelf photo was read', goal: '>= 1 photo read' },
+      { id: 'shelf-errors', label: 'shelf-errors', met: shelf.errors === 0, actual: `${shelf.errors} photos errored (see report)`, goal: '0' },
+      { id: 'shelf-found', label: 'shelf found', met: shelf.foundRate >= SHELF_FOUND_GOAL - EPSILON, actual: `${percent(shelf.foundRate)} (${shelf.found}/${shelf.expected})`, goal: `>= ${percent(SHELF_FOUND_GOAL)}` },
+      { id: 'shelf-invented', label: 'shelf invented', met: shelf.invented === 0, actual: String(shelf.invented), goal: '0' },
+      { id: 'shelf-wrong-merges', label: 'shelf wrong merges', met: shelf.wrongRows === 0, actual: String(shelf.wrongRows), goal: '0' },
+      { id: 'shelf-same-row', label: 'shelf same row', met: shelf.sameRow >= SHELF_SAME_ROW_GOAL - EPSILON, actual: percent(shelf.sameRow), goal: `>= ${percent(SHELF_SAME_ROW_GOAL)}` },
     )
   }
   const provisional = images?.unjudged ?? 0

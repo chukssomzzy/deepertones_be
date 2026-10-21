@@ -9,7 +9,9 @@ import {
   scoreImages,
   scoreMatching,
   scoreOrder,
+  scoreShelf,
   type ImageOutcome,
+  type ShelfPhotoInput,
   type PhotoOutcome,
 } from './matching-score'
 
@@ -459,5 +461,262 @@ describe('duplicateUnitCost', () => {
 
     expect(source).toBe('measured')
     expect(each).toBeCloseTo(0.05 + ANALYSIS_COST_USD, 10)
+  })
+})
+
+// scoreShelf takes one ShelfPhotoInput per shelf photo, in run order:
+//   { photo, labelled: [{ id, rowId, brand, inSet }] in label order, listed: [{ brand, landed }] in listed order, error? }
+// `rowId` is the row the labelled product was seeded as; `landed` is the row a listed product resolved to, or null when resolve created a row.
+describe('scoreShelf', () => {
+  const lab = (id: string, brand = 'Acme', inSet = true) => ({ id, rowId: `row-${id}`, brand, inSet })
+  const onRow = (id: string, brand = 'Acme') => ({ brand, landed: `row-${id}` })
+  const created = (brand = 'Acme') => ({ brand, landed: null })
+  const shelf = (photo: string, labelled: ShelfPhotoInput['labelled'], listed: ShelfPhotoInput['listed'], error?: string): ShelfPhotoInput => ({ photo, labelled, listed, ...(error ? { error } : {}) })
+  const first = (score: ReturnType<typeof scoreShelf>) => score.photos[0]!
+
+  it('counts a listed product that landed on a labelled product\'s row as found, and a labelled product nobody listed as missing', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2')], [onRow('p1')])])
+
+    expect(first(score)).toMatchObject({ photo: 'a.jpg', labelled: 2, expected: 2, found: 1, repeat: 0, misread: 0, invented: 0, wrongRows: 0, missing: ['p2'] })
+    expect(first(score).outcomes).toEqual(['found'])
+  })
+
+  it('counts a product listed twice as found once and a repeat once', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), onRow('p1')])])
+
+    expect(first(score)).toMatchObject({ found: 1, repeat: 1, misread: 0, invented: 0, wrongRows: 0, missing: [] })
+    expect(first(score).outcomes).toEqual(['found', 'repeat'])
+  })
+
+  it('counts a listed product that landed on a row of a product not in the photo as a wrong row', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [{ brand: 'Acme', landed: 'row-elsewhere' }])])
+
+    expect(first(score)).toMatchObject({ found: 0, wrongRows: 1, misread: 0, invented: 0, missing: ['p1'] })
+    expect(first(score).outcomes).toEqual(['wrong-row'])
+  })
+
+  it('calls a created row misread when a labelled product of the same brand family is still unfound', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1', 'CeraVe')], [created('Cerave Paris')])])
+
+    expect(first(score)).toMatchObject({ found: 0, misread: 1, invented: 0 })
+    expect(first(score).outcomes).toEqual(['misread'])
+  })
+
+  it('calls a created row invented when no labelled product shares its brand family', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1', 'CeraVe')], [created('Nivea')])])
+
+    expect(first(score)).toMatchObject({ misread: 0, invented: 1 })
+    expect(first(score).outcomes).toEqual(['invented'])
+  })
+
+  it('calls a created row invented when every labelled product of its brand family is already found', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), created()])])
+
+    expect(first(score)).toMatchObject({ found: 1, misread: 0, invented: 1 })
+    expect(first(score).outcomes).toEqual(['found', 'invented'])
+  })
+
+  it('attributes each misread to the next unfound same-brand product in label order, so two created rows are two misreads and a third is invented', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2')], [created(), created(), created()])])
+
+    expect(first(score)).toMatchObject({ misread: 2, invented: 1, missing: ['p1', 'p2'] })
+    expect(first(score).outcomes).toEqual(['misread', 'misread', 'invented'])
+  })
+
+  it('scores a product listed again onto the row an earlier listing of this photo created as a repeat, not a wrong merge', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [created(), { brand: 'Acme', landed: 'made-1', onCreatedRow: true }])])
+
+    expect(first(score).outcomes).toEqual(['misread', 'repeat'])
+    expect(first(score)).toMatchObject({ wrongRows: 0, repeat: 1 })
+    expect(score.wrongRows).toBe(0)
+  })
+
+  it('does not attribute a misread to a product found later in the listing order', () => {
+    // p1 is found by the second listed product, so the first created row (listed before) is a misread of p1 only if p1 is still unfound then.
+    const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2')], [created(), onRow('p1')])])
+
+    expect(first(score).outcomes).toEqual(['misread', 'found'])
+    expect(first(score)).toMatchObject({ found: 1, misread: 1, missing: ['p2'] })
+  })
+
+  it('expects at most 5 products per photo, so finding 5 of 7 labelled is a found rate of 1', () => {
+    const labelled = Array.from({ length: 7 }, (_, i) => lab(`p${i}`))
+    const score = scoreShelf([shelf('a.jpg', labelled, labelled.slice(0, 5).map((l) => onRow(l.id)))])
+
+    expect(first(score)).toMatchObject({ labelled: 7, expected: 5, found: 5 })
+    expect(score).toMatchObject({ labelled: 7, expected: 5, found: 5, foundRate: 1 })
+  })
+
+  it('expects every labelled product when a photo has 5 or fewer', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2'), lab('p3'), lab('p4'), lab('p5')], [onRow('p1')])])
+
+    expect(first(score)).toMatchObject({ labelled: 5, expected: 5 })
+  })
+
+  it('sums found over the sum of expected across photos, not the mean of per-photo rates', () => {
+    // Photo A finds 1 of 1; photo B finds 1 of 4. Pooled 2/5 = 0.4 (the mean of rates would be 0.625).
+    const score = scoreShelf([
+      shelf('a.jpg', [lab('a1')], [onRow('a1')]),
+      shelf('b.jpg', [lab('b1'), lab('b2'), lab('b3'), lab('b4')], [onRow('b1')]),
+    ])
+
+    expect(score).toMatchObject({ labelled: 5, expected: 5, found: 2 })
+    expect(score.foundRate).toBeCloseTo(0.4, 10)
+    expect(score.photos.map((p) => p.found)).toEqual([1, 1])
+  })
+
+  it('totals repeat, misread, invented and wrong rows across photos', () => {
+    const score = scoreShelf([
+      shelf('a.jpg', [lab('a1')], [onRow('a1'), onRow('a1'), created('Zed')]),
+      shelf('b.jpg', [lab('b1')], [created(), { brand: 'Acme', landed: 'row-elsewhere' }]),
+    ])
+
+    expect(score).toMatchObject({ found: 1, repeat: 1, invented: 1, misread: 1, wrongRows: 1 })
+  })
+
+  it('measures same-row as found in-set over found in-set plus misread in-set', () => {
+    // In-set: p1 found, p2 misread -> 1/2. Out-of-set p3 found and p4 misread are not in this rate.
+    const score = scoreShelf([shelf('a.jpg', [lab('p1', 'Acme'), lab('p2', 'Acme'), lab('p3', 'Out', false), lab('p4', 'Other', false)], [onRow('p1'), created('Acme'), onRow('p3', 'Out'), created('Other')])])
+
+    expect(score).toMatchObject({ found: 2, misread: 2 })
+    expect(score.sameRow).toBeCloseTo(0.5, 10)
+  })
+
+  it('does not count a misread of an out-of-set product against same-row', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1', 'Acme'), lab('p2', 'Out', false)], [onRow('p1'), created('Out')])])
+
+    expect(score.sameRow).toBe(1)
+    expect(score.misread).toBe(1)
+  })
+
+  it('does not count a wrong row in same-row: its landed row is not a product of the photo, so it cannot be attributed', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), { brand: 'Acme', landed: 'row-elsewhere' }])])
+
+    expect(score).toMatchObject({ found: 1, wrongRows: 1 })
+    expect(score.sameRow).toBe(1)
+  })
+
+  it('does not count a repeat or an invented product in same-row', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [onRow('p1'), onRow('p1'), created('Zed')])])
+
+    expect(score.sameRow).toBe(1)
+  })
+
+  it('reports same-row across photos as one pooled share', () => {
+    const score = scoreShelf([
+      shelf('a.jpg', [lab('a1'), lab('a2'), lab('a3')], [onRow('a1'), onRow('a2'), onRow('a3')]),
+      shelf('b.jpg', [lab('b1')], [created()]),
+    ])
+
+    expect(score.sameRow).toBeCloseTo(3 / 4, 10)
+  })
+
+  it('records a photo whose recognition errored with its error name, and counts it in errors and errorNames', () => {
+    const score = scoreShelf([
+      shelf('a.jpg', [lab('p1')], [onRow('p1')]),
+      shelf('b.jpg', [lab('b1')], [], 'AnthropicUnavailableError'),
+      shelf('c.jpg', [lab('c1')], [], 'AnthropicUnavailableError'),
+      shelf('d.jpg', [lab('d1')], [], 'AnthropicRefusalError'),
+    ])
+
+    expect(score.errors).toBe(3)
+    expect(score.errorNames).toEqual(['AnthropicRefusalError', 'AnthropicUnavailableError'])
+    expect(score.photos[1]).toMatchObject({ photo: 'b.jpg', error: 'AnthropicUnavailableError' })
+    expect(score.photos[0]!.error).toBeUndefined()
+    expect(score.evidence).toBe(true)
+  })
+
+  it('has no evidence with no photos, or when every photo errored', () => {
+    expect(scoreShelf([]).evidence).toBe(false)
+    expect(scoreShelf([shelf('a.jpg', [lab('p1')], [], 'AnthropicUnavailableError')]).evidence).toBe(false)
+  })
+
+  it('has evidence once one photo was read, even if it listed nothing', () => {
+    expect(scoreShelf([shelf('a.jpg', [lab('p1')], [])]).evidence).toBe(true)
+  })
+})
+
+describe('judge with shelf', () => {
+  // 4 photos of 5 in-set Acme products: 20 expected. `found` of them are listed on their rows, `misread` more are created rows.
+  const shelfWith = (found: number, extra: { misread?: number; invented?: number; wrong?: number; error?: string } = {}) => {
+    const photos: ShelfPhotoInput[] = Array.from({ length: 4 }, (_, p) => ({
+      photo: `p${p}.jpg`,
+      labelled: Array.from({ length: 5 }, (_, i) => ({ id: `p${p}-${i}`, rowId: `row-p${p}-${i}`, brand: 'Acme', inSet: true })),
+      listed: [],
+    }))
+    let index = 0
+    const at = () => photos[Math.floor(index / 5)]!
+    for (; index < found; index++) at().listed.push({ brand: 'Acme', landed: `row-${at().labelled[index % 5]!.id}` })
+    for (let m = 0; m < (extra.misread ?? 0); m++, index++) at().listed.push({ brand: 'Acme', landed: null })
+    for (let i = 0; i < (extra.invented ?? 0); i++) photos[0]!.listed.push({ brand: 'Zed', landed: null })
+    for (let w = 0; w < (extra.wrong ?? 0); w++) photos[0]!.listed.push({ brand: 'Acme', landed: 'row-elsewhere' })
+    if (extra.error) photos[3]!.error = extra.error
+    return scoreShelf(photos)
+  }
+  const target = (v: ReturnType<typeof judge>, id: string) => v.targets.find((t) => t.id === id)
+
+  it('meets every shelf target for a clean shelf run and exits 0', () => {
+    const v = judge({ shelf: shelfWith(20) })
+
+    expect(v.targets.map((t) => t.id).sort()).toEqual(['shelf-errors', 'shelf-evidence', 'shelf-found', 'shelf-invented', 'shelf-same-row', 'shelf-wrong-merges'])
+    expect(v.targets.every((t) => t.met)).toBe(true)
+    expect(exitCode(v)).toBe(0)
+  })
+
+  it('meets shelf-found at exactly 90% and misses it just below', () => {
+    expect(target(judge({ shelf: shelfWith(18, { misread: 2 }) }), 'shelf-found')).toMatchObject({ met: true })
+    expect(target(judge({ shelf: shelfWith(17, { misread: 3 }) }), 'shelf-found')).toMatchObject({ met: false })
+  })
+
+  it('meets shelf-same-row at exactly 95% and misses it just below', () => {
+    // 19 found + 1 misread = 19/20 = 95%.
+    expect(target(judge({ shelf: shelfWith(19, { misread: 1 }) }), 'shelf-same-row')).toMatchObject({ met: true })
+    // 18 found + 2 misread = 90%: same-row misses while found (90%) is still met.
+    const v = judge({ shelf: shelfWith(18, { misread: 2 }) })
+    expect(target(v, 'shelf-same-row')).toMatchObject({ met: false })
+    expect(target(v, 'shelf-found')).toMatchObject({ met: true })
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('misses shelf-invented at one invented product and meets it at none', () => {
+    expect(target(judge({ shelf: shelfWith(20) }), 'shelf-invented')).toMatchObject({ met: true })
+    const v = judge({ shelf: shelfWith(20, { invented: 1 }) })
+    expect(target(v, 'shelf-invented')).toMatchObject({ met: false })
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('misses shelf-wrong-merges at one wrong row and meets it at none', () => {
+    expect(target(judge({ shelf: shelfWith(20) }), 'shelf-wrong-merges')).toMatchObject({ met: true })
+    const v = judge({ shelf: shelfWith(20, { wrong: 1 }) })
+    expect(target(v, 'shelf-wrong-merges')).toMatchObject({ met: false })
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('misses shelf-errors when a photo errored and meets it when none did', () => {
+    expect(target(judge({ shelf: shelfWith(20) }), 'shelf-errors')).toMatchObject({ met: true })
+    const v = judge({ shelf: shelfWith(15, { error: 'AnthropicUnavailableError' }) })
+    expect(target(v, 'shelf-errors')).toMatchObject({ met: false })
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('misses shelf-evidence, and so exits 1, when there are no shelf photos', () => {
+    const v = judge({ shelf: scoreShelf([]) })
+
+    expect(target(v, 'shelf-evidence')).toMatchObject({ met: false })
+    expect(exitCode(v)).toBe(1)
+  })
+
+  it('has no shelf targets when the shelf part did not run', () => {
+    const v = judge({ images: scoreImages([{ folder: 'a', stage: 'stored', hash: 'h' }], { h: 'right' }) })
+
+    expect(v.targets.some((t) => t.id.startsWith('shelf-'))).toBe(false)
+  })
+
+  it('keeps the matching and images targets as they were when shelf is added alongside', () => {
+    const matching = scoreMatching([order([read('serum', 'r1', 'new-row'), read('serum', 'r1', 'exact-key')])], NO_LABELS)
+    const without = judge({ matching })
+    const withShelf = judge({ matching, shelf: shelfWith(20) })
+
+    expect(withShelf.targets.filter((t) => !t.id.startsWith('shelf-'))).toEqual(without.targets)
   })
 })
