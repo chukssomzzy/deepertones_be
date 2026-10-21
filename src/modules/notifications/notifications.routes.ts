@@ -41,7 +41,7 @@ const getNotificationSettings = defineRoute({
   operationId: 'getNotificationSettings',
   tags: ['Notifications'],
   summary: 'Which notifications the account wants',
-  description: 'Both are on until changed. The phone\'s own permission is the master switch.',
+  description: 'Both are on until changed, and they cover face scans too: the first for a scan that is ready, the second for a photo that needs a retake. The phone\'s own permission is the master switch.',
   security: bearer,
   responses: { 200: success(NotificationSettingsResponse, 'The account\'s settings'), ...errorResponses(401) },
 })
@@ -52,7 +52,7 @@ const updateNotificationSettings = defineRoute({
   operationId: 'updateNotificationSettings',
   tags: ['Notifications'],
   summary: 'Turn scan notifications on or off',
-  description: 'Name the settings to change; the rest keep their value. The account\'s profiles share one set.',
+  description: 'Name the settings to change; the rest keep their value. The account\'s profiles share one set. The switches cover face scans too: `scanFinished` for a face scan that is ready, `scanNeedsYou` for a face photo that needs a retake.',
   security: bearer,
   request: { body: jsonBody(UpdateNotificationSettingsBody) },
   responses: { 200: success(NotificationSettingsResponse, 'All of the account\'s settings, after the change'), ...errorResponses(401) },
