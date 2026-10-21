@@ -1,6 +1,8 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { extname, join } from 'node:path'
+import { identityKey } from '../../src/modules/catalog/catalog.identity'
 import { CATEGORIES, PRODUCT_FORMS, type ProductForm } from '../../src/modules/catalog/catalog.vocabulary'
+import { SCAN_POLICY } from '../../src/modules/scans/scans.service'
 import type { ProductImage } from '../../src/providers/product-analysis/product-analyst.provider'
 
 // Reads and checks the owner's photo set for `npm run eval:matching` (see matching.ts): everything that can be wrong with
@@ -19,6 +21,11 @@ export type Label = {
 export type SetPhoto = { name: string; path: string; mediaType: ProductImage['mediaType'] }
 export type SetProduct = { folder: string; label: Label; photos: SetPhoto[] }
 export type PhotoSet = { products: SetProduct[] }
+
+/** A product in a shelf photo: its label, and the catalog folder it came from when it is a product of the single set. */
+export type ShelfProduct = { folder?: string; label: Label }
+export type ShelfPhoto = SetPhoto & { products: ShelfProduct[] }
+export type ShelfSet = { photos: ShelfPhoto[] }
 
 export type Verdict = 'right' | 'wrong'
 export type Verdicts = Record<string, Verdict>
@@ -132,6 +139,55 @@ export const loadPhotoSet = async (directory: string): Promise<PhotoSet> => {
     products.push({ folder, label: labels.get(folder)!, photos })
   }
   return { products }
+}
+
+/**
+ * Loads `<directory>/labels.json` and the photos beside it, or throws a PhotoSetError naming the first problem. A `{ folder }` entry
+ * takes the label of that catalog folder; any other entry is a full identity. Null when the directory is not there: whether
+ * that is an error depends on the part being run.
+ */
+export const loadShelfSet = async (directory: string, catalogLabels: Record<string, Label>): Promise<ShelfSet | null> => {
+  let entries
+  try {
+    entries = await readdir(directory, { withFileTypes: true })
+  } catch (error) {
+    if (isMissing(error)) return null
+    throw error
+  }
+  const rawLabels = await readLabelsFile(directory)
+  const files = entries.filter((entry) => entry.name !== LABELS_FILE && !entry.name.startsWith('.')).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  for (const file of files) {
+    if (!file.isFile() || !MEDIA_TYPES[extname(file.name).toLowerCase()]) throw new PhotoSetError(`${file.name}: unsupported entry (only .jpg, .jpeg, .png and .webp photos belong in ${directory}).`)
+    if (!(file.name in rawLabels)) throw new PhotoSetError(`${file.name}: the photo has no entry in ${LABELS_FILE}.`)
+  }
+  for (const name of Object.keys(rawLabels)) if (!files.some((file) => file.name === name)) throw new PhotoSetError(`${name}: the entry has no photo in ${directory}.`)
+
+  const photos: ShelfPhoto[] = []
+  for (const file of files) {
+    const path = join(directory, file.name)
+    if ((await stat(path)).size > SCAN_POLICY.maxPhotoBytes) throw new PhotoSetError(`${file.name}: the photo is over ${SCAN_POLICY.maxPhotoBytes} bytes, which a scan refuses.`)
+    const raw = (rawLabels[file.name] as Record<string, unknown>).products
+    if (!Array.isArray(raw) || raw.length === 0) throw new PhotoSetError(`${file.name}: "products" must list at least 1 product.`)
+    const seen = new Set<string>()
+    const products = raw.map((entry: unknown): ShelfProduct => {
+      if (!isRecord(entry)) throw new PhotoSetError(`${file.name}: each product must be { "folder" } or a brand, name and category.`)
+      let product: ShelfProduct
+      if (typeof entry.folder === 'string') {
+        const label = catalogLabels[entry.folder]
+        if (!label) throw new PhotoSetError(`${file.name}: folder "${entry.folder}" is not a product folder of the catalog set.`)
+        product = { folder: entry.folder, label }
+      } else {
+        const { lookalikes: _ignored, ...label } = toLabel(file.name, entry)
+        product = { label }
+      }
+      const key = identityKey(product.label)
+      if (seen.has(key)) throw new PhotoSetError(`${file.name}: ${product.folder ?? `${product.label.brand} ${product.label.name}`} is listed twice.`)
+      seen.add(key)
+      return product
+    })
+    photos.push({ name: file.name, path, mediaType: MEDIA_TYPES[extname(file.name).toLowerCase()]!, products })
+  }
+  return { photos }
 }
 
 export const parseVerdicts = (body: string): Verdicts => {

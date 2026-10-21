@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { loadPhotoSet, loadVerdicts, parseVerdictFlag, parseVerdicts, PhotoSetError, recordVerdicts, SEEDS, seededShuffle, VerdictsError } from './matching-set'
+import { loadPhotoSet, loadShelfSet, loadVerdicts, parseVerdictFlag, parseVerdicts, PhotoSetError, recordVerdicts, SEEDS, seededShuffle, VerdictsError } from './matching-set'
 
 // The loader is exercised against a real temp directory (node:fs + os.tmpdir, removed after each test): the set IS a
 // directory layout, so this is simpler and more faithful than a fake file-system interface.
@@ -301,5 +301,148 @@ describe('seededShuffle', () => {
   it('handles empty and single-item lists', () => {
     expect(seededShuffle([], 1)).toEqual([])
     expect(seededShuffle(['a'], 1)).toEqual(['a'])
+  })
+})
+
+describe('loadShelfSet', () => {
+  // The shelf directory holds the photos and labels.json side by side; the catalog labels are what `{ folder }` entries refer to.
+  const CATALOG = {
+    serum: { brand: 'Glow Co', name: 'Bright Serum', category: 'skin' },
+    cream: { brand: 'Glow Co', name: 'Soft Cream', form: 'cream', category: 'skin' },
+  } as const
+  const OUT_OF_SET = { brand: 'CeraVe', name: 'Moisturizing Cream', category: 'skin' }
+  const MAX_PHOTO_BYTES = 2_000_000
+
+  const writeShelf = (labels: unknown) => writeFile(join(root, 'labels.json'), typeof labels === 'string' ? labels : JSON.stringify(labels))
+  const writePhoto = (name: string, bytes: number | string = 'x') => writeFile(join(root, name), typeof bytes === 'number' ? Buffer.alloc(bytes) : bytes)
+  /** One photo, `shelf.jpg`, with the given products. */
+  const onePhoto = async (products: unknown[]) => {
+    await writeShelf({ 'shelf.jpg': { products } })
+    await writePhoto('shelf.jpg')
+  }
+
+  it('loads each photo with its products, a folder entry resolved to the catalog label and an inline entry kept as written', async () => {
+    await writeShelf({ 'b.png': { products: [{ folder: 'serum' }, OUT_OF_SET] }, 'a.jpg': { products: [{ folder: 'cream' }] } })
+    await writePhoto('b.png')
+    await writePhoto('a.jpg')
+    await writeFile(join(root, '.DS_Store'), 'x')
+
+    const set = await loadShelfSet(root, CATALOG)
+
+    expect(set).not.toBeNull()
+    expect(set!.photos.map((p) => p.name)).toEqual(['a.jpg', 'b.png'])
+    expect(set!.photos[0]).toMatchObject({ path: join(root, 'a.jpg'), mediaType: 'image/jpeg' })
+    expect(set!.photos[1]!.mediaType).toBe('image/png')
+    expect(set!.photos[0]!.products).toEqual([{ folder: 'cream', label: CATALOG.cream }])
+    expect(set!.photos[1]!.products).toEqual([{ folder: 'serum', label: CATALOG.serum }, { label: OUT_OF_SET }])
+  })
+
+  it('returns null, not an error, when the shelf directory does not exist', async () => {
+    await expect(loadShelfSet(join(root, 'nope'), CATALOG)).resolves.toBeNull()
+  })
+
+  it('accepts a photo of exactly 2,000,000 bytes', async () => {
+    await writeShelf({ 'shelf.jpg': { products: [{ folder: 'serum' }] } })
+    await writePhoto('shelf.jpg', MAX_PHOTO_BYTES)
+
+    await expect(loadShelfSet(root, CATALOG)).resolves.not.toBeNull()
+  })
+
+  it('rejects a photo of 2,000,001 bytes, naming the file', async () => {
+    await writeShelf({ 'big.jpg': { products: [{ folder: 'serum' }] } })
+    await writePhoto('big.jpg', MAX_PHOTO_BYTES + 1)
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/big\.jpg/)
+  })
+
+  it('rejects a photo that has no entry in labels.json, naming the file', async () => {
+    await writeShelf({ 'a.jpg': { products: [{ folder: 'serum' }] } })
+    await writePhoto('a.jpg')
+    await writePhoto('unlabelled.jpg')
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/unlabelled\.jpg/)
+  })
+
+  it('rejects a labels entry that has no photo, naming the file', async () => {
+    await writeShelf({ 'a.jpg': { products: [{ folder: 'serum' }] }, 'ghost.jpg': { products: [{ folder: 'serum' }] } })
+    await writePhoto('a.jpg')
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/ghost\.jpg/)
+  })
+
+  it('rejects a photo with no products, naming the file', async () => {
+    await onePhoto([])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects a folder entry that is not a catalog folder, naming the photo and the folder', async () => {
+    await onePhoto([{ folder: 'toner' }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg.*toner|toner.*shelf\.jpg/)
+  })
+
+  it('rejects an inline product with an invalid category, naming the photo', async () => {
+    await onePhoto([{ ...OUT_OF_SET, category: 'nails' }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects an inline product with an invalid form, naming the photo', async () => {
+    await onePhoto([{ ...OUT_OF_SET, form: 'soup' }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects an inline product without a brand or a name, naming the photo', async () => {
+    await onePhoto([{ name: 'Moisturizing Cream', category: 'skin' }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects the same folder listed twice in one photo, naming the photo', async () => {
+    await onePhoto([{ folder: 'serum' }, { folder: 'serum' }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects the same inline identity listed twice in one photo', async () => {
+    await onePhoto([OUT_OF_SET, { ...OUT_OF_SET }])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/shelf\.jpg/)
+  })
+
+  it('rejects an inline product that is a catalog folder product written out again', async () => {
+    await onePhoto([{ folder: 'serum' }, CATALOG.serum])
+
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+  })
+
+  it('allows the same product in two different photos', async () => {
+    await writeShelf({ 'a.jpg': { products: [{ folder: 'serum' }] }, 'b.jpg': { products: [{ folder: 'serum' }] } })
+    await writePhoto('a.jpg')
+    await writePhoto('b.jpg')
+
+    const set = await loadShelfSet(root, CATALOG)
+
+    expect(set!.photos).toHaveLength(2)
+  })
+
+  it('rejects a labels.json that is missing or not valid JSON', async () => {
+    await writePhoto('shelf.jpg')
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+
+    await writeShelf('{ not json')
+    await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
   })
 })
