@@ -244,7 +244,7 @@ database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.m
 Both commands read `ADMIN_API_TOKEN` from the environment's vars file: `.dev.vars` for `local`, `.dev.vars.staging` and `.dev.vars.production` for the
 deployed ones (the same gitignored files as above). The token is sent only in the `X-Admin-Token` header and is never printed.
 
-- **Creating or rotating the token:** generate a long random value (for example `openssl rand -base64 48`), put it in `.dev.vars.<env>` as
+- **Creating or rotating the token:** generate a long random value (`openssl rand -hex 32`, as for the other secrets), put it in `.dev.vars.<env>` as
   `ADMIN_API_TOKEN`, and push it with `npm run secrets:push -- --env <env> --apply`. To rotate, replace the value and push again; the old value stops
   working as soon as the Worker has the new one. For `local`, the value in `.dev.vars` is what `wrangler dev` reads.
 - **A file only goes back where it came from.** The export stamps the environment, the catalog version and the contract version into the hidden `_meta`
