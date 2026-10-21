@@ -193,6 +193,12 @@ The reviewed set of products the app may suggest adding to a routine, each descr
 types it suits, its safety notes and the countries it is sold in. A product reaches it only through review.
 _Avoid_: Formulary, catalog (alone), shop
 
+**Candidate**:
+A recommended product that passes every rule for one user: sold in their shopping country, fills a gap in their routine, works
+on their goal's skin concerns, suits their skin type, and breaks no ingredient rule for their safety answers. An AI may
+choose among candidates and explain the choice, but never suggests anything that is not one.
+_Avoid_: Match, suggestion, pick
+
 **Ingredient rule**:
 A reviewed statement that an ingredient carries a caution, and when (for example, retinoids in pregnancy), with its source.
 Ingredient rules decide whether a product is safe for a user; a product row's own claims can only make it stricter.
