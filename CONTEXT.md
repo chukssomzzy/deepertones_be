@@ -195,8 +195,14 @@ _Avoid_: Reference entry, flag
 
 **Catalog workbook**:
 The reviewed spreadsheet, with a Products tab and an Ingredients tab, that is the source of the recommendation catalog and of
-the ingredient rules. Each row has a stable code.
+the ingredient rules. Each row has a stable code. It is the only place those rows are edited: every edit starts from an
+export of what is live, and an upload made from an older export is refused.
 _Avoid_: Dataset, master sheet, CSV
+
+**Retired**:
+A row that has left the workbook. It is no longer recommended or applied, but is kept, so past routines and verdicts can
+still say what they were based on.
+_Avoid_: Deleted, removed
 
 **Draft**:
 A workbook row or cell an AI filled from cited sources, which nobody has approved yet. The team decides which products go in
