@@ -313,7 +313,11 @@ export class ProductCatalogService {
     })
     // A reading that says less than two or more candidates ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either: a duplicate is safer than a wrong merge.
     const ambiguous = candidates.filter((c) => lessSpecific(identity, c)).length >= 2
-    for (const candidate of ambiguous ? [] : candidates) {
+    // A reading that says less than one candidate ("Facial Moisturizing Lotion" against "PM Facial Moisturizing Lotion") is most likely a
+    // partial read of it: landing it on a row vaguer still ("Moisturizing Lotion") would be a guess, so that row is not asked about.
+    const partialRead = candidates.some((c) => lessSpecific(identity, c))
+    const toJudge = partialRead ? candidates.filter((c) => !lessSpecific(c, identity)) : candidates
+    for (const candidate of ambiguous ? [] : toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         // A reading that says less than the product ("Hydro Boost"), or more than a vague row, or prints no form where the product does, would as an alias claim a
         // look-alike's next reading by exact key; only a reading of equal specificity is remembered.

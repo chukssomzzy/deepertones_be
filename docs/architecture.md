@@ -1413,7 +1413,10 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   equal specificity (the same words in another order, spelling or case, or a different variant wording over the same words) is remembered.
   **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
-  as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual. **A partial read is not judged against a vaguer row:** when the reading is less specific than at least one
+  candidate, the candidates less specific than the reading are not asked about ("Facial Moisturizing Lotion" with "PM Facial Moisturizing
+  Lotion" and "Moisturising Lotion" stored asks only about the PM lotion, and a "no" makes a new row): the reading is most likely the more
+  specific product read in part, so landing it on a row vaguer still would be a guess.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
   (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
   missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this

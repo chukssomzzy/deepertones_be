@@ -259,7 +259,8 @@ describe('ProductCatalogService.resolve', () => {
 
 describe('ProductCatalogService.resolve near misses', () => {
   const ACME = 'Acme'
-  // Word overlap with TARGET (Jaccard): A 3/5 = 0.6 (exactly the threshold), B 4/5, C 5/6, D 5/5, E 3/8 (and TARGET's words are not all inside it).
+  // Word overlap with TARGET (Jaccard): A 3/5 = 0.6 (exactly the threshold), B 4/5, C 5/6, D 5/5, E 3/8 (and TARGET's words are not all inside it),
+  // F 4/6 (neither inside TARGET nor holding all of it).
   const TARGET = identity({ brand: ACME, name: 'Radiance Serum Vitamin Glow Booster' })
   const NAMES = {
     A: 'Radiance Serum Vitamin',
@@ -267,6 +268,7 @@ describe('ProductCatalogService.resolve near misses', () => {
     C: 'Radiance Serum Vitamin Glow Booster Night',
     D: 'Booster Glow Vitamin Serum Radiance',
     E: 'Radiance Serum Hydra Mist',
+    F: 'Radiance Serum Vitamin Glow Elixir',
   }
 
   /** Creates the products one after another, so each is newer than the last. Returns their ids by letter. */
@@ -305,7 +307,8 @@ describe('ProductCatalogService.resolve near misses', () => {
 
   it('asks about at most nearMissLimit candidates, always as (the scanned label, the candidate), and makes a new product when all are different', async () => {
     const ctx = setup()
-    const ids = await catalogued(ctx, ['A', 'B', 'C', 'D'])
+    // No candidate says more than TARGET (C would, and then the vaguer A and B are never asked: a partial read is not judged against a vaguer row).
+    const ids = await catalogued(ctx, ['A', 'B', 'F', 'D'])
     const before = ctx.analyst.calls.sameProduct.length
 
     const result = await ctx.service.resolve(TARGET)
