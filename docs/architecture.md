@@ -1255,7 +1255,11 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   `oz`, `fl oz` at any number; a bare `g` or `l` only from 10 up, so "Shade 4 L" is kept). A `+` touching a letter or
   digit is read as "plus" ("SPF 50+" and "Hydro Boost+"; a standalone " + " is just a space). A space is put between a
   letter and the digit after it ("NC15" is "nc 15"), never between a digit and a letter, so "250ml" still reaches the
-  size rule. A dot survives only between two digits ("2.5"). **Brand spellings are not merged yet**: two spellings of
+  size rule. A dot survives only between two digits ("2.5"). **A number written with `%` is never a size**: before
+  the rest of the text is normalised, a number directly followed by `%` is glued to a letter suffix ("100%" becomes
+  "100pct"), so it can never read as a bare `l` or `g` once the `%` itself turns into a space; the suffix comes off
+  again once sizes have been stripped, leaving the plain number ("100% L-Ascorbic Acid Powder" keys as "100 l
+  ascorbic acid powder", not "ascorbic acid powder" with its "100" eaten as 100 litres). **Brand spellings are not merged yet**: two spellings of
   one brand make two brand keys, so a product under the other spelling is not found as a near miss.
 - **Near-miss candidates** are products of the same brand family with a different identity key whose words overlap
   (Jaccard similarity, default threshold 0.6) or **where one reading's words are all inside the other's** ("NIVEA soft" in
@@ -1266,7 +1270,12 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   (lotion, cream, gel, oil, wash, cleanser, soap, body, face, hand, hair, skin, men, women, sun, original, classic, care, daily ...;
   `GENERIC_WORDS` in `catalog.identity.ts`). "NIVEA soft" in "NIVEA Soft Light Moisturiser" is a containment; "Dove Body Wash" in
   "Dove Go Fresh Body Wash" is not (it may still be a Jaccard candidate). The word relations (equal, subset, superset) behind
-  containment and `lessSpecific` come from one private helper. Best first by
+  containment and `lessSpecific` come from one private helper. **UK and US spellings are folded for this scoring only**
+  (`nameSimilarity`, containment and the edition check, `namesAnotherEdition`; never `identityKey`, so a UK and a US
+  reading keep different keys until the judge is asked), word for word from a fixed, reviewed list: the -ise/-ised/
+  -iser/-ising/-isation forms of moisturise, sanitise and normalise, plus colour, centre and grey. No generic suffix
+  rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is whole-word, so "greyhound" and "centred"
+  do not either. Best first by
   similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
@@ -1398,7 +1407,10 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
-  (a product line, range or bare descriptor against a specific product).
+  (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
+  missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this
+  does not touch the rule above, which still says false when one listing's whole name is only the range or line, against a
+  specific product in it.
 - **Research accounting.** An attempt is written as `started` BEFORE the researcher is called and settled to `found`,
   `not-found` or `failed` after, so a crash in between still counts. `found` is settled only AFTER the formulation is
   stored, so until then the `started` row keeps shielding the product from a concurrent call; if the store fails the

@@ -10,6 +10,9 @@
 //   images    each product is created from its label and researched for real; the stock image it stores is saved for you to judge.
 //   shelf     photos of several products together are read once each; every product listed is resolved against a catalog seeded with the true
 //             rows of the single set and of the shelf photos' other products: did it find what is in the photo, invent nothing, land on the right rows?
+//             A single-set product's row is seeded from what its own single photos were read as (the first that reads as a beauty product, in
+//             name order; reused from the matching part's own recognitions when it ran this invocation, else read fresh), so the row is what the
+//             catalog would really hold, not the owner's label wording; a product with none readable, and every shelf-only product, keeps its label.
 //   --part matching|images|shelf|all   (default all)    --max-usd N   stop spending at N dollars (default 3)    --limit N   products to run
 //   --limit does not cut the shelf photos: the catalog is seeded from the whole set.
 //   --model JOB=MODEL   run a job on another model (repeatable)
@@ -58,7 +61,6 @@ import {
   type ShelfScore,
 } from './matching-score'
 import {
-  type Label,
   loadPhotoSet,
   loadShelfSet,
   loadVerdicts,
@@ -74,6 +76,7 @@ import {
   type Verdicts,
 } from './matching-set'
 import { loadEnv, parseArgs } from './score'
+import { identityOfLabel, type PhotoReading, seedReadingOf, type SeedSource } from './shelf-seeds'
 
 const DIRECTORY = 'eval-photos/catalog'
 const SHELF_DIRECTORY = 'eval-photos/shelf'
@@ -132,11 +135,6 @@ const splitArgs = (argv: string[]): { part: Part; verdicts: string[]; rest: stri
 }
 
 const readPhoto = (photo: SetPhoto): ProductImage => ({ bytes: readFileSync(photo.path), mediaType: photo.mediaType })
-
-const identityOfLabel = (product: { label: Label }): ProductIdentity => {
-  const { brand, name, variant, form, category } = product.label
-  return { brand, name, category, ...(variant ? { variant } : {}), ...(form ? { form } : {}) }
-}
 
 /** A ledger that remembers having refused a reservation: the run then stopped short of what it was asked to measure. */
 class WatchedLedger extends MemoryAiSpendLedger {
@@ -422,25 +420,67 @@ type ShelfDetail = {
   listed: ShelfListedDetail[]
 }
 
-type ShelfSeed = { id: string; identity: ProductIdentity; inSet: boolean }
+type ShelfSeed = { id: string; identity: ProductIdentity; inSet: boolean; source: SeedSource; photo?: string }
 
 /**
- * The true identity of every product of the single set and of every out-of-set product labelled in a shelf photo, once each. Two
- * different products with one identity key cannot both be a row, so the set is wrong and no number from it would mean anything.
+ * This product's single photos as `PhotoReading`s, in the photo name order the matching part already reads them: reused from its
+ * own recognitions (no extra spend) when it ran this invocation, else read fresh below.
  */
-const shelfSeeds = (products: SetProduct[], shelf: ShelfSet): ShelfSeed[] => {
+const readingsFromRecognised = (recognised: Recognised[], folder: string): PhotoReading[] =>
+  recognised
+    .filter((item) => item.folder === folder)
+    .map((item): PhotoReading =>
+      'read' in item
+        ? { photo: item.photo.name, recognition: { classification: 'beauty-product', ...item.read.identity, confidence: item.read.confidence } }
+        : { photo: item.photo.name, error: 'unreadable' in item ? item.unreadable : item.error },
+    )
+
+/**
+ * This product's single photos, read fresh in name order and stopped at the first beauty-product reading: what seeding its
+ * shelf row needs, and no more spend than that. Only reached when the matching part did not already read these photos.
+ */
+const readingsForSeeding = async (recognizer: AnthropicProductRecognizer, product: SetProduct): Promise<PhotoReading[]> => {
+  const readings: PhotoReading[] = []
+  for (const photo of product.photos) {
+    let recognition: Recognition
+    try {
+      recognition = await withRetries(() => recognizer.recognize(readPhoto(photo)))
+    } catch (error) {
+      if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
+      if (error instanceof AiBudgetExceededError) throw new SetupError('The spend cap was reached while reading photos for the shelf seeds; raise --max-usd.')
+      readings.push({ photo: photo.name, error: errorName(error) })
+      continue
+    }
+    readings.push({ photo: photo.name, recognition })
+    if (recognition.classification === 'beauty-product') break
+  }
+  return readings
+}
+
+/**
+ * The true identity of every product of the single set and of every out-of-set product labelled in a shelf photo, once each. An
+ * in-set product is seeded from what its own single photos were read as (`readings`), so the eval measures landing on the row the
+ * catalog would really hold, not the owner's label wording; a shelf-only product keeps its label, there being no single photo of it.
+ * Two different products with one identity key cannot both be a row, so the set is wrong and no number from it would mean anything.
+ */
+const shelfSeeds = (products: SetProduct[], shelf: ShelfSet, readings: ReadonlyMap<string, PhotoReading[]>): ShelfSeed[] => {
   const byKey = new Map<string, ShelfSeed>()
+  // No model or label text here: both ids are the owner's own (a folder name or a normalised identity key), never what a reading said.
   const add = (seed: ShelfSeed, where: string) => {
     const key = identityKey(seed.identity)
     const other = byKey.get(key)
-    if (other && other.id !== seed.id) throw new SetupError(`${where}: ${seed.identity.brand} / ${seed.identity.name} has the same identity key as ${other.identity.brand} / ${other.identity.name}; one product cannot be two rows.`)
+    if (other && other.id !== seed.id) throw new SetupError(`${where}: ${seed.id} has the same identity key as ${other.id}; one product cannot be two rows.`)
     byKey.set(key, seed)
   }
-  for (const product of products) add({ id: product.folder, identity: identityOfLabel(product), inSet: true }, product.folder)
+  for (const product of products) {
+    const seeded = seedReadingOf(product, readings.get(product.folder) ?? [])
+    add({ id: product.folder, identity: seeded.identity, inSet: true, source: seeded.source, ...(seeded.source === 'single-scan' ? { photo: seeded.photo } : {}) }, product.folder)
+  }
   for (const photo of shelf.photos) {
     for (const product of photo.products) {
+      if (product.folder !== undefined) continue // already seeded above, from its own single photos (or its label if none read)
       const identity = identityOfLabel(product)
-      add({ id: product.folder ?? `shelf:${identityKey(identity)}`, identity, inSet: product.folder !== undefined }, photo.name)
+      add({ id: `shelf:${identityKey(identity)}`, identity, inSet: false, source: 'label' }, photo.name)
     }
   }
   return [...byKey.values()]
@@ -571,9 +611,10 @@ const main = async (): Promise<number> => {
     if (split.part === 'shelf' || split.part === 'all') {
       const catalogLabels = Object.fromEntries(set.products.map((p) => [p.folder, p.label]))
       shelfSet = await loadShelfSet(SHELF_DIRECTORY, catalogLabels)
-      if (shelfSet) seeds = shelfSeeds(set.products, shelfSet)
-      else if (split.part === 'shelf') throw new SetupError(`${SHELF_DIRECTORY} does not exist: put your shelf photos and labels.json there (see the header of scripts/eval/matching.ts).`)
-      else console.log(`Shelf part skipped: ${SHELF_DIRECTORY} does not exist.`)
+      if (!shelfSet) {
+        if (split.part === 'shelf') throw new SetupError(`${SHELF_DIRECTORY} does not exist: put your shelf photos and labels.json there (see the header of scripts/eval/matching.ts).`)
+        console.log(`Shelf part skipped: ${SHELF_DIRECTORY} does not exist.`)
+      }
     }
     env = await loadEnv()
   } catch (error) {
@@ -598,9 +639,10 @@ const main = async (): Promise<number> => {
   let imageDetails: ImageDetail[] = []
   let shelf: ShelfScore | undefined
   let shelfDetails: ShelfDetail[] = []
+  let recognised: Recognised[] | undefined
   try {
     if (split.part === 'matching' || split.part === 'all') {
-      const recognised = await recogniseOnce(new AnthropicProductRecognizer(client), products)
+      recognised = await recogniseOnce(new AnthropicProductRecognizer(client), products)
       orders = []
       for (const seed of SEEDS) orders.push({ seed, photos: await runOrder(seed, recognised, analyst) })
       matching = scoreMatching(orders, labels)
@@ -611,6 +653,15 @@ const main = async (): Promise<number> => {
     }
     if (shelfSet) {
       const recognizer = new AnthropicProductRecognizer(client)
+      // --limit does not cut the shelf photos (see the header): the whole single set seeds the catalog, in or out of `products`.
+      // A product the matching part did not reach (outside --limit, or that part did not run) has no recognitions to reuse.
+      const readings = new Map<string, PhotoReading[]>()
+      for (const product of set.products) {
+        const reused = recognised ? readingsFromRecognised(recognised, product.folder) : []
+        readings.set(product.folder, reused.length > 0 ? reused : await readingsForSeeding(recognizer, product))
+      }
+      seeds = shelfSeeds(set.products, shelfSet, readings)
+      console.log(`Shelf seeds: ${seeds.filter((s) => s.source === 'single-scan').length} from single scans, ${seeds.filter((s) => s.source === 'label').length} from labels`)
       for (const photo of shelfSet.photos) shelfDetails.push(await runShelfPhoto(photo, seeds, recognizer, analyst))
       shelf = scoreShelf(shelfDetails.map((d) => d.input))
     }
@@ -643,7 +694,11 @@ const main = async (): Promise<number> => {
     spendCapReached: ledger.refused,
     matching: matching && { score: matching, photos: orders },
     images: images && { score: images, hashes: imageDetails.map(({ folder: name, stage, hash, error }) => ({ folder: name, stage, hash, error })) },
-    shelf: shelf && { score: shelf, photos: shelfDetails.map(({ input, classification, excluded, listed }) => ({ photo: input.photo, error: input.error, classification, excluded, labelled: input.labelled, listed })) },
+    shelf: shelf && {
+      score: shelf,
+      seeds: seeds.map(({ id, source, photo }) => ({ id, source, photo })),
+      photos: shelfDetails.map(({ input, classification, excluded, listed }) => ({ photo: input.photo, error: input.error, classification, excluded, labelled: input.labelled, listed })),
+    },
     verdict,
   }
   writeFileSync(join(folder, 'report.json'), `${JSON.stringify(report, null, 2)}\n`)
