@@ -7,7 +7,18 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, nameSimilarity, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
+import {
+  brandFirstWord,
+  brandKey,
+  identityKey,
+  lessSpecific,
+  lessSpecificForNearMiss,
+  namesAnotherEdition,
+  nearMissCandidates,
+  normaliseText,
+  pagesByNameMatch,
+  sameWords,
+} from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -208,10 +219,16 @@ export class ProductCatalogService {
    * made instead. When the reading gives a form and exactly one of those less-specific candidates shares it (any of a
    * different known form was already dropped before `candidates` was built), the ones with no form recorded settle
    * nothing: they are not counted towards the guard above, and are not judged either, so a vaguer, formless sibling
-   * never stands in front of the one candidate that already agrees on form.
+   * never stands in front of the one candidate that already agrees on form. Specificity is judged with the
+   * suitability-phrase ignoring applied, on the same `allComparable` list `nearMissCandidates` saw, so a phrase that
+   * bought a candidate past the threshold (or kept one out) is seen the same way here.
    */
-  private static ambiguityFiltered<P extends Product>(identity: { brand: string; name: string; variant?: string; form?: string | null }, candidates: P[]): P[] {
-    const lessSpecificOnes = candidates.filter((c) => lessSpecific(identity, c))
+  private static ambiguityFiltered<P extends Product>(
+    identity: { brand: string; name: string; variant?: string; form?: string | null },
+    candidates: P[],
+    allComparable: P[],
+  ): P[] {
+    const lessSpecificOnes = candidates.filter((c) => lessSpecificForNearMiss(identity, c, allComparable))
     const sameForm = identity.form ? lessSpecificOnes.filter((c) => c.form === identity.form) : []
     const exempt = sameForm.length === 1 ? lessSpecificOnes.filter((c) => !c.form) : []
     const counted = exempt.length > 0 ? sameForm : lessSpecificOnes
@@ -330,8 +347,8 @@ export class ProductCatalogService {
     // A candidate with exactly the reading's words is not held back by the guard: when the guard holds the reading back from
     // its longer look-alikes, the equal ones are still judged (a "no" then makes a new row); otherwise every candidate is judged
     // as before, equal ones first (they sort first by similarity).
-    const equal = candidates.filter((c) => nameSimilarity(identity, c) === 1)
-    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates)
+    const equal = candidates.filter((c) => sameWords(identity, c))
+    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates, comparable)
     const toJudge = filtered.length === 0 ? equal : [...equal, ...filtered.filter((c) => !equal.includes(c))]
     for (const candidate of toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {

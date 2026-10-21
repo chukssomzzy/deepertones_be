@@ -1279,19 +1279,32 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   centre and grey. No generic suffix rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is
   whole-word, so "greyhound" and "centred" do not either. The fold lives in the one shared word set (`words`, pooling
   brand, name and variant), so it reaches `nameSimilarity`, containment, `lessSpecific` and the edition check
-  (`namesAnotherEdition`) alike — and through `lessSpecific`, the ambiguity guard and the alias-equality check too.
+  (`namesAnotherEdition`) alike — and through `lessSpecific` and `lessSpecificForNearMiss`, the alias-equality check
+  and the ambiguity guard too.
   That is intended: a UK reading is treated exactly as its US spelling would be, so a UK reading less specific than
   two US rows of different ranges is held back just as the US reading is, and a UK reading landing on a US row by an
   equally-specific match is aliased just as the US spelling would be. `identityKey` never folds, so a UK and a US
   reading keep different keys until the judge is asked. **A suitability phrase named on only one side is ignored here**
   ("for" then up to 3 words then "hair" or "skin", optionally followed by "type"/"types" — "for Natural Hair", "for All
   Hair Types", "for Normal to Oily Skin"; four words between "for" and the hair/skin word is too many to be the phrase,
-  so nothing is set aside). It is dropped from the similarity ratio and the containment check only when exactly one of
-  the two listings gives one; the same phrase on both sides, two that differ on both sides, and no phrase on either side
-  score on the full words, as before. This is local to `nearMissCandidates`: it never reaches `identityKey`,
-  `namesAnotherEdition`, `lessSpecific`, the ambiguity guard's equal-words check, or the alias-equality check, all of
-  which still see the phrase's words. Best first by
-  similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
+  so nothing is set aside). **An edition marker is not a suitability line:** a phrase whose words between "for" and
+  "hair"/"skin" include any of men, mens, man, mans, women, womens, woman, womans, kids, kid, baby, babys, babies, child,
+  childs, children, childrens, teen, teens ("for Men's Skin", "for Kids Hair") is never treated as the phrase and never
+  set aside — it names an edition of the range, a real difference, not the pack's wording of the same suitability
+  (apostrophes are already dropped by `normaliseText`, so "men's" reads as "mens"). The phrase is dropped from the
+  similarity ratio and the containment check only when exactly one of the two listings gives one; the same phrase on
+  both sides, two that differ on both sides, and no phrase on either side score on the full words, as before. **Two or
+  more distinct phrases switch the ignoring off for the whole call:** when the reading and the products passed to
+  `nearMissCandidates` hold 2+ distinct suitability phrases between them (a reading with a phrase and a sibling with a
+  different one; or a reading with none among rows with two different ones), nothing is set aside for any pair in that
+  call, because the family itself then shows the words tell products apart rather than restate a shared suitability.
+  One distinct phrase, on whichever side, still gets ignored. This is local to `nearMissCandidates`: it never reaches
+  `identityKey`, `namesAnotherEdition`, the exported `lessSpecific`, the ambiguity guard's equal-words check, or the
+  alias-equality check, all of which still see the phrase's words — but it does reach the ambiguity guard's
+  specificity check below (`lessSpecificForNearMiss`) and the form-outranking rule's count, which uses the same
+  less-specific set, so a line that bought (or cost) a candidate its place here is seen the same way there. Ranking
+  (best first by similarity, then id, at most 3 after ranking) sorts on this phrase-ignored similarity too, not the full
+  words'. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
   looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
@@ -1421,8 +1434,13 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  This specificity test (`lessSpecificForNearMiss`) weighs the same words the suitability-phrase ignoring (near-miss
+  candidates, above) used to find the candidate in the first place — a one-sided phrase set aside, or not, by the same
+  two-or-more-distinct-phrases switch-off — not the full words `lessSpecific` gives: a phrase that bought a candidate
+  past the threshold, or kept one out, is seen the same way here, so a line no row of the family gives cannot buy the
+  reading a judge call it would not otherwise have earned.
   **An equal candidate is never held back by it.** Whenever one or more of the near-miss candidates have exactly the reading's
-  words (full words, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
+  words (full words, `sameWords`, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
   judged even when the guard holds the reading back from the rest: then only the equal ones are asked about, so a "no" still
   makes a new row and the longer look-alikes are never asked (a "Moisturizing Lotion" reading against stored "Moisturising
   Lotion", "Daily Moisturizing Lotion" and "Night Moisturizing Lotion" rows judges only the first). When the guard would not
