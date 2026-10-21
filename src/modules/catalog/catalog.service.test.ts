@@ -4541,3 +4541,64 @@ describe('ProductCatalogService.resolve: spellings, % names and range-less readi
     })
   })
 })
+
+describe('ProductCatalogService.resolve: a row whose identity key the code no longer produces', () => {
+  /** The name whose key the % size fix changed: "100%" used to read as "100 l", 100 litres, and be stripped as a size. */
+  const ASCORBIC = { brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder', category: 'skin' } as const
+  /** The key a Worker before the fix wrote for it. Pinned literally: no migration rewrote the rows it made. */
+  const OLD_KEY = 'the ordinary|ascorbic acid powder||'
+  const OLD_ID = 'old-row'
+
+  /** The product as the old Worker stored it: today's fields under the key that code produced. */
+  const rowFromBeforeTheFix = (ctx: Ctx) =>
+    ctx.repository.createProduct({
+      id: OLD_ID,
+      identityKey: OLD_KEY,
+      brandKey: brandKey(ASCORBIC.brand),
+      kind: 'named',
+      brand: ASCORBIC.brand,
+      name: ASCORBIC.name,
+      variant: null,
+      form: null,
+      category: ASCORBIC.category,
+      createdAt: T0,
+    })
+
+  it('asks the judge once about the old row and, on a "yes", lands the reading on it with an alias for the new key', async () => {
+    const ctx = setup()
+    await rowFromBeforeTheFix(ctx)
+    ctx.analyst.sameProductWith(() => true)
+    const scanned = identity(ASCORBIC)
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).toBe(OLD_ID)
+    expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: OLD_ID })
+  })
+
+  it('reaches the same row by that alias on the next scan, without asking the judge again', async () => {
+    const ctx = setup()
+    await rowFromBeforeTheFix(ctx)
+    ctx.analyst.sameProductWith(() => true)
+    await ctx.service.resolve(identity(ASCORBIC))
+
+    const again = await ctx.service.resolve(identity(ASCORBIC))
+
+    expect(again.productId).toBe(OLD_ID)
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+  })
+
+  it('makes a new product, keyed by the new key and with no alias, when the judge says it is not the old row', async () => {
+    const ctx = setup()
+    await rowFromBeforeTheFix(ctx)
+    ctx.analyst.sameProductWith(() => false)
+    const scanned = identity(ASCORBIC)
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).not.toBe(OLD_ID)
+    expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
+  })
+})

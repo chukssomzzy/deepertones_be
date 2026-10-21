@@ -450,6 +450,37 @@ describe('nearMissCandidates', () => {
       expect(ids(nearMissCandidates(scanned, [widest, wider, nearer, close]))).toEqual(['close', 'nearer', 'wider'])
     })
   })
+
+  // A row written before the % size fix carries the key that code produced; the key its fields produce today is another
+  // string. Judging sameness on the recomputed key would hide that row from the judge, which is the duplicate it exists to stop.
+  describe('with a stored identity key', () => {
+    const ASCORBIC = { brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder' }
+    /** The key a Worker before the % fix wrote for this product: "100%" read as "100 l", 100 litres, and stripped as a size. */
+    const OLD_KEY = 'the ordinary|ascorbic acid powder||'
+    /** The key the same reading has now. */
+    const NEW_KEY = 'the ordinary|100 l ascorbic acid powder||'
+
+    it('no longer produces the pre-fix key for the reading itself', () => {
+      expect(identityKey(ASCORBIC)).toBe(NEW_KEY)
+      expect(identityKey(ASCORBIC)).not.toBe(OLD_KEY)
+    })
+
+    it('makes a row whose stored key differs from the target a candidate, though recomputing the row\'s key would equal the target\'s', () => {
+      const stale = { id: 'stale', ...ASCORBIC, identityKey: OLD_KEY }
+
+      expect(ids(nearMissCandidates(ASCORBIC, [stale]))).toEqual(['stale'])
+    })
+
+    it('still leaves out a row whose stored key is the target\'s', () => {
+      const current = { id: 'current', ...ASCORBIC, identityKey: NEW_KEY }
+
+      expect(nearMissCandidates(ASCORBIC, [current])).toEqual([])
+    })
+
+    it('falls back to the recomputed key for a product that carries none', () => {
+      expect(nearMissCandidates(ASCORBIC, [{ id: 'keyless', ...ASCORBIC }])).toEqual([])
+    })
+  })
 })
 
 describe('lessSpecific', () => {
@@ -655,6 +686,23 @@ describe('a number written with % is never a pack size', () => {
 
     expect(tokens).not.toContain('ml')
     expect(tokens).toContain('l')
+  })
+
+  // A pack may print "100 %" with a space; the sign still belongs to the number, so the number is still not an amount.
+  it.each([
+    ['100 % L-Ascorbic Acid Powder', '100% L-Ascorbic Acid Powder', 'b|100 l ascorbic acid powder||'],
+    ['10 % L-Lactic Acid Serum', '10% L-Lactic Acid Serum', 'b|10 l lactic acid serum||'],
+  ])('keys %j the same as %j', (spaced, tight, expected) => {
+    expect(identityKey({ brand: 'B', name: spaced })).toBe(identityKey({ brand: 'B', name: tight }))
+    expect(identityKey({ brand: 'B', name: spaced })).toBe(expected)
+  })
+
+  it('still strips a real size beside a % number written with a space', () => {
+    const tokens = keyName('10 % L-Lactic Acid Serum 100 ml')
+
+    expect(tokens).not.toContain('ml')
+    expect(tokens).toContain('l')
+    expect(tokens).toContain('10')
   })
 
   it.each([
