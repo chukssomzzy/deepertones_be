@@ -19,6 +19,7 @@ import { goalsRoutes } from './modules/goals/goals.routes'
 import { healthRoutes } from './modules/health/health.routes'
 import { notificationsRoutes } from './modules/notifications/notifications.routes'
 import { onboardingRoutes } from './modules/onboarding/onboarding.routes'
+import { recommendationsRoutes } from './modules/recommendations/recommendations.routes'
 import { safetyRoutes } from './modules/safety/safety.routes'
 import { shelfRoutes } from './modules/shelf/shelf.routes'
 import { FACE_SCANS_PATH, PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
@@ -42,6 +43,7 @@ const v1 = openapiApp()
   .route('/me', notificationsRoutes)
   .route('/me', goalsRoutes)
   .route('/me', safetyRoutes)
+  .route('/me', recommendationsRoutes)
   .route('/me', shelfRoutes)
   .route('/me', faceConsentRoutes)
   .route('/products', productRoutes)

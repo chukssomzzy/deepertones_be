@@ -40,6 +40,7 @@ src/
     <feature>.service.test.ts     unit tests, next to the code
   modules/scans/           the product scan: scans and scan_items, ScanService, the advance-scan-item job (see "Scan module")
   modules/face-scans/      the face scan: pure rules (face-scans.tables.ts), consent, the scan records and their routes, FaceScanService (see "Face scans")
+  modules/recommendations/ where a profile shops and what it can spend, and the reviewed products it may be suggested: RecommendationService (see "Shopping facts and candidates")
   emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   prompts/                 the Claude system prompts as Markdown, and prompts.generated.ts built from them (see "Prompts")
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
@@ -490,6 +491,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
 | `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
 | `PUT`/`GET /api/v1/me/safety` | bearer (guests included); see "Safety facts (onboarding)" | none |
+| `PUT`/`GET /api/v1/me/shopping` | bearer (guests included); see "Shopping facts and candidates" | PUT: 20 per IP and 10 per user; GET none |
 | `GET /api/v1/onboarding/content` | public: a token is ignored; see "Onboarding content" | none (cached) |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
@@ -899,6 +901,56 @@ two texts is the fourth.
   (`SAFETY_SET_IP_LIMITER` 20 a minute per address, then `signedIn()`, then `SAFETY_SET_USER_LIMITER` 10 a minute per user; 429 `RATE_LIMITED` with `Retry-After`; namespace ids 1022/1023, 2022/2023 and 3022/3023): a
   save can queue a parse that researches a product into the shared catalog, and a guest costs nothing to make. `GET /safety` is not limited. A save calls no model itself.
 
+### Shopping facts and candidates
+`modules/recommendations` holds `profile_shopping` (migration 0033), `D1RecommendationsRepository` (`append`, `current`, `history`) and `RecommendationService`
+(`setShopping`, `currentShopping`, `candidatesFor`). It is the fifth pull request of issue #115: the reviewed catalog of "Catalog workbook import" gets a reader,
+which answers one question, "which products may be suggested to this profile for this routine step", by fixed rules and no model. It reads the goal, the safety answers,
+the face scan, the catalog and the workbook through their services, never their repositories.
+
+- **History, as for goals and safety.** `profile_shopping` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by `created_at` is the
+  current one (ties by `rowid`, so the one appended later wins), read through the `(profile_id, created_at)` index. `country` is a code of the Countries tab and has no foreign
+  key (that table is the catalog's, and a country is retired, never deleted, so a stored code keeps its meaning). `budget_band` is `low`, `mid`, `high` or null, and the newest row
+  decides, so a band is taken back by saving the country alone. A guest has a fact as much as a verified user and keeps it on signing up; a second profile has its own. No
+  cleaner: rows cascade from the profile.
+- **Setting it.** `setShopping({ country, budgetBand? })` refuses a country that is not an **active** row of `CatalogWorkbookService.countries()` (a retired one is no longer served) with
+  400 `UNKNOWN_COUNTRY`, then a band outside `BUDGET_BANDS` with 400 `UNKNOWN_BUDGET_BAND`, and stores nothing for either. Both are plain text on the wire, so these say which of the two it was;
+  a body that is not text, or has no country, is the schema's 400 `VALIDATION_FAILED`. `GET` is 404 `SHOPPING_NOT_SET` until a country is saved.
+- **Rate limits on `PUT /shopping`.** `SHOPPING_SET_IP_LIMITER` (20 a minute per address, namespace ids 1030 / 2030 / 3030) then `signedIn()` then `SHOPPING_SET_USER_LIMITER` (10 a minute per user,
+  1031 / 2031 / 3031), in the order of the goal route; 429 `RATE_LIMITED` with `Retry-After`. `GET` is not limited. Routes are bearer, under `/api/v1/me`, tagged "Recommendations".
+- **`candidatesFor({ step })` has no route yet**; the routine stage will call it. It needs, in this order, a goal (409 `GOAL_REQUIRED`), safety answers ("none of these" is one: 409
+  `SAFETY_ANSWERS_REQUIRED`) and a shopping fact (409 `SHOPPING_REQUIRED`). A stored country that has since been retired, or no row passing, is `[]`: a normal answer, which the routine
+  meets with "use what you have".
+- **The rules**, all fixed, applied to `approvedFor({ country, step })` (the approved rows sold in the country that fill the step, each pinned to the formulation the workbook reviewed;
+  `latestFormulation` is never read for a row):
+  - **Concern:** the row works on at least one of the goal's concerns (`concernsForGoal`, the face scan's table).
+  - **Skin type:** `FaceScanService.latestSkinType()`, the label of the newest **ready** scan of the profile (a newer scan still analysing, or needing a retake, does not hide an older ready
+    one; a newer ready scan with no label is the answer, null). A known type keeps rows that list it or say `all`; an unknown one keeps only `all`, and a type is never assumed.
+  - **Budget:** the row's **lowest** price is at most the band's top in the country's own money (`low_max`, `mid_max`; `high` has no cap; no band, no check).
+  - **Ingredient rules:** the facts of a row are `flagFacts(row.ingredients, liveRules.entries)` (the live approved rules, matched as the analysis matches them: a strength, a bracket
+    or a slash is no way round) plus the cautions the row lists itself, which can only add. A `banned-substance` fact always leaves the row out, and a `pregnancy-caution` fact does when
+    `SafetyView.excludesPregnancyCaution` (pregnant or breastfeeding). Other kinds (allergen, irritation) are for the verdict and never take a row out of this list. A row that claims
+    "pregnancy safe" but lists retinol is still flagged by the rule.
+  - **What the user named** (`SafetyService.currentMentions()`, the newest answer only): a product mention whose `productId` is the row's leaves it out, **whatever its resolution and whichever
+    text it came from** (the user named that exact product, and a product the parse could not research keeps its catalog id); a product with no id (named with no maker) leaves out nothing.
+    A row whose ingredient list is the same list (`ingredientsKey`: case, spacing and order) as the latest list of any **resolved** product named, as a reaction or a prescription, is also left out: the
+    same product entered under another spelling has another product id. An ingredient mention leaves out any row that lists it, matched whole through `ingredientParts` ("alcohol" takes out "Alcohol" and
+    not "Cetearyl Alcohol"), **and through the live rules' labels**: the named parts are expanded with every label (name and aliases) of each rule that lists one of them, so "fragrance" and "Parfum", or
+    "retinoic acid" and "tretinoin", stand for each other whichever the user or the row wrote. The expansion is one step, never a chain through rules that share a label, so it does not depend on rule
+    order, and a name no rule lists is matched as written: never fuzzy. Words not parsed yet name nothing, so the ticked boxes alone apply: unparsed words never relax anything.
+- **The answer** is `[{ code, product, passed, sharedWithReaction, origin, frequency, priceMin, priceMax, whereSold }]`, sorted by lowest price then code, so **origin never decides a place**
+  (a brand-submitted row passed the same evidence bar and gets no help). `product` is the summary of the pinned formulation's product (one batched `productSummaries`); a row whose product
+  cannot be found is left out and logged as `candidate-product-missing` with its code only, so one bad row cannot fail the list. `passed` names the rules the row passed, in the fixed order
+  `country, step, skin-concern, skin-type, budget, ingredient-rules, reactions`: `budget` only when a band was given, `reactions` only when the user named something that could be checked
+  (an ingredient, or a product with an id).
+- **`sharedWithReaction` is information, not a filter.** For each product the user named in the **reaction** text that the parse resolved, in the order they named them, it lists the candidate's
+  ingredients, spelled as the candidate has them, that the product's latest list also holds (compared through `ingredientParts`, expanded through the live rules' labels as above). A product with no list, or one not resolved, has no entry, and so
+  does one that shares nothing. `ProductCatalogService.latestIngredients(productId)` reads the list: the latest formulation's ingredients or null (also for an unknown product), never throws for
+  a missing one, researches nothing and writes nothing.
+- **Reads.** After the guards (in order, so the error names what is missing first), the countries, the mentions, the skin type, the live rules and the approved rows for the stored country are read
+  together; the named products' latest lists (at most three products, in parallel) and the summaries of the rows kept follow. `flagFacts` builds its label map once per rules array (a `WeakMap`
+  keyed by the array, which is one per rules version), not once per row.
+- **Wiring.** The container builds `RecommendationService` over `D1RecommendationsRepository` and the goals, safety, catalogWorkbook, faceScans and catalog services, exposed as `recommendations`.
+
 ### Onboarding content
 `GET /api/v1/onboarding/content` (`modules/onboarding`, operation `getOnboardingContent`, tag "Onboarding", mounted at `/api/v1/onboarding`) serves the text of onboarding screens 1.2 to 1.5
 (goal, answer, safety), the fifth pull request of issue #82, so a copy change, a new chip or a new choice is a deploy and not an app release. The app fetches it first and renders from it.
@@ -1277,6 +1329,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
   is read once per list).
+- **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
+  then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
+  does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").
 - **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters

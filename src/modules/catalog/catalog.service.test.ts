@@ -1825,6 +1825,48 @@ describe('ProductCatalogService.productSummary', () => {
   })
 })
 
+describe('ProductCatalogService.latestIngredients', () => {
+  it('gives the ingredient list of the product\'s only formulation, as it was stored', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx, { ingredients: CLEAN })
+
+    expect(await ctx.service.latestIngredients(productId)).toEqual(CLEAN)
+  })
+
+  it('gives the list of the formulation found most recently, when the product has more than one', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx, { ingredients: CLEAN })
+    ctx.advance(MINUTE)
+    await ctx.service.addLabelIngredients(productId, [...CLEAN, 'Phenoxyethanol'])
+
+    expect(await ctx.service.latestIngredients(productId)).toEqual([...CLEAN, 'Phenoxyethanol'])
+  })
+
+  it('is null for a product that has no formulation yet (resolved, never researched)', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.latestIngredients(productId)).toBeNull()
+  })
+
+  it('is null for a product id the catalog does not hold, rather than an error: a caller asking about what a user named must go on', async () => {
+    const ctx = setup()
+
+    expect(await ctx.service.latestIngredients('no-such-product')).toBeNull()
+  })
+
+  it('makes no research call and no model call, and writes nothing', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    ctx.researcher.respondWith(() => {
+      throw new Error('the researcher must not be asked')
+    })
+
+    expect(await ctx.service.latestIngredients(productId)).toBeNull()
+    expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+  })
+})
+
 describe('ProductCatalogService.research without asking the researcher', () => {
   const productFor = async (ctx: Ctx, who = identity()) => (await ctx.service.resolve(who)).productId
 

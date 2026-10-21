@@ -648,6 +648,14 @@ export class ProductCatalogService {
     return summaries
   }
 
+  /**
+   * The ingredient list of the product's most recently found formulation, or null when it has none (never researched) or the catalog does not hold the
+   * product. For a caller that must go on without it (a product a user named): it asks no researcher and no model, and writes nothing.
+   */
+  async latestIngredients(productId: string): Promise<string[] | null> {
+    return (await this.repository.latestFormulation(productId))?.ingredients ?? null
+  }
+
   /** The model's word on a near miss. If the AI spend cap stops the question, the answer is unknown: merging would guess and creating would risk a duplicate, so the scan waits. */
   private async isSameProduct(identity: ProductIdentity, candidate: Product): Promise<boolean> {
     try {

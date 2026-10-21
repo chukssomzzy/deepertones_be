@@ -184,6 +184,9 @@
     { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "1028", "simple": { "limit": 300, "period": 60 } },
     // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
     { "name": "ADMIN_IP_LIMITER", "namespace_id": "1029", "simple": { "limit": 10, "period": 60 } },
+    // Saving the shopping country and budget band: cheap, but a write per call, so as tight as the goal's.
+    { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "1030", "simple": { "limit": 20, "period": 60 } },
+    { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "1031", "simple": { "limit": 10, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -420,6 +423,9 @@
         { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "2028", "simple": { "limit": 300, "period": 60 } },
         // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
         { "name": "ADMIN_IP_LIMITER", "namespace_id": "2029", "simple": { "limit": 10, "period": 60 } },
+        // Saving the shopping country and budget band: cheap, but a write per call, so as tight as the goal's.
+        { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "2030", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "2031", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -621,6 +627,9 @@
         { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "3028", "simple": { "limit": 300, "period": 60 } },
         // The admin catalog routes (export and import): per address and before the token is checked, so a guess at the token costs an attempt.
         { "name": "ADMIN_IP_LIMITER", "namespace_id": "3029", "simple": { "limit": 10, "period": 60 } },
+        // Saving the shopping country and budget band: cheap, but a write per call, so as tight as the goal's.
+        { "name": "SHOPPING_SET_IP_LIMITER", "namespace_id": "3030", "simple": { "limit": 20, "period": 60 } },
+        { "name": "SHOPPING_SET_USER_LIMITER", "namespace_id": "3031", "simple": { "limit": 10, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],

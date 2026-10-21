@@ -28,7 +28,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -233,6 +233,16 @@ export class FaceScanService {
   async getFaceScan(id: string): Promise<FaceScanView> {
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
+  }
+
+  /**
+   * The skin type of the caller's profile's newest ready scan, or null (no ready scan, or Perfect Corp sent none for it). A newer scan that is still
+   * being analysed or needs a retake does not hide an older ready one, and a newer ready scan with no skin type is not skipped for an older reading: it is the
+   * profile's latest word on the face. Needs no consent and no goal, so it still answers after the consent is withdrawn. Reads only.
+   */
+  async latestSkinType(): Promise<SkinTypeLabel | null> {
+    const { profileId } = requireUser()
+    return (await this.repository.latestReadyForProfile(profileId))?.skinType ?? null
   }
 
   /**

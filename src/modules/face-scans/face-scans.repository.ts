@@ -118,6 +118,20 @@ export class D1FaceScansRepository {
     return row ?? null
   }
 
+  /**
+   * The profile's newest scan that is `ready`, or null. Unlike `latestForProfile`, a newer scan that is analysing or needs a retake does not hide it: a
+   * reader of what a scan found (the skin type) wants the last scan that found something. Scans made at the same time go to the one written last.
+   */
+  async latestReadyForProfile(profileId: string): Promise<FaceScan | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceScans)
+      .where(and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready')))
+      .orderBy(desc(faceScans.createdAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
   /** The profile's newest `limit` scans, in every state, newest first; scans made at the same time go to the higher id. */
   async listForProfile(profileId: string, limit: number): Promise<FaceScan[]> {
     return this.db.select().from(faceScans).where(eq(faceScans.profileId, profileId)).orderBy(desc(faceScans.createdAt), desc(faceScans.id)).limit(limit)
