@@ -871,6 +871,11 @@ describe('a phrase that names an edition rather than a suitability, in nearMissC
     ['Repair Balm for Baby Skin'],
     ['Repair Balm for Sensitive Baby Skin'],
     ['Repair Balm for Teen Skin'],
+    ['Repair Balm for Boys Hair'],
+    ['Repair Balm for Girls Skin'],
+    ['Repair Balm for Ladies Skin'],
+    ['Repair Balm for Toddler Skin'],
+    ['Repair Balm for Infant Skin'],
   ])('keeps the words of "%s", so the Rich balm is not a candidate of it', (readingName) => {
     expect(found(readingName)).toEqual([])
   })
@@ -886,6 +891,8 @@ describe('a suitability phrase in the brand family that differs from the reading
   const BARE = row('bare', 'Daily Lotion')
   const DRY = row('dry', 'Daily Lotion for Dry Skin')
   const OILY = row('oily', 'Daily Lotion for Oily Skin')
+  /** A row of the family with a phrase of its own that shares only {zuri, for, skin} with the reading: 3 of 9, and no containment, so it is a candidate in no reading below. */
+  const SCRUB = row('scrub', 'Body Scrub for Normal Skin')
   const reading = (name: string) => ({ brand: 'Zuri', name, form: 'lotion' })
   const found = (name: string, rows: typeof BARE[]) => nearMissCandidates(reading(name), rows, { limit: 10 }).map((p) => p.id)
 
@@ -894,11 +901,32 @@ describe('a suitability phrase in the brand family that differs from the reading
     expect(found(DRY.name, [BARE, OILY])).toEqual(['oily'])
   })
 
+  it('stops ignoring just the same when a row that is no near miss also gives a phrase of its own', () => {
+    // The Oily row is a near miss and prints the second line by itself, so the unrelated scrub row changes nothing.
+    expect(found(DRY.name, [BARE, OILY, SCRUB])).toEqual(['oily'])
+  })
+
   it('stops ignoring for a reading that gives no phrase when two rows give phrases that differ', () => {
     expect(found(BARE.name, [DRY, OILY])).toEqual([])
   })
 
   it('still ignores the reading\'s phrase when the bare row is the only one in the family', () => {
     expect(found(DRY.name, [BARE])).toEqual(['bare'])
+  })
+})
+
+// Invented brands and names on purpose: the rule is general, not a fix for any product the eval happens to hold.
+describe('a suitability phrase on a row of the family that is no near miss, in nearMissCandidates', () => {
+  const row = (id: string, name: string) => ({ id, brand: 'Kinkly', name, form: 'gel' })
+  const EXTRA = row('extra', 'Shea Butter Extra Hold Edge Stay Gel')
+  /** A row of the family with a line of its own ("for All Hair Types") that the reading shares only {kinkly, for, hair} with: 3 of 13, and no containment. */
+  const CUSTARD = row('custard', 'Curl Custard for All Hair Types')
+  const READING = { brand: 'Kinkly', name: 'Shea Butter for Natural Hair Edge Stay Gel', form: 'gel' }
+  const found = (rows: typeof EXTRA[]) => nearMissCandidates(READING, rows, { limit: 10 }).map((p) => p.id)
+
+  it('keeps ignoring the reading\'s one-sided phrase, so the Extra Hold row is still a candidate', () => {
+    // Only the Extra Hold row is a near miss once the line is set aside (6 of 8 = 0.75), so the reading and it hold one
+    // line between them and the ignoring stays on. On the full words it is 6 of 11 = 0.545, under the threshold, with no containment.
+    expect(found([EXTRA, CUSTARD])).toEqual(['extra'])
   })
 })

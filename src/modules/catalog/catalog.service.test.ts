@@ -4767,6 +4767,8 @@ describe('ProductCatalogService.resolve: a reading whose suitability line no row
   const EXTRA_HOLD = 'Shea Butter Extra Hold Edge Stay Gel'
   const SOFT_HOLD = 'Shea Butter Soft Hold Edge Gel'
   const SHINE_WAX = 'Shea Butter Shine Wax Edge'
+  /** A row of the family with a line of its own that is no near miss of any reading below: it shares only {kinkly, for, hair} with them. */
+  const CURL_CUSTARD = 'Curl Custard for All Hair Types'
 
   /** Stores the rows through resolve, oldest first, so each is a real row of the brand. The judge says "different" while they are made. */
   const catalogued = async (ctx: Ctx, names: string[]) => {
@@ -4804,6 +4806,20 @@ describe('ProductCatalogService.resolve: a reading whose suitability line no row
     const before = ctx.analyst.calls.sameProduct.length
 
     const result = await ctx.service.resolve(identity({ ...KINKLY, name: 'Shea Butter for Natural Hair' }))
+
+    expect(askedSince(ctx, before)).toEqual([EXTRA_HOLD])
+    expect(result.productId).toBe(ids[EXTRA_HOLD])
+  })
+
+  // A row of the family that prints another line but is nowhere near the reading settles nothing about the reading's line:
+  // only the near misses themselves can show that the line tells products apart.
+  it('still judges the Extra Hold row when an unrelated row of the family prints a line of its own, and a "yes" lands the reading on it', async () => {
+    const ctx = setup()
+    const ids = await catalogued(ctx, [EXTRA_HOLD, CURL_CUSTARD])
+    ctx.analyst.sameProductWith(() => true)
+    const before = ctx.analyst.calls.sameProduct.length
+
+    const result = await ctx.service.resolve(identity({ ...KINKLY, name: 'Shea Butter for Natural Hair Edge Stay Gel' }))
 
     expect(askedSince(ctx, before)).toEqual([EXTRA_HOLD])
     expect(result.productId).toBe(ids[EXTRA_HOLD])
