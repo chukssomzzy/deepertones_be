@@ -120,8 +120,10 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
   }
 
   async recognizeShelfProduct(image: ProductImage, target: ShelfProductTarget): Promise<Recognition> {
-    // JSON.stringify, so a quote or newline in the position or hint cannot break out of the sentence.
-    const text = `Read the product at this position: ${JSON.stringify(target.position)}. A quick read of the shelf gave: ${JSON.stringify(AnthropicProductRecognizer.hintOf(target.hint))}.`
+    // JSON.stringify, so a quote or newline in the position or hint cannot break out of the sentence; each cut to a field's length, so
+    // a caller that passes text the shelf read never bounded cannot make the call long.
+    const position = AnthropicProductRecognizer.bounded(target.position)
+    const text = `Read the product at this position: ${JSON.stringify(position)}. A quick read of the shelf gave: ${JSON.stringify(AnthropicProductRecognizer.hintOf(target.hint))}.`
     const answer = await this.client.structured(
       {
         max_tokens: AnthropicProductRecognizer.MAX_TOKENS,
@@ -142,10 +144,13 @@ export class AnthropicProductRecognizer implements ProductRecognizer {
     return AnthropicProductRecognizer.accept(answer)
   }
 
-  /** The hint's fields in a fixed order, the variant left out when absent. */
+  /** The hint's fields in a fixed order, each cut to a field's length, the variant left out when absent. */
   private static hintOf(hint: ShelfProductTarget['hint']) {
-    return { brand: hint.brand, name: hint.name, ...(hint.variant === undefined ? {} : { variant: hint.variant }) }
+    const bounded = AnthropicProductRecognizer.bounded
+    return { brand: bounded(hint.brand), name: bounded(hint.name), ...(hint.variant === undefined ? {} : { variant: bounded(hint.variant) }) }
   }
+
+  private static bounded = (text: string): string => text.slice(0, AnthropicProductRecognizer.MAX_FIELD_LENGTH)
 
   private static orEmpty<T extends z.ZodType<string>>(schema: T) {
     return z.preprocess((value) => value ?? '', schema)

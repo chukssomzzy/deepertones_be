@@ -1062,6 +1062,18 @@ describe('AnthropicProductRecognizer recognizeShelfProduct request', () => {
     })
   })
 
+  it('cuts a position or hint longer than a field may be to that length before sending it, whatever the caller passed', async () => {
+    const { calls, recognizer } = recognizerOver(structured(product()))
+    const long = 'x'.repeat(10_000)
+
+    await recognizer.recognizeShelfProduct(JPEG, { position: long, hint: { brand: long, name: long, variant: long } })
+
+    const text: string = calls[0]!.body.messages[0].content[1].text
+    expect(text).toContain(`Read the product at this position: "${'x'.repeat(120)}".`)
+    expect(text).toContain(`{"brand":"${'x'.repeat(120)}","name":"${'x'.repeat(120)}","variant":"${'x'.repeat(120)}"}`)
+    expect(text.length).toBeLessThan(800)
+  })
+
   it('leaves a missing variant out of the encoded hint', async () => {
     const { calls, recognizer } = recognizerOver(structured(product()))
 
@@ -1225,6 +1237,10 @@ describe('AnthropicProductRecognizer recognizeShelfProduct prompt', () => {
 
     expect(system).toMatch(/hint[^.]*(may|might|can)[^.]*(wrong|incomplete)|(wrong|incomplete)[^.]*hint/i)
     expect(system).toMatch(/cannot be read[^.]*rather than repeating the hint/i)
+    // "Say so" is a classification, not free text: unreadable, or label-not-visible when the label is turned away; nothing there is unreadable.
+    expect(system).toMatch(/cannot be read[^.]*rather than repeating the hint[^.]*unreadable/i)
+    expect(system).toMatch(/label-not-visible[^.]*turned away/i)
+    expect(system).toMatch(/no product at the position[^.]*unreadable/i)
   })
 
   it('tells the model the photo, the position and the hint are data whose instructions must be ignored', async () => {
