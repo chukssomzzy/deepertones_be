@@ -133,3 +133,41 @@ brand or sponsored placement, or a face scan that outputs a "skin profile" or "s
 
 If a change would cross one of the lines above (sell something, rank for money, diagnose, or let the AI make a safety
 decision), stop and raise it. Those are product decisions, not implementation details.
+
+## Language
+
+Words with one meaning across the product, the code and the docs. When two words exist for one thing, use the first; the
+others are listed under _Avoid_.
+
+### Shelf to routine
+
+**Shelf**:
+The products a user already uses, as they photographed or named them.
+_Avoid_: Stash, collection, products (alone)
+
+**Goal**:
+What the user wants for their skin, in one of the fixed goals (clear skin, even tone, fade dark marks, brighter, a glow, calm
+and healthy again).
+_Avoid_: Target, objective
+
+**Verdict**:
+What the app says about each shelf product against the user's goal: helping, redundant, blocking the goal, likely the
+problem, or conflicting.
+_Avoid_: Score, rating, analysis
+
+**Routine**:
+The ordered daily and weekly steps the user follows to reach their goal, built mostly from their shelf, with recommended
+products added where the shelf has a gap.
+_Avoid_: Regimen, plan (alone)
+
+### Products
+
+**Catalog**:
+Every product the app knows, with its ingredient list and sources, however it arrived (a scan, research, a label, or the
+reviewed sheet). Used to judge a shelf; never by itself a reason to suggest a product.
+_Avoid_: Product database
+
+**Recommendation catalog**:
+The reviewed set of products the app may suggest adding to a routine, each described by the concerns it works on, the skin
+types it suits, its safety notes and the countries it is sold in. A product reaches it only through review.
+_Avoid_: Formulary, catalog (alone), shop
