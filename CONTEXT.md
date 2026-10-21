@@ -39,7 +39,7 @@ back last time. "SkinSense" and "Bare" are retired names.
 | Hero flow         | Goal → shelf photo → face photo → verdict → signup → plan (routine and taper schedule).                                                                                                                                                                               |
 | Signup            | Happens at the verdict, never before it. The headline verdict is free; saving it, the detail, the plan and reminders need an account. One screen.                                                                                                                     |
 | Identity          | A phone number (WhatsApp is the channel back to the user in Nigeria); email is optional. _Backend today:_ OTP goes by email (ZeptoMail) until Meta business verification clears; WhatsApp is the planned channel ("OTP over channels" in architecture.md).            |
-| Face photo        | Taken in the first run, after the shelf and before the verdict. It is the day-0 baseline. Described only by what can be seen ("redness around the nose"), never as a condition. Skippable for privacy; skipping loses the timeline, not the verdict.                  |
+| Face photo        | Day-0 baseline, after the shelf and before the verdict. Described only by what can be seen ("redness around the nose"), never as a condition. May be shown back with overlays and change (see Safety). Skippable for privacy: loses the timeline, not the verdict.    |
 | Monetisation      | A premium subscription will exist at app-store launch. Its shape is undecided and deliberately designed separately. No affiliate income, ads or brand placement, ever.                                                                                                |
 | Product sourcing  | Users buy products themselves. The app informs; it does not sell. Never a "buy" button.                                                                                                                                                                               |
 | Progress tracking | Tells the user whether the routine is working, adjusts it when it isn't, and tells us what worked.                                                                                                                                                                    |
@@ -56,6 +56,13 @@ About 21 fixed rules bind the product. The ones that shape behaviour:
 
 - **Patterns, not diagnoses.** The app may name a pattern with honest uncertainty ("this is the rebound that happens when
   you stop a steroid cream", "the pattern usually called PIH") but never says "you have X".
+- **What a face scan may show, and never.** It may show the user's own face with overlays on what can be seen, plain seen-words
+  ("some dark marks across the face"), a skin type (oily, dry, combination or normal), a skin age as a plain fact, and how each of
+  their goal's concerns has changed since day one ("fainter", "less visible"). It must never diagnose, name a condition, say "you
+  have X", show an absolute or overall score, or describe change as lightness. It is not a "skin profile" that grades the person.
+  Perfect Corp's "dermatologist-verified" claim changes none of this. **The overlays and skin age were not checked on darker skin
+  before launch** (the team chose to ship without that check; a small manual run of consented photos through staging is still
+  recommended), so the routine stage and later reviews should treat both as unproven for the skin we design for.
 - **The AI decides nothing safety-relevant.** Whether a product is _stop with a plan_, _reduce and monitor_ or _fine to
   continue_ comes from fixed rules over a reviewed knowledge base. The AI only phrases the result.
 - Every claim about an ingredient or product traces to a **cited source** the user can open. Every verdict has a reason, and
@@ -94,9 +101,10 @@ think this is for him?**
 ## Tone
 
 Calm, plain and direct. Closer to a good banking app than a beauty counter. Every verdict is about the product, never the
-person: no scolds, no scores or grades of the user. Darker skin is the default in every example. Ingredient terms are
-explained where they appear. The tone is optimistic about the goal. Progress visuals show evenness, calm and texture, never
-lightness: "lighter after" is the thing we exist to undo.
+person: no scolds, no scores or grades of the user. A skin age stated as a plain fact, never compared with their real age, is
+not a grade. Darker skin is the default in every example. Ingredient terms are explained where they appear. The tone is
+optimistic about the goal. Progress visuals show evenness, calm and texture, never lightness: "lighter after" is the thing we
+exist to undo.
 
 ## The screens, in order of importance
 
@@ -118,7 +126,8 @@ lightness: "lighter after" is the thing we exist to undo.
 7. **Escalation**: a calm, normal screen that says when to see a professional.
 
 **Not in v1 design yet:** the paywall, premium page and subscription management. **Never:** a marketplace, purchase flow,
-brand or sponsored placement, or a face scan that outputs a "skin profile" or "skin analysis".
+brand or sponsored placement, or a face scan that diagnoses, names a condition, says "you have X", shows an absolute or overall score,
+or describes change as lightness (see Safety for what it may show).
 
 ## How this backend maps to it
 

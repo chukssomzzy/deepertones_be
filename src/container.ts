@@ -7,6 +7,9 @@ import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
+import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
+import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
+import { FaceScanService } from './modules/face-scans/face-scans.service'
 import { D1GoalsRepository } from './modules/goals/goals.repository'
 import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
@@ -37,6 +40,7 @@ import { AnthropicLabelReader } from './providers/label-reading/anthropic.label-
 import { AnthropicMentionReader } from './providers/mention-reading/anthropic.mention-reader'
 import { AnthropicNameSplitter } from './providers/name-splitting/anthropic.name-splitter'
 import { MetaWhatsAppOtpDelivery } from './providers/otp-delivery/meta-whatsapp.otp-delivery'
+import { RestPerfectCorpClient } from './providers/perfect-corp/rest.perfect-corp'
 import type { PhotoEnvironment } from './providers/photo-store/photo-store.provider'
 import { R2PhotoStore } from './providers/photo-store/r2.photo-store'
 import { AnthropicProductAnalyst } from './providers/product-analysis/anthropic.product-analyst'
@@ -86,7 +90,13 @@ export const buildContainer = (env: CloudflareBindings) => {
     if (!Number.isFinite(dailyBudgetUsd) || dailyBudgetUsd <= 0) {
       throw new Error('AI_DAILY_BUDGET_USD must be a positive number of US dollars, e.g. "5"')
     }
-    return new AiUsageService({ repository: new D1AiUsageRepository(db()), opsAlerts: opsAlerts(), capMicros: Math.round(dailyBudgetUsd * 1_000_000) })
+    return new AiUsageService({
+      repository: new D1AiUsageRepository(db()),
+      opsAlerts: opsAlerts(),
+      capMicros: Math.round(dailyBudgetUsd * 1_000_000),
+      // Passed raw and checked when a Perfect Corp call is recorded, so a bad price cannot take the Claude calls down with it.
+      perfectCorpUsdPerUnit: env.PERFECT_CORP_USD_PER_UNIT,
+    })
   })
 
   // The clients share the key, the models and the spend ledger. `timeoutMs` is the client's alone, so a caller that must answer within a
@@ -151,6 +161,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'push-receipts': env.PUSH_RECEIPTS_QUEUE,
         'parse-safety': env.PARSE_SAFETY_QUEUE,
         email: env.EMAIL_QUEUE,
+        'face-scans': env.FACE_SCANS_QUEUE,
       }),
   )
 
@@ -211,13 +222,19 @@ export const buildContainer = (env: CloudflareBindings) => {
   // The guest cleanup needs only the scan rows and photos, not the scan service with the catalog and model clients behind it.
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
+  // Likewise for face scans: the cleanup deletes their photos and masks from the bucket (the rows cascade from the profile, the bucket does not).
+  const faceCleaner = once(() => new FaceDataCleaner({ repository: new D1FaceScansRepository(db()), photos: privatePhotos() }))
+
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
   // (push_tokens, notification_settings, profile_goals and profile_safety are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
         repository: new D1UsersRepository(db()),
-        guestDataCleaners: [{ name: 'scans', deleteFor: (ids) => scanCleaner().deleteForUsers(ids) }],
+        guestDataCleaners: [
+          { name: 'scans', deleteFor: (ids) => scanCleaner().deleteForUsers(ids) },
+          { name: 'face-scans', deleteFor: (ids) => faceCleaner().deleteForUsers(ids) },
+        ],
       }),
   )
 
@@ -264,6 +281,26 @@ export const buildContainer = (env: CloudflareBindings) => {
     () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
   )
 
+  const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
+
+  const faceScans = once(
+    () =>
+      new FaceScanService({
+        repository: new D1FaceScansRepository(db()),
+        goals: goals(),
+        photos: privatePhotos(),
+        jobs: jobQueue(),
+        perfectCorp: perfectCorp(),
+        // Perfect Corp's units go in the same ledger as the Claude calls: one table, one daily figure, one alert.
+        aiUsage: aiUsage(),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        opsAlerts: opsAlerts(),
+        // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
+        photoLinkSecret: env.JWT_SECRET,
+        environment: photoEnvironment(env.ENVIRONMENT),
+      }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -285,6 +322,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get catalog() {
       return catalog()
+    },
+    get faceScans() {
+      return faceScans()
     },
     get goals() {
       return goals()

@@ -123,6 +123,50 @@ describe('R2PhotoStore.get', () => {
   })
 })
 
+describe('R2PhotoStore face keys', () => {
+  const PNG: ProductImage = { bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 5, 6, 7]), mediaType: 'image/png' }
+  const FACE_KEY = 'faces/test/user-1/profile-1/scan-1/front.jpg'
+  const MASK_KEY = 'faces/test/user-1/profile-1/scan-1/mask-hd-acne.png'
+
+  it('stores a face photo as a JPEG with a private, uncacheable cache-control, like a product photo', async () => {
+    const { store, fake } = make()
+
+    await store.put(FACE_KEY, JPEG)
+
+    expect(fake.put.mock.calls[0]?.[0]).toBe(FACE_KEY)
+    expect(fake.put.mock.calls[0]?.[2]?.httpMetadata).toEqual({ contentType: 'image/jpeg', cacheControl: 'private, no-store' })
+  })
+
+  it('stores a mask as image/png with the same private, uncacheable cache-control', async () => {
+    const { store, fake } = make()
+
+    await store.put(MASK_KEY, PNG)
+
+    expect(fake.put.mock.calls[0]?.[2]?.httpMetadata).toEqual({ contentType: 'image/png', cacheControl: 'private, no-store' })
+  })
+
+  it('reads a mask back as a PNG by the stored content type', async () => {
+    const { store, fake } = make()
+    fake.seed(MASK_KEY, PNG.bytes, 'image/png')
+
+    await expect(store.get(MASK_KEY)).resolves.toEqual(PNG)
+  })
+
+  it('still returns null for a PNG stored under a product key, which is not a photo we wrote', async () => {
+    const { store, fake } = make()
+    fake.seed(KEY, PNG.bytes, 'image/png')
+
+    await expect(store.get(KEY)).resolves.toBeNull()
+  })
+
+  it('returns null when a face photo key holds a content type that is not an image we write', async () => {
+    const { store, fake } = make()
+    fake.seed(FACE_KEY, JPEG.bytes, 'text/html')
+
+    await expect(store.get(FACE_KEY)).resolves.toBeNull()
+  })
+})
+
 describe('R2PhotoStore.delete', () => {
   it('removes the object, and deleting a key that is not there is not an error', async () => {
     const { store, fake } = make()

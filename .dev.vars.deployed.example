@@ -13,7 +13,7 @@
 #
 # What is deliberately NOT here: ENVIRONMENT, CORS_ORIGINS, DOCS_ENABLED, OTP_CHANNELS,
 # EMAIL_FROM_*, ZEPTOMAIL_API_URL, WHATSAPP_*  (phone number id, template, language), ANTHROPIC_MODEL_* (one per job),
-# AI_DAILY_BUDGET_USD and CATALOG_IMAGES_PUBLIC_URL. They are
+# AI_DAILY_BUDGET_USD, PERFECT_CORP_BASE_URL, PERFECT_CORP_USD_PER_UNIT and CATALOG_IMAGES_PUBLIC_URL. They are
 # `vars` in wrangler.jsonc, per environment. A secret of the same name is shadowed by the config
 # value on every deploy, so setting one here would look set and never apply. The push refuses them.
 #
@@ -56,3 +56,10 @@ ANTHROPIC_API_KEY=
 # Also turn on "Enhanced security for push notifications" in the Expo project settings.
 # A different token per environment is fine but not required.
 EXPO_ACCESS_TOKEN=
+
+# Perfect Corp (YouCam) API key for the face scan (Perfect Corp console → API keys). Required: a deploy fails until it is set.
+# One account serves every environment today; the code never assumes that, so a key per environment needs no change.
+PERFECT_CORP_API_KEY=
+
+# Perfect Corp webhook secret ("whsec_..."), shown when this environment's webhook URL is registered in their console. Required: a deploy fails until it is set.
+PERFECT_CORP_WEBHOOK_SECRET=

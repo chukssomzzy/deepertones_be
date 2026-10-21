@@ -33,6 +33,7 @@ const usage = (over: Partial<AiUsage> = {}): AiUsage => ({
 })
 
 type Reservation = Parameters<AiUsageRepository['insertReservation']>[0]
+type VendorCall = Parameters<AiUsageRepository['insertSettled']>[0]
 
 /**
  * Behaviour every AiUsageRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier).
@@ -312,6 +313,226 @@ export const aiUsageRepositoryContract = (name: string, make: () => AiUsageRepos
 
       it('has no row for a model nothing was settled on', async () => {
         expect(await ofModel(await make(), windowStart(), fresh('never-used'))).toEqual([])
+      })
+    })
+    // A vendor that bills per unit (Perfect Corp) is recorded ONCE, when the call has succeeded and been charged: no reservation held open,
+    // because nothing sweeps one. The row is settled from the start, on the same table and under the same daily sum as the Claude rows.
+    // Claude's own reserve, settle and release are described above and are unchanged.
+    describe('insertSettled and vendorSummary', () => {
+      const vendorCall = (since: Date, over: Partial<VendorCall> = {}): VendorCall => ({
+        id: freshId(),
+        vendor: 'perfect-corp',
+        job: 'face-analysis',
+        units: 12,
+        costMicros: 840_000,
+        createdAt: since,
+        capMicros: NO_CAP,
+        since,
+        ...over,
+      })
+
+      /** What the vendor summary says about one job, so a shared database's leftovers cannot matter: tests compare with what they read first. */
+      const totalFor = async (repo: AiUsageRepository, since: Date, job: string) => {
+        const rows = (await repo.vendorSummary(since)).filter((r) => r.vendor === 'perfect-corp' && r.job === job)
+        return { calls: rows.reduce((n, r) => n + r.calls, 0), units: rows.reduce((n, r) => n + r.units, 0), costMicros: rows.reduce((n, r) => n + r.costMicros, 0) }
+      }
+
+      it('stores a settled row with its vendor, job, units and cost, read back through the vendor summary', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await totalFor(repo, since, 'face-analysis')
+
+        await repo.insertSettled(vendorCall(since, { units: 12, costMicros: 840_000 }))
+
+        const after = await totalFor(repo, since, 'face-analysis')
+        expect(after).toEqual({ calls: before.calls + 1, units: before.units + 12, costMicros: before.costMicros + 840_000 })
+        expect(await repo.vendorSummary(since)).toContainEqual(expect.objectContaining({ vendor: 'perfect-corp', job: 'face-analysis' }))
+      })
+
+      it('adds up the calls, units and cost of a job, and keeps the Fitzpatrick job apart from the analysis job', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const [analysis, fitzpatrick] = [await totalFor(repo, since, 'face-analysis'), await totalFor(repo, since, 'fitzpatrick')]
+
+        await repo.insertSettled(vendorCall(since, { job: 'face-analysis', units: 12, costMicros: 600 }))
+        await repo.insertSettled(vendorCall(since, { job: 'face-analysis', units: 12, costMicros: 600 }))
+        await repo.insertSettled(vendorCall(since, { job: 'fitzpatrick', units: 10, costMicros: 500 }))
+
+        expect(await totalFor(repo, since, 'face-analysis')).toEqual({ calls: analysis.calls + 2, units: analysis.units + 24, costMicros: analysis.costMicros + 1200 })
+        expect(await totalFor(repo, since, 'fitzpatrick')).toEqual({ calls: fitzpatrick.calls + 1, units: fitzpatrick.units + 10, costMicros: fitzpatrick.costMicros + 500 })
+      })
+
+      it('counts a vendor call toward the day\'s committed spend at what it cost, from the moment it is stored', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+
+        await repo.insertSettled(vendorCall(since, { costMicros: 840_000 }))
+
+        expect(await repo.committedMicrosSince(since)).toBe(before + 840_000)
+      })
+
+      it('adds vendor spend to Claude spend under the same sum', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        await reserve(repo, since, { estimateMicros: 60 })
+
+        await repo.insertSettled(vendorCall(since, { costMicros: 41 }))
+
+        expect(await repo.committedMicrosSince(since)).toBe(before + 101)
+      })
+
+      it('says the cap is not passed when the call exactly fills what the cap has left, and stores it', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+
+        const result = await repo.insertSettled(vendorCall(since, { costMicros: 100, capMicros: before + 100 }))
+
+        expect(result).toEqual({ overCap: false })
+        expect(await repo.committedMicrosSince(since)).toBe(before + 100)
+      })
+
+      it('says the cap is passed when the call is one micro over it, and still stores it', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+
+        const result = await repo.insertSettled(vendorCall(since, { costMicros: 100, capMicros: before + 99 }))
+
+        expect(result).toEqual({ overCap: true })
+        expect(await repo.committedMicrosSince(since)).toBe(before + 100)
+      })
+
+      it('measures the cap against Claude\'s open reservations and settled calls too, to the micro', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        await reserve(repo, since, { estimateMicros: 60 })
+
+        expect(await repo.insertSettled(vendorCall(since, { costMicros: 40, capMicros: before + 100 }))).toEqual({ overCap: false })
+        expect(await repo.insertSettled(vendorCall(since, { costMicros: 1, capMicros: before + 100 }))).toEqual({ overCap: true })
+      })
+
+      it('lets a Claude reservation see vendor spend when it measures the cap', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        await repo.insertSettled(vendorCall(since, { costMicros: 70 }))
+
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 30, capMicros: before + 100 }))).toEqual({ overCap: false })
+        expect(await repo.insertReservation(reservation(since, { estimateMicros: 1, capMicros: before + 100 }))).toEqual({ overCap: true })
+      })
+
+      it('does not count spend from before `since`, and counts spend made exactly at it', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+
+        await repo.insertSettled(vendorCall(since, { costMicros: 1000, createdAt: new Date(since.getTime() - 1) }))
+        expect(await repo.committedMicrosSince(since)).toBe(before)
+
+        await repo.insertSettled(vendorCall(since, { costMicros: 7, createdAt: since }))
+        expect(await repo.committedMicrosSince(since)).toBe(before + 7)
+      })
+
+      it('leaves a vendor call out of the vendor summary of a window that starts after it', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await totalFor(repo, since, 'face-analysis')
+        await repo.insertSettled(vendorCall(since, { createdAt: new Date(since.getTime() - 1) }))
+
+        expect(await totalFor(repo, since, 'face-analysis')).toEqual(before)
+
+        await repo.insertSettled(vendorCall(since, { createdAt: since, units: 12, costMicros: 5 }))
+
+        expect(await totalFor(repo, since, 'face-analysis')).toEqual({ calls: before.calls + 1, units: before.units + 12, costMicros: before.costMicros + 5 })
+      })
+
+      // A queue job is redelivered and a webhook can arrive twice; the service derives the row id from the vendor's task id, so a repeat
+      // arrives here with an id that is already stored. It is a no-op, not an error and not a second charge.
+      it('ignores a call whose id is already stored: no error, no second row, nothing added to the day', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await totalFor(repo, since, 'face-analysis')
+        const beforeCommitted = await repo.committedMicrosSince(since)
+        const first = vendorCall(since, { units: 12, costMicros: 600 })
+        await repo.insertSettled(first)
+
+        await expect(repo.insertSettled({ ...first })).resolves.toBeDefined()
+
+        expect(await totalFor(repo, since, 'face-analysis')).toEqual({ calls: before.calls + 1, units: before.units + 12, costMicros: before.costMicros + 600 })
+        expect(await repo.committedMicrosSince(since)).toBe(beforeCommitted + 600)
+      })
+
+      it('keeps the first call\'s units and cost when the same id comes again with other figures', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await totalFor(repo, since, 'face-analysis')
+        const first = vendorCall(since, { units: 12, costMicros: 600 })
+        await repo.insertSettled(first)
+
+        await repo.insertSettled({ ...first, units: 5, costMicros: 9_999, job: 'fitzpatrick' })
+
+        expect(await totalFor(repo, since, 'face-analysis')).toEqual({ calls: before.calls + 1, units: before.units + 12, costMicros: before.costMicros + 600 })
+        expect((await totalFor(repo, since, 'fitzpatrick')).costMicros).not.toBeGreaterThanOrEqual(9_999)
+      })
+
+      it('says the cap is not passed for a repeat, even when the day is already past it: nothing was recorded, so there is nothing to alert about', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        const first = vendorCall(since, { costMicros: 100, capMicros: before + 50 })
+        expect(await repo.insertSettled(first)).toEqual({ overCap: true })
+
+        expect(await repo.insertSettled({ ...first })).toEqual({ overCap: false })
+      })
+
+      it('stores a call with a new id beside one with an id it already holds', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await totalFor(repo, since, 'face-analysis')
+        const first = vendorCall(since, { costMicros: 600 })
+        await repo.insertSettled(first)
+        await repo.insertSettled({ ...first })
+
+        await repo.insertSettled(vendorCall(since, { costMicros: 600 }))
+
+        expect((await totalFor(repo, since, 'face-analysis')).calls).toBe(before.calls + 2)
+      })
+
+      it('keeps Claude\'s calls out of the vendor summary, and vendor calls out of Claude\'s summary', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const model = fresh('model')
+        const claude = await reserve(repo, since, { model })
+        await repo.settle(claude, { usage: usage(), costMicros: 30, settledAt: since })
+        const analysisBefore = await totalFor(repo, since, 'face-analysis')
+        const claudeBefore = (await repo.summary(since)).length
+
+        await repo.insertSettled(vendorCall(since))
+
+        const claudeRows = await repo.summary(since)
+        expect(claudeRows).toContainEqual(expect.objectContaining({ job: 'research', model, calls: 1, costMicros: 30 }))
+        expect(claudeRows).toHaveLength(claudeBefore)
+        expect(claudeRows.some((r) => (r.job as string) === 'face-analysis' || (r.job as string) === 'fitzpatrick')).toBe(false)
+        expect((await repo.vendorSummary(since)).some((r) => r.job === 'research')).toBe(false)
+        expect((await totalFor(repo, since, 'face-analysis')).calls).toBe(analysisBefore.calls + 1)
+      })
+
+      it('leaves Claude\'s reserve, settle and release working beside vendor rows', async () => {
+        const repo = await make()
+        const since = windowStart()
+        const before = await repo.committedMicrosSince(since)
+        await repo.insertSettled(vendorCall(since, { costMicros: 25 }))
+        const settled = await reserve(repo, since, { estimateMicros: 100 })
+        const released = await reserve(repo, since, { estimateMicros: 200 })
+
+        await repo.settle(settled, { usage: usage(), costMicros: 30, settledAt: since })
+        await repo.release(released)
+
+        expect(await repo.committedMicrosSince(since)).toBe(before + 25 + 30)
       })
     })
   })

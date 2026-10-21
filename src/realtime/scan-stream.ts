@@ -63,7 +63,12 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
       for (const client of [...this.clients]) this.end(client, frame('done', '{}'))
       return
     }
-    const bytes = event.type === 'photo' ? frame('photo', JSON.stringify(event.photo)) : frame('item', JSON.stringify(event.item))
+    const bytes =
+      event.type === 'photo'
+        ? frame('photo', JSON.stringify(event.photo))
+        : event.type === 'face'
+          ? frame('face', JSON.stringify(event.faceScan))
+          : frame('item', JSON.stringify(event.item))
     for (const client of [...this.clients]) this.send(client, bytes)
   }
 

@@ -1,15 +1,15 @@
 import type { ProductImage } from '../product-analysis/product-analyst.provider'
-import { assertPhotoKey, assertPhotoMedia, type PhotoEnvironment, type PhotoStore } from './photo-store.provider'
+import { assertPhotoKey, assertPhotoMedia, isFaceKey, type PhotoEnvironment, type PhotoStore } from './photo-store.provider'
 
 export type R2PhotoStoreConfig = {
   /** The private bucket, deepertones-private. */
   bucket: R2Bucket
-  /** The only environment whose keys (photos/<environment>/...) this store will touch. */
+  /** The only environment whose keys (photos/<environment>/... and faces/<environment>/...) this store will touch. */
   environment: PhotoEnvironment
 }
 
 /**
- * Keeps users' product photos in R2.
+ * Keeps users' product and face photos, and face overlay masks, in R2.
  *
  * This bucket has no public domain and r2.dev is off: photos are served only through signed photo links
  * (src/lib/photo-link.ts), which the Worker checks before reading here. Keep it that way; a public address
@@ -39,9 +39,9 @@ export class R2PhotoStore implements PhotoStore {
     this.assertKey(key)
     const object = await this.bucket.get(key)
     if (!object) return null
-    // The stored type decides, never the extension; anything but a JPEG or WebP is not a photo we wrote.
+    // The stored type decides, never the extension; anything but a JPEG or WebP (or a PNG under a face key, where masks are) is not a photo we wrote.
     const mediaType = object.httpMetadata?.contentType
-    if (mediaType !== 'image/jpeg' && mediaType !== 'image/webp') return null
+    if (mediaType !== 'image/jpeg' && mediaType !== 'image/webp' && !(mediaType === 'image/png' && isFaceKey(key))) return null
     return { bytes: new Uint8Array(await object.arrayBuffer()), mediaType }
   }
 

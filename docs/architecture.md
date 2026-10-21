@@ -39,6 +39,7 @@ src/
     <feature>.presenter.ts        domain object → public JSON, typed by its response schema
     <feature>.service.test.ts     unit tests, next to the code
   modules/scans/           the product scan: scans and scan_items, ScanService, the advance-scan-item job (see "Scan module")
+  modules/face-scans/      the face scan: pure rules (face-scans.tables.ts), consent, the scan records and their routes, FaceScanService (see "Face scans")
   emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   prompts/                 the Claude system prompts as Markdown, and prompts.generated.ts built from them (see "Prompts")
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
@@ -57,6 +58,8 @@ src/
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
     (push/ sends push notifications: a PushSender port, the Expo adapter, a memory fake. See "Push notifications (Expo)".)
+    (perfect-corp/ reaches Perfect Corp (YouCam) for the face scan: a PerfectCorpClient port with its error classes, the REST adapter, a memory
+     fake, and the VendorSpendLedger port. See "Perfect Corp provider" and "Vendor spend ledger".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
 docs/openapi.json          the generated spec, committed (npm run openapi)
 scripts/                   build-time scripts (spec generation, prompts generation)
@@ -291,7 +294,7 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
 `client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products`, `client.api.v1.onboarding` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
@@ -299,7 +302,7 @@ Anything that builds a link to an API route starts from `API_V1_PREFIX` (the ser
 in `modules/scans/scans.paths.ts`) rather than writing the path out.
 
 Scans are named by what is scanned: this module is the **product scan**, at `/api/v1/scans/products` (operations
-`createProductScan`, `getProductScan`, ..., tag "Product scans"). `/api/v1/scans/faces` is reserved for face scans. Only
+`createProductScan`, `getProductScan`, ..., tag "Product scans"); the **face scan** is at `/api/v1/scans/faces` (tag "Face scans", see "Face scans"). Only
 the HTTP surface carries the name: the module directory, classes, tables, queues, Durable Object and error codes keep `scan`.
 
 - **Schemas** for requests and responses live in `<feature>.schemas.ts`, built with the `z` from
@@ -1110,6 +1113,7 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   `settled`, `released`), the estimate, and once settled the cost in micros, the five usage counts and the time.
   A reservation that is never settled or released (a crash) keeps holding its estimate for that UTC day; `npm run ai:spend`
   shows these.
+  Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
   `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
@@ -1125,6 +1129,225 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   cost only), a line "held by unsettled reservations" with the estimates still reserved and how many, then each job and
   model. It is read-only. The catalog eval reports its own cost (see "Catalog eval").
 
+### Perfect Corp provider
+Face photos are analysed by Perfect Corp (YouCam), behind a `PerfectCorpClient` port (`providers/perfect-corp/perfect-corp.provider.ts`) with
+one adapter, `RestPerfectCorpClient` (`rest.perfect-corp.ts`), and a memory fake, `MemoryPerfectCorpClient`. It is REST only, so there is no
+vendor SDK; the adapter calls the API through `requestJson$` (and `requestBytes$` for masks), bearer-authorised with
+`PERFECT_CORP_API_KEY`, against `PERFECT_CORP_BASE_URL`. No retries here (the job system retries), and nothing is logged.
+The API key and webhook secret are `#` fields so they stay out of `JSON.stringify`.
+
+- **The port.** `uploadFile` (a slot request, then a PUT of the bytes to the slot's own address, method and headers, without our key),
+  `createSkinAnalysis` (HD actions, `format: json`), `createFitzpatrick`, `getSkinAnalysis`, `getFitzpatrick`, `deleteTask`,
+  `downloadMask` (capped, no redirects, no key) and `verifyWebhook`. A task read answers `running` or `success` with the parsed result;
+  a task that ended on an error throws.
+- **Error mapping.** Four classes, so a caller chooses by class and never reads vendor text:
+  - `PerfectCorpUnavailableError`: no connection, a timeout, HTTP 5xx, 429 or 408, a reply that cannot be read (no task id, no results, a
+    status it does not know), and any task error that is not a photo problem. Retry with jitter.
+  - `PerfectCorpRejectedPhotoError` (with a fixed `reason`): a task error that a retake fixes. `error_lighting_dark` is `too-dark`;
+    `error_pose` and the three `error_face_angle_*` are `turn-to-camera`; `error_src_face_too_small` is `move-closer`;
+    `error_src_face_out_of_bound` is `face-not-centred`; `error_no_face` is `no-face`; `error_below_min_image_size` and
+    `error_exceed_max_image_size` are `image-size`. Exact matches only. Perfect Corp charges only on success, so a rejection costs nothing.
+  - `PerfectCorpCreditError`: HTTP 400 with `error_code` `CreditInsufficiency` (on a 400 only). Not retried: an ops alert, not a retry storm.
+  - `PerfectCorpBadRequestError`: every other 4xx, a mask address that is not an absolute `https:` URL (refused before any request is made:
+    the address comes from the vendor's reply, so a plain, local or odd scheme is never fetched), a mask over the size cap, and a mask
+    answered with a redirect.
+  Error messages carry the class, an HTTP status or a code-shaped vendor code, and nothing the vendor wrote: its free text can echo an
+  address with a signature in it.
+- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `verifyWebhook(rawBody, headers)` needs `webhook-id`,
+  `webhook-timestamp` (seconds, digits only, within 5 minutes either way) and `webhook-signature` (space-separated `v1,<base64>`
+  entries; any one may match, other versions are ignored). The signature is HMAC-SHA-256 over `id.timestamp.body` with `crypto.subtle`,
+  keyed with the base64-DECODED secret (`whsec_` stripped when present), compared in constant time. Only after that is the body read: it
+  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to `null` (never throws), and the route
+  answers 401. The clock is injected.
+- **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
+  `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
+  and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
+- **The memory fake** logs every call in order with its arguments (a scripted failure too, since the call was made), and `script(method,
+  ...answers)` queues answers handed out one per call (an `Error` is thrown as itself). Its defaults keep a service waiting (tasks are
+  `running`) and fail a webhook closed.
+
+### Face scan tables
+`modules/face-scans/face-scans.tables.ts` holds the face-scan rules as pure, versioned tables: no I/O, no clock, no model, so the same
+results always give the same words. Everything reads `raw_score` (1 to 100, HIGHER IS HEALTHIER), never `ui_score`.
+
+- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today: `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
+  three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
+  and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
+- **The thresholds are placeholders to calibrate** against real staging results, and the overlays and skin age have not been checked on
+  darker skin (see CONTEXT.md). A concern is visible at a `raw_score` of 60 or less; bands are `a-little` (above 45), `some` (above 30) and
+  `clear` (30 or less). A change counts only when it is bigger than 5 points for a concern or 2 years for skin age; exactly that much is noise.
+  A rise in a concern is "fainter", a fall "more visible"; no change is ever worded as lightness.
+- **The wording** is one text per concern and band, with a `whole` text that answers any region without words of its own (region-specific
+  words are added once Perfect Corp's region names are confirmed). Every text describes only what can be seen, in 80 characters or fewer, with
+  no digit, no exclamation mark, no condition name, no "acne" (spots and breakouts are what show), no "you have" and no lightness word.
+  `face-scans.tables.test.ts` scans every string for these, so a new text that breaks one fails there. The skin age is the one text with a
+  number, and it is a plain fact (`Your skin looks about 29`) that never compares with a real age.
+- **Skin type** is read from the whole-face `hd_skin_type` item only (never guessed from the t_zone and u_zone items): `Oily`, `Dry`,
+  `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
+
+### Face scans
+`modules/face-scans` is the face scan (#112), built as four stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
+provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), and this one (3 of 4) is the **analysis
+pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
+check, the live stream and the spend. The result view (which concerns are shown, their wording, the change since day one, the mask links) comes after.
+`FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
+store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events and the ops alerts (`Pick<OpsAlertsService,
+'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
+
+- **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
+  from `face_scans`. `face_consents` (one row per profile: version, given and withdrawn times), `face_scans` (`state` `analysing` |
+  `needs-retake` | `ready` | `failed`, `reason`, `goal_at_scan`, the Perfect Corp task ids and environment, `skin_age`, `skin_type`, `tables_version`,
+  timestamps; indexed on `(profile_id, created_at)`; migration 0030 adds `reaper_checked_at` and indexes on both task-id columns and on
+  `(state, updated_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
+  and, filled by the analysis, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
+  `profile_fitzpatrick` (`I` to `VI` and the task id). No route shows those last three yet. `reason` is `unavailable` or `consent-withdrawn` for a
+  failed scan, and for a scan that needs a retake one of `REJECTED_PHOTO_REASONS` (`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`,
+  `no-face`, `image-size`); the column is plain text and the enum is the TypeScript table's.
+- **Consent.** `CURRENT_FACE_CONSENT_VERSION` (1) is the version of the wording; bump it and every earlier consent stops counting.
+  Consent belongs to the profile. `PUT /me/face-consent { version }` records it (any other version is 400 `FACE_CONSENT_VERSION_MISMATCH`
+  with `details.current`; giving again starts it afresh and clears a withdrawal), `GET` shows it (404 `FACE_CONSENT_NOT_FOUND` until given; a
+  withdrawn or older one is shown with `current` false), and `DELETE` stamps the withdrawal time and keeps the row (204, also when there is nothing to withdraw).
+- **Creating a scan.** `POST /scans/faces` takes multipart `front` (required) and `right` and `left` (optional). Middleware, in order:
+  `FACE_SCAN_IP_LIMITER` (20 a minute) → `signedIn` → `FACE_SCAN_USER_LIMITER` (10 a minute) → `bodyLimit` (3 x 6,000,000 + 1,000,000 bytes).
+  The service then checks, in this order, and stores and queues nothing until all pass: consent (409 `FACE_CONSENT_REQUIRED`: none, withdrawn, or an
+  older version), the goal (409 `GOAL_REQUIRED`, from `GoalsService.requireGoal`), whether a scan is due (429 `FACE_SCAN_NOT_DUE` with `details.reason`),
+  then every photo (400). A photo is a JPEG, decided by its bytes and never by what the caller claims: `UNSUPPORTED_IMAGE` for anything else (and for
+  a header over 4096 px, which `readImageHeader` reads as no image), `IMAGE_TOO_SMALL` for a shorter side under 1080 px, `IMAGE_TOO_LARGE` over 6,000,000
+  bytes. Then it writes **R2 before the database**, deleting the photos again if the write fails; saves the scan and its photo rows in one `db.batch`;
+  and enqueues `analyse-face-scan { faceScanId, step: 'upload', at }`. If the enqueue fails the scan is marked `failed` / `unavailable`
+  (kept, with its photos, so the user can see and delete it) and the call still answers 202. The AI spend ledger is not touched: Perfect
+  Corp is charged when a result comes back.
+- **Double-submit guard.** Two requests for one profile (a double tap, two devices) can both read "no scan under this goal yet" before either writes, so
+  the check alone cannot stop them. The write does: `createFaceScan(scan, photos, { expectLatestId })` stores the scan only if the profile's latest
+  non-failed scan (ordered as `latestForProfile` is, `created_at` then `rowid`) is still `expectLatestId` (null for none), and answers true or false. On D1
+  that is one `db.batch` whose first statement is `INSERT ... SELECT ... WHERE (latest) IS ?` and whose photo inserts are `WHERE EXISTS` that scan row; the
+  answer is the first statement's `meta.changes`. Writes in a batch are serialised, so exactly one of any number of simultaneous requests lands. The service
+  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` (`already-scanned-for-goal`). Without the
+  option the write is unconditional. There is deliberately no unique index on (profile, goal): going back to an earlier goal is allowed once another scan came between.
+- **The policy** (`face-scans.policy.ts`, pure): `mayScanNow({ goal, latest })` allows a profile with no scan, or whose latest scan was
+  taken under another goal, and otherwise refuses with `already-scanned-for-goal`. The latest scan is the newest that has **not failed** (a
+  failed scan gave the profile nothing to look at), and ties go to the one written last. A later check-in schedule adds a third reason.
+- **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
+  per photo, `rescanSuggested`) and no result yet. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
+  a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
+  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
+  `mask-<concern>.png` of its goal's concerns) once more, so a mask written by an analysis that committed between the key read and the row delete does not
+  stay in the bucket (204). Another profile's
+  scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
+- **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET
+  /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
+  other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
+  product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
+- **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
+  bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
+  message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters
+  have namespace ids 1026/1027, 2026/2027 and 3026/3027.
+- **States.** `analysing` becomes `ready` (results copied), `needs-retake` (Perfect Corp refused the front photo; `reason` is one retake reason) or
+  `failed` (`unavailable` or `consent-withdrawn`); `needs-retake` becomes `analysing` again on a retake. `ready` and `failed` are final. Every change is
+  a conditional `updateFaceScan(id, expectedState, patch)`, so of two simultaneous callers exactly one wins and a late message does nothing.
+- **The job** `analyse-face-scan { faceScanId, step, at, webhookId? }` has three steps, all in `FaceScanService.advance`. The key is
+  `<id>:<step>:wh:<webhookId>` when a webhook woke it and `<id>:<step>:<at>` otherwise, so a webhook delivered twice is one run (the dispatcher's
+  `job_runs` claim acks the repeat; there is no table of webhook ids).
+  - `upload`: does nothing for a scan that is gone, not `analysing`, or that already has its analysis task (a message taken over after its lease must not
+    pay twice). It re-checks consent (no current consent fails the scan as `consent-withdrawn` with no Perfect Corp call), reads the front photo (missing:
+    `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
+    A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
+    never fails the scan.
+  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each of the goal's
+    three concerns that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
+    `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
+    region, plus the overall score as concern `all`, region `whole`), the `face_masks` rows, `skin_type` (`skinTypeLabel`), `skin_age`, `tables_version`
+    (`TABLES_VERSION`) and `state = 'ready'` as one batch that holds only while the scan exists and is `analysing`. When it does not (deleted, or moved on,
+    while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
+    recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
+    scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
+    Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
+  - `fitzpatrick`: stores the type for the profile (insert, first read stands) and records 10 units keyed by the task, then deletes their copy. It never
+    changes the scan and is never shown. A task that already gave the profile its type only has its copy deleted again; a task that succeeds after another
+    one gave the profile its type is still charged, so its spend is recorded (a ledger failure is logged, not retried) before its copy is deleted.
+  - **Perfect Corp's copy of the photo.** The face photo must not outlive the scan at Perfect Corp, so `deleteTask` (best effort: the error's name is logged as
+    `task-delete-failed`, nothing else changes) is called for **both** the analysis and the Fitzpatrick task, when set, when a scan goes to `failed` (any
+    reason: credit, bad request, the reaper's 2-hour give-up, the dead-letter hook, consent withdrawn), when the user deletes it, and for the analysis task
+    when it goes to `needs-retake`. The one exception: a Fitzpatrick task is **kept** on a `needs-retake` scan while the profile has no Fitzpatrick row, since
+    it is a read of the same face and may still complete (its own step deletes it). A task created by an upload that then loses (the scan was deleted or failed,
+    or a second upload stored its task first; the task id is stored only while the scan has none) is deleted at once. **Not covered:** the account and guest
+    purge (`FaceDataCleaner`) does not reach Perfect Corp; tasks there expire on their own. **A failed delete is logged, not retried**, a deliberate deviation from
+    the spec's "retried" (a retry would need a place to remember the task id once the scan row is gone).
+  - **Perfect Corp's errors**, mapped alike in every step that calls it: `PerfectCorpRejectedPhotoError` sends the scan to `needs-retake` with the reason
+    (no spend); `PerfectCorpUnavailableError` is rethrown for the queue to retry (after 4 retries the dead-letter hook fails the scan as `unavailable`,
+    except for a `fitzpatrick` step, which leaves the scan alone); `PerfectCorpCreditError` raises the `face-scan-account` ops alert (also when it comes from creating the Fitzpatrick task, which still never fails the scan), fails the scan as
+    `unavailable` and ends the message as a `PermanentJobError` (the service fails the scan itself because the dispatcher acks a permanent error and never
+    dead-letters it); `PerfectCorpBadRequestError` does the same without the alert. A webhook that says the task ended in an error still queues `fetch`:
+    the provider's mapping on `getSkinAnalysis` decides whether that is a retake or an outage.
+- **The webhook.** `POST /webhooks/perfect-corp` (under the API prefix) is public (`security: []`): the Standard Webhooks signature on the RAW body is the
+  credential (`RestPerfectCorpClient.verifyWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
+  (300 a minute per address; namespace ids 1028/2028/3028) then `bodyLimit` (64 KB, so an oversized body is 413 before any signature work). The route reads
+  `c.req.text()` and calls `receiveWebhook`: a bad signature is 401 `WEBHOOK_SIGNATURE_INVALID`; otherwise `findByTaskId` (both task-id columns are
+  indexed) finds the scan, and a task of another environment (`pc_environment` is not this one) or of a deleted scan is ignored; a match queues `fetch` (its
+  analysis task) or `fitzpatrick` with the `webhook-id`. Every non-401 case answers 200 `{ received: true }` in the usual envelope; a step that cannot be
+  queued is 503, so Perfect Corp sends the webhook again. Register the URL for each environment in Perfect Corp's console (see the README).
+- **Retake.** `POST /scans/faces/{id}/retake` takes multipart `front` only, with create's middleware and its single-photo body limit. The checks run in
+  this order and nothing changes until all pass: the scan is the caller's (404 `FACE_SCAN_NOT_FOUND`), consent is current (409 `FACE_CONSENT_REQUIRED`), the
+  scan is `needs-retake` (409 `FACE_SCAN_NOT_AWAITING_RETAKE`), then the photo (the same JPEG checks). The front object is overwritten under the same
+  key, the scan moves `needs-retake` to `analysing` with `reason`, `pc_analysis_task_id` and `reaper_checked_at` cleared (the retaken photo gets a task and a
+  reaper check of its own; the analysis task id is cleared on the row only, its Perfect Corp task was deleted when the photo was refused), and `upload` is queued.
+  If the move loses and the scan no longer exists (deleted meanwhile), the front object just written is deleted and the answer is 404; if it exists but is
+  no longer waiting for a retake it is 409. If `upload` cannot be queued the scan fails as `unavailable`, still 202. There is no limit and no due-check.
+- **The reaper's one check.** `createScanReaper` also calls `FaceScanService.reap(now)`, in its own try (a failure is logged, never fails the product
+  sweep nor is hidden by it). It runs two queries of at most 100 scans each, longest-waiting first. First `staleAnalysing(now - 2h)`: those are failed as
+  `unavailable`. Then `staleAnalysing(now - 15min, { unchecked: true })`, which leaves out scans with `reaper_checked_at` set so that ones already checked
+  and not yet 2 hours old cannot fill the batch and starve newer scans: for each, `markReaperChecked` sets `reaper_checked_at` (a conditional write of that
+  column alone: it holds only while the scan is `analysing` and unchecked, and never touches `updated_at`, so the 2 hours do not restart and a scan that
+  moved on since it was read keeps its own time) and, only if it did, `fetch` is queued, or `upload` if the scan has no task (its first message was lost).
+  The check happens once.
+- **The live stream.** The `ScanStream` Durable Object, one per face scan id, carries a `{ type: 'face', faceScan: { id, state, reason } }` event as SSE
+  event `face`; product frames are unchanged. `GET /scans/faces/{id}/events` (signed in, the caller's own scan, else 404 `FACE_SCAN_NOT_FOUND`) opens a
+  stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
+  scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
+  change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
+- **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), as soon as Perfect Corp reports a task successful (before our copy of the result is
+  stored: they bill on success), and a failure to record it is logged and does not fail the step.
+- **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket
+  first, then their face rows (which also cascade from the profile), so a bucket failure leaves the rows and the keys for the next run. Both
+  halves are safe to repeat and chunk the ids under D1's bound-parameter limit. It deletes only what the face tables list, so product photos are untouched.
+
+### Vendor spend ledger
+`AiUsageService` is also the `VendorSpendLedger` (`providers/perfect-corp/vendor-spend.provider.ts`), so a face job depends on the port and not the service.
+`record({ vendor: 'perfect-corp', job: 'face-analysis' | 'fitzpatrick', units, key })` writes one row to the same `ai_usage` table, already
+`settled`, and raises the same `ai-spend-cap` alert when the day's sum passes the figure. It never refuses a call for the figure.
+
+- **Idempotent per vendor task.** `key` is the Perfect Corp task id and the row id is `<vendor>:<key>`, so a redelivered job or a webhook that
+  came twice is one charge. `insertSettled` inserts with `onConflictDoNothing` on the id, `returning` the id, in the same `db.batch` as the
+  sum; a repeat stores nothing, answers `{ overCap: false }` and so raises no alert (the first record already did, if it passed the figure).
+- **Units are validated.** `units` must be a positive whole number or `record` throws before anything is stored (so a bad record does not
+  use up its task id).
+
+- **Recorded once, on success.** Perfect Corp charges only when a task succeeds, and nothing sweeps a reservation held open across a
+  webhook wait, so nothing is reserved. The spend is recorded when the task is seen to have succeeded, before anything of ours that could fail. A rejected photo records nothing. The units are 12 for the HD analysis and 10 for a first Fitzpatrick read.
+- **Cost** is `Math.round(units x PERFECT_CORP_USD_PER_UNIT x 1,000,000)` micro-USD, rounded once at the end (12 x 0.07 is not exact in floating point).
+  The container passes `PERFECT_CORP_USD_PER_UNIT` raw and `record` validates it when it is used, throwing an error that names the
+  variable unless it is a positive number (or the text of one). It is not checked when the container is built, because the same ledger serves every
+  Claude call, and a bad price must fail only the Perfect Corp record, never reserve, settle or release.
+- **Migration 0028** adds `vendor` (text, not null, default `anthropic`) and `units` (integer, null) to `ai_usage`. A vendor row stores
+  the vendor name as `model` and its estimate as its cost, since both columns are not null. `AI_JOBS` stays Claude's list: the Perfect Corp
+  jobs are not in it, so no model, price or prompt is wired for them.
+- **Two summaries.** `summary()` is Claude only (it excludes any other vendor); `vendorSummary()` adds up the others per vendor and job
+  with calls, units and cost. The daily sum (`committedMicrosSince`) counts both. `npm run ai:spend` reads every settled row, so its
+  totals include Perfect Corp, and the vendor's rows show with the vendor name as the model.
+
+### Perfect Corp config
+Per environment (dev, staging, production) even though one Perfect Corp account is shared today; the code never assumes that.
+
+- Vars in all three `wrangler.jsonc` blocks: `PERFECT_CORP_BASE_URL` (`https://yce-api-01.makeupar.com`) and `PERFECT_CORP_USD_PER_UNIT`.
+  **The price is a placeholder (`0.05`)**: confirm it from Perfect Corp's feature-cost endpoint and the plan price before trusting spend figures.
+- Secrets `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`, **required** in the secrets plan and in `secrets.required` in all three blocks, so a
+  deploy fails until both are set on that environment's Worker. Both are in the two `.dev.vars` example files.
+- The webhook URL for each environment (`https://<that Worker's host>/api/v1/webhooks/perfect-corp`) is registered in Perfect Corp's console (a deploy
+  step, not code); the console shows the secret. Until it is registered nothing wakes the `fetch` step, and the reaper's check 15 minutes on is what finds the result.
+
 ### Ops alerts
 `modules/ops-alerts` (`OpsAlertsService`) emails the owner when an environment-wide problem needs them. Nothing here is shown to a
 user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue #91): the limits only make noise.
@@ -1132,6 +1355,7 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
 | Kind              | Raised when                                                                                  | At most one email per |
 | ----------------- | -------------------------------------------------------------------------------------------- | --------------------- |
 | `ai-account`      | Claude refuses our account: any `AnthropicConfigError` (401, 402 `billing_error`, 403)       | hour                  |
+| `face-scan-account` | Perfect Corp refuses our account: a `PerfectCorpCreditError` in a face scan step          | hour                  |
 | `ai-spend-cap`    | A call takes the UTC day's AI spend past `AI_DAILY_BUDGET_USD`                               | UTC day               |
 | `research-budget` | A research attempt is made when the day's count has reached `dailyResearchBudget` (200)      | UTC day               |
 | `analysis-budget` | An analysis attempt is made when the day's count has reached `dailyAnalysisBudget` (300)     | UTC day               |
@@ -1141,7 +1365,7 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   is logged `{ outcome: 'ops-alert-failed', kind, error }` with the error's name only.
 - **One claim per kind and window, then a job.** `OpsAlertsRepository.claim(kind, windowStart)` is ONE guarded upsert on
   `ops_alert_claims` (one row per kind, replaced only by a newer window), so however many callers hit the problem in a window
-  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`)
+  exactly one wins, and only the winner queues the `send-ops-alert` job. The window is the start of the UTC hour (`ai-account`, `face-scan-account`)
   or UTC day (the rest). The repository does not know how long a window is. *Trade-off:* the window is claimed before the job is
   queued, so a queue outage loses that window's email (the next window sends); queueing first would send one email per caller.
 - **`send-ops-alert` is the first job on the shared `email` queue** (see "Background jobs"), keyed `kind:windowStart`, so a
@@ -1204,38 +1428,51 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   catalog service must pass the image through `ProductAnalyst.imageShowsProduct` before `put`.
 
 ### Private photos
-`providers/photo-store` keeps the photos users take of products. The port is `PhotoStore` (`put`, `get`, `delete`,
+`providers/photo-store` keeps the photos users take of products, and their face photos and overlay masks. The port is `PhotoStore` (`put`, `get`, `delete`,
 `deleteMany`); `R2PhotoStore` and `MemoryPhotoStore` implement it. Unlike catalog images, these are private.
 
 - **One private bucket for every environment.** `deepertones-private`, bound as `PRIVATE_PHOTOS` in all three
   `wrangler.jsonc` blocks, next to the public `CATALOG_IMAGES`, never in its place. It has no public domain and r2.dev
   is off, so the only way out is a signed photo link. Environments are told apart by key prefix, as in the public
   bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket.
-- **Key layout.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, where `<environment>` is
+- **Key layout.** Product photos are `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`. Face photos are
+  `faces/<environment>/<user id>/<profile id>/<scan id>/<name>`: `<name>` is `front.jpg`, `right.jpg` or `left.jpg`, or `mask-<concern>.png` for an
+  overlay mask, and exactly three id segments sit between the environment and the name. The profile is in the key so a photo link can be checked
+  against it. Face photos live under their own prefix, so the product sweeps (which release a photo once it has been used) can never reach them.
+  In both, `<environment>` is
   `development`, `staging`, `production` or `test`, and each id is lowercase `a-z 0-9 -` (UUIDs pass). Every method
   validates the key and throws a plain `Error` on a bad one, before touching the bucket: a bad key is our bug.
   `deleteMany` validates every key before deleting any, then deletes in batches of 1000 (the R2 limit). An item id may
   end in `-back` for the back of the pack (`<item id>-back.jpg`); it is an ordinary id.
 - **Environment lock.** Both stores are built with `{ environment }` (`R2PhotoStore` also takes the `bucket`) and accept
-  only keys that start `photos/<that environment>/`; a key of another environment is the same plain `Error`, and the
+  only keys that start `photos/<that environment>/` or `faces/<that environment>/`; a key of another environment is the same plain `Error`, and the
   bucket is not touched. One bucket serves every environment, so this keeps a misconfigured Worker from reading or
   deleting another environment's photos.
-- **Media rules.** `put` throws unless the media type is `image/jpeg` or `image/webp` and matches the key's extension
-  (`jpg` with `image/jpeg`, `webp` with `image/webp`).
+- **Media rules.** `put` throws unless the media type matches the key's extension: `jpg` with `image/jpeg`, `webp` with
+  `image/webp`, and `png` with `image/png`. The key rule is what keeps PNG narrow: only a face mask key can end in `.png`, a face photo
+  is a JPEG only, and a product photo is a JPEG or WebP only.
 - **One set of checks.** `assertPhotoKey` and `assertPhotoMedia` live in `photo-store.provider.ts`, the one
   non-concrete file both stores may import, and `MemoryPhotoStore` calls them too, so the fake accepts and refuses exactly
   what the real store does. `photo-store.contract.ts` runs the same tests against both.
 - **`put` and `get`.** `put` stores the bytes with the media type and `Cache-Control: private, no-store`. `get` returns
   the stored bytes and media type, or null for a missing key or any stored type other than `image/jpeg` or
-  `image/webp` (the stored type decides, not the extension). `delete` of a missing key is not an error. Storage
+  `image/webp` (or `image/png` under a `faces/` key, where the masks are); the stored type decides, not the extension. `delete` of a missing key is not an error. Storage
   failures are thrown so the caller can retry.
-- **Signed photo links.** `lib/photo-link.ts` signs `{ key, userId, expiresAt }` as an opaque token: base64url of
+- **Signed photo links.** `lib/photo-link.ts` signs `{ key, userId, expiresAt }` (and, for a face photo, `profileId`) as an opaque token: base64url of
   `payload.signature`, where the payload is JSON and the signature is HMAC-SHA-256 under a key derived with
   HKDF-SHA-256 from the secret (empty salt, info `deepertones/photo-link/v1`, 256 bits). The container passes
   `JWT_SECRET` to the scan service; there is no new secret, and the distinct info keeps this key unrelated to the one that signs JWTs. A
   link lives `PHOTO_LINK_TTL_SECONDS` (5 minutes), and that is enforced at both ends. `signPhotoLink(link, secret, now)`
   throws on an empty secret, on an expiry more than the TTL after `now`, and when the key's user segment
   (`photos/<environment>/<user id>/...`) is not `userId`, so a link is only ever minted for its own user's photo.
+  **The profile claim.** A face link also carries `profileId`, which must equal the key's profile segment
+  (`faces/<environment>/<user id>/<profile id>/...`): the signer throws on a face key with no profile or another one, and on a
+  product key with a profile, and the verifier gives null for a face token whose profile is missing, empty or not the key's. So the
+  account's other profiles cannot open a link made for one profile, and `verifyPhotoLink` gives `{ key, userId, profileId }` for a face
+  photo and `{ key, userId }` (no `profileId`) for a product photo.
+  **Each route serves its own prefix.** The two kinds of link verify with the same secret, so each photo route checks the key's
+  root: `ScanService.photoForLink` refuses (404 `PHOTO_NOT_FOUND`) any key that does not start `photos/`, and
+  `FaceScanService.photoForLink` any that does not start `faces/`, so a face token can never open through the product route nor the other way round.
   `verifyPhotoLink(token, secret, now)` takes the clock as an argument and returns the key and user, or null for
   anything malformed, over 2048 characters, wrongly signed, expired, or ending more than the TTL after `now` (a link
   minted wrong still cannot live longer than 5 minutes); reasons are not told apart. The signature is compared in

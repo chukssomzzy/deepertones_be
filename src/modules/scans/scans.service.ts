@@ -633,7 +633,8 @@ export class ScanService {
    */
   async photoForLink(token: string): Promise<ProductImage> {
     const link = await verifyPhotoLink(token, this.#photoLinkSecret, this.now())
-    if (!link) throw ScanService.photoNotFound()
+    // The store holds face photos too, and their links verify with the same secret: this route serves product photos only.
+    if (!link || !link.key.startsWith('photos/')) throw ScanService.photoNotFound()
     const photo = await this.photos.get(link.key)
     if (!photo) throw ScanService.photoNotFound()
     return photo

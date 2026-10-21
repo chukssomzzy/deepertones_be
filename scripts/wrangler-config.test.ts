@@ -81,6 +81,42 @@ describe('wrangler.jsonc product catalog config', () => {
   })
 })
 
+// Perfect Corp (YouCam) runs the face scan. Per environment even though one account is shared today, so a separate account per
+// environment later needs no code change. The key and webhook secret are secrets (optional for now); the address and
+// the price of one unit are plain vars. Env blocks do not inherit either, so each block restates them. The price is not pinned to a
+// number, only to a positive one, because it is the owner's to set.
+describe('wrangler.jsonc Perfect Corp config', () => {
+  it.each(blocks)('%s sets the Perfect Corp API address', (_, block) => {
+    expect(block?.vars?.PERFECT_CORP_BASE_URL).toBe('https://yce-api-01.makeupar.com')
+  })
+
+  it.each(blocks)('%s sets the price of one Perfect Corp unit in USD as a positive number', (_, block) => {
+    const price = block?.vars?.PERFECT_CORP_USD_PER_UNIT
+
+    expect(typeof price).toBe('string')
+    expect(price).toMatch(/^\d+(\.\d+)?$/)
+    expect(Number(price)).toBeGreaterThan(0)
+    expect(Number.isFinite(Number(price))).toBe(true)
+  })
+
+  // Required now that the face scan pipeline calls Perfect Corp and verifies its webhooks: a deploy without them must fail, not run without them.
+  it.each(blocks)('%s requires PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET, so a deploy fails without them', (_, block) => {
+    expect(block?.secrets?.required).toContain('PERFECT_CORP_API_KEY')
+    expect(block?.secrets?.required).toContain('PERFECT_CORP_WEBHOOK_SECRET')
+  })
+
+  it.each(blocks)('%s does not hold the key or the webhook secret as plain vars', (_, block) => {
+    expect(block?.vars).not.toHaveProperty('PERFECT_CORP_API_KEY')
+    expect(block?.vars).not.toHaveProperty('PERFECT_CORP_WEBHOOK_SECRET')
+  })
+
+  it.each(blocks)('%s still requires the secrets it already required', (_, block) => {
+    expect(block?.secrets?.required).toEqual(
+      expect.arrayContaining(['ZEPTOMAIL_API_KEY', 'OTP_PEPPER', 'JWT_SECRET', 'DEVICE_ID_KEY', 'ANTHROPIC_API_KEY', 'EXPO_ACCESS_TOKEN']),
+    )
+  })
+})
+
 // Users' product photos are private: one private bucket for every environment, told apart by key prefix
 // (photos/<environment>/…), with no public address. It sits beside the public assets bucket, never in its place.
 describe('wrangler.jsonc private photo storage', () => {
@@ -245,6 +281,13 @@ describe('wrangler.jsonc scan, goal, safety, product search and shelf route rate
     // Adding a product from search starts a scan that may research and analyse it: as tight as the other routes that can cost a model call.
     ['SHELF_ADD_IP_LIMITER', 20],
     ['SHELF_ADD_USER_LIMITER', 10],
+    // A face scan sends a photo to Perfect Corp, which is paid per use: as tight as the other routes that can cost money. A profile can start one
+    // per goal anyway (409/429 on the rest), so this only stops a flood of rejected attempts.
+    ['FACE_SCAN_IP_LIMITER', 20],
+    ['FACE_SCAN_USER_LIMITER', 10],
+    // Perfect Corp's webhook: public, and signed, so the limit only keeps a flood of unsigned requests from costing a signature check each. A burst of
+    // genuine deliveries (every scan sends one or two) is far under it.
+    ['PERFECT_CORP_WEBHOOK_LIMITER', 300],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 
@@ -304,5 +347,67 @@ describe('wrangler.jsonc scan stream Durable Object', () => {
   // becomes the default on 2026-11-17 anyway.
   it.each(streamBlocks)('%s does not set pipe_to_backward_propagation', (_, block) => {
     expect(block?.compatibility_flags ?? []).not.toContain('pipe_to_backward_propagation')
+  })
+})
+
+// The face scan limiters (issue #112) each get an id of their own in every block. Pinned to the numbers, not only to being unique: the ids
+// are account-wide counters, and dev, staging and production are told apart by their thousands (1xxx, 2xxx, 3xxx).
+describe('wrangler.jsonc face scan rate limit namespace ids', () => {
+  const ids: [string, QueueBlock | undefined, { ip: string; user: string }][] = [
+    ['top level', queueConfig, { ip: '1026', user: '1027' }],
+    ['env.staging', queueConfig.env.staging, { ip: '2026', user: '2027' }],
+    ['env.production', queueConfig.env.production, { ip: '3026', user: '3027' }],
+  ]
+
+  it.each(ids)('%s gives FACE_SCAN_IP_LIMITER and FACE_SCAN_USER_LIMITER their own ids', (_, block, expected) => {
+    const byName = Object.fromEntries((block?.ratelimits ?? []).map((limit) => [limit.name, limit.namespace_id]))
+
+    expect(byName.FACE_SCAN_IP_LIMITER).toBe(expected.ip)
+    expect(byName.FACE_SCAN_USER_LIMITER).toBe(expected.user)
+  })
+})
+
+describe('wrangler.jsonc Perfect Corp webhook rate limit namespace id', () => {
+  const ids: [string, QueueBlock | undefined, string][] = [
+    ['top level', queueConfig, '1028'],
+    ['env.staging', queueConfig.env.staging, '2028'],
+    ['env.production', queueConfig.env.production, '3028'],
+  ]
+
+  it.each(ids)('%s gives PERFECT_CORP_WEBHOOK_LIMITER its own id', (_, block, expected) => {
+    const byName = Object.fromEntries((block?.ratelimits ?? []).map((limit) => [limit.name, limit.namespace_id]))
+
+    expect(byName.PERFECT_CORP_WEBHOOK_LIMITER).toBe(expected)
+  })
+})
+
+// Face scans' background work (issue #112): the analysis job runs on a queue of its own, with a dead-letter queue, per environment. The consumer
+// takes one message at a time: a message is one exchange with Perfect Corp (an upload, task creation or a fetch), and a batch is retried or acked as a whole.
+describe('wrangler.jsonc face-scans queue', () => {
+  it.each(scanBlocks)('%s produces to the face-scans queue as FACE_SCANS_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'FACE_SCANS_QUEUE')?.queue).toBe(`deepertones-face-scans-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the face-scans queue one message at a time with 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-face-scans-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 1, max_retries: 4, dead_letter_queue: `deepertones-face-scans-dlq-${environment}` })
+  })
+
+  it.each(scanBlocks)('%s consumes the face-scans dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-face-scans-dlq-${environment}`)
+
+    expect(consumer).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps every queue it already had beside it', (_, block, environment) => {
+    const bindings = Object.fromEntries((block?.queues?.producers ?? []).map((p) => [p.binding, p.queue]))
+
+    expect(bindings).toMatchObject({
+      OTP_DELIVERY_QUEUE: `deepertones-otp-delivery-${environment}`,
+      SCAN_ITEMS_QUEUE: `deepertones-scan-items-${environment}`,
+      PARSE_SAFETY_QUEUE: `deepertones-parse-safety-${environment}`,
+      EMAIL_QUEUE: `deepertones-email-${environment}`,
+    })
   })
 })

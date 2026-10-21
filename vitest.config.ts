@@ -16,7 +16,7 @@ export default defineConfig(async () => {
     cloudflareTest({
       wrangler: { configPath: './wrangler.jsonc' },
       // Test-only values, so no test needs a real secret.
-      miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', JWT_SECRET: 'test-jwt-secret', DEVICE_ID_KEY: 'test-device-id-key', ZEPTOMAIL_API_KEY: 'test-key', WHATSAPP_ACCESS_TOKEN: 'test-token', ANTHROPIC_API_KEY: 'test-anthropic-key', EXPO_ACCESS_TOKEN: 'test-expo-token' } },
+      miniflare: { bindings: { TEST_MIGRATIONS: migrations, OTP_PEPPER: 'test-pepper', JWT_SECRET: 'test-jwt-secret', DEVICE_ID_KEY: 'test-device-id-key', ZEPTOMAIL_API_KEY: 'test-key', WHATSAPP_ACCESS_TOKEN: 'test-token', ANTHROPIC_API_KEY: 'test-anthropic-key', EXPO_ACCESS_TOKEN: 'test-expo-token', PERFECT_CORP_API_KEY: 'test-perfect-corp-key', PERFECT_CORP_WEBHOOK_SECRET: 'whsec_' + btoa('test-perfect-corp-webhook-secret!') } },
     })
 
   return {

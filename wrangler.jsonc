@@ -39,14 +39,18 @@
     // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
     "OPS_ALERT_EMAIL": "",
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
-    "CATALOG_IMAGES_PUBLIC_URL": ""
+    "CATALOG_IMAGES_PUBLIC_URL": "",
+    // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+    "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+    // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+    "PERFECT_CORP_USD_PER_UNIT": "0.05"
   },
-  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
+  // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
   // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
   // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
   // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
+  "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
 
   // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
   // README → Before the first deploy lists the full set:
@@ -62,6 +66,8 @@
   //   npx wrangler queues create deepertones-parse-safety-dlq-development
   //   npx wrangler queues create deepertones-email-development
   //   npx wrangler queues create deepertones-email-dlq-development
+  //   npx wrangler queues create deepertones-face-scans-development
+  //   npx wrangler queues create deepertones-face-scans-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
     "producers": [
@@ -70,7 +76,8 @@
       { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-development" },
       { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-development" },
       { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" },
-      { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-development" }
+      { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-development" },
+      { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-development" }
     ],
     "consumers": [
       {
@@ -130,7 +137,16 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-email-dlq-development"
       },
-      { "queue": "deepertones-email-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-email-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-face-scans-development",
+        // One message at a time: a message is one exchange with Perfect Corp (an upload, task creation or a fetch), and a batch is retried or acked as a whole.
+        "max_batch_size": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the scan failed.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-face-scans-dlq-development"
+      },
+      { "queue": "deepertones-face-scans-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -161,6 +177,11 @@
     // Adding a searched product to the shelf: may start a typed scan that costs a model call, so as tight as the goal's.
     { "name": "SHELF_ADD_IP_LIMITER", "namespace_id": "1024", "simple": { "limit": 20, "period": 60 } },
     { "name": "SHELF_ADD_USER_LIMITER", "namespace_id": "1025", "simple": { "limit": 10, "period": 60 } },
+    // Starting a face scan sends a photo to Perfect Corp, which is paid per use: as tight as the other routes that can cost money.
+    { "name": "FACE_SCAN_IP_LIMITER", "namespace_id": "1026", "simple": { "limit": 20, "period": 60 } },
+    { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "1027", "simple": { "limit": 10, "period": 60 } },
+    // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
+    { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "1028", "simple": { "limit": 300, "period": 60 } },
     { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "1014", "simple": { "limit": 120, "period": 60 } },
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
@@ -253,14 +274,18 @@
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
-        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
+        // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+        "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+        "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-staging
@@ -275,6 +300,8 @@
       //   npx wrangler queues create deepertones-parse-safety-dlq-staging
       //   npx wrangler queues create deepertones-email-staging
       //   npx wrangler queues create deepertones-email-dlq-staging
+      //   npx wrangler queues create deepertones-face-scans-staging
+      //   npx wrangler queues create deepertones-face-scans-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -283,7 +310,8 @@
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-staging" },
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-staging" },
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" },
-          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-staging" }
+          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-staging" },
+          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-staging" }
         ],
         "consumers": [
           {
@@ -343,7 +371,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-email-dlq-staging"
           },
-          { "queue": "deepertones-email-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-email-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-face-scans-staging",
+            // One message at a time: a message is one exchange with Perfect Corp (an upload, task creation or a fetch), and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the scan failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-face-scans-dlq-staging"
+          },
+          { "queue": "deepertones-face-scans-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -373,6 +410,11 @@
         // Adding a searched product to the shelf: may start a typed scan that costs a model call, so as tight as the goal's.
         { "name": "SHELF_ADD_IP_LIMITER", "namespace_id": "2024", "simple": { "limit": 20, "period": 60 } },
         { "name": "SHELF_ADD_USER_LIMITER", "namespace_id": "2025", "simple": { "limit": 10, "period": 60 } },
+        // Starting a face scan sends a photo to Perfect Corp, which is paid per use: as tight as the other routes that can cost money.
+        { "name": "FACE_SCAN_IP_LIMITER", "namespace_id": "2026", "simple": { "limit": 20, "period": 60 } },
+        { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "2027", "simple": { "limit": 10, "period": 60 } },
+        // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
+        { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "2028", "simple": { "limit": 300, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
@@ -431,14 +473,18 @@
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
         // Where deepertones-assets is served from (its custom domain).
-        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com"
+        "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
+        // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
+        "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
+        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
+        "PERFECT_CORP_USD_PER_UNIT": "0.05"
       },
-      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY and EXPO_ACCESS_TOKEN are set on this environment's Worker: fill in
+      // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY and PERFECT_CORP_WEBHOOK_SECRET are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
       // JWT_SECRET_PREVIOUS is optional: set only while rotating JWT_SECRET.
       // EXPO_ACCESS_TOKEN is an Expo robot-user access token: the push sender authenticates every send with it (enhanced push security is on).
       // WHATSAPP_ACCESS_TOKEN is not required: WhatsApp stays off until it is added to OTP_CHANNELS.
-      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN"] },
+      "secrets": { "required": ["ZEPTOMAIL_API_KEY", "OTP_PEPPER", "JWT_SECRET", "DEVICE_ID_KEY", "ANTHROPIC_API_KEY", "EXPO_ACCESS_TOKEN", "PERFECT_CORP_API_KEY", "PERFECT_CORP_WEBHOOK_SECRET"] },
       // Every queue below (each job's main + dead-letter pair) must exist before the first deploy that binds them;
       // README → Before the first deploy lists the full set:
       //   npx wrangler queues create deepertones-otp-delivery-production
@@ -453,6 +499,8 @@
       //   npx wrangler queues create deepertones-parse-safety-dlq-production
       //   npx wrangler queues create deepertones-email-production
       //   npx wrangler queues create deepertones-email-dlq-production
+      //   npx wrangler queues create deepertones-face-scans-production
+      //   npx wrangler queues create deepertones-face-scans-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -461,7 +509,8 @@
           { "binding": "PUSH_DELIVERY_QUEUE", "queue": "deepertones-push-delivery-production" },
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-production" },
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" },
-          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-production" }
+          { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-production" },
+          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-production" }
         ],
         "consumers": [
           {
@@ -521,7 +570,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-email-dlq-production"
           },
-          { "queue": "deepertones-email-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-email-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-face-scans-production",
+            // One message at a time: a message is one exchange with Perfect Corp (an upload, task creation or a fetch), and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook marks the scan failed.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-face-scans-dlq-production"
+          },
+          { "queue": "deepertones-face-scans-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -551,6 +609,11 @@
         // Adding a searched product to the shelf: may start a typed scan that costs a model call, so as tight as the goal's.
         { "name": "SHELF_ADD_IP_LIMITER", "namespace_id": "3024", "simple": { "limit": 20, "period": 60 } },
         { "name": "SHELF_ADD_USER_LIMITER", "namespace_id": "3025", "simple": { "limit": 10, "period": 60 } },
+        // Starting a face scan sends a photo to Perfect Corp, which is paid per use: as tight as the other routes that can cost money.
+        { "name": "FACE_SCAN_IP_LIMITER", "namespace_id": "3026", "simple": { "limit": 20, "period": 60 } },
+        { "name": "FACE_SCAN_USER_LIMITER", "namespace_id": "3027", "simple": { "limit": 10, "period": 60 } },
+        // Perfect Corp's webhook is public and signed: the limit only stops a flood of unsigned requests from each costing a signature check.
+        { "name": "PERFECT_CORP_WEBHOOK_LIMITER", "namespace_id": "3028", "simple": { "limit": 300, "period": 60 } },
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],

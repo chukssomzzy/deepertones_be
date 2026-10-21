@@ -257,5 +257,176 @@ export const photoStoreContract = (name: string, make: (environment: PhotoEnviro
         await expect(store.get(key)).resolves.toBeNull()
       })
     })
+
+    // Face photos live beside product photos in the one private bucket, under their own prefix: faces/<environment>/<user id>/<profile id>/<scan id>/<name>.
+    // The profile is in the key so that a photo link can be checked against the profile (the account's other profiles must not open it). A face photo is a
+    // JPEG. The only PNG the store holds is an overlay mask, whose name starts with `mask-`, under the same layout; a product photo is never a PNG.
+    describe('face keys', () => {
+      const faceKey = (name: string, environment: string = ENV) => `faces/${environment}/user-1/profile-1/scan-1/${name}`
+
+      it.each([['front'], ['right'], ['left']])('accepts the %s photo of a face scan as a JPEG in every method, and gives it back', async (position) => {
+        const store = make(ENV)
+        const key = faceKey(`${position}.jpg`)
+
+        await store.put(key, JPEG)
+        await expect(store.get(key)).resolves.toEqual(JPEG)
+        await store.delete(key)
+        await store.deleteMany([key])
+        await expect(store.get(key)).resolves.toBeNull()
+      })
+
+      it('accepts UUID ids in every segment', async () => {
+        const store = make(ENV)
+        const key = `faces/${ENV}/0b9f3c1e-7a2d-4e5f-8c6b-1d2e3f4a5b6c/1c2d3e4f-0000-4a5b-8c6d-7e8f9a0b1c2d/9f8e7d6c-1111-4b2a-9c3d-4e5f6a7b8c9d/front.jpg`
+
+        await store.put(key, JPEG)
+
+        await expect(store.get(key)).resolves.toEqual(JPEG)
+      })
+
+      it('keeps the photos of two profiles of one account apart', async () => {
+        const store = make(ENV)
+        const mine = 'faces/test/user-1/profile-1/scan-1/front.jpg'
+        const theirs = 'faces/test/user-1/profile-2/scan-1/front.jpg'
+        const other = { bytes: new Uint8Array([0xff, 0xd8, 0xff, 9]), mediaType: 'image/jpeg' as const }
+        await store.put(mine, JPEG)
+        await store.put(theirs, other)
+
+        await expect(store.get(mine)).resolves.toEqual(JPEG)
+        await expect(store.get(theirs)).resolves.toEqual(other)
+      })
+
+      it.each([
+        ['a webp extension (a face photo is a JPEG)', 'faces/test/user-1/profile-1/scan-1/front.webp'],
+        ['a png extension on a name that is not a mask', 'faces/test/user-1/profile-1/scan-1/front.png'],
+        ['no profile segment', 'faces/test/user-1/scan-1/front.jpg'],
+        ['an extra segment', 'faces/test/user-1/profile-1/scan-1/extra/front.jpg'],
+        ['an unknown environment', 'faces/prod/user-1/profile-1/scan-1/front.jpg'],
+        ['an uppercase environment', 'faces/Test/user-1/profile-1/scan-1/front.jpg'],
+        ['no environment', 'faces/user-1/profile-1/scan-1/front.jpg'],
+        ['an uppercase profile id', 'faces/test/user-1/Profile-1/scan-1/front.jpg'],
+        ['an underscore in an id', 'faces/test/user-1/profile_1/scan-1/front.jpg'],
+        ['an empty profile id', 'faces/test/user-1//scan-1/front.jpg'],
+        ['a dot-dot segment', 'faces/test/user-1/profile-1/../front.jpg'],
+        ['a leading slash', '/faces/test/user-1/profile-1/scan-1/front.jpg'],
+        ['a jpeg extension spelled out', 'faces/test/user-1/profile-1/scan-1/front.jpeg'],
+        ['no extension', 'faces/test/user-1/profile-1/scan-1/front'],
+        ['a trailing newline', 'faces/test/user-1/profile-1/scan-1/front.jpg\n'],
+      ])('rejects a key with %s in every method with a plain Error', async (_label, key) => {
+        const store = make(ENV)
+
+        const errors = [
+          await caught(store.put(key, JPEG)),
+          await caught(store.get(key)),
+          await caught(store.delete(key)),
+          await caught(store.deleteMany([faceKey('front.jpg'), key])),
+        ]
+
+        for (const error of errors) {
+          expect(error).toBeInstanceOf(Error)
+          expect((error as Error).name).toBe('Error')
+          expect((error as Error).message).toMatch(/key/i)
+        }
+      })
+
+      it('removes nothing when one key of a delete is invalid, even if the others are face keys', async () => {
+        const store = make(ENV)
+        await store.put(faceKey('front.jpg'), JPEG)
+
+        await caught(store.deleteMany([faceKey('front.jpg'), faceKey('front.webp')]))
+
+        await expect(store.get(faceKey('front.jpg'))).resolves.toEqual(JPEG)
+      })
+
+      it.each([
+        ['development', 'staging'],
+        ['staging', 'production'],
+        ['production', 'test'],
+        ['test', 'development'],
+      ] as const)('a %s store rejects a %s face key in every method', async (own, other) => {
+        const store = make(own)
+        const key = faceKey('front.jpg', other)
+
+        const errors = [await caught(store.put(key, JPEG)), await caught(store.get(key)), await caught(store.delete(key)), await caught(store.deleteMany([key]))]
+
+        for (const error of errors) {
+          expect(error).toBeInstanceOf(Error)
+          expect((error as Error).message).toMatch(/key/i)
+        }
+      })
+    })
+
+    describe('face media rules', () => {
+      const faceKey = (name: string) => `faces/${ENV}/user-1/profile-1/scan-1/${name}`
+      const PNG: ProductImage = { bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47, 5, 6, 7]), mediaType: 'image/png' }
+
+      it('puts a JPEG under a face photo key', async () => {
+        await expect(make(ENV).put(faceKey('front.jpg'), JPEG)).resolves.toBeUndefined()
+      })
+
+      it.each([
+        ['image/webp', 'front.jpg'],
+        ['image/png', 'front.jpg'],
+        ['image/gif', 'front.jpg'],
+        ['', 'front.jpg'],
+        ['image/jpeg', 'mask-hd-acne.png'],
+        ['image/webp', 'mask-hd-acne.png'],
+      ] as const)('refuses %s under the key %s with a plain Error, storing nothing', async (mediaType, name) => {
+        const store = make(ENV)
+
+        const error = await caught(store.put(faceKey(name), { bytes: new Uint8Array([1]), mediaType } as unknown as ProductImage))
+
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).name).toBe('Error')
+        await expect(store.get(faceKey(name))).resolves.toBeNull()
+      })
+
+      it('puts a PNG under a mask key of the face layout, gives it back as a PNG, and deletes it', async () => {
+        const store = make(ENV)
+        const key = faceKey('mask-hd-acne.png')
+
+        await store.put(key, PNG)
+
+        await expect(store.get(key)).resolves.toEqual(PNG)
+        await store.delete(key)
+        await expect(store.get(key)).resolves.toBeNull()
+      })
+
+      it('deletes a photo and its masks together in one deleteMany', async () => {
+        const store = make(ENV)
+        await store.put(faceKey('front.jpg'), JPEG)
+        await store.put(faceKey('mask-hd-acne.png'), PNG)
+        await store.put(faceKey('mask-hd-radiance.png'), PNG)
+
+        await store.deleteMany([faceKey('front.jpg'), faceKey('mask-hd-acne.png'), faceKey('mask-hd-radiance.png')])
+
+        for (const name of ['front.jpg', 'mask-hd-acne.png', 'mask-hd-radiance.png']) await expect(store.get(faceKey(name))).resolves.toBeNull()
+      })
+
+      // The product layout is unchanged: JPEG and WebP only. A PNG is a mask, and a mask is only ever under faces/.
+      it.each([
+        ['a .jpg product key', 'photos/test/user-1/scan-1/item-1.jpg'],
+        ['a .webp product key', 'photos/test/user-1/scan-1/item-1.webp'],
+        ['a .png product key', 'photos/test/user-1/scan-1/item-1.png'],
+        ['a product key named like a mask', 'photos/test/user-1/scan-1/mask-hd-acne.png'],
+      ])('still refuses a PNG under %s', async (_label, key) => {
+        const store = make(ENV)
+
+        const error = await caught(store.put(key, PNG))
+
+        expect(error).toBeInstanceOf(Error)
+        expect((error as Error).name).toBe('Error')
+      })
+
+      it('still accepts a JPEG and a WebP under product keys', async () => {
+        const store = make(ENV)
+
+        await store.put('photos/test/user-1/scan-1/item-1.jpg', JPEG)
+        await store.put('photos/test/user-1/scan-1/item-2.webp', WEBP)
+
+        await expect(store.get('photos/test/user-1/scan-1/item-1.jpg')).resolves.toEqual(JPEG)
+        await expect(store.get('photos/test/user-1/scan-1/item-2.webp')).resolves.toEqual(WEBP)
+      })
+    })
   })
 }
