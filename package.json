@@ -22,6 +22,7 @@
     "emails:preview": "tsx scripts/email-preview.ts",
     "assets:sync": "tsx scripts/sync-assets.ts",
     "catalog:contract-doc": "tsx scripts/catalog-contract-doc.ts",
+    "catalog:draft": "tsx scripts/catalog-draft.ts",
     "catalog:export": "tsx scripts/catalog-export.ts",
     "catalog:upload": "tsx scripts/catalog-upload.ts",
     "eval:catalog": "tsx scripts/eval-catalog.ts",

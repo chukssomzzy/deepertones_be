@@ -21,6 +21,7 @@ export const MODELS: Record<AiJob, string> = {
   'split-name': MODEL,
   'read-goal': MODEL,
   'read-mentions': MODEL,
+  'draft-catalog-row': MODEL,
 }
 /** A different priced model per job, so a test can tell which model a job was routed to. */
 export const ROUTED_MODELS: Record<AiJob, string> = {
@@ -34,6 +35,7 @@ export const ROUTED_MODELS: Record<AiJob, string> = {
   'split-name': 'claude-haiku-5-5',
   'read-goal': 'claude-haiku-5-5',
   'read-mentions': 'claude-haiku-5-5',
+  'draft-catalog-row': 'claude-opus-5-5',
 }
 /** A cap no test comes near, for tests that are not about the cap. */
 export const BIG_CAP_MICROS = 1_000_000_000_000

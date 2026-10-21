@@ -3,6 +3,7 @@ import type { DraftConcernRow } from '../../src/modules/catalog/catalog.types'
 import type { ResearchResult } from '../../src/providers/product-research/product-researcher.provider'
 import type { Mention } from '../../src/providers/mention-reading/mention-reader.provider'
 import type { AnalysisCase, GoalCase, MentionCase, ResearchCase } from './cases'
+import { AI_JOBS } from '../../src/providers/anthropic/ai-spend.provider'
 import { loadEnv, parseArgs, scoreAnalysis, scoreGoalReading, scoreMentions, scoreResearch, summarise } from './score'
 
 const PRODUCT = { brand: 'Test Brand', name: 'Test Cream', category: 'skin' } as const
@@ -475,7 +476,7 @@ describe('parseArgs', () => {
     expect(parseArgs(argv as string[]).maxUsd).toBe(expected)
   })
 
-  it.each(['research', 'analysis', 'same-product', 'image-check', 'recognize', 'recognize-shelf', 'read-label', 'split-name', 'read-goal', 'read-mentions'])('reads --model %s=<model> as an override for that job', (job) => {
+  it.each(AI_JOBS)('reads --model %s=<model> as an override for that job', (job) => {
     expect(parseArgs(['--model', `${job}=claude-haiku-5-5`]).models).toEqual({ [job]: 'claude-haiku-5-5' })
   })
 

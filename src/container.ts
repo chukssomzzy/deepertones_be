@@ -117,6 +117,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'split-name': env.ANTHROPIC_MODEL_JUDGE,
         'read-goal': env.ANTHROPIC_MODEL_JUDGE,
         'read-mentions': env.ANTHROPIC_MODEL_JUDGE,
+        'draft-catalog-row': env.ANTHROPIC_MODEL_RESEARCH,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })

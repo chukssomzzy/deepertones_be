@@ -929,7 +929,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`. The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -1121,11 +1121,16 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   shows these.
   Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
+- **`AnthropicCatalogDrafter`** (`draft-catalog-row`, port `CatalogDrafter`, in `providers/catalog-drafting/`; `MemoryCatalogDrafter` is the fake, with `calls`, `respondWith` and
+  `failNextWith`) drafts the empty catalog cells of one product for `npm run catalog:draft`: `draft({ product, columns, countries })` (each country with its currency) answers the values of `skin_concerns`, `skin_types`, `steps` and
+  `frequency`, each with the page it came from, and a price range for each country. It searches the web (2 searches and one per country, to a most of 6; 8192 `max_tokens`; an answer cut off or refused throws `AnthropicRequestError` or `AnthropicRefusalError`, as `structured()` does) and the prompt tells the model to use only the pages it
+  found, never memory, and to ignore instructions in them. `checkedDraft`, in the port file, keeps only what the workbook can take: the columns and countries asked for, values
+  in the vocabularies, whole-number prices of at least 1, and a source that is a public https page the search returned (the script runs it again without the search check). It runs on Haiku through `ANTHROPIC_MODEL_RESEARCH`.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
   by the eval's research mode (`npm run eval:catalog -- --mode research`), and the Models API field
   `capabilities.server_tools.web_search.supported` is the authority. If it is false, set `ANTHROPIC_MODEL_RESEARCH` to

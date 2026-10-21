@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { productResearcherResearchPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
-import { sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
+import { lastJsonObjectIn, sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import type { ProductIdentity, ProductResearcher, ResearchResult } from './product-researcher.provider'
 
 // A type outside the class cannot read its private members (TS2341), so the answer shape is spelled out beside the schema it mirrors.
@@ -48,7 +48,7 @@ export class AnthropicProductResearcher implements ProductResearcher {
     // The model can name a page it never saw, so the source must be one the search returned.
     // Any answer that cannot be read or checked is "not found": the caller has a fallback for that.
     const notFound = AnthropicProductResearcher.NOT_FOUND
-    const answer = AnthropicProductResearcher.lastAnswerIn(textOf(message))
+    const answer = lastJsonObjectIn(textOf(message), AnthropicProductResearcher.ANSWER_SCHEMA)
     if (!answer) return notFound
     const searched = sourceUrlsOf(message)
     // Pages are named even when no list was found: the product can still get a picture from them.
@@ -85,45 +85,5 @@ export class AnthropicProductResearcher implements ProductResearcher {
         (name) => name.length <= AnthropicProductResearcher.MAX_INGREDIENT_LENGTH && !AnthropicProductResearcher.CONTROL_CHARACTER.test(name),
       )
     )
-  }
-
-  /**
-   * The last JSON object in the text that fits the answer shape: the final answer comes after any
-   * chatter. Walks back from the last "}" to its matching "{", so the work is linear in the text.
-   * Stray braces after the answer end the search with nothing found rather than risk a quadratic scan.
-   */
-  private static lastAnswerIn(text: string): Answer | undefined {
-    for (let end = text.lastIndexOf('}'); end !== -1; ) {
-      const start = AnthropicProductResearcher.balancedStart(text, end)
-      if (start === -1) return undefined
-      try {
-        const parsed = AnthropicProductResearcher.ANSWER_SCHEMA.safeParse(JSON.parse(text.slice(start, end + 1)))
-        if (parsed.success) return parsed.data
-      } catch {
-        // not JSON; try the object before it
-      }
-      end = text.lastIndexOf('}', start - 1)
-    }
-    return undefined
-  }
-
-  /** Index of the brace opening the object that closes at `end`, or -1. Braces inside strings do not count. */
-  private static balancedStart(text: string, end: number): number {
-    let depth = 0
-    let inString = false
-    for (let i = end; i >= 0; i--) {
-      const char = text[i]
-      if (char === '"' && !AnthropicProductResearcher.isEscaped(text, i)) inString = !inString
-      else if (inString) continue
-      else if (char === '}') depth++
-      else if (char === '{' && --depth === 0) return i
-    }
-    return -1
-  }
-
-  private static isEscaped(text: string, quote: number): boolean {
-    let backslashes = 0
-    while (text[quote - 1 - backslashes] === '\\') backslashes++
-    return backslashes % 2 === 1
   }
 }

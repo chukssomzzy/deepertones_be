@@ -256,6 +256,15 @@ deployed ones (the same gitignored files as above). The token is sent only in th
 - **Keep the cells as text.** Excel may retype a date, or turn a code such as `007` into a number, when you paste over a cell. Dates are written
   `YYYY-MM-DD` and codes are text, and the contract check lists any cell that no longer fits.
 
+**Drafting with AI.** To fill in a new product's blanks, add its row to the Products tab (brand, name, category, origin, status `draft`), then run
+`npm run catalog:draft -- in.xlsx --out out.xlsx --max-usd 2 [--countries NG,GB]`. It fills only the empty cells of `draft` rows (the ingredient list, its
+page, skin concerns, skin types, steps and frequency) and adds an Availability row for each active country that has none, never adding or removing a product
+and never writing to the input file. Every cell it fills is listed in `draft_cells` with the page it came from, and a row stays `draft` with no approval, so a
+person must check each cell against its page, clear its `draft_cells` entry and approve the row. It makes real, billed Claude calls (key from `.dev.vars`) and
+stops at `--max-usd` (2 dollars by default), keeping what it has. The report lists what is still wrong, by tab, row and column; the output file is a normal
+workbook to finish and upload as above. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
+contract version), so it uploads to the environment it was exported from, and a file with no stamp stays refused by the upload.
+
 ## Face scan setup (Perfect Corp)
 
 The face scan sends the front photo to Perfect Corp (YouCam) and gets the analysis back by webhook. Design in "Face scans" in
