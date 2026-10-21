@@ -1,7 +1,8 @@
-import { and, asc, desc, eq, inArray, isNull, lt, ne, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, max, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import type { Goal } from '../goals/goals.vocabulary'
 import { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
 import type {
   FaceConsent,
@@ -113,6 +114,34 @@ export class D1FaceScansRepository {
       .from(faceScans)
       .where(and(eq(faceScans.profileId, profileId), ne(faceScans.state, 'failed')))
       .orderBy(desc(faceScans.createdAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
+  /**
+   * The day-one scan of the scan taken at `at` under `goal`: the profile's earliest ready scan under that goal, taken at or before `at`, with no ready scan
+   * under another goal between it and `at`. That is the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, found in one
+   * query (profile_id, created_at serves it). Scans taken at the same time go to the lower id. It is the scan itself when nothing earlier qualifies, and null
+   * when no ready scan does. Only ready scans count either way: one that failed, needs a retake or is analysing neither starts a day one nor ends one.
+   */
+  async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
+    const cutOff = this.db
+      .select({ at: max(faceScans.createdAt) })
+      .from(faceScans)
+      .where(and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready'), ne(faceScans.goalAtScan, goal), lt(faceScans.createdAt, at)))
+    const [row] = await this.db
+      .select()
+      .from(faceScans)
+      .where(
+        and(
+          eq(faceScans.profileId, profileId),
+          eq(faceScans.state, 'ready'),
+          eq(faceScans.goalAtScan, goal),
+          lte(faceScans.createdAt, at),
+          gt(faceScans.createdAt, sql`coalesce((${cutOff}), -1)`),
+        ),
+      )
+      .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
       .limit(1)
     return row ?? null
   }

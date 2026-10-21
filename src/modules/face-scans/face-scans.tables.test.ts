@@ -2,18 +2,24 @@ import { describe, expect, it } from 'vitest'
 import { GOALS } from '../goals/goals.vocabulary'
 import {
   CHANGE_VERSION,
+  CONCERN_IDS,
   GOAL_CONCERNS_VERSION,
+  NOTHING_STANDS_OUT,
   SKIN_TYPE_VERSION,
+  TABLES_VERSION,
   VISIBILITY_VERSION,
   WORDING,
   WORDING_VERSION,
   bandFor,
+  changeWords,
   concernChange,
   concernsForGoal,
   hdActionsForGoal,
   isVisible,
+  resultView,
   seenWords,
   skinAgeChange,
+  skinAgeChangeWords,
   skinAgeWords,
   skinTypeLabel,
 } from './face-scans.tables'
@@ -176,38 +182,39 @@ describe('when a concern is visible, and how much', () => {
   })
 })
 
+// Names a condition, speaks to the person as having something, or talks about lightness. Case-insensitive.
+const BANNED: [string, RegExp][] = [
+  ['acne vulgaris', /acne vulgaris/i],
+  ['melasma', /melasma/i],
+  ['rosacea', /rosacea/i],
+  ['eczema', /eczema/i],
+  ['dermatitis', /dermatitis/i],
+  ['psoriasis', /psoriasis/i],
+  ['hyperpigmentation disorder', /hyperpigmentation disorder/i],
+  ['you have', /you have/i],
+  ['diagnos', /diagnos/i],
+  ['disease', /disease/i],
+  ['condition', /condition/i],
+  ['lighter', /lighter/i],
+  ['lighten', /lighten/i],
+  ['fairer', /fairer/i],
+  ['whiter', /whiter/i],
+  ['bleach', /bleach/i],
+  // Words that judge the skin or talk about its colour. "Less glow" says what can be seen; "dull" grades it.
+  ['dull', /\bdull/i],
+  ['bright', /\bbright/i],
+  ['fair', /\bfair\b/i],
+  ['pale', /\bpale\b/i],
+  ['hyperpigment', /hyperpigment/i],
+  ['pigmentation disorder', /pigmentation disorder/i],
+  // "acne" is the concern's own name. The words say "spots" or "breakouts" instead, which is what can be seen.
+  ['acne', /\bacne\b/i],
+  // Never a score or a number: Amara's face is not graded.
+  ['a digit', /\d/],
+  ['score', /score/i],
+]
+
 describe('seen-words wording', () => {
-  // Names a condition, speaks to the person as having something, or talks about lightness. Case-insensitive.
-  const BANNED: [string, RegExp][] = [
-    ['acne vulgaris', /acne vulgaris/i],
-    ['melasma', /melasma/i],
-    ['rosacea', /rosacea/i],
-    ['eczema', /eczema/i],
-    ['dermatitis', /dermatitis/i],
-    ['psoriasis', /psoriasis/i],
-    ['hyperpigmentation disorder', /hyperpigmentation disorder/i],
-    ['you have', /you have/i],
-    ['diagnos', /diagnos/i],
-    ['disease', /disease/i],
-    ['condition', /condition/i],
-    ['lighter', /lighter/i],
-    ['lighten', /lighten/i],
-    ['fairer', /fairer/i],
-    ['whiter', /whiter/i],
-    ['bleach', /bleach/i],
-    // Words that judge the skin or talk about its colour. "Less glow" says what can be seen; "dull" grades it.
-    ['dull', /\bdull/i],
-    ['bright', /\bbright/i],
-    ['fair', /\bfair\b/i],
-    ['pale', /\bpale\b/i],
-    ['hyperpigment', /hyperpigment/i],
-    ['pigmentation disorder', /pigmentation disorder/i],
-    // "acne" is the concern's own name. The words say "spots" or "breakouts" instead, which is what can be seen.
-    ['acne', /\bacne\b/i],
-    // Never a score or a number: Amara's face is not graded.
-    ['a digit', /\d/],
-    ['score', /score/i],
-  ]
   const MAX_LENGTH = 80
 
   /** Every text the table holds: each shown concern, each band, each region it names. */
@@ -502,5 +509,381 @@ describe('skin age wording', () => {
 
   it('gives the same words every time for the same age', () => {
     expect(skinAgeWords(41)).toBe(skinAgeWords(41))
+  })
+})
+
+// --- PR 4: the result view ---
+//
+// The public face of a scan: stable ids for the concerns (never Perfect Corp's names), the words for a change since day one, and the pure
+// builder that turns stored rows into what the app shows. Signatures the implementation owes, fixed by these tests:
+//   CONCERN_IDS: Record<ShownConcern, ConcernId>
+//   changeWords(concern: ShownConcern, change: ConcernChange): string          (keyed by the tables' own 'fainter' | 'more visible' | 'no clear change')
+//   skinAgeChangeWords(change: SkinAgeChange, years: number): string           (years is the whole number of years apart, at least 1)
+//   NOTHING_STANDS_OUT: string
+//   resultView({ goal, results, overlays, skinType, skinAge, dayOne }): the `result` of the view, with `dayOneAt` a Date and `tablesVersion` TABLES_VERSION
+//     results:  { concern: string; region: string; rawScore: number }[]        the scan's stored rows
+//     overlays: Partial<Record<string, { url: string }>>                         by Perfect Corp concern, already signed
+//     dayOne:   null | { id: string; createdAt: Date; results: (same rows)[]; skinAge: number | null }
+// The change values in the VIEW use hyphens (`more-visible`, `no-clear-change`); the tables' own values keep their spaces.
+
+const CONCERN_ID_LITERAL = {
+  hd_acne: 'spots',
+  hd_pore: 'pores',
+  hd_oiliness: 'shine',
+  hd_age_spot: 'marks',
+  hd_redness: 'redness',
+  hd_radiance: 'glow',
+  hd_texture: 'texture',
+  hd_dark_circle: 'under-eyes',
+  hd_moisture: 'dryness',
+} as const
+
+// Written out from the brief: [concern, fainter, more visible, no clear change].
+const CHANGE_WORDS_LITERAL = [
+  ['hd_acne', 'Spots look fainter than on day one', 'Spots look more visible than on day one', 'No clear change in spots since day one'],
+  ['hd_pore', 'Pores look less open than on day one', 'Pores look more open than on day one', 'No clear change in pores since day one'],
+  ['hd_oiliness', 'Less shine than on day one', 'More shine than on day one', 'No clear change in shine since day one'],
+  ['hd_age_spot', 'Marks look fainter than on day one', 'Marks look more visible than on day one', 'No clear change in marks since day one'],
+  ['hd_redness', 'Redness looks fainter than on day one', 'Redness looks more visible than on day one', 'No clear change in redness since day one'],
+  ['hd_radiance', 'More glow than on day one', 'Less glow than on day one', 'No clear change in glow since day one'],
+  ['hd_texture', 'Skin looks smoother than on day one', 'Skin looks rougher than on day one', 'No clear change in smoothness since day one'],
+  ['hd_dark_circle', 'Under-eye shadows look fainter than on day one', 'Under-eye shadows look more visible than on day one', 'No clear change under the eyes since day one'],
+  ['hd_moisture', 'Skin looks less dry than on day one', 'Skin looks drier than on day one', 'No clear change in dryness since day one'],
+] as const
+
+const CHANGES = ['fainter', 'more visible', 'no clear change'] as const
+const LIGHTNESS = /lighter|darker|light|dark|fairer|whiter/i
+
+describe('public concern ids', () => {
+  it('names all 9 shown concerns with the public id the app sees, and nothing else', () => {
+    expect(CONCERN_IDS).toEqual(CONCERN_ID_LITERAL)
+  })
+
+  it('never gives the app one of Perfect Corp\'s names, and gives each concern an id of its own', () => {
+    const ids = Object.values(CONCERN_IDS)
+
+    expect(new Set(ids).size).toBe(9)
+    for (const id of ids) expect(id).not.toMatch(/^hd_|_/)
+  })
+})
+
+describe('change wording', () => {
+  it.each(CHANGE_WORDS_LITERAL)('words a change in %s as: fainter "%s", more visible "%s", no clear change "%s"', (concern, fainter, moreVisible, noChange) => {
+    expect(changeWords(concern, 'fainter')).toBe(fainter)
+    expect(changeWords(concern, 'more visible')).toBe(moreVisible)
+    expect(changeWords(concern, 'no clear change')).toBe(noChange)
+  })
+
+  it('is complete: 9 concerns by 3 changes is 27 different texts', () => {
+    const texts = SHOWN_CONCERNS.flatMap((concern) => CHANGES.map((change) => changeWords(concern, change)))
+
+    expect(texts).toHaveLength(27)
+    expect(new Set(texts).size).toBe(27)
+    for (const text of texts) expect(text).toEqual(expect.any(String))
+  })
+
+  it('says a rise in a healthy score is "fainter" and a fall is "more visible", for radiance as for the rest: more glow is the good direction', () => {
+    expect(changeWords('hd_radiance', concernChange(40, 50))).toBe('More glow than on day one')
+    expect(changeWords('hd_radiance', concernChange(50, 40))).toBe('Less glow than on day one')
+    expect(changeWords('hd_acne', concernChange(40, 50))).toBe('Spots look fainter than on day one')
+  })
+})
+
+describe('skin age change wording', () => {
+  it.each([
+    ['younger', 1, 'Your skin looks about 1 year younger than on day one'],
+    ['younger', 3, 'Your skin looks about 3 years younger than on day one'],
+    ['older', 1, 'Your skin looks about 1 year older than on day one'],
+    ['older', 4, 'Your skin looks about 4 years older than on day one'],
+    ['older', 12, 'Your skin looks about 12 years older than on day one'],
+  ] as const)('says "%s" for %s year(s) as: %s', (change, years, expected) => {
+    expect(skinAgeChangeWords(change, years)).toBe(expected)
+  })
+
+  it('says "year" only for exactly one, and "years" for any other number', () => {
+    expect(skinAgeChangeWords('younger', 1)).toMatch(/\b1 year younger/)
+    expect(skinAgeChangeWords('younger', 2)).toMatch(/\b2 years younger/)
+    expect(skinAgeChangeWords('older', 1)).not.toMatch(/years/)
+  })
+
+  it('has no number and no direction for no clear change, whatever the gap', () => {
+    expect(skinAgeChangeWords('no clear change', 1)).toBe('No clear change in skin age since day one')
+    expect(skinAgeChangeWords('no clear change', 2)).toBe('No clear change in skin age since day one')
+  })
+})
+
+describe('nothing stands out', () => {
+  it('is one calm sentence', () => {
+    expect(NOTHING_STANDS_OUT).toBe('Nothing stands out for your goal right now')
+  })
+})
+
+// The same scan as every other string the product shows: nothing that diagnoses, nothing that grades, nothing about lightness.
+describe('every new string passes the same ban list as the seen-words', () => {
+  // A skin age change has to carry the number of years (a plain fact, as "Your skin looks about 29" does), so it is the one place a digit is allowed.
+  const withoutDigitRule = BANNED.filter(([name]) => name !== 'a digit')
+
+  const changeTexts = () => SHOWN_CONCERNS.flatMap((concern) => CHANGES.map((change) => ({ where: `${concern} / ${change}`, text: changeWords(concern, change) })))
+  const skinAgeTexts = () =>
+    [1, 2, 3, 10].flatMap((years) => (['younger', 'older'] as const).map((change) => ({ where: `skin age ${change} ${years}`, text: skinAgeChangeWords(change, years) }))).concat({
+      where: 'skin age no clear change',
+      text: skinAgeChangeWords('no clear change', 2),
+    })
+
+  it('names no condition, never says "you have", never grades, and carries no digit, in any change text or the nothing-stands-out text', () => {
+    for (const { where, text } of [...changeTexts(), { where: 'nothing stands out', text: NOTHING_STANDS_OUT }]) {
+      for (const [name, pattern] of BANNED) expect(pattern.test(text), `"${text}" (${where}) must not contain ${name}`).toBe(false)
+    }
+  })
+
+  it('does the same for the skin age change texts, which alone may hold a digit', () => {
+    for (const { where, text } of skinAgeTexts()) {
+      for (const [name, pattern] of withoutDigitRule) expect(pattern.test(text), `"${text}" (${where}) must not contain ${name}`).toBe(false)
+    }
+  })
+
+  it('never talks of lightness, in any new string: not "lighter", "darker", "light", "dark", "fairer" or "whiter"', () => {
+    for (const { where, text } of [...changeTexts(), ...skinAgeTexts(), { where: 'nothing stands out', text: NOTHING_STANDS_OUT }]) {
+      expect(LIGHTNESS.test(text), `"${text}" (${where})`).toBe(false)
+    }
+  })
+
+  it('is plain and calm: short, with no exclamation mark', () => {
+    for (const { where, text } of [...changeTexts(), ...skinAgeTexts(), { where: 'nothing stands out', text: NOTHING_STANDS_OUT }]) {
+      expect(text.length, where).toBeLessThanOrEqual(80)
+      expect(text, where).not.toMatch(/!/)
+    }
+  })
+
+  it('has a lightness check that catches what it is meant to', () => {
+    for (const text of ['Skin looks lighter', 'Skin looks DARKER', 'More light', 'Dark marks', 'Looks fairer', 'Looks whiter']) expect(LIGHTNESS.test(text), text).toBe(true)
+    expect(LIGHTNESS.test('Skin looks smoother than on day one')).toBe(false)
+  })
+})
+
+describe('resultView: the seen concerns', () => {
+  const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
+  const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
+  // glow shows hd_radiance (public id glow), hd_moisture (dryness), hd_texture (texture), in that order.
+
+  it('shows the goal\'s concerns that are visible, in the goal\'s order, and leaves out those that are not', () => {
+    const result = build({ results: [row('hd_texture', 'whole', 55), row('hd_moisture', 'whole', 62), row('hd_radiance', 'whole', 41.5)] })
+
+    expect(result.seen).toEqual([
+      { concern: 'glow', region: 'whole', words: 'Less glow across the face', overlay: null },
+      { concern: 'texture', region: 'whole', words: 'A little roughness in places', overlay: null },
+    ])
+    expect(result.nothingStandsOut).toBeNull()
+  })
+
+  it('words each of the three bands with the seen-words for that band', () => {
+    const result = build({ results: [row('hd_radiance', 'whole', 60), row('hd_moisture', 'whole', 45), row('hd_texture', 'whole', 30)] })
+
+    expect(result.seen.map((seen) => seen.words)).toEqual(['A little less glow in places', 'Some dry patches', 'Rough, uneven skin across much of the face'])
+    expect(result.seen.map((seen) => seen.concern)).toEqual(['glow', 'dryness', 'texture'])
+  })
+
+  it('shows a score of exactly 60 and not one of 60.1: the visible threshold is inclusive', () => {
+    expect(build({ results: [row('hd_radiance', 'whole', 60)] }).seen).toHaveLength(1)
+    expect(build({ results: [row('hd_radiance', 'whole', 60.1)] }).seen).toEqual([])
+  })
+
+  it('reads the whole-face row in preference to another region, whatever the order of the rows', () => {
+    // The left cheek is clear (20); the whole face is only a-little (55). The whole face is the one that is read.
+    const rows = [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'whole', 55)]
+
+    for (const results of [rows, [...rows].reverse()]) {
+      expect(build({ results }).seen).toEqual([{ concern: 'glow', region: 'whole', words: 'A little less glow in places', overlay: null }])
+    }
+  })
+
+  it('does not show a concern whose whole-face row is not visible just because another region is', () => {
+    const result = build({ results: [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'whole', 80)] })
+
+    expect(result.seen).toEqual([])
+    expect(result.nothingStandsOut).toBe(NOTHING_STANDS_OUT)
+  })
+
+  it('with no whole-face row, reads the first region by name and says which region it read', () => {
+    // 'forehead' sorts before 'left_cheek'; the rows arrive the other way round.
+    const result = build({ results: [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'forehead', 40)] })
+
+    expect(result.seen).toEqual([{ concern: 'glow', region: 'forehead', words: 'Less glow across the face', overlay: null }])
+  })
+
+  it('leaves out a concern that has no row at all, and does not fail', () => {
+    const result = build({ results: [row('hd_radiance', 'whole', 41.5), row('hd_texture', 'whole', 55)] })
+
+    expect(result.seen.map((seen) => seen.concern)).toEqual(['glow', 'texture'])
+  })
+
+  it('ignores rows for concerns the goal does not show, and the overall score', () => {
+    const result = build({ results: [row('hd_acne', 'whole', 10), row('all', 'whole', 5), row('hd_pore', 'whole', 5)] })
+
+    expect(result.seen).toEqual([])
+    expect(result.nothingStandsOut).toBe(NOTHING_STANDS_OUT)
+  })
+
+  it('says nothing stands out, and shows nothing, when no concern of the goal is visible', () => {
+    const result = build({ results: [row('hd_radiance', 'whole', 61), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 100)] })
+
+    expect(result.seen).toEqual([])
+    expect(result.nothingStandsOut).toBe('Nothing stands out for your goal right now')
+  })
+
+  it('says nothing stands out for a scan with no rows at all', () => {
+    expect(build().nothingStandsOut).toBe(NOTHING_STANDS_OUT)
+  })
+
+  it('follows the goal: the same rows read under another goal show that goal\'s concerns', () => {
+    const result = build({ goal: 'clear-skin', results: [row('hd_acne', 'whole', 40), row('hd_radiance', 'whole', 40)] })
+
+    expect(result.seen).toEqual([{ concern: 'spots', region: 'whole', words: 'Some spots and breakouts across the face', overlay: null }])
+  })
+})
+
+describe('resultView: overlays', () => {
+  const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
+  const results = [row('hd_radiance', 'whole', 41.5), row('hd_moisture', 'whole', 62), row('hd_texture', 'whole', 55)]
+
+  it('gives a shown concern the link it was signed with, and null when there is none', () => {
+    const result = resultView({ goal: 'glow', results, overlays: { hd_radiance: { url: '/link/radiance' } }, skinType: null, skinAge: null, dayOne: null })
+
+    expect(result.seen.map((seen) => seen.overlay)).toEqual([{ url: '/link/radiance' }, null])
+  })
+
+  it('gives no overlay to a concern that is not shown, even when it has a mask', () => {
+    const result = resultView({ goal: 'glow', results, overlays: { hd_radiance: { url: '/link/radiance' }, hd_moisture: { url: '/link/moisture' }, hd_acne: { url: '/link/acne' } }, skinType: null, skinAge: null, dayOne: null })
+
+    expect(JSON.stringify(result)).not.toContain('/link/moisture')
+    expect(JSON.stringify(result)).not.toContain('/link/acne')
+    expect(JSON.stringify(result)).toContain('/link/radiance')
+  })
+})
+
+describe('resultView: skin type, skin age and the rest of the shape', () => {
+  const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
+
+  it.each(['oily', 'dry', 'combination', 'normal'] as const)('passes the skin type %s through', (skinType) => {
+    expect(build({ skinType }).skinType).toBe(skinType)
+  })
+
+  it('has no skin type when there is none', () => {
+    expect(build({ skinType: null }).skinType).toBeNull()
+  })
+
+  it('states the skin age as a whole number of years with its plain-fact words', () => {
+    expect(build({ skinAge: 31 }).skinAge).toEqual({ years: 31, words: 'Your skin looks about 31' })
+    expect(build({ skinAge: 28.5 }).skinAge).toEqual({ years: 29, words: 'Your skin looks about 29' })
+    expect(build({ skinAge: 28.49 }).skinAge).toEqual({ years: 28, words: 'Your skin looks about 28' })
+  })
+
+  it('has no skin age when there is none', () => {
+    expect(build({ skinAge: null }).skinAge).toBeNull()
+  })
+
+  it('carries the version of the tables in force, and exactly the fields of the contract', () => {
+    const result = build({ results: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5 }] })
+
+    expect(result.tablesVersion).toBe(TABLES_VERSION)
+    expect(Object.keys(result).sort()).toEqual(['nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
+    expect(Object.keys(result.seen[0]!).sort()).toEqual(['concern', 'overlay', 'region', 'words'])
+  })
+
+  it('has no day one when it was given none', () => {
+    expect(build().sinceDayOne).toBeNull()
+  })
+})
+
+describe('resultView: change since day one', () => {
+  const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
+  const DAY_ONE_AT = new Date('2030-06-15T12:00:00.000Z')
+  const dayOne = (results: ReturnType<typeof row>[], skinAge: number | null = null) => ({ id: 'day-one-scan', createdAt: DAY_ONE_AT, results, skinAge })
+  const since = (current: ReturnType<typeof row>[], base: ReturnType<typeof row>[], skinAges: [number | null, number | null] = [null, null]) =>
+    resultView({ goal: 'glow', results: current, overlays: {}, skinType: null, skinAge: skinAges[0], dayOne: dayOne(base, skinAges[1]) }).sinceDayOne
+
+  it('names the day-one scan and when it was taken', () => {
+    const result = since([], [])
+
+    expect(result).toMatchObject({ dayOneScanId: 'day-one-scan', dayOneAt: DAY_ONE_AT })
+    expect(Object.keys(result!).sort()).toEqual(['concerns', 'dayOneAt', 'dayOneScanId', 'skinAge'])
+  })
+
+  it('reads all three goal concerns, in goal order, each as fainter, more visible or no clear change, in the API\'s hyphenated words', () => {
+    const result = since(
+      [row('hd_radiance', 'whole', 46), row('hd_moisture', 'whole', 44), row('hd_texture', 'whole', 55)],
+      [row('hd_radiance', 'whole', 40), row('hd_moisture', 'whole', 50), row('hd_texture', 'whole', 55)],
+    )
+
+    expect(result!.concerns).toEqual([
+      { concern: 'glow', change: 'fainter', words: 'More glow than on day one' },
+      { concern: 'dryness', change: 'more-visible', words: 'Skin looks drier than on day one' },
+      { concern: 'texture', change: 'no-clear-change', words: 'No clear change in smoothness since day one' },
+    ])
+  })
+
+  it('counts a change of exactly 5 as no clear change, in either direction, and anything bigger as a change', () => {
+    const at = (current: number) => since([row('hd_texture', 'whole', current)], [row('hd_texture', 'whole', 50)])!.concerns[0]!.change
+
+    expect(at(55)).toBe('no-clear-change')
+    expect(at(45)).toBe('no-clear-change')
+    expect(at(55.5)).toBe('fainter')
+    expect(at(44.5)).toBe('more-visible')
+  })
+
+  it('reads a concern that is no longer visible too: the change is about the score, not about what is shown now', () => {
+    const result = since([row('hd_radiance', 'whole', 80)], [row('hd_radiance', 'whole', 50)])
+
+    expect(result!.concerns).toEqual([{ concern: 'glow', change: 'fainter', words: 'More glow than on day one' }])
+  })
+
+  it('compares the whole-face score on both scans, not another region', () => {
+    const result = since(
+      [row('hd_radiance', 'whole', 46), row('hd_radiance', 'left_cheek', 10)],
+      [row('hd_radiance', 'whole', 40), row('hd_radiance', 'left_cheek', 90)],
+    )
+
+    expect(result!.concerns).toEqual([{ concern: 'glow', change: 'fainter', words: 'More glow than on day one' }])
+  })
+
+  it('leaves out a concern that is missing on the day-one scan, and one that is missing on this scan', () => {
+    const result = since(
+      [row('hd_radiance', 'whole', 46), row('hd_moisture', 'whole', 44)],
+      [row('hd_radiance', 'whole', 40), row('hd_texture', 'whole', 40)],
+    )
+
+    expect(result!.concerns.map((concern) => concern.concern)).toEqual(['glow'])
+  })
+
+  it('has an empty list, not a missing day one, when no concern is on both scans', () => {
+    expect(since([row('hd_radiance', 'whole', 46)], [])!.concerns).toEqual([])
+  })
+
+  it('says how the skin age moved: older by more than 2 years, younger by more than 2, and no clear change inside it', () => {
+    const age = (current: number, base: number) => since([], [], [current, base])!.skinAge
+
+    expect(age(34, 31)).toEqual({ change: 'older', words: 'Your skin looks about 3 years older than on day one' })
+    expect(age(28, 31)).toEqual({ change: 'younger', words: 'Your skin looks about 3 years younger than on day one' })
+    expect(age(33, 31)).toEqual({ change: 'no-clear-change', words: 'No clear change in skin age since day one' })
+    expect(age(29, 31)).toEqual({ change: 'no-clear-change', words: 'No clear change in skin age since day one' })
+    expect(age(31, 31)).toEqual({ change: 'no-clear-change', words: 'No clear change in skin age since day one' })
+  })
+
+  it('has no skin age change when either scan has no skin age, and still has the concerns', () => {
+    expect(since([row('hd_radiance', 'whole', 46)], [row('hd_radiance', 'whole', 40)], [null, 31])!.skinAge).toBeNull()
+    expect(since([row('hd_radiance', 'whole', 46)], [row('hd_radiance', 'whole', 40)], [31, null])!.skinAge).toBeNull()
+    expect(since([row('hd_radiance', 'whole', 46)], [row('hd_radiance', 'whole', 40)], [null, null])!.concerns).toHaveLength(1)
+  })
+
+  it('never says a word about lightness or a number of points, whatever the scores', () => {
+    const result = since(
+      [row('hd_radiance', 'whole', 90), row('hd_moisture', 'whole', 10), row('hd_texture', 'whole', 50)],
+      [row('hd_radiance', 'whole', 10), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 50)],
+      [20, 40],
+    )
+
+    const text = JSON.stringify(result!.concerns)
+    expect(text).not.toMatch(LIGHTNESS)
+    expect(text).not.toMatch(/\d/)
   })
 })

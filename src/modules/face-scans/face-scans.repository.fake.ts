@@ -1,3 +1,4 @@
+import type { Goal } from '../goals/goals.vocabulary'
 import type { FaceScansRepository } from './face-scans.repository'
 import type {
   FaceConsent,
@@ -78,6 +79,15 @@ export class FakeFaceScansRepository implements FaceScansRepository {
   async latestForProfile(profileId: string): Promise<FaceScan | null> {
     const latest = this.latest(profileId)
     return latest ? { ...latest } : null
+  }
+
+  async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
+    const ready = [...this.scans.values()].filter((scan) => scan.profileId === profileId && scan.state === 'ready')
+    const cutOff = Math.max(-1, ...ready.filter((scan) => scan.goalAtScan !== goal && scan.createdAt.getTime() < at.getTime()).map((scan) => scan.createdAt.getTime()))
+    const [first] = ready
+      .filter((scan) => scan.goalAtScan === goal && scan.createdAt.getTime() <= at.getTime() && scan.createdAt.getTime() > cutOff)
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    return first ? { ...first } : null
   }
 
   async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch, options?: { onlyIfNoAnalysisTask?: true }): Promise<boolean> {

@@ -2065,6 +2065,9 @@
           "rescanSuggested": {
             "type": "boolean",
             "description": "True when the profile's latest scan was taken under another goal than its current one."
+          },
+          "result": {
+            "$ref": "#/components/schemas/FaceScanResult"
           }
         },
         "required": [
@@ -2074,8 +2077,211 @@
           "goal",
           "createdAt",
           "photos",
-          "rescanSuggested"
+          "rescanSuggested",
+          "result"
         ]
+      },
+      "FaceScanResult": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "seen": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "concern": {
+                  "type": "string",
+                  "enum": [
+                    "spots",
+                    "pores",
+                    "shine",
+                    "marks",
+                    "redness",
+                    "glow",
+                    "texture",
+                    "under-eyes",
+                    "dryness"
+                  ],
+                  "description": "The concern, by the app's own id. Never a Perfect Corp name."
+                },
+                "region": {
+                  "type": "string",
+                  "description": "The region that was read: `whole` for the whole face."
+                },
+                "words": {
+                  "type": "string",
+                  "description": "What can be seen, in plain words. Show it as it is; it is never a diagnosis."
+                },
+                "overlay": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "description": "A signed link to the PNG mask of where the concern shows, good for 5 minutes (fetch the scan again for a new one); null when there is no mask."
+                }
+              },
+              "required": [
+                "concern",
+                "region",
+                "words",
+                "overlay"
+              ]
+            },
+            "description": "The goal's concerns that can be seen now, in goal order, at most 3. Empty when nothing stands out."
+          },
+          "nothingStandsOut": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A calm sentence to show when `seen` is empty; null otherwise."
+          },
+          "skinType": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "oily",
+              "dry",
+              "combination",
+              "normal",
+              null
+            ],
+            "description": "The skin type; null when it could not be read."
+          },
+          "skinAge": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "years": {
+                "type": "integer"
+              },
+              "words": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "years",
+              "words"
+            ],
+            "description": "The skin age as a plain fact in whole years. It is never compared with a real age. Null when it could not be read."
+          },
+          "sinceDayOne": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "dayOneScanId": {
+                "type": "string",
+                "description": "The earlier scan this one is compared with: the profile's first ready scan under this goal since the goal last changed."
+              },
+              "dayOneAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "concerns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "concern": {
+                      "type": "string",
+                      "enum": [
+                        "spots",
+                        "pores",
+                        "shine",
+                        "marks",
+                        "redness",
+                        "glow",
+                        "texture",
+                        "under-eyes",
+                        "dryness"
+                      ],
+                      "description": "The concern, by the app's own id. Never a Perfect Corp name."
+                    },
+                    "change": {
+                      "type": "string",
+                      "enum": [
+                        "fainter",
+                        "more-visible",
+                        "no-clear-change"
+                      ]
+                    },
+                    "words": {
+                      "type": "string",
+                      "description": "The change in plain words. Show it as it is."
+                    }
+                  },
+                  "required": [
+                    "concern",
+                    "change",
+                    "words"
+                  ]
+                },
+                "description": "The goal's concerns that were read on both scans, in goal order. Changes inside ordinary variation are `no-clear-change`."
+              },
+              "skinAge": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "change": {
+                    "type": "string",
+                    "enum": [
+                      "younger",
+                      "older",
+                      "no-clear-change"
+                    ]
+                  },
+                  "words": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "change",
+                  "words"
+                ],
+                "description": "How the skin age moved; null when either scan has no skin age."
+              }
+            },
+            "required": [
+              "dayOneScanId",
+              "dayOneAt",
+              "concerns",
+              "skinAge"
+            ],
+            "description": "The change since day one; null when this scan is its own day one."
+          },
+          "tablesVersion": {
+            "type": "string",
+            "description": "The version of the rules that worded this result. The words are worked out each time the scan is read."
+          }
+        },
+        "required": [
+          "seen",
+          "nothingStandsOut",
+          "skinType",
+          "skinAge",
+          "sinceDayOne",
+          "tablesVersion"
+        ],
+        "description": "What the scan shows: filled when `state` is `ready`, null otherwise."
       },
       "CreateFaceScanBody": {
         "type": "object",

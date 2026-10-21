@@ -187,3 +187,127 @@ export const skinAgeChange = (baseline: number, current: number): SkinAgeChange 
 
 /** The skin age as a plain fact, a whole number. It has no real age to compare with, so it never compares. */
 export const skinAgeWords = (skinAge: number): string => `Your skin looks about ${Math.round(skinAge)}`
+
+/** What the app calls a concern. Never Perfect Corp's name: that is theirs to change, and the app must not depend on it. */
+export type ConcernId = 'spots' | 'pores' | 'shine' | 'marks' | 'redness' | 'glow' | 'texture' | 'under-eyes' | 'dryness'
+
+export const CONCERN_IDS: Record<ShownConcern, ConcernId> = {
+  hd_acne: 'spots',
+  hd_pore: 'pores',
+  hd_oiliness: 'shine',
+  hd_age_spot: 'marks',
+  hd_redness: 'redness',
+  hd_radiance: 'glow',
+  hd_texture: 'texture',
+  hd_dark_circle: 'under-eyes',
+  hd_moisture: 'dryness',
+}
+
+// The words for a change since day one. "fainter" is the healthy direction (the score rose), so for radiance it reads as more glow. Like the
+// seen-words, none talks of lightness; face-scans.tables.test.ts scans every one.
+const CHANGE_WORDS: Record<ShownConcern, Record<ConcernChange, string>> = {
+  hd_acne: { fainter: 'Spots look fainter than on day one', 'more visible': 'Spots look more visible than on day one', 'no clear change': 'No clear change in spots since day one' },
+  hd_pore: { fainter: 'Pores look less open than on day one', 'more visible': 'Pores look more open than on day one', 'no clear change': 'No clear change in pores since day one' },
+  hd_oiliness: { fainter: 'Less shine than on day one', 'more visible': 'More shine than on day one', 'no clear change': 'No clear change in shine since day one' },
+  hd_age_spot: { fainter: 'Marks look fainter than on day one', 'more visible': 'Marks look more visible than on day one', 'no clear change': 'No clear change in marks since day one' },
+  hd_redness: { fainter: 'Redness looks fainter than on day one', 'more visible': 'Redness looks more visible than on day one', 'no clear change': 'No clear change in redness since day one' },
+  hd_radiance: { fainter: 'More glow than on day one', 'more visible': 'Less glow than on day one', 'no clear change': 'No clear change in glow since day one' },
+  hd_texture: { fainter: 'Skin looks smoother than on day one', 'more visible': 'Skin looks rougher than on day one', 'no clear change': 'No clear change in smoothness since day one' },
+  hd_dark_circle: {
+    fainter: 'Under-eye shadows look fainter than on day one',
+    'more visible': 'Under-eye shadows look more visible than on day one',
+    'no clear change': 'No clear change under the eyes since day one',
+  },
+  hd_moisture: { fainter: 'Skin looks less dry than on day one', 'more visible': 'Skin looks drier than on day one', 'no clear change': 'No clear change in dryness since day one' },
+}
+
+export const changeWords = (concern: ShownConcern, change: ConcernChange): string => CHANGE_WORDS[concern][change]
+
+/** The skin age change in words. `years` is the whole number of years apart, at least 1; it is only said for a change. */
+export const skinAgeChangeWords = (change: SkinAgeChange, years: number): string => {
+  if (change === 'no clear change') return 'No clear change in skin age since day one'
+  return `Your skin looks about ${years} year${years === 1 ? '' : 's'} ${change} than on day one`
+}
+
+export const NOTHING_STANDS_OUT = 'Nothing stands out for your goal right now'
+
+/** A stored concern score: the one number the rules read. */
+type ScoreRow = { concern: string; region: string; rawScore: number }
+
+type ViewConcernChange = 'fainter' | 'more-visible' | 'no-clear-change'
+type ViewSkinAgeChange = 'younger' | 'older' | 'no-clear-change'
+
+export type ResultView = {
+  seen: { concern: ConcernId; region: string; words: string; overlay: { url: string } | null }[]
+  nothingStandsOut: string | null
+  skinType: SkinTypeLabel | null
+  skinAge: { years: number; words: string } | null
+  sinceDayOne: {
+    dayOneScanId: string
+    dayOneAt: Date
+    concerns: { concern: ConcernId; change: ViewConcernChange; words: string }[]
+    skinAge: { change: ViewSkinAgeChange; words: string } | null
+  } | null
+  tablesVersion: string
+}
+
+// The API spells a change with hyphens; the tables' own values keep their spaces.
+const CONCERN_CHANGE_IDS: Record<ConcernChange, ViewConcernChange> = { fainter: 'fainter', 'more visible': 'more-visible', 'no clear change': 'no-clear-change' }
+const SKIN_AGE_CHANGE_IDS: Record<SkinAgeChange, ViewSkinAgeChange> = { younger: 'younger', older: 'older', 'no clear change': 'no-clear-change' }
+
+/** The row to read for a concern: the whole-face one, else the first region by name. Null when the scan has no row for it. */
+const rowFor = (results: readonly ScoreRow[], concern: ShownConcern): ScoreRow | null => {
+  const rows = results.filter((row) => row.concern === concern)
+  return rows.find((row) => row.region === 'whole') ?? rows.sort((a, b) => (a.region < b.region ? -1 : a.region > b.region ? 1 : 0))[0] ?? null
+}
+
+/**
+ * What the app shows for a ready scan, from the stored rows alone: the goal's concerns that can be seen, the skin reading, and how each concern has
+ * moved since day one. The words are worked out here, when read, so a change to the tables reaches scans already stored. `overlays` are already signed
+ * links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a Perfect Corp name or a condition.
+ */
+export const resultView = (input: {
+  goal: Goal
+  results: readonly ScoreRow[]
+  overlays: Partial<Record<string, { url: string }>>
+  skinType: SkinTypeLabel | null
+  skinAge: number | null
+  dayOne: { id: string; createdAt: Date; results: readonly ScoreRow[]; skinAge: number | null } | null
+}): ResultView => {
+  const { goal, results, overlays, skinType, skinAge, dayOne } = input
+  const concerns = concernsForGoal(goal)
+  const seen: ResultView['seen'] = []
+  for (const concern of concerns) {
+    const row = rowFor(results, concern)
+    const band = row ? bandFor(concern, row.rawScore) : null
+    if (!row || !band) continue
+    seen.push({ concern: CONCERN_IDS[concern], region: row.region, words: seenWords(concern, band, row.region), overlay: overlays[concern] ? { url: overlays[concern].url } : null })
+  }
+
+  let sinceDayOne: ResultView['sinceDayOne'] = null
+  if (dayOne) {
+    const changes: NonNullable<ResultView['sinceDayOne']>['concerns'] = []
+    for (const concern of concerns) {
+      const now = rowFor(results, concern)
+      const before = rowFor(dayOne.results, concern)
+      if (!now || !before) continue
+      const change = concernChange(before.rawScore, now.rawScore)
+      changes.push({ concern: CONCERN_IDS[concern], change: CONCERN_CHANGE_IDS[change], words: changeWords(concern, change) })
+    }
+    let ageChange: NonNullable<ResultView['sinceDayOne']>['skinAge'] = null
+    if (skinAge !== null && dayOne.skinAge !== null) {
+      const change = skinAgeChange(dayOne.skinAge, skinAge)
+      ageChange = { change: SKIN_AGE_CHANGE_IDS[change], words: skinAgeChangeWords(change, Math.max(1, Math.round(Math.abs(skinAge - dayOne.skinAge)))) }
+    }
+    sinceDayOne = { dayOneScanId: dayOne.id, dayOneAt: dayOne.createdAt, concerns: changes, skinAge: ageChange }
+  }
+
+  return {
+    seen,
+    nothingStandsOut: seen.length === 0 ? NOTHING_STANDS_OUT : null,
+    skinType,
+    skinAge: skinAge === null ? null : { years: Math.round(skinAge), words: skinAgeWords(skinAge) },
+    sinceDayOne,
+    tablesVersion: TABLES_VERSION,
+  }
+}

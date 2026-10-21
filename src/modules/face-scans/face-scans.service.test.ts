@@ -608,7 +608,7 @@ describe('FaceScanService.create: a scan that is accepted', () => {
 
     const view = await create(ctx, { front: face(), left: face({}, 3) })
 
-    expect(Object.keys(view).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'state'])
+    expect(Object.keys(view).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
     expect(view).toMatchObject({ state: 'analysing', reason: null, goal: 'clear-skin', createdAt: T0, rescanSuggested: false })
     expect(Object.keys(view.photos).sort()).toEqual(['front', 'left'])
     for (const photo of Object.values<{ url: string }>(view.photos)) expect(Object.keys(photo)).toEqual(['url'])
@@ -630,12 +630,13 @@ describe('FaceScanService.create: a scan that is accepted', () => {
     }
   })
 
-  it('has no result in it yet: no concerns, skin type, skin age or score', async () => {
+  it('has a null result while the scan is analysing: no concerns, skin type, skin age or score', async () => {
     const ctx = setup()
     await ready(ctx)
 
     const view = await create(ctx, three())
 
+    expect(view).toHaveProperty('result', null)
     const text = JSON.stringify(view).toLowerCase()
     for (const word of ['skintype', 'skinage', 'shown', 'score', 'concern', 'mask', 'fitzpatrick']) expect(text).not.toContain(word)
   })
@@ -728,7 +729,7 @@ describe('FaceScanService.getFaceScan', () => {
 
     expect(view).toMatchObject({ id: made.id, state: 'analysing', reason: null, goal: 'glow', createdAt: T0 })
     expect(Object.keys(view.photos).sort()).toEqual(['front', 'left', 'right'])
-    expect(Object.keys(view).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'state'])
+    expect(Object.keys(view).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
   })
 
   it.each([

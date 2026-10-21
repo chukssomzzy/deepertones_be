@@ -1,11 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import type { FaceScansRepository } from './face-scans.repository'
 import type { FaceMask, FaceResult, FaceScanCompletion, NewFacePhoto, NewFaceScan } from './face-scans.types'
+import type { Goal } from '../goals/goals.vocabulary'
 
 // The one clock every fixture hangs off; later times are offsets from it.
 const BASE = new Date('2030-06-15T12:00:00.000Z')
 const MINUTE = 60 * 1000
 const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
 const YEAR = 365 * 24 * HOUR
 const at = (offsetMs: number) => new Date(BASE.getTime() + offsetMs)
 
@@ -1001,6 +1003,190 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
         expect(await repository.resultsOf(second.id)).toEqual([])
         expect(await repository.masksOf(second.id)).toEqual([])
         expect((await repository.findFaceScan(second.id))!.state).toBe('analysing')
+      })
+    })
+
+    describe('dayOneFor: the scan a later scan is compared with', () => {
+      // The day one of a scan S is the earliest READY scan of the same profile under the same goal as S, taken at or before S, with no READY scan under
+      // another goal between it and S. S itself is the answer when nothing earlier qualifies (and S is ready); null when no ready scan qualifies at all.
+      const day = (n: number) => at(n * DAY)
+      type EndState = 'ready' | 'failed' | 'needs-retake' | 'analysing'
+
+      /** A scan written the way the pipeline writes one: created analysing, then ended by the write that ends it. */
+      const scanned = async (repository: FaceScansContractSetup['repository'], account: Account, goal: Goal, createdAt: Date, state: EndState = 'ready', id = freshId()) => {
+        const scan = newScan(account, { id, goalAtScan: goal, createdAt })
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        const updatedAt = new Date(createdAt.getTime() + MINUTE)
+        if (state === 'ready') await repository.completeFaceScan(id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt })
+        if (state === 'failed') await repository.updateFaceScan(id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt })
+        if (state === 'needs-retake') await repository.updateFaceScan(id, 'analysing', { state: 'needs-retake', reason: 'no-face', updatedAt })
+        return scan
+      }
+      const dayOneOf = async (repository: FaceScansContractSetup['repository'], scan: NewFaceScan) =>
+        (await repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }))?.id ?? null
+
+      it('is the earliest ready scan under the goal', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        await scanned(repository, account, 'glow', day(2))
+        const third = await scanned(repository, account, 'glow', day(3))
+
+        expect(await dayOneOf(repository, third)).toBe(first.id)
+      })
+
+      it('gives the whole scan: its goal, its time, its state', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        const second = await scanned(repository, account, 'glow', day(2))
+
+        const found = await repository.dayOneFor({ profileId: account.profileId, goal: 'glow', at: second.createdAt, scanId: second.id })
+
+        expect(found).toMatchObject({ id: first.id, profileId: account.profileId, userId: account.userId, goalAtScan: 'glow', state: 'ready' })
+        expect(found!.createdAt.getTime()).toBe(day(1).getTime())
+      })
+
+      it('is the scan itself when no earlier ready scan qualifies', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const only = await scanned(repository, account, 'glow', day(1))
+
+        expect(await dayOneOf(repository, only)).toBe(only.id)
+      })
+
+      it('is the scan itself for the first scan, and the first scan again for each later one asked about', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        const second = await scanned(repository, account, 'glow', day(2))
+
+        expect(await dayOneOf(repository, first)).toBe(first.id)
+        expect(await dayOneOf(repository, second)).toBe(first.id)
+      })
+
+      it('is null when no scan of the profile is ready under the goal', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const scan = await scanned(repository, account, 'glow', day(1), 'analysing')
+
+        expect(await dayOneOf(repository, scan)).toBeNull()
+        expect(await repository.dayOneFor({ profileId: account.profileId, goal: 'brighter', at: day(1), scanId: scan.id })).toBeNull()
+      })
+
+      it('is null for a profile with no scans', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.dayOneFor({ profileId, goal: 'glow', at: day(1), scanId: freshId() })).toBeNull()
+      })
+
+      it('never reaches forward: a ready scan taken after the one asked about is not its day one', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const earlier = await scanned(repository, account, 'glow', day(1), 'analysing')
+        await scanned(repository, account, 'glow', day(2))
+
+        expect(await dayOneOf(repository, earlier)).toBeNull()
+      })
+
+      it('starts again after a ready scan under another goal: the scans before it are not the day one', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await scanned(repository, account, 'glow', day(1))
+        await scanned(repository, account, 'brighter', day(2))
+        const third = await scanned(repository, account, 'glow', day(3))
+        const fourth = await scanned(repository, account, 'glow', day(4))
+
+        expect(await dayOneOf(repository, third)).toBe(third.id)
+        expect(await dayOneOf(repository, fourth)).toBe(third.id)
+      })
+
+      it('starts again at the latest of several ready scans under other goals', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await scanned(repository, account, 'glow', day(1))
+        await scanned(repository, account, 'brighter', day(2))
+        await scanned(repository, account, 'glow', day(3))
+        await scanned(repository, account, 'even-tone', day(4))
+        const fifth = await scanned(repository, account, 'glow', day(5))
+        const sixth = await scanned(repository, account, 'glow', day(6))
+
+        expect(await dayOneOf(repository, fifth)).toBe(fifth.id)
+        expect(await dayOneOf(repository, sixth)).toBe(fifth.id)
+      })
+
+      it('is not cut by a ready scan under another goal that comes after the scan asked about', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        const second = await scanned(repository, account, 'glow', day(2))
+        await scanned(repository, account, 'brighter', day(3))
+
+        expect(await dayOneOf(repository, second)).toBe(first.id)
+      })
+
+      it.each(['failed', 'needs-retake', 'analysing'] as const)('is not cut by a scan under another goal that is %s', async (state) => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        await scanned(repository, account, 'brighter', day(2), state)
+        const third = await scanned(repository, account, 'glow', day(3))
+
+        expect(await dayOneOf(repository, third)).toBe(first.id)
+      })
+
+      it.each(['failed', 'needs-retake', 'analysing'] as const)('never takes a scan under the goal that is %s for the day one', async (state) => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await scanned(repository, account, 'glow', day(1), state)
+        const second = await scanned(repository, account, 'glow', day(2))
+
+        expect(await dayOneOf(repository, second)).toBe(second.id)
+      })
+
+      it('breaks a tie in the time of two ready scans by the lower id, whichever was written first', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const prefix = freshId()
+        // Written higher id first, so the order of writing is not what decides.
+        const higher = await scanned(repository, account, 'glow', day(1), 'ready', `${prefix}-b`)
+        const lower = await scanned(repository, account, 'glow', day(1), 'ready', `${prefix}-a`)
+        const later = await scanned(repository, account, 'glow', day(2))
+
+        expect(await dayOneOf(repository, later)).toBe(lower.id)
+        expect(await dayOneOf(repository, higher)).toBe(lower.id)
+        expect(await dayOneOf(repository, lower)).toBe(lower.id)
+      })
+
+      it('takes the next scan under the goal once the day one is deleted', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = await scanned(repository, account, 'glow', day(1))
+        const second = await scanned(repository, account, 'glow', day(2))
+        const third = await scanned(repository, account, 'glow', day(3))
+
+        await repository.deleteFaceScan(first.id)
+
+        expect(await dayOneOf(repository, third)).toBe(second.id)
+        expect(await dayOneOf(repository, second)).toBe(second.id)
+      })
+
+      it('reads only the profile\'s own scans: another profile of the account, and another account, neither supply a day one nor cut one', async () => {
+        const { repository, newAccount, newProfile } = await make()
+        const account = await newAccount()
+        const stranger = await newAccount()
+        const secondProfile = { userId: account.userId, profileId: await newProfile(account.userId) }
+        // Earlier ready scans under the same goal belong to others, so they are no day one; one under another goal between must not cut.
+        await scanned(repository, secondProfile, 'glow', day(0))
+        await scanned(repository, stranger, 'glow', day(0))
+        const mine = await scanned(repository, account, 'glow', day(1))
+        await scanned(repository, secondProfile, 'brighter', day(2))
+        await scanned(repository, stranger, 'brighter', day(2))
+        const latest = await scanned(repository, account, 'glow', day(3))
+
+        expect(await dayOneOf(repository, mine)).toBe(mine.id)
+        expect(await dayOneOf(repository, latest)).toBe(mine.id)
       })
     })
 

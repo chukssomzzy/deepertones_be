@@ -27,7 +27,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -48,7 +48,7 @@ export type FaceConsentGiven = { version: number; givenAt: Date }
 /** `current` is true while the consent is for the current wording and not withdrawn. */
 export type FaceConsentView = { version: number; givenAt: Date; withdrawnAt: Date | null; current: boolean }
 
-/** What the app shows for a face scan. There is no result in it yet: the result view is a later change. */
+/** What the app shows for a face scan. `result` is there once the scan is ready and null before. */
 export type FaceScanView = {
   id: string
   state: FaceScanState
@@ -59,6 +59,7 @@ export type FaceScanView = {
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
   /** True when the profile's latest scan was taken under a goal other than its current one. Worked out when read, never stored. */
   rescanSuggested: boolean
+  result: ResultView | null
 }
 
 /** The view of a scan that was retaken: it always has its front photo. */
@@ -687,11 +688,9 @@ export class FaceScanService {
   private async view(scan: FaceScan, photos: FaceScanPhoto[]): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
+    const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
     const links: FaceScanView['photos'] = {}
-    for (const photo of photos) {
-      const token = await signPhotoLink({ key: photo.photoKey, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now)
-      links[photo.position] = { url: facePhotoUrl(token) }
-    }
+    for (const photo of photos) links[photo.position] = { url: await link(photo.photoKey) }
     return {
       id: scan.id,
       state: scan.state,
@@ -700,7 +699,28 @@ export class FaceScanService {
       createdAt: scan.createdAt,
       photos: links,
       rescanSuggested: await this.rescanSuggested(scan.profileId),
+      result: scan.state === 'ready' ? await this.result(scan, link) : null,
     }
+  }
+
+  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest, which is no day one to compare with. */
+  private async result(scan: FaceScan, link: (key: string) => Promise<string>): Promise<ResultView> {
+    const [results, masks, found] = await Promise.all([
+      this.repository.resultsOf(scan.id),
+      this.repository.masksOf(scan.id),
+      this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
+    ])
+    const overlays: Record<string, { url: string }> = {}
+    for (const mask of masks) overlays[mask.concern] = { url: await link(mask.maskKey) }
+    const dayOne = found && found.id !== scan.id ? found : null
+    return resultView({
+      goal: scan.goalAtScan,
+      results,
+      overlays,
+      skinType: scan.skinType,
+      skinAge: scan.skinAge,
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.repository.resultsOf(dayOne.id), skinAge: dayOne.skinAge },
+    })
   }
 
   /** Whether the profile's latest scan was taken under another goal than the one it has now. No goal, or typed words nobody sorted into one, suggests nothing. */
