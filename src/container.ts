@@ -7,6 +7,9 @@ import { AuthService } from './modules/auth/auth.service'
 import { TokenService } from './modules/auth/tokens.service'
 import { D1CatalogRepository } from './modules/catalog/catalog.repository'
 import { ProductCatalogService } from './modules/catalog/catalog.service'
+import { FaceDataCleaner } from './modules/face-scans/face-scans.cleaner'
+import { D1FaceScansRepository } from './modules/face-scans/face-scans.repository'
+import { FaceScanService } from './modules/face-scans/face-scans.service'
 import { D1GoalsRepository } from './modules/goals/goals.repository'
 import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
@@ -157,6 +160,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'push-receipts': env.PUSH_RECEIPTS_QUEUE,
         'parse-safety': env.PARSE_SAFETY_QUEUE,
         email: env.EMAIL_QUEUE,
+        'face-scans': env.FACE_SCANS_QUEUE,
       }),
   )
 
@@ -217,13 +221,19 @@ export const buildContainer = (env: CloudflareBindings) => {
   // The guest cleanup needs only the scan rows and photos, not the scan service with the catalog and model clients behind it.
   const scanCleaner = once(() => new ScanDataCleaner({ repository: new D1ScansRepository(db()), photos: privatePhotos() }))
 
+  // Likewise for face scans: the cleanup deletes their photos and masks from the bucket (the rows cascade from the profile, the bucket does not).
+  const faceCleaner = once(() => new FaceDataCleaner({ repository: new D1FaceScansRepository(db()), photos: privatePhotos() }))
+
   // A module that stores per-user data adds a cleaner here; the daily guest cleanup runs it before deleting the guests.
   // (push_tokens, notification_settings, profile_goals and profile_safety are not listed: their foreign keys cascade from users or profiles.)
   const users = once(
     () =>
       new UsersService({
         repository: new D1UsersRepository(db()),
-        guestDataCleaners: [{ name: 'scans', deleteFor: (ids) => scanCleaner().deleteForUsers(ids) }],
+        guestDataCleaners: [
+          { name: 'scans', deleteFor: (ids) => scanCleaner().deleteForUsers(ids) },
+          { name: 'face-scans', deleteFor: (ids) => faceCleaner().deleteForUsers(ids) },
+        ],
       }),
   )
 
@@ -270,6 +280,19 @@ export const buildContainer = (env: CloudflareBindings) => {
     () => new ShelfService({ repository: new D1ShelfRepository(db()), catalog: catalog(), scans: scans(), now: () => new Date() }),
   )
 
+  const faceScans = once(
+    () =>
+      new FaceScanService({
+        repository: new D1FaceScansRepository(db()),
+        goals: goals(),
+        photos: privatePhotos(),
+        jobs: jobQueue(),
+        // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
+        photoLinkSecret: env.JWT_SECRET,
+        environment: photoEnvironment(env.ENVIRONMENT),
+      }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -291,6 +314,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get catalog() {
       return catalog()
+    },
+    get faceScans() {
+      return faceScans()
     },
     get goals() {
       return goals()

@@ -281,6 +281,10 @@ describe('wrangler.jsonc scan, goal, safety, product search and shelf route rate
     // Adding a product from search starts a scan that may research and analyse it: as tight as the other routes that can cost a model call.
     ['SHELF_ADD_IP_LIMITER', 20],
     ['SHELF_ADD_USER_LIMITER', 10],
+    // A face scan sends a photo to Perfect Corp, which is paid per use: as tight as the other routes that can cost money. A profile can start one
+    // per goal anyway (409/429 on the rest), so this only stops a flood of rejected attempts.
+    ['FACE_SCAN_IP_LIMITER', 20],
+    ['FACE_SCAN_USER_LIMITER', 10],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 
@@ -340,5 +344,53 @@ describe('wrangler.jsonc scan stream Durable Object', () => {
   // becomes the default on 2026-11-17 anyway.
   it.each(streamBlocks)('%s does not set pipe_to_backward_propagation', (_, block) => {
     expect(block?.compatibility_flags ?? []).not.toContain('pipe_to_backward_propagation')
+  })
+})
+
+// The face scan limiters (issue #112) each get an id of their own in every block. Pinned to the numbers, not only to being unique: the ids
+// are account-wide counters, and dev, staging and production are told apart by their thousands (1xxx, 2xxx, 3xxx).
+describe('wrangler.jsonc face scan rate limit namespace ids', () => {
+  const ids: [string, QueueBlock | undefined, { ip: string; user: string }][] = [
+    ['top level', queueConfig, { ip: '1026', user: '1027' }],
+    ['env.staging', queueConfig.env.staging, { ip: '2026', user: '2027' }],
+    ['env.production', queueConfig.env.production, { ip: '3026', user: '3027' }],
+  ]
+
+  it.each(ids)('%s gives FACE_SCAN_IP_LIMITER and FACE_SCAN_USER_LIMITER their own ids', (_, block, expected) => {
+    const byName = Object.fromEntries((block?.ratelimits ?? []).map((limit) => [limit.name, limit.namespace_id]))
+
+    expect(byName.FACE_SCAN_IP_LIMITER).toBe(expected.ip)
+    expect(byName.FACE_SCAN_USER_LIMITER).toBe(expected.user)
+  })
+})
+
+// Face scans' background work (issue #112): the analysis job runs on a queue of its own, with a dead-letter queue, per environment. The consumer
+// takes one message at a time: a message is one exchange with Perfect Corp (an upload, task creation or a fetch), and a batch is retried or acked as a whole.
+describe('wrangler.jsonc face-scans queue', () => {
+  it.each(scanBlocks)('%s produces to the face-scans queue as FACE_SCANS_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'FACE_SCANS_QUEUE')?.queue).toBe(`deepertones-face-scans-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the face-scans queue one message at a time with 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-face-scans-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 1, max_retries: 4, dead_letter_queue: `deepertones-face-scans-dlq-${environment}` })
+  })
+
+  it.each(scanBlocks)('%s consumes the face-scans dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-face-scans-dlq-${environment}`)
+
+    expect(consumer).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps every queue it already had beside it', (_, block, environment) => {
+    const bindings = Object.fromEntries((block?.queues?.producers ?? []).map((p) => [p.binding, p.queue]))
+
+    expect(bindings).toMatchObject({
+      OTP_DELIVERY_QUEUE: `deepertones-otp-delivery-${environment}`,
+      SCAN_ITEMS_QUEUE: `deepertones-scan-items-${environment}`,
+      PARSE_SAFETY_QUEUE: `deepertones-parse-safety-${environment}`,
+      EMAIL_QUEUE: `deepertones-email-${environment}`,
+    })
   })
 })

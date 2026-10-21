@@ -39,6 +39,7 @@ src/
     <feature>.presenter.ts        domain object → public JSON, typed by its response schema
     <feature>.service.test.ts     unit tests, next to the code
   modules/scans/           the product scan: scans and scan_items, ScanService, the advance-scan-item job (see "Scan module")
+  modules/face-scans/      the face scan: pure rules (face-scans.tables.ts), consent, the scan records and their routes, FaceScanService (see "Face scans")
   emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   prompts/                 the Claude system prompts as Markdown, and prompts.generated.ts built from them (see "Prompts")
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
@@ -293,7 +294,7 @@ declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
 `client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products`, `client.api.v1.onboarding` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
@@ -301,7 +302,7 @@ Anything that builds a link to an API route starts from `API_V1_PREFIX` (the ser
 in `modules/scans/scans.paths.ts`) rather than writing the path out.
 
 Scans are named by what is scanned: this module is the **product scan**, at `/api/v1/scans/products` (operations
-`createProductScan`, `getProductScan`, ..., tag "Product scans"). `/api/v1/scans/faces` is reserved for face scans. Only
+`createProductScan`, `getProductScan`, ..., tag "Product scans"); the **face scan** is at `/api/v1/scans/faces` (tag "Face scans", see "Face scans"). Only
 the HTTP surface carries the name: the module directory, classes, tables, queues, Durable Object and error codes keep `scan`.
 
 - **Schemas** for requests and responses live in `<feature>.schemas.ts`, built with the `z` from
@@ -1185,6 +1186,64 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
 - **Skin type** is read from the whole-face `hd_skin_type` item only (never guessed from the t_zone and u_zone items): `Oily`, `Dry`,
   `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
 
+### Face scans
+`modules/face-scans` is the face scan (#112), built as four stacked changes. This one (2 of 4) is the **records**: consent, the scan and its
+photos, the routes, the queue and the cleaner. The pure rules (`face-scans.tables.ts`) and the Perfect Corp provider came before it; the
+analysis itself (the job that sends the front photo, the webhook, the results and the masks) and the result view come after.
+`FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
+store and the job queue. It never reaches Perfect Corp yet.
+
+- **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
+  from `face_scans`. `face_consents` (one row per profile: version, given and withdrawn times), `face_scans` (`state` `analysing` |
+  `needs-retake` | `ready` | `failed`, `reason`, `goal_at_scan`, the Perfect Corp task ids and environment, `skin_age`, `skin_type`, `tables_version`,
+  timestamps; indexed on `(profile_id, created_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
+  and, for the analysis to fill, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
+  `profile_fitzpatrick` (`I` to `VI` and the task id). No route uses those last three yet. `reason` is `unavailable` for now; retake reasons come with the analysis.
+- **Consent.** `CURRENT_FACE_CONSENT_VERSION` (1) is the version of the wording; bump it and every earlier consent stops counting.
+  Consent belongs to the profile. `PUT /me/face-consent { version }` records it (any other version is 400 `FACE_CONSENT_VERSION_MISMATCH`
+  with `details.current`; giving again starts it afresh and clears a withdrawal), `GET` shows it (404 `FACE_CONSENT_NOT_FOUND` until given; a
+  withdrawn or older one is shown with `current` false), and `DELETE` stamps the withdrawal time and keeps the row (204, also when there is nothing to withdraw).
+- **Creating a scan.** `POST /scans/faces` takes multipart `front` (required) and `right` and `left` (optional). Middleware, in order:
+  `FACE_SCAN_IP_LIMITER` (20 a minute) → `signedIn` → `FACE_SCAN_USER_LIMITER` (10 a minute) → `bodyLimit` (3 x 6,000,000 + 1,000,000 bytes).
+  The service then checks, in this order, and stores and queues nothing until all pass: consent (409 `FACE_CONSENT_REQUIRED`: none, withdrawn, or an
+  older version), the goal (409 `GOAL_REQUIRED`, from `GoalsService.requireGoal`), whether a scan is due (429 `FACE_SCAN_NOT_DUE` with `details.reason`),
+  then every photo (400). A photo is a JPEG, decided by its bytes and never by what the caller claims: `UNSUPPORTED_IMAGE` for anything else (and for
+  a header over 4096 px, which `readImageHeader` reads as no image), `IMAGE_TOO_SMALL` for a shorter side under 1080 px, `IMAGE_TOO_LARGE` over 6,000,000
+  bytes. Then it writes **R2 before the database**, deleting the photos again if the write fails; saves the scan and its photo rows in one `db.batch`;
+  and enqueues `analyse-face-scan { faceScanId, step: 'upload', at }`. If the enqueue fails the scan is marked `failed` / `unavailable`
+  (kept, with its photos, so the user can see and delete it) and the call still answers 202. The AI spend ledger is not touched: Perfect
+  Corp is charged when a result comes back.
+- **Double-submit guard.** Two requests for one profile (a double tap, two devices) can both read "no scan under this goal yet" before either writes, so
+  the check alone cannot stop them. The write does: `createFaceScan(scan, photos, { expectLatestId })` stores the scan only if the profile's latest
+  non-failed scan (ordered as `latestForProfile` is, `created_at` then `rowid`) is still `expectLatestId` (null for none), and answers true or false. On D1
+  that is one `db.batch` whose first statement is `INSERT ... SELECT ... WHERE (latest) IS ?` and whose photo inserts are `WHERE EXISTS` that scan row; the
+  answer is the first statement's `meta.changes`. Writes in a batch are serialised, so exactly one of any number of simultaneous requests lands. The service
+  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` (`already-scanned-for-goal`). Without the
+  option the write is unconditional. There is deliberately no unique index on (profile, goal): going back to an earlier goal is allowed once another scan came between.
+- **The policy** (`face-scans.policy.ts`, pure): `mayScanNow({ goal, latest })` allows a profile with no scan, or whose latest scan was
+  taken under another goal, and otherwise refuses with `already-scanned-for-goal`. The latest scan is the newest that has **not failed** (a
+  failed scan gave the profile nothing to look at), and ties go to the one written last. A later check-in schedule adds a third reason.
+- **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
+  per photo, `rescanSuggested`) and no result yet. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
+  a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
+  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows (204). Another profile's
+  scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
+- **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET
+  /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
+  other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
+  product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
+- **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
+  bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
+  message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters
+  have namespace ids 1026/1027, 2026/2027 and 3026/3027.
+- **A placeholder handler.** The analysis is not built in this change, so `face-scans.jobs.ts` registers `analyse-face-scan` with a handler that
+  marks the scan `failed` / `unavailable` and then throws a `PermanentJobError` ("face analysis not built yet"); its dead-letter hook does the
+  same. The handler marks the scan itself because the dispatcher acks a `PermanentJobError` and never sends it to the dead-letter queue. So a
+  scan fails cleanly when this ships without the analysis, instead of hanging in `analysing`. The analysis replaces the handler.
+- **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket
+  first, then their face rows (which also cascade from the profile), so a bucket failure leaves the rows and the keys for the next run. Both
+  halves are safe to repeat and chunk the ids under D1's bound-parameter limit. It deletes only what the face tables list, so product photos are untouched.
+
 ### Vendor spend ledger
 `AiUsageService` is also the `VendorSpendLedger` (`providers/perfect-corp/vendor-spend.provider.ts`), so a face job depends on the port and not the service.
 `record({ vendor: 'perfect-corp', job: 'face-analysis' | 'fitzpatrick', units, key })` writes one row to the same `ai_usage` table, already
@@ -1298,38 +1357,51 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
   catalog service must pass the image through `ProductAnalyst.imageShowsProduct` before `put`.
 
 ### Private photos
-`providers/photo-store` keeps the photos users take of products. The port is `PhotoStore` (`put`, `get`, `delete`,
+`providers/photo-store` keeps the photos users take of products, and their face photos and overlay masks. The port is `PhotoStore` (`put`, `get`, `delete`,
 `deleteMany`); `R2PhotoStore` and `MemoryPhotoStore` implement it. Unlike catalog images, these are private.
 
 - **One private bucket for every environment.** `deepertones-private`, bound as `PRIVATE_PHOTOS` in all three
   `wrangler.jsonc` blocks, next to the public `CATALOG_IMAGES`, never in its place. It has no public domain and r2.dev
   is off, so the only way out is a signed photo link. Environments are told apart by key prefix, as in the public
   bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket.
-- **Key layout.** `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`, where `<environment>` is
+- **Key layout.** Product photos are `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`. Face photos are
+  `faces/<environment>/<user id>/<profile id>/<scan id>/<name>`: `<name>` is `front.jpg`, `right.jpg` or `left.jpg`, or `mask-<concern>.png` for an
+  overlay mask, and exactly three id segments sit between the environment and the name. The profile is in the key so a photo link can be checked
+  against it. Face photos live under their own prefix, so the product sweeps (which release a photo once it has been used) can never reach them.
+  In both, `<environment>` is
   `development`, `staging`, `production` or `test`, and each id is lowercase `a-z 0-9 -` (UUIDs pass). Every method
   validates the key and throws a plain `Error` on a bad one, before touching the bucket: a bad key is our bug.
   `deleteMany` validates every key before deleting any, then deletes in batches of 1000 (the R2 limit). An item id may
   end in `-back` for the back of the pack (`<item id>-back.jpg`); it is an ordinary id.
 - **Environment lock.** Both stores are built with `{ environment }` (`R2PhotoStore` also takes the `bucket`) and accept
-  only keys that start `photos/<that environment>/`; a key of another environment is the same plain `Error`, and the
+  only keys that start `photos/<that environment>/` or `faces/<that environment>/`; a key of another environment is the same plain `Error`, and the
   bucket is not touched. One bucket serves every environment, so this keeps a misconfigured Worker from reading or
   deleting another environment's photos.
-- **Media rules.** `put` throws unless the media type is `image/jpeg` or `image/webp` and matches the key's extension
-  (`jpg` with `image/jpeg`, `webp` with `image/webp`).
+- **Media rules.** `put` throws unless the media type matches the key's extension: `jpg` with `image/jpeg`, `webp` with
+  `image/webp`, and `png` with `image/png`. The key rule is what keeps PNG narrow: only a face mask key can end in `.png`, a face photo
+  is a JPEG only, and a product photo is a JPEG or WebP only.
 - **One set of checks.** `assertPhotoKey` and `assertPhotoMedia` live in `photo-store.provider.ts`, the one
   non-concrete file both stores may import, and `MemoryPhotoStore` calls them too, so the fake accepts and refuses exactly
   what the real store does. `photo-store.contract.ts` runs the same tests against both.
 - **`put` and `get`.** `put` stores the bytes with the media type and `Cache-Control: private, no-store`. `get` returns
   the stored bytes and media type, or null for a missing key or any stored type other than `image/jpeg` or
-  `image/webp` (the stored type decides, not the extension). `delete` of a missing key is not an error. Storage
+  `image/webp` (or `image/png` under a `faces/` key, where the masks are); the stored type decides, not the extension. `delete` of a missing key is not an error. Storage
   failures are thrown so the caller can retry.
-- **Signed photo links.** `lib/photo-link.ts` signs `{ key, userId, expiresAt }` as an opaque token: base64url of
+- **Signed photo links.** `lib/photo-link.ts` signs `{ key, userId, expiresAt }` (and, for a face photo, `profileId`) as an opaque token: base64url of
   `payload.signature`, where the payload is JSON and the signature is HMAC-SHA-256 under a key derived with
   HKDF-SHA-256 from the secret (empty salt, info `deepertones/photo-link/v1`, 256 bits). The container passes
   `JWT_SECRET` to the scan service; there is no new secret, and the distinct info keeps this key unrelated to the one that signs JWTs. A
   link lives `PHOTO_LINK_TTL_SECONDS` (5 minutes), and that is enforced at both ends. `signPhotoLink(link, secret, now)`
   throws on an empty secret, on an expiry more than the TTL after `now`, and when the key's user segment
   (`photos/<environment>/<user id>/...`) is not `userId`, so a link is only ever minted for its own user's photo.
+  **The profile claim.** A face link also carries `profileId`, which must equal the key's profile segment
+  (`faces/<environment>/<user id>/<profile id>/...`): the signer throws on a face key with no profile or another one, and on a
+  product key with a profile, and the verifier gives null for a face token whose profile is missing, empty or not the key's. So the
+  account's other profiles cannot open a link made for one profile, and `verifyPhotoLink` gives `{ key, userId, profileId }` for a face
+  photo and `{ key, userId }` (no `profileId`) for a product photo.
+  **Each route serves its own prefix.** The two kinds of link verify with the same secret, so each photo route checks the key's
+  root: `ScanService.photoForLink` refuses (404 `PHOTO_NOT_FOUND`) any key that does not start `photos/`, and
+  `FaceScanService.photoForLink` any that does not start `faces/`, so a face token can never open through the product route nor the other way round.
   `verifyPhotoLink(token, secret, now)` takes the clock as an argument and returns the key and user, or null for
   anything malformed, over 2048 characters, wrongly signed, expired, or ending more than the TTL after `now` (a link
   minted wrong still cannot live longer than 5 minutes); reasons are not told apart. The signature is compared in

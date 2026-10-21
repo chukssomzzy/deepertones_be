@@ -444,6 +444,10 @@ stopped using it.
    npx wrangler queues create deepertones-email-dlq-staging
    npx wrangler queues create deepertones-email-production
    npx wrangler queues create deepertones-email-dlq-production
+   npx wrangler queues create deepertones-face-scans-staging
+   npx wrangler queues create deepertones-face-scans-dlq-staging
+   npx wrangler queues create deepertones-face-scans-production
+   npx wrangler queues create deepertones-face-scans-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins

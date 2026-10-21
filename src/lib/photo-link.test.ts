@@ -332,3 +332,132 @@ describe('verifyPhotoLink token length', () => {
     await expect(verifyPhotoLink(tooLong, SECRET, NOW)).resolves.toBeNull()
   })
 })
+
+// A face photo link names the PROFILE as well as the user: the account's other profiles must not open it. The key
+// (faces/<environment>/<user id>/<profile id>/<scan id>/<name>) carries the profile, and the token carries the profile the link was made for.
+// The signer refuses a link whose profile is not the key's, and the verifier gives nothing for a validly signed token whose profile is not
+// the key's (made here with `forge`, which the real signer would refuse), so no token opens a photo of a profile it was not made for.
+describe('face photo links', () => {
+  const FACE_KEY = 'faces/test/user-1/profile-1/scan-1/front.jpg'
+  const PROFILE = 'profile-1'
+  const signFace = (overrides: Partial<{ key: string; userId: string; profileId: string; expiresAt: Date }> = {}) =>
+    signPhotoLink({ key: FACE_KEY, userId: USER, profileId: PROFILE, expiresAt: EXPIRES, ...overrides } as Parameters<typeof signPhotoLink>[0], SECRET, NOW)
+
+  it('gives back the key, the user and the profile a face link was signed for', async () => {
+    const token = await signFace()
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toStrictEqual({ key: FACE_KEY, userId: USER, profileId: PROFILE })
+  })
+
+  it('carries the profile in the signed payload', async () => {
+    const { payload } = open(await signFace())
+
+    expect(JSON.parse(payload)).toMatchObject({ key: FACE_KEY, userId: USER, profileId: PROFILE })
+  })
+
+  it('still gives a product link back as the key and the user only', async () => {
+    await expect(verifyPhotoLink(await sign(), SECRET, NOW)).resolves.toStrictEqual({ key: KEY, userId: USER })
+  })
+
+  it.each([
+    ['the key of another profile', { profileId: 'profile-2' }],
+    ['the profile id as a prefix of the segment', { profileId: 'profile' }],
+    ['an empty profile', { profileId: '' }],
+    ['the key of another user', { key: 'faces/test/user-2/profile-1/scan-1/front.jpg' }],
+    ['a key with no profile segment', { key: 'faces/test/user-1/scan-1/front.jpg' }],
+    ['a product key', { key: KEY }],
+  ])('refuses to sign a face link with %s', async (_label, overrides) => {
+    await expect(signFace(overrides)).rejects.toThrow()
+  })
+
+  it('refuses to sign a face key with no profile at all', async () => {
+    await expect(signPhotoLink({ key: FACE_KEY, userId: USER, expiresAt: EXPIRES }, SECRET, NOW)).rejects.toThrow()
+  })
+
+  it('refuses to sign a face link that would live longer than the TTL, as a product link is', async () => {
+    await expect(signFace({ expiresAt: at(PHOTO_LINK_TTL_SECONDS + 1) })).rejects.toThrow(/longer than/)
+  })
+
+  it.each([
+    ['another profile than the key\'s', { key: FACE_KEY, userId: USER, profileId: 'profile-2' }],
+    ['no profile', { key: FACE_KEY, userId: USER }],
+    ['a profile that is not text', { key: FACE_KEY, userId: USER, profileId: 7 }],
+    ['an empty profile', { key: FACE_KEY, userId: USER, profileId: '' }],
+  ])('returns null for a face key whose validly signed token names %s', async (_label, claims) => {
+    const token = await forge({ ...claims, exp: EXPIRES.getTime() })
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toBeNull()
+  })
+
+  it('returns the profile for a forged token that is right, so the null above is about the profile and nothing else', async () => {
+    const token = await forge({ key: FACE_KEY, userId: USER, profileId: PROFILE, exp: EXPIRES.getTime() })
+
+    await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.toStrictEqual({ key: FACE_KEY, userId: USER, profileId: PROFILE })
+  })
+
+  it('returns null at the moment a face link expires and for another secret, as for a product link', async () => {
+    const token = await signFace()
+
+    await expect(verifyPhotoLink(token, SECRET, at(PHOTO_LINK_TTL_SECONDS - 1))).resolves.not.toBeNull()
+    await expect(verifyPhotoLink(token, SECRET, at(PHOTO_LINK_TTL_SECONDS))).resolves.toBeNull()
+    await expect(verifyPhotoLink(token, OTHER_SECRET, NOW)).resolves.toBeNull()
+  })
+})
+
+// base64 has more bits in its last character than the bytes need when the length is not a multiple of 4: 4 unused bits at length 2 (mod 4) and 2 at
+// length 3. Decoders ignore them, so a token with them changed decodes to the same bytes, passes the signature check, and is a second spelling of a
+// link that was only ever issued one way. Only the spelling the signer wrote opens a photo.
+describe('the one spelling of a link', () => {
+  const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_'
+  const FACE_PROFILE = 'profile-1'
+
+  /** A real signed token whose length leaves the given remainder when divided by 4, found by lengthening the user id. */
+  const tokenWithRemainder = async (remainder: 2 | 3, kind: 'product' | 'face') => {
+    for (let length = 1; length <= 12; length++) {
+      const userId = 'u'.repeat(length)
+      const token =
+        kind === 'product'
+          ? await signPhotoLink({ key: `photos/test/${userId}/scan-1/item-1.jpg`, userId, expiresAt: EXPIRES }, SECRET, NOW)
+          : await signPhotoLink({ key: `faces/test/${userId}/${FACE_PROFILE}/scan-1/front.jpg`, userId, profileId: FACE_PROFILE, expiresAt: EXPIRES } as Parameters<typeof signPhotoLink>[0], SECRET, NOW)
+      if (token.length % 4 === remainder) return token
+    }
+    throw new Error(`no token of length ${remainder} mod 4 found`)
+  }
+  /** The last character with some of its unused low bits (4 of them at remainder 2, 2 at remainder 3) set. */
+  const withUnusedBits = (token: string, bits: number) => token.slice(0, -1) + ALPHABET[ALPHABET.indexOf(token.at(-1)!) | bits]
+
+  const cases = [
+    ['a product link', 'product', 2, [1, 2, 4, 8, 15]],
+    ['a product link', 'product', 3, [1, 2, 3]],
+    ['a face link', 'face', 2, [1, 2, 4, 8, 15]],
+    ['a face link', 'face', 3, [1, 2, 3]],
+  ] as const
+
+  it.each(cases.flatMap(([label, kind, remainder, bits]) => bits.map((b) => [label, kind, remainder, b] as const)))(
+    'returns null for %s of length %i mod 4 (kind %s) when the unused bits of the last character are set to %i, though the bytes are the same',
+    async (_label, kind, remainder, bits) => {
+      const token = await tokenWithRemainder(remainder, kind)
+      const respelled = withUnusedBits(token, bits)
+
+      // The respelling really is the same bytes (decoded here with the test's own codec), so only the unused bits differ.
+      expect(respelled).not.toBe(token)
+      expect(fromB64url(respelled)).toEqual(fromB64url(token))
+      await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.not.toBeNull()
+      await expect(verifyPhotoLink(respelled, SECRET, NOW)).resolves.toBeNull()
+    },
+  )
+
+  it.each(['product', 'face'] as const)('still opens a %s link whose length is a multiple of 4, which has no unused bits to change', async (kind) => {
+    for (let length = 1; length <= 12; length++) {
+      const userId = 'u'.repeat(length)
+      const token =
+        kind === 'product'
+          ? await signPhotoLink({ key: `photos/test/${userId}/scan-1/item-1.jpg`, userId, expiresAt: EXPIRES }, SECRET, NOW)
+          : await signPhotoLink({ key: `faces/test/${userId}/${FACE_PROFILE}/scan-1/front.jpg`, userId, profileId: FACE_PROFILE, expiresAt: EXPIRES } as Parameters<typeof signPhotoLink>[0], SECRET, NOW)
+      if (token.length % 4 !== 0) continue
+      await expect(verifyPhotoLink(token, SECRET, NOW)).resolves.not.toBeNull()
+      return
+    }
+    throw new Error('no token whose length is a multiple of 4 found')
+  })
+})

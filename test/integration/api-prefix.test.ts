@@ -89,6 +89,26 @@ describe('the versioned API', () => {
     expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
   })
 
+  it.each([
+    ['GET', '/api/v1/me/face-consent'],
+    ['PUT', '/api/v1/me/face-consent'],
+    ['DELETE', '/api/v1/me/face-consent'],
+    ['GET', `/api/v1/scans/faces/${SCAN_ID}`],
+    ['DELETE', `/api/v1/scans/faces/${SCAN_ID}`],
+  ])('answers %s %s without a token with 401 AUTH_REQUIRED', async (method, path) => {
+    const res = await fetchWorker(path, { method })
+
+    expect(res.status).toBe(401)
+    expect(await res.json()).toMatchObject({ success: false, status: 401, error: { code: 'AUTH_REQUIRED' } })
+  })
+
+  it('answers GET /api/v1/scans/faces/photos/{token} without a token with 404 PHOTO_NOT_FOUND, not 401: the link is the credential', async () => {
+    const res = await fetchWorker('/api/v1/scans/faces/photos/not-a-token')
+
+    expect(res.status).toBe(404)
+    expect(await res.json()).toMatchObject({ success: false, status: 404, error: { code: 'PHOTO_NOT_FOUND' } })
+  })
+
   it('answers GET /api/v1/scans/products/{scanId} without a token with 401 AUTH_REQUIRED', async () => {
     const res = await fetchWorker(`/api/v1/scans/products/${SCAN_ID}`)
 
@@ -128,6 +148,9 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/onboarding',
         'PUT /api/v1/me/safety',
         'GET /api/v1/me/safety',
+        'PUT /api/v1/me/face-consent',
+        'GET /api/v1/me/face-consent',
+        'DELETE /api/v1/me/face-consent',
         'GET /api/v1/me/shelf',
         'DELETE /api/v1/me/shelf/{entryId}',
         'POST /api/v1/me/shelf',
@@ -141,6 +164,10 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/identification',
         'POST /api/v1/scans/products/{scanId}/items/{itemId}/no-label',
         'GET /api/v1/scans/products/photos/{token}',
+        'POST /api/v1/scans/faces',
+        'GET /api/v1/scans/faces/{id}',
+        'DELETE /api/v1/scans/faces/{id}',
+        'GET /api/v1/scans/faces/photos/{token}',
         'GET /api/v1/products/search',
         'GET /api/v1/onboarding/content',
       ].sort(),
@@ -199,5 +226,87 @@ describe('the OpenAPI document', () => {
     for (const old of ['createScan', 'getScan', 'watchScan', 'confirmScanItem', 'addScanItemBackPhoto', 'getScanPhoto']) {
       expect(ids).not.toContain(old)
     }
+  })
+})
+
+// The face scan routes (issue #112): paths, operation names, the one public route, and the error codes a client can meet, which the document
+// carries in the operations' descriptions (the error responses are documented by status).
+describe('the OpenAPI document: face scans', () => {
+  type FaceOperation = Operation & { description?: string; security?: unknown[]; responses?: Record<string, { content?: Record<string, unknown> }> }
+  type FaceDocument = { paths: Record<string, Record<string, FaceOperation>> }
+  const faceDocumentOf = async () => (await documentOf()) as unknown as FaceDocument
+  const FACES = '/api/v1/scans/faces'
+  const CONSENT = '/api/v1/me/face-consent'
+
+  it('names the face scan and consent operations, all under the "Face scans" tag, each with a summary', async () => {
+    const { paths } = await faceDocumentOf()
+    const operations = {
+      setFaceConsent: paths[CONSENT]?.put,
+      getFaceConsent: paths[CONSENT]?.get,
+      withdrawFaceConsent: paths[CONSENT]?.delete,
+      createFaceScan: paths[FACES]?.post,
+      getFaceScan: paths[`${FACES}/{id}`]?.get,
+      deleteFaceScan: paths[`${FACES}/{id}`]?.delete,
+      getFaceScanPhoto: paths[`${FACES}/photos/{token}`]?.get,
+    }
+
+    for (const [operationId, operation] of Object.entries(operations)) {
+      expect(operation?.operationId, operationId).toBe(operationId)
+      expect(operation?.tags, operationId).toEqual(['Face scans'])
+      expect(operation?.summary, operationId).toEqual(expect.any(String))
+    }
+  })
+
+  it('leaves the product scan routes under "Product scans": face scans are a separate tag', async () => {
+    const { paths } = await faceDocumentOf()
+
+    expect(paths['/api/v1/scans/products']?.post?.tags).toEqual(['Product scans'])
+  })
+
+  it('documents the photo route as public (security: []), and every other face route as needing the bearer token', async () => {
+    const { paths } = await faceDocumentOf()
+
+    expect(paths[`${FACES}/photos/{token}`]?.get?.security).toEqual([])
+    for (const operation of [paths[CONSENT]?.put, paths[CONSENT]?.get, paths[CONSENT]?.delete, paths[FACES]?.post, paths[`${FACES}/{id}`]?.get, paths[`${FACES}/{id}`]?.delete]) {
+      expect(operation?.security).toEqual([{ bearerAuth: [] }])
+    }
+  })
+
+  it('documents the photo route as a JPEG with a 404, and creating a scan as a 202 with the errors a client meets', async () => {
+    const { paths } = await faceDocumentOf()
+
+    expect(Object.keys(paths[`${FACES}/photos/{token}`]?.get?.responses?.['200']?.content ?? {})).toContain('image/jpeg')
+    expect(paths[`${FACES}/photos/{token}`]?.get?.responses).toHaveProperty('404')
+    const create = paths[FACES]?.post?.responses ?? {}
+    for (const status of ['202', '400', '401', '409', '413', '429']) expect(create, status).toHaveProperty(status)
+  })
+
+  it('documents the other face routes\' answers: consent 200 and 204, a scan 200 and 404, a delete 204 and 404', async () => {
+    const { paths } = await faceDocumentOf()
+
+    expect(paths[CONSENT]?.put?.responses).toHaveProperty('200')
+    expect(paths[CONSENT]?.put?.responses).toHaveProperty('400')
+    expect(paths[CONSENT]?.get?.responses).toHaveProperty('200')
+    expect(paths[CONSENT]?.get?.responses).toHaveProperty('404')
+    expect(paths[CONSENT]?.delete?.responses).toHaveProperty('204')
+    expect(paths[`${FACES}/{id}`]?.get?.responses).toHaveProperty('200')
+    expect(paths[`${FACES}/{id}`]?.get?.responses).toHaveProperty('404')
+    expect(paths[`${FACES}/{id}`]?.delete?.responses).toHaveProperty('204')
+    expect(paths[`${FACES}/{id}`]?.delete?.responses).toHaveProperty('404')
+  })
+
+  it('names the error codes in the descriptions that can answer with them', async () => {
+    const { paths } = await faceDocumentOf()
+    const descriptionOf = (operation: FaceOperation | undefined) => operation?.description ?? ''
+
+    expect(descriptionOf(paths[FACES]?.post)).toContain('FACE_CONSENT_REQUIRED')
+    expect(descriptionOf(paths[FACES]?.post)).toContain('FACE_SCAN_NOT_DUE')
+    expect(descriptionOf(paths[FACES]?.post)).toContain('GOAL_REQUIRED')
+    expect(descriptionOf(paths[FACES]?.post)).toContain('UNSUPPORTED_IMAGE')
+    expect(descriptionOf(paths[`${FACES}/{id}`]?.get)).toContain('FACE_SCAN_NOT_FOUND')
+    expect(descriptionOf(paths[`${FACES}/{id}`]?.delete)).toContain('FACE_SCAN_NOT_FOUND')
+    expect(descriptionOf(paths[`${FACES}/photos/{token}`]?.get)).toContain('PHOTO_NOT_FOUND')
+    expect(descriptionOf(paths[CONSENT]?.put)).toContain('FACE_CONSENT_VERSION_MISMATCH')
+    expect(descriptionOf(paths[CONSENT]?.get)).toContain('FACE_CONSENT_NOT_FOUND')
   })
 })
