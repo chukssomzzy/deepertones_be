@@ -337,6 +337,45 @@ describe('loadShelfSet', () => {
     expect(set!.photos[1]!.products).toEqual([{ folder: 'serum', label: CATALOG.serum }, { label: OUT_OF_SET }])
   })
 
+  describe('one product labelled two ways across photos', () => {
+    const twoPhotos = async (first: unknown, second: unknown) => {
+      await writeShelf({ 'a.jpg': { products: [first] }, 'b.jpg': { products: [second] } })
+      await writePhoto('a.jpg')
+      await writePhoto('b.jpg')
+    }
+
+    it('rejects a form given in one photo and missing in another, naming both photos, since the catalog treats them as one product', async () => {
+      await twoPhotos({ ...OUT_OF_SET, form: 'cream' }, OUT_OF_SET)
+
+      await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+      await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(/a\.jpg[\s\S]*b\.jpg|b\.jpg[\s\S]*a\.jpg/)
+    })
+
+    it('rejects a different category for the same product', async () => {
+      await twoPhotos(OUT_OF_SET, { ...OUT_OF_SET, category: 'body' })
+
+      await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    })
+
+    it('rejects an inline entry that repeats a catalog product without its form', async () => {
+      await twoPhotos({ folder: 'cream' }, { brand: 'Glow Co', name: 'Soft Cream', category: 'skin' })
+
+      await expect(loadShelfSet(root, CATALOG)).rejects.toThrow(PhotoSetError)
+    })
+
+    it('allows two different known forms of one name, which are two real products (a gel and a serum)', async () => {
+      await twoPhotos({ ...OUT_OF_SET, form: 'gel' }, { ...OUT_OF_SET, form: 'serum' })
+
+      await expect(loadShelfSet(root, CATALOG)).resolves.not.toBeNull()
+    })
+
+    it('allows the same product labelled identically in two photos', async () => {
+      await twoPhotos(OUT_OF_SET, OUT_OF_SET)
+
+      await expect(loadShelfSet(root, CATALOG)).resolves.not.toBeNull()
+    })
+  })
+
   it('returns null, not an error, when the shelf directory does not exist', async () => {
     await expect(loadShelfSet(join(root, 'nope'), CATALOG)).resolves.toBeNull()
   })

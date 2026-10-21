@@ -523,6 +523,14 @@ describe('scoreShelf', () => {
     expect(first(score).outcomes).toEqual(['misread', 'misread', 'invented'])
   })
 
+  it('scores a product listed again onto the row an earlier listing of this photo created as a repeat, not a wrong merge', () => {
+    const score = scoreShelf([shelf('a.jpg', [lab('p1')], [created(), { brand: 'Acme', landed: 'made-1', onCreatedRow: true }])])
+
+    expect(first(score).outcomes).toEqual(['misread', 'repeat'])
+    expect(first(score)).toMatchObject({ wrongRows: 0, repeat: 1 })
+    expect(score.wrongRows).toBe(0)
+  })
+
   it('does not attribute a misread to a product found later in the listing order', () => {
     // p1 is found by the second listed product, so the first created row (listed before) is a misread of p1 only if p1 is still unfound then.
     const score = scoreShelf([shelf('a.jpg', [lab('p1'), lab('p2')], [created(), onRow('p1')])])

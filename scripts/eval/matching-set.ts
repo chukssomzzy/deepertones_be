@@ -146,6 +146,33 @@ export const loadPhotoSet = async (directory: string): Promise<PhotoSet> => {
  * takes the label of that catalog folder; any other entry is a full identity. Null when the directory is not there: whether
  * that is an error depends on the part being run.
  */
+/**
+ * One real product must be one identity everywhere it is labelled, as the catalog sees it: the same brand, name and variant with
+ * another category, or with a form in one place and none in another (which the catalog treats as the same product), would seed two
+ * rows for it and turn a right answer into a wrong merge. Two different known forms are two real products and are allowed.
+ */
+const assertConsistentLabels = (photos: ShelfPhoto[], catalogLabels: Record<string, Label>): void => {
+  const seen = new Map<string, { label: Label; where: string }>()
+  const entries = [
+    ...Object.entries(catalogLabels).map(([folder, label]) => ({ label, where: `catalog folder ${folder}` })),
+    ...photos.flatMap((photo) => photo.products.filter((product) => product.folder === undefined).map(({ label }) => ({ label, where: photo.name }))),
+  ]
+  for (const { label, where } of entries) {
+    // The identity key without the form: what must agree on category, and on whether a form is given.
+    const key = identityKey({ ...label, form: null })
+    const forms = seen.get(key)
+    if (!forms) {
+      seen.set(key, { label, where })
+      continue
+    }
+    const other = forms.label
+    const formClash = (label.form ?? null) !== (other.form ?? null) && (!label.form || !other.form)
+    if (label.category !== other.category || formClash) {
+      throw new PhotoSetError(`${where} and ${forms.where} label ${label.brand} / ${label.name} differently (category or form); give the same identity everywhere.`)
+    }
+  }
+}
+
 export const loadShelfSet = async (directory: string, catalogLabels: Record<string, Label>): Promise<ShelfSet | null> => {
   let entries
   try {
@@ -187,6 +214,7 @@ export const loadShelfSet = async (directory: string, catalogLabels: Record<stri
     })
     photos.push({ name: file.name, path, mediaType: MEDIA_TYPES[extname(file.name).toLowerCase()]!, products })
   }
+  assertConsistentLabels(photos, catalogLabels)
   return { photos }
 }
 

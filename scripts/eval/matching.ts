@@ -413,7 +413,7 @@ const printImages = (score: ReturnType<typeof scoreImages>) => {
 // ---- shelf ----
 
 /** One product the shelf prompt listed, with what resolve did with it. The identity is model text: it stays in the report file. */
-type ShelfListedDetail = { identity: ProductIdentity; confidence: number; belowConfirmConfidence: boolean; landed: string | null; questions: JudgeAnswer[] }
+type ShelfListedDetail = { identity: ProductIdentity; confidence: number; belowConfirmConfidence: boolean; landed: string | null; onCreatedRow?: true; questions: JudgeAnswer[] }
 type ShelfDetail = {
   input: ShelfPhotoInput
   /** The recognition's own classification and excluded counts; absent when it failed. */
@@ -496,20 +496,24 @@ const runShelfPhoto = async (photo: ShelfPhoto, seeds: ShelfSeed[], recognizer: 
     return failed(errorName(error))
   }
   const listed: ShelfListedDetail[] = []
+  // Rows this photo's own listings created: a later listing landing on one is the same product read twice.
+  const createdHere = new Set<string>()
   for (const { brand, name, variant, form, category, confidence } of seen.products) {
     const identity: ProductIdentity = { brand, name, category, ...(variant ? { variant } : {}), ...(form ? { form } : {}) }
     repository.trace = { created: false, questions: [] }
     try {
       const resolved = await withRetries(() => service.resolve(identity))
       const { created, questions } = repository.trace
-      listed.push({ identity, confidence, belowConfirmConfidence: confidence < SCAN_POLICY.confirmBelowConfidence, landed: created ? null : resolved.productId, questions })
+      const onCreatedRow = !created && createdHere.has(resolved.productId)
+      if (created) createdHere.add(resolved.productId)
+      listed.push({ identity, confidence, belowConfirmConfidence: confidence < SCAN_POLICY.confirmBelowConfidence, landed: created ? null : resolved.productId, ...(onCreatedRow ? { onCreatedRow: true as const } : {}), questions })
     } catch (error) {
       if (error instanceof AnthropicConfigError) throw new SetupError('Claude rejected the API key or the account (check ANTHROPIC_API_KEY and billing).')
       if (errorName(error) === 'CatalogBusyError') throw new SetupError('The spend cap was reached while matching; raise --max-usd.')
       return { ...failed(errorName(error)), classification: seen.classification, excluded: seen.excluded }
     }
   }
-  return { input: { photo: photo.name, labelled, listed: listed.map(({ identity, landed }) => ({ brand: identity.brand, landed })) }, classification: seen.classification, excluded: seen.excluded, listed }
+  return { input: { photo: photo.name, labelled, listed: listed.map(({ identity, landed, onCreatedRow }) => ({ brand: identity.brand, landed, ...(onCreatedRow ? { onCreatedRow } : {}) })) }, classification: seen.classification, excluded: seen.excluded, listed }
 }
 
 const labelledName = (product: ShelfPhoto['products'][number]): string => product.folder ?? `${product.label.brand} / ${product.label.name}`

@@ -225,13 +225,17 @@ const SHELF_PRODUCT_CAP = 5
 
 /** A product labelled in a shelf photo: `rowId` is the row it was seeded as, `inSet` whether it is a product of the single set. */
 export type ShelfLabelled = { id: string; rowId: string; brand: string; inSet: boolean }
-/** A product the recognizer listed: the row it resolved to, or null when resolve created a row. */
-export type ShelfListed = { brand: string; landed: string | null }
+/**
+ * A product the recognizer listed: the row it resolved to, or null when resolve created a row. `onCreatedRow` marks a row an earlier
+ * listing of the same photo created (the same product listed twice), which is a repeat, never a wrong merge.
+ */
+export type ShelfListed = { brand: string; landed: string | null; onCreatedRow?: true }
 /** One shelf photo's labels and what was listed, in run order. `error` is the class name of a failed recognition. */
 export type ShelfPhotoInput = { photo: string; labelled: ShelfLabelled[]; listed: ShelfListed[]; error?: string }
 
 /**
- * found: landed on the row of a labelled product, the first time. repeat: on the row of one already found. wrong-row: on a seeded row
+ * found: landed on the row of a labelled product, the first time. repeat: on the row of one already found, or on a row an earlier
+ * listing of the photo created. wrong-row: on a seeded row
  * of a product that is not in the photo (a wrong merge). misread / invented: a created row, with or without a labelled product of its
  * brand family still to be found.
  */
@@ -289,6 +293,7 @@ const scoreShelfPhoto = (input: ShelfPhotoInput): { score: ShelfPhotoScore; foun
       misread.add(target.id)
       return 'misread'
     }
+    if (item.onCreatedRow) return 'repeat'
     const hit = byRow.get(item.landed)
     if (!hit) return 'wrong-row'
     if (found.has(hit.id)) return 'repeat'
