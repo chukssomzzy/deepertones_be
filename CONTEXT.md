@@ -133,3 +133,116 @@ brand or sponsored placement, or a face scan that outputs a "skin profile" or "s
 
 If a change would cross one of the lines above (sell something, rank for money, diagnose, or let the AI make a safety
 decision), stop and raise it. Those are product decisions, not implementation details.
+
+## Language
+
+Words with one meaning across the product, the code and the docs. When two words exist for one thing, use the first; the
+others are listed under _Avoid_.
+
+### Shelf to routine
+
+**Shelf**:
+The products a user already uses, as they photographed or named them.
+_Avoid_: Stash, collection, products (alone)
+
+**Goal**:
+What the user wants for their skin, in one of the fixed goals (clear skin, even tone, fade dark marks, brighter, a glow, calm
+and healthy again).
+_Avoid_: Target, objective
+
+**Verdict**:
+What the app says about each shelf product against the user's goal: helping, redundant, blocking the goal, likely the
+problem, or conflicting.
+_Avoid_: Score, rating, analysis
+
+**Routine**:
+The ordered daily and weekly steps the user follows to reach their goal, built mostly from their shelf, with recommended
+products added where the shelf has a gap.
+_Avoid_: Regimen, plan (alone)
+
+**Routine step**:
+One role a product plays in a routine: cleanse, treat, moisturise or protect from the sun. A routine has a gap when a step its
+goal needs is missing from the shelf.
+_Avoid_: Slot, stage
+
+**Shopping country**:
+The country a profile buys its products in, confirmed by the user once (suggested from the phone's region) and changeable.
+Only products sold there are recommended.
+_Avoid_: Location, region, country (alone)
+
+**Budget band**:
+A rough, optional answer to how much a user can spend on one new product, in bands of their shopping country's currency.
+Candidates above it are not suggested; with no answer, cheaper candidates come first. Never shown as judging what they can
+afford.
+_Avoid_: Income, price limit, affordability
+
+### Skin and products
+
+**Skin concern**:
+Something visible on a person's skin that a goal targets, such as dark spots, acne or redness. A face scan reads it, and a
+recommended product says which ones it works on. Never a diagnosis.
+_Avoid_: Concern (alone), condition, problem
+
+**Caution**:
+Something a product may do to some people, such as irritation, clogging pores or being unsuitable in pregnancy, found from its
+ingredients and their sources.
+_Avoid_: Concern (alone), risk, warning, side effect
+
+**Face scan**:
+The guided face photos a user takes and what is read from them: visible skin concerns, skin type, skin age and Fitzpatrick
+type, worded as what can be seen.
+_Avoid_: Skin analysis, skin profile, diagnosis
+
+
+**Catalog**:
+Every product the app knows, with its ingredient list and sources, however it arrived (a scan, research, a label, or the
+reviewed sheet). Used to judge a shelf; never by itself a reason to suggest a product.
+_Avoid_: Product database
+
+**Recommendation catalog**:
+The reviewed set of products the app may suggest adding to a routine, each described by the concerns it works on, the skin
+types it suits, its safety notes and the countries it is sold in. A product reaches it only through review. Every
+recommended product is also a catalog product, with the ingredient list the workbook gives it, so scanning it shows the
+same product.
+_Avoid_: Formulary, catalog (alone), shop
+
+**Candidate**:
+A recommended product that passes every rule for one user: sold in their shopping country, fills a gap in their routine, works
+on their goal's skin concerns, suits their skin type, and breaks no ingredient rule for their safety answers. An AI may
+choose among candidates and explain the choice, but never suggests anything that is not one.
+_Avoid_: Match, suggestion, pick
+
+**Ingredient rule**:
+A reviewed statement that an ingredient carries a caution, and when (for example, retinoids in pregnancy), with its source.
+Ingredient rules decide whether a product is safe for a user; a product row's own claims can only make it stricter.
+_Avoid_: Reference entry, flag
+
+**Catalog workbook**:
+The reviewed spreadsheet, with a Products tab and an Ingredients tab, that is the source of the recommendation catalog and of
+the ingredient rules. Each row has a stable code. It is the only place those rows are edited: every edit starts from an
+export of what is live, and an upload made from an older export is refused.
+_Avoid_: Dataset, master sheet, CSV
+
+**Retired**:
+A row that has left the workbook. It is no longer recommended or applied, but is kept, so past routines and verdicts can
+still say what they were based on.
+_Avoid_: Deleted, removed
+
+**Origin**:
+How a product reached the recommendation catalog: sourced by us, or submitted by its brand with a disclosed review fee.
+Users see a brand-submitted product's origin; the rules and the AI that choose among candidates never do.
+_Avoid_: Sponsorship, partner, paid placement
+
+**Draft**:
+A workbook row or cell an AI filled from cited sources, which nobody has approved yet. The team decides which products go in
+the workbook; the AI only fills in what is known about them.
+_Avoid_: Suggestion, AI recommendation
+
+**Approved**:
+A recommendation catalog row the team has signed off, which makes the product recommendable. It names who approved it and when.
+_Avoid_: Verified, certified, dermatologist-approved
+
+**Audit**:
+A dermatologist's periodic review of approved rows, which can correct or retire them. An audited row records who audited it
+and when; being audited is not a condition for being recommended.
+_Avoid_: Approval (for this), sign-off
