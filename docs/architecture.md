@@ -1138,7 +1138,7 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 
 - **The port.** `uploadFile` (a slot request, then a PUT of the bytes to the slot's own address, method and headers, without our key),
   `createSkinAnalysis` (HD actions, `format: json`), `createFitzpatrick`, `getSkinAnalysis`, `getFitzpatrick`, `deleteTask`,
-  `downloadMask` (capped, no redirects, no key) and `verifyWebhook`. A task read answers `running` or `success` with the parsed result;
+  `downloadMask` (capped, no redirects, no key) and `checkWebhook`. A task read answers `running` or `success` with the parsed result;
   a task that ended on an error throws.
 - **Error mapping.** Four classes, so a caller chooses by class and never reads vendor text:
   - `PerfectCorpUnavailableError`: no connection, a timeout, HTTP 5xx, 429 or 408, a reply that cannot be read (no task id, no results, a
@@ -1153,12 +1153,13 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
     answered with a redirect.
   Error messages carry the class, an HTTP status or a code-shaped vendor code, and nothing the vendor wrote: its free text can echo an
   address with a signature in it.
-- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `verifyWebhook(rawBody, headers)` needs `webhook-id`,
+- **Webhooks** follow Standard Webhooks (standardwebhooks.com). `checkWebhook(rawBody, headers)` needs `webhook-id`,
   `webhook-timestamp` (seconds, digits only, within 5 minutes either way) and `webhook-signature` (space-separated `v1,<base64>`
   entries; any one may match, other versions are ignored). The signature is HMAC-SHA-256 over `id.timestamp.body` with `crypto.subtle`,
   keyed with the base64-DECODED secret (`whsec_` stripped when present), compared in constant time. Only after that is the body read: it
-  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to `null` (never throws), and the route
-  answers 401. The clock is injected.
+  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to a rejection naming the reason (never throws), and the route
+  answers 401. A rejected delivery is logged as `perfect-corp-webhook-rejected` with that reason (read with `npx wrangler tail --env staging`), never the
+  secret, a signature or the body. The clock is injected.
 - **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
   `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
   and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
@@ -1283,7 +1284,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     dead-letters it); `PerfectCorpBadRequestError` does the same without the alert. A webhook that says the task ended in an error still queues `fetch`:
     the provider's mapping on `getSkinAnalysis` decides whether that is a retake or an outage.
 - **The webhook.** `POST /webhooks/perfect-corp` (under the API prefix) is public (`security: []`): the Standard Webhooks signature on the RAW body is the
-  credential (`RestPerfectCorpClient.verifyWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
+  credential (`RestPerfectCorpClient.checkWebhook`, which also refuses a delivery older than 5 minutes). Middleware, in order: `PERFECT_CORP_WEBHOOK_LIMITER`
   (300 a minute per address; namespace ids 1028/2028/3028) then `bodyLimit` (64 KB, so an oversized body is 413 before any signature work). The route reads
   `c.req.text()` and calls `receiveWebhook`: a bad signature is 401 `WEBHOOK_SIGNATURE_INVALID`; otherwise `findByTaskId` (both task-id columns are
   indexed) finds the scan, and a task of another environment (`pc_environment` is not this one) or of a deleted scan is ignored; a match queues `fetch` (its

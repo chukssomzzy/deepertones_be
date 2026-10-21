@@ -284,12 +284,16 @@ export class FaceScanService {
 
   /**
    * Queues the step a verified Perfect Corp webhook is for: `fetch` for a scan's analysis task, `fitzpatrick` for its Fitzpatrick task. The signature is
-   * checked on the raw body first (401 WEBHOOK_SIGNATURE_INVALID). A task no scan of this environment holds is answered and ignored. A step that cannot be
-   * queued is 503, so Perfect Corp sends the webhook again.
+   * checked on the raw body first (401 WEBHOOK_SIGNATURE_INVALID, with the reason logged as `perfect-corp-webhook-rejected`, never the body, a header value or a
+   * secret). A task no scan of this environment holds is answered and ignored. A step that cannot be queued is 503, so Perfect Corp sends the webhook again.
    */
   async receiveWebhook(rawBody: string, headers: Headers): Promise<void> {
-    const delivery = await this.perfectCorp.verifyWebhook(rawBody, headers)
-    if (!delivery) throw new UnauthorizedError('WEBHOOK_SIGNATURE_INVALID', 'The webhook signature is not valid')
+    const check = await this.perfectCorp.checkWebhook(rawBody, headers)
+    if (!check.ok) {
+      console.warn({ outcome: 'perfect-corp-webhook-rejected', ...check.rejection, bodyBytes: rawBody.length })
+      throw new UnauthorizedError('WEBHOOK_SIGNATURE_INVALID', 'The webhook signature is not valid')
+    }
+    const { delivery } = check
     const scan = await this.repository.findByTaskId(delivery.taskId)
     if (!scan || scan.pcEnvironment !== this.environment) return
     const step = scan.pcAnalysisTaskId === delivery.taskId ? 'fetch' : 'fitzpatrick'

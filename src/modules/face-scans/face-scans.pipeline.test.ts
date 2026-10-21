@@ -998,14 +998,94 @@ describe('FaceScanService.receiveWebhook', () => {
     expect(ctx.jobs.enqueued).toEqual([])
   })
 
+  it('logs why a delivery was rejected, once, as a warning with the reason, the fields it gave and the size of the body, and still answers 401', async () => {
+    const ctx = setup()
+    const { analysisTask } = await uploaded(ctx)
+    clearQueue(ctx)
+    const rejection = { reason: 'stale-timestamp' as const, skewSeconds: 4000, skewIfMilliseconds: null, signatureValid: true }
+    ctx.perfectCorp.script('checkWebhook', { ok: false, rejection })
+    const raw = JSON.stringify({ data: { task_id: analysisTask, task_status: 'success' } })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const error = await errorOf(receive(ctx, raw))
+
+      expect(error).toBeInstanceOf(UnauthorizedError)
+      expect(error.code).toBe('WEBHOOK_SIGNATURE_INVALID')
+      expect(ctx.jobs.enqueued).toEqual([])
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]).toEqual([{ outcome: 'perfect-corp-webhook-rejected', ...rejection, bodyBytes: raw.length }])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it('logs every field of each kind of rejection it is given', async () => {
+    const rejections = [
+      { reason: 'missing-headers' as const, missing: ['webhook-id' as const] },
+      {
+        reason: 'signature-mismatch' as const,
+        versions: ['v1', 'other'],
+        signatureCount: 2,
+        undecodedSecretWouldMatch: true,
+        idWithoutSuffixWouldMatch: true,
+        undecodedAndIdWithoutSuffixWouldMatch: false,
+        topLevelKeys: ['created_at', 'data'],
+        dataKeys: ['task_id', 'task_status'],
+      },
+      { reason: 'bad-shape' as const, problem: 'no-task-id' as const, topLevelKeys: ['data'], dataKeys: ['task_status'] },
+    ]
+    for (const rejection of rejections) {
+      const ctx = setup()
+      ctx.perfectCorp.script('checkWebhook', { ok: false, rejection })
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+      try {
+        await errorOf(receive(ctx, 'abc'))
+
+        expect(warn.mock.calls).toEqual([[{ outcome: 'perfect-corp-webhook-rejected', ...rejection, bodyBytes: 3 }]])
+      } finally {
+        warn.mockRestore()
+      }
+    }
+  })
+
+  it('logs nothing of the body when it rejects a delivery: only its size', async () => {
+    const ctx = setup()
+    ctx.perfectCorp.script('checkWebhook', { ok: false, rejection: { reason: 'bad-shape', problem: 'no-data', topLevelKeys: ['created_at'], dataKeys: [] } })
+    const raw = JSON.stringify({ created_at: 1, note: 'distinctive-body-value-7731' })
+
+    const logged = await loggedDuring(() => errorOf(receive(ctx, raw, { 'webhook-id': 'distinctive-id-value-5521', 'webhook-signature': 'v1,distinctive-signature-9913' })))
+
+    expect(logged).toContain('perfect-corp-webhook-rejected')
+    expect(logged).toContain(`"bodyBytes":${raw.length}`)
+    expect(logged).not.toContain('distinctive-body-value-7731')
+    expect(logged).not.toContain('distinctive-id-value-5521')
+    expect(logged).not.toContain('distinctive-signature-9913')
+  })
+
+  it('logs no warning for a delivery it accepts', async () => {
+    const ctx = setup()
+    const { analysisTask } = await uploaded(ctx)
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-48', taskId: analysisTask, taskStatus: 'success' } })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      await receive(ctx)
+
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('verifies the raw body and the headers exactly as they arrived', async () => {
     const ctx = setup()
     const raw = '{"data":  {"task_id":"t-1","task_status":"success"}}'
-    ctx.perfectCorp.script('verifyWebhook', null)
+    ctx.perfectCorp.script('checkWebhook', { ok: false, rejection: { reason: 'bad-timestamp' } })
 
     await errorOf(receive(ctx, raw, { 'webhook-id': 'wh-9', 'webhook-timestamp': '1', 'webhook-signature': 'v1,abc' }))
 
-    const [body, headers] = callsOf(ctx, 'verifyWebhook')[0]!.args as [string, Headers]
+    const [body, headers] = callsOf(ctx, 'checkWebhook')[0]!.args as [string, Headers]
     expect(body).toBe(raw)
     expect(headers.get('webhook-id')).toBe('wh-9')
     expect(headers.get('webhook-signature')).toBe('v1,abc')
@@ -1016,7 +1096,7 @@ describe('FaceScanService.receiveWebhook', () => {
     const { id, analysisTask } = await uploaded(ctx)
     clearQueue(ctx)
     ctx.advanceClock(3 * MINUTE)
-    ctx.perfectCorp.script('verifyWebhook', { webhookId: 'wh-42', taskId: analysisTask, taskStatus: 'success' })
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-42', taskId: analysisTask, taskStatus: 'success' } })
 
     await expect(receive(ctx)).resolves.toBeUndefined()
 
@@ -1027,7 +1107,7 @@ describe('FaceScanService.receiveWebhook', () => {
     const ctx = setup()
     const { id, fitzpatrickTask } = await uploaded(ctx)
     clearQueue(ctx)
-    ctx.perfectCorp.script('verifyWebhook', { webhookId: 'wh-43', taskId: fitzpatrickTask!, taskStatus: 'success' })
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-43', taskId: fitzpatrickTask!, taskStatus: 'success' } })
 
     await receive(ctx)
 
@@ -1038,7 +1118,7 @@ describe('FaceScanService.receiveWebhook', () => {
     const ctx = setup()
     const { id, analysisTask } = await uploaded(ctx)
     clearQueue(ctx)
-    ctx.perfectCorp.script('verifyWebhook', { webhookId: 'wh-44', taskId: analysisTask, taskStatus: 'error' })
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-44', taskId: analysisTask, taskStatus: 'error' } })
 
     await receive(ctx)
 
@@ -1049,7 +1129,7 @@ describe('FaceScanService.receiveWebhook', () => {
     const ctx = setup()
     await uploaded(ctx)
     clearQueue(ctx)
-    ctx.perfectCorp.script('verifyWebhook', { webhookId: 'wh-45', taskId: 'task-from-nowhere', taskStatus: 'success' })
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-45', taskId: 'task-from-nowhere', taskStatus: 'success' } })
 
     await expect(receive(ctx)).resolves.toBeUndefined()
 
@@ -1061,7 +1141,7 @@ describe('FaceScanService.receiveWebhook', () => {
     const production = setup({ repository, environment: 'production' })
     const { analysisTask } = await uploaded(production)
     const staging = setup({ repository, environment: 'staging' })
-    staging.perfectCorp.script('verifyWebhook', { webhookId: 'wh-46', taskId: analysisTask, taskStatus: 'success' })
+    staging.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-46', taskId: analysisTask, taskStatus: 'success' } })
 
     await expect(receive(staging)).resolves.toBeUndefined()
 
@@ -1071,7 +1151,7 @@ describe('FaceScanService.receiveWebhook', () => {
   it('throws an UnavailableError, which the route answers 503 so Perfect Corp sends it again, when the step cannot be queued', async () => {
     const ctx = setup()
     const { analysisTask } = await uploaded(ctx)
-    ctx.perfectCorp.script('verifyWebhook', { webhookId: 'wh-47', taskId: analysisTask, taskStatus: 'success' })
+    ctx.perfectCorp.script('checkWebhook', { ok: true, delivery: { webhookId: 'wh-47', taskId: analysisTask, taskStatus: 'success' } })
     ctx.jobs.failNextWith(new Error('queue is down'))
 
     expect(await errorOf(receive(ctx))).toBeInstanceOf(UnavailableError)

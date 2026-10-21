@@ -629,14 +629,18 @@ describe('RestPerfectCorpClient error mapping', () => {
 
 // The Standard Webhooks scheme (standardwebhooks.com): headers webhook-id, webhook-timestamp (seconds) and webhook-signature (space-separated
 // "v1,<base64>" entries). The signature is HMAC-SHA256 over `${id}.${timestamp}.${body}`, keyed with the secret after "whsec_" is
-// stripped and the rest is base64-decoded. The clock is injected.
-describe('RestPerfectCorpClient.verifyWebhook', () => {
+// stripped and the rest is base64-decoded. The clock is injected. A delivery that is refused says why, with the reason and a few
+// counts and key names, and never the secret, a signature or anything the body says.
+describe('RestPerfectCorpClient.checkWebhook', () => {
   const KEY_BYTES = Uint8Array.from({ length: 24 }, (_, i) => i * 7 + 3)
+  const OTHER_KEY_BYTES = Uint8Array.from({ length: 24 }, (_, i) => i * 5 + 1)
   const base64 = (bytes: ArrayBuffer | Uint8Array) => btoa(String.fromCharCode(...new Uint8Array(bytes)))
   const SECRET_BASE64 = base64(KEY_BYTES)
   const WEBHOOK_ID = 'msg_2zq0xYk4WpP3eK8vNn1aBcDeFgH'
-  const PAYLOAD = { created_at: 1761112848, data: { task_id: 'task-skin-1', task_status: 'success' } }
+  const TASK_ID = 'task-skin-1'
+  const PAYLOAD = { created_at: 1761112848, data: { task_id: TASK_ID, task_status: 'success' } }
   const BODY = JSON.stringify(PAYLOAD)
+  const ALL_HEADERS = ['webhook-id', 'webhook-timestamp', 'webhook-signature']
 
   /** The signature the way the Standard Webhooks spec computes it, worked here with WebCrypto and not with the adapter. */
   const sign = async (id: string, timestamp: string | number, body: string, keyBytes: Uint8Array = KEY_BYTES) => {
@@ -654,167 +658,707 @@ describe('RestPerfectCorpClient.verifyWebhook', () => {
     return { body, headers: new Headers({ 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` }), timestamp, signature }
   }
 
-  it('matches the published Standard Webhooks test vector, so the scheme is the standard one and not only self-consistent', async () => {
-    const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw'
-    const id = 'msg_p5jXN8AQM9LWM0D4loKWxJek'
-    const timestamp = '1614265330'
-    const published = 'v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE='
-    const keyBytes = Uint8Array.from(atob(secret.slice('whsec_'.length)), (c) => c.charCodeAt(0))
-    const verifier = make(() => json({}), { webhookSecret: secret, now: () => new Date(1614265330 * 1000) }).client
-    const payload = '{"created_at": 1614265330, "data": {"task_id": "t-9", "task_status": "error"}}'
+  const withSignature = (timestamp: string, value: string) => new Headers({ 'webhook-id': WEBHOOK_ID, 'webhook-timestamp': timestamp, 'webhook-signature': value })
 
-    // The test's own signer, run over the published inputs, gives the published signature: it is the standard scheme.
-    expect(`v1,${await sign(id, timestamp, '{"test": 2432232314}', keyBytes)}`).toBe(published)
-    // And the adapter accepts a payload signed the same way, under the same secret.
-    const headers = new Headers({ 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${await sign(id, timestamp, payload, keyBytes)}` })
-    expect(await verifier.verifyWebhook(payload, headers)).toEqual({ webhookId: id, taskId: 't-9', taskStatus: 'error' })
-  })
+  /** The reason a delivery was refused. Fails the test if it was accepted. */
+  const rejectionOf = async (body: string, headers: Headers, webhookClient = client()) => {
+    const result = await webhookClient.checkWebhook(body, headers)
+    if (result.ok) throw new Error('expected the delivery to be rejected, but it was accepted')
+    return result.rejection
+  }
 
-  it('accepts a correctly signed delivery and returns the webhook id, task id and status', async () => {
-    const { body, headers } = await delivery()
-
-    expect(await client().verifyWebhook(body, headers)).toEqual({ webhookId: WEBHOOK_ID, taskId: 'task-skin-1', taskStatus: 'success' })
-  })
-
-  it('returns an error status as it is', async () => {
-    const errored = JSON.stringify({ created_at: 1, data: { task_id: 'task-9', task_status: 'error' } })
-    const { body, headers } = await delivery({ body: errored })
-
-    expect(await client().verifyWebhook(body, headers)).toEqual({ webhookId: WEBHOOK_ID, taskId: 'task-9', taskStatus: 'error' })
-  })
-
-  it('accepts a secret with the whsec_ prefix and the same secret without it', async () => {
-    const { body, headers } = await delivery()
-
-    expect(await client(`whsec_${SECRET_BASE64}`).verifyWebhook(body, headers)).not.toBeNull()
-    expect(await client(SECRET_BASE64).verifyWebhook(body, headers)).not.toBeNull()
-  })
-
-  it('rejects a signature made with another secret, however it is configured', async () => {
-    const other = Uint8Array.from({ length: 24 }, (_, i) => i * 5 + 1)
-    const { body, headers } = await delivery({ keyBytes: other })
-
-    expect(await client(`whsec_${SECRET_BASE64}`).verifyWebhook(body, headers)).toBeNull()
-    expect(await client(SECRET_BASE64).verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it('does not use the base64 text of the secret as the key: the key is the decoded bytes', async () => {
-    const textKey = new TextEncoder().encode(SECRET_BASE64)
-    const { body, headers } = await delivery({ keyBytes: textKey })
-
-    expect(await client().verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it('rejects a body that was changed after it was signed, by a single character', async () => {
-    const { body, headers } = await delivery()
-
-    expect(await client().verifyWebhook(body.replace('task-skin-1', 'task-skin-2'), headers)).toBeNull()
-    expect(await client().verifyWebhook(body + ' ', headers)).toBeNull()
-  })
-
-  it('rejects a delivery whose webhook id or timestamp was changed after signing, even inside the time window', async () => {
-    const { body, headers, signature } = await delivery()
-    const otherId = new Headers({ 'webhook-id': WEBHOOK_ID + 'x', 'webhook-timestamp': headers.get('webhook-timestamp')!, 'webhook-signature': `v1,${signature}` })
-    const otherTime = new Headers({ 'webhook-id': WEBHOOK_ID, 'webhook-timestamp': String(NOW_SECONDS - 1), 'webhook-signature': `v1,${signature}` })
-
-    expect(await client().verifyWebhook(body, otherId)).toBeNull()
-    expect(await client().verifyWebhook(body, otherTime)).toBeNull()
-  })
-
-  it('accepts a timestamp exactly 5 minutes old and refuses one a second older', async () => {
-    const edge = await delivery({ ageSeconds: TOLERANCE_SECONDS })
-    const past = await delivery({ ageSeconds: TOLERANCE_SECONDS + 1 })
-
-    expect(await client().verifyWebhook(edge.body, edge.headers)).not.toBeNull()
-    expect(await client().verifyWebhook(past.body, past.headers)).toBeNull()
-  })
-
-  it('accepts a timestamp exactly 5 minutes in the future and refuses one a second further', async () => {
-    const edge = await delivery({ ageSeconds: -TOLERANCE_SECONDS })
-    const past = await delivery({ ageSeconds: -(TOLERANCE_SECONDS + 1) })
-
-    expect(await client().verifyWebhook(edge.body, edge.headers)).not.toBeNull()
-    expect(await client().verifyWebhook(past.body, past.headers)).toBeNull()
-  })
-
-  it('judges the age by the injected clock, not the real one', async () => {
-    const { body, headers } = await delivery()
-    const later = make(() => json({}), { now: () => new Date(NOW.getTime() + (TOLERANCE_SECONDS + 1) * 1000) }).client
-
-    expect(await later.verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it('accepts a delivery when any one of several space-separated signatures matches, in any position', async () => {
-    const { body, headers, timestamp, signature } = await delivery()
-    const wrong = `v1,${base64(new Uint8Array(32).fill(9))}`
-    const at = (value: string) => new Headers({ 'webhook-id': WEBHOOK_ID, 'webhook-timestamp': timestamp, 'webhook-signature': value })
-
-    expect(headers.get('webhook-signature')).toBe(`v1,${signature}`)
-    expect(await client().verifyWebhook(body, at(`${wrong} v1,${signature}`))).not.toBeNull()
-    expect(await client().verifyWebhook(body, at(`v1,${signature} ${wrong}`))).not.toBeNull()
-    expect(await client().verifyWebhook(body, at(`${wrong} v1,${signature} ${wrong}`))).not.toBeNull()
-    expect(await client().verifyWebhook(body, at(`${wrong} ${wrong}`))).toBeNull()
-  })
-
-  it('ignores a signature of a version it does not know', async () => {
-    const { body, timestamp, signature } = await delivery()
-    const at = (value: string) => new Headers({ 'webhook-id': WEBHOOK_ID, 'webhook-timestamp': timestamp, 'webhook-signature': value })
-
-    expect(await client().verifyWebhook(body, at(`v2,${signature}`))).toBeNull()
-    expect(await client().verifyWebhook(body, at(`v2,${signature} v1,${signature}`))).not.toBeNull()
-  })
-
-  it.each(['webhook-id', 'webhook-timestamp', 'webhook-signature'])('rejects a delivery with no %s header', async (missing) => {
-    const { body, headers } = await delivery()
-    headers.delete(missing)
-
-    expect(await client().verifyWebhook(body, headers)).toBeNull()
-  })
-
-  // Signed over the empty value, so only the emptiness itself can be what is refused.
-  it('rejects a delivery whose webhook id is empty, even when it is signed over the empty id', async () => {
-    const { body, headers } = await delivery({ id: '' })
-
-    expect(await client().verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it('rejects a delivery whose timestamp is empty, even when it is signed over the empty timestamp', async () => {
-    const { body, headers } = await delivery({ timestamp: '' })
-
-    expect(await client().verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it('rejects a delivery whose signature header is empty', async () => {
-    const { body, headers } = await delivery()
-    headers.set('webhook-signature', '')
-
-    expect(await client().verifyWebhook(body, headers)).toBeNull()
-  })
-
-  it.each(['', 'v1', 'v1,', 'v1,!!!not-base64!!!', 'garbage', ',', 'v1,AAAA,BBBB'])('rejects, without throwing, a signature header of "%s"', async (value) => {
-    const { body, headers } = await delivery()
-    headers.set('webhook-signature', value)
-
-    await expect(client().verifyWebhook(body, headers)).resolves.toBeNull()
-  })
-
-  // Signed over the odd timestamp too, so only the timestamp itself can be what is refused.
-  it.each(['abc', '12.5x', 'NaN', '-', '0x10'])('rejects, without throwing, a timestamp of "%s", even when it is signed over that timestamp', async (timestamp) => {
-    const { body, headers } = await delivery({ timestamp })
-
-    await expect(client().verifyWebhook(body, headers)).resolves.toBeNull()
-  })
-
-  it.each([
-    ['is not JSON', 'not json at all'],
-    ['has no data', JSON.stringify({ created_at: 1 })],
-    ['has no task id', JSON.stringify({ created_at: 1, data: { task_status: 'success' } })],
-    ['has a task id that is not text', JSON.stringify({ created_at: 1, data: { task_id: 5, task_status: 'success' } })],
-    ['has a status other than success or error', JSON.stringify({ created_at: 1, data: { task_id: 't', task_status: 'running' } })],
-    ['has no status', JSON.stringify({ created_at: 1, data: { task_id: 't' } })],
-  ])('returns null for a correctly signed payload that %s', async (_label, body) => {
+  /** A correctly signed, fresh delivery of `body`. */
+  const shapeOf = async (body: string) => {
     const signed = await delivery({ body })
+    return rejectionOf(signed.body, signed.headers)
+  }
 
-    await expect(client().verifyWebhook(signed.body, signed.headers)).resolves.toBeNull()
+  /** What a wrongly signed BODY delivery says: nothing matched even with the other ways to read the secret and the id, and its keys are listed. */
+  const MISMATCH = {
+    reason: 'signature-mismatch',
+    versions: ['v1'],
+    signatureCount: 1,
+    undecodedSecretWouldMatch: false,
+    idWithoutSuffixWouldMatch: false,
+    undecodedAndIdWithoutSuffixWouldMatch: false,
+    topLevelKeys: ['created_at', 'data'],
+    dataKeys: ['task_id', 'task_status'],
+  }
+
+  const ACCEPTED = { ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: TASK_ID, taskStatus: 'success' } }
+
+  describe('a delivery that is accepted', () => {
+    it('matches the published Standard Webhooks test vector, so the scheme is the standard one and not only self-consistent', async () => {
+      const secret = 'whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw'
+      const id = 'msg_p5jXN8AQM9LWM0D4loKWxJek'
+      const timestamp = '1614265330'
+      const published = 'v1,g0hM9SsE+OTPJTGt/tmIKtSyZlE3uFJELVlNIOLJ1OE='
+      const keyBytes = Uint8Array.from(atob(secret.slice('whsec_'.length)), (c) => c.charCodeAt(0))
+      const verifier = make(() => json({}), { webhookSecret: secret, now: () => new Date(1614265330 * 1000) }).client
+      const payload = '{"created_at": 1614265330, "data": {"task_id": "t-9", "task_status": "error"}}'
+
+      // The test's own signer, run over the published inputs, gives the published signature: it is the standard scheme.
+      expect(`v1,${await sign(id, timestamp, '{"test": 2432232314}', keyBytes)}`).toBe(published)
+      // And the adapter accepts a payload signed the same way, under the same secret.
+      const headers = new Headers({ 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${await sign(id, timestamp, payload, keyBytes)}` })
+      expect(await verifier.checkWebhook(payload, headers)).toEqual({ ok: true, delivery: { webhookId: id, taskId: 't-9', taskStatus: 'error' } })
+    })
+
+    it('accepts a correctly signed delivery and returns the webhook id, task id and status', async () => {
+      const { body, headers } = await delivery()
+
+      expect(await client().checkWebhook(body, headers)).toEqual(ACCEPTED)
+    })
+
+    it('returns an error status as it is', async () => {
+      const errored = JSON.stringify({ created_at: 1, data: { task_id: 'task-9', task_status: 'error' } })
+      const { body, headers } = await delivery({ body: errored })
+
+      expect(await client().checkWebhook(body, headers)).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'task-9', taskStatus: 'error' } })
+    })
+
+    it('accepts a secret with the whsec_ prefix and the same secret without it', async () => {
+      const { body, headers } = await delivery()
+
+      expect(await client(`whsec_${SECRET_BASE64}`).checkWebhook(body, headers)).toEqual(ACCEPTED)
+      expect(await client(SECRET_BASE64).checkWebhook(body, headers)).toEqual(ACCEPTED)
+    })
+
+    it('accepts a timestamp exactly 5 minutes old and refuses one a second older', async () => {
+      const edge = await delivery({ ageSeconds: TOLERANCE_SECONDS })
+      const past = await delivery({ ageSeconds: TOLERANCE_SECONDS + 1 })
+
+      expect(await client().checkWebhook(edge.body, edge.headers)).toEqual(ACCEPTED)
+      expect(await rejectionOf(past.body, past.headers)).toMatchObject({ reason: 'stale-timestamp' })
+    })
+
+    it('accepts a timestamp exactly 5 minutes in the future and refuses one a second further', async () => {
+      const edge = await delivery({ ageSeconds: -TOLERANCE_SECONDS })
+      const past = await delivery({ ageSeconds: -(TOLERANCE_SECONDS + 1) })
+
+      expect(await client().checkWebhook(edge.body, edge.headers)).toEqual(ACCEPTED)
+      expect(await rejectionOf(past.body, past.headers)).toMatchObject({ reason: 'stale-timestamp' })
+    })
+
+    it('accepts a delivery when any one of several space-separated signatures matches, in any position', async () => {
+      const { body, timestamp, signature } = await delivery()
+      const wrong = `v1,${base64(new Uint8Array(32).fill(9))}`
+
+      expect(await client().checkWebhook(body, withSignature(timestamp, `${wrong} v1,${signature}`))).toEqual(ACCEPTED)
+      expect(await client().checkWebhook(body, withSignature(timestamp, `v1,${signature} ${wrong}`))).toEqual(ACCEPTED)
+      expect(await client().checkWebhook(body, withSignature(timestamp, `${wrong} v1,${signature} ${wrong}`))).toEqual(ACCEPTED)
+    })
+
+    it('ignores a signature of a version it does not know, and accepts when a v1 one sits beside it', async () => {
+      const { body, timestamp, signature } = await delivery()
+
+      expect(await client().checkWebhook(body, withSignature(timestamp, `v2,${signature} v1,${signature}`))).toEqual(ACCEPTED)
+    })
+  })
+
+  describe('rejection: missing-headers', () => {
+    it.each(ALL_HEADERS)('names %s, and only it, when that header is absent', async (missing) => {
+      const { body, headers } = await delivery()
+      headers.delete(missing)
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: [missing] })
+    })
+
+    it('names all three, in the order id, timestamp, signature, when there are no headers at all', async () => {
+      expect(await rejectionOf(BODY, new Headers())).toEqual({ reason: 'missing-headers', missing: ['webhook-id', 'webhook-timestamp', 'webhook-signature'] })
+    })
+
+    it('names two of them in that same order when two are absent', async () => {
+      const { body, headers } = await delivery()
+      headers.delete('webhook-signature')
+      headers.delete('webhook-id')
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: ['webhook-id', 'webhook-signature'] })
+    })
+
+    // Signed over the empty value, so only the emptiness itself can be what is refused.
+    it('counts an empty webhook id as missing, even when it is signed over the empty id', async () => {
+      const { body, headers } = await delivery({ id: '' })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: ['webhook-id'] })
+    })
+
+    it('counts an empty timestamp as missing, even when it is signed over the empty timestamp', async () => {
+      const { body, headers } = await delivery({ timestamp: '' })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: ['webhook-timestamp'] })
+    })
+
+    it('counts an empty signature header as missing', async () => {
+      const { body, headers } = await delivery()
+      headers.set('webhook-signature', '')
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: ['webhook-signature'] })
+    })
+
+    it('is the first thing checked: a missing header is reported even when the timestamp that is there is not digits', async () => {
+      const { body, headers } = await delivery({ timestamp: 'abc' })
+      headers.delete('webhook-id')
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'missing-headers', missing: ['webhook-id'] })
+    })
+  })
+
+  describe('rejection: bad-timestamp', () => {
+    // Signed over the odd timestamp too, so only the timestamp itself can be what is refused.
+    it.each(['abc', '12.5x', 'NaN', '-', '0x10', '-5', '+5', '1e3'])('refuses a timestamp of "%s", even when it is signed over that timestamp', async (timestamp) => {
+      const { body, headers } = await delivery({ timestamp })
+
+      await expect(rejectionOf(body, headers)).resolves.toEqual({ reason: 'bad-timestamp' })
+    })
+
+    it('is checked before the age: digits only is the rule that comes first', async () => {
+      const { body, headers } = await delivery({ timestamp: '12.5' })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'bad-timestamp' })
+    })
+  })
+
+  describe('rejection: stale-timestamp', () => {
+    it('says how far in the past a delivery is, one second beyond the window, with no millisecond reading and a signature that was good', async () => {
+      const { body, headers } = await delivery({ ageSeconds: TOLERANCE_SECONDS + 1 })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'stale-timestamp', skewSeconds: 301, skewIfMilliseconds: null, signatureValid: true })
+    })
+
+    it('says how far in the future a delivery is, as a negative skew', async () => {
+      const { body, headers } = await delivery({ ageSeconds: -(TOLERANCE_SECONDS + 1) })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'stale-timestamp', skewSeconds: -301, skewIfMilliseconds: null, signatureValid: true })
+    })
+
+    it('reports a long-past delivery in seconds', async () => {
+      const { body, headers } = await delivery({ ageSeconds: 86_400 })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'stale-timestamp', skewSeconds: 86_400, skewIfMilliseconds: null, signatureValid: true })
+    })
+
+    it('says the signature was not good when it was made with another secret, so a bad clock is told apart from a bad secret', async () => {
+      const { body, headers } = await delivery({ ageSeconds: 1000, keyBytes: OTHER_KEY_BYTES })
+
+      expect(await rejectionOf(body, headers)).toEqual({ reason: 'stale-timestamp', skewSeconds: 1000, skewIfMilliseconds: null, signatureValid: false })
+    })
+
+    it('says the signature was not good when the body was changed after signing', async () => {
+      const { body, headers } = await delivery({ ageSeconds: 1000 })
+
+      expect(await rejectionOf(body + ' ', headers)).toMatchObject({ reason: 'stale-timestamp', signatureValid: false })
+    })
+
+    it('judges the age by the injected clock, not the real one', async () => {
+      const { body, headers } = await delivery()
+      const later = make(() => json({}), { webhookSecret: `whsec_${SECRET_BASE64}`, now: () => new Date(NOW.getTime() + (TOLERANCE_SECONDS + 1) * 1000) }).client
+
+      expect(await rejectionOf(body, headers, later)).toEqual({ reason: 'stale-timestamp', skewSeconds: 301, skewIfMilliseconds: null, signatureValid: true })
+    })
+
+    describe('a timestamp in milliseconds', () => {
+      it('shows the skew it would have in seconds near zero, and a signature that is good when signed over that very timestamp', async () => {
+        const timestamp = String(NOW.getTime() - 2000)
+        const { body, headers } = await delivery({ timestamp })
+
+        expect(await rejectionOf(body, headers)).toEqual({
+          reason: 'stale-timestamp',
+          // Read as seconds the timestamp is about 1000 times too far ahead: now_s - (now_ms - 2000).
+          skewSeconds: NOW_SECONDS - (NOW.getTime() - 2000),
+          skewIfMilliseconds: 2,
+          signatureValid: true,
+        })
+      })
+
+      it('reads 0 when the millisecond timestamp is exactly now', async () => {
+        const { body, headers } = await delivery({ timestamp: String(NOW.getTime()) })
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ reason: 'stale-timestamp', skewIfMilliseconds: 0, signatureValid: true })
+      })
+
+      it('reads a negative number of seconds when the millisecond timestamp is ahead of now', async () => {
+        const { body, headers } = await delivery({ timestamp: String(NOW.getTime() + 7000) })
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ reason: 'stale-timestamp', skewIfMilliseconds: -7, signatureValid: true })
+      })
+
+      it('says the signature was not good when the millisecond timestamp was signed with another secret', async () => {
+        const { body, headers } = await delivery({ timestamp: String(NOW.getTime() - 2000), keyBytes: OTHER_KEY_BYTES })
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ reason: 'stale-timestamp', skewIfMilliseconds: 2, signatureValid: false })
+      })
+
+      it('treats 100000000000 as seconds and the next number up as milliseconds', async () => {
+        const seconds = await delivery({ timestamp: '100000000000' })
+        const millis = await delivery({ timestamp: '100000000001' })
+
+        expect(await rejectionOf(seconds.body, seconds.headers)).toMatchObject({ reason: 'stale-timestamp', skewIfMilliseconds: null })
+        // 100000000001 ms is 100000000.001 s, so now_s minus that is 100,000,000 s less than now_s, to the second.
+        expect(await rejectionOf(millis.body, millis.headers)).toMatchObject({ reason: 'stale-timestamp', skewIfMilliseconds: NOW_SECONDS - 100_000_000 })
+      })
+    })
+
+    it('comes before the signature is judged: a stale delivery with a wrong signature is stale, not a mismatch', async () => {
+      const { body, headers } = await delivery({ ageSeconds: 1000, keyBytes: OTHER_KEY_BYTES })
+
+      expect((await rejectionOf(body, headers)).reason).toBe('stale-timestamp')
+    })
+
+    it('comes before the secret is read: a stale delivery is stale even when our secret cannot be decoded', async () => {
+      const { body, headers } = await delivery({ ageSeconds: 1000 })
+
+      expect((await rejectionOf(body, headers, client('whsec_!!!not-base64!!!'))).reason).toBe('stale-timestamp')
+    })
+  })
+
+  describe('rejection: unreadable-secret', () => {
+    it.each(['whsec_!!!not-base64!!!', '!!!not-base64!!!'])('is reported when our configured secret "%s" cannot be base64-decoded, without throwing', async (secret) => {
+      const { body, headers } = await delivery()
+
+      await expect(rejectionOf(body, headers, client(secret))).resolves.toEqual({ reason: 'unreadable-secret' })
+    })
+  })
+
+  describe('rejection: signature-mismatch', () => {
+    it('is reported for a signature made with another secret, however ours is configured, with what the header held and no match for our text', async () => {
+      const { body, headers } = await delivery({ keyBytes: OTHER_KEY_BYTES })
+      const expected = MISMATCH
+
+      expect(await rejectionOf(body, headers, client(`whsec_${SECRET_BASE64}`))).toEqual(expected)
+      expect(await rejectionOf(body, headers, client(SECRET_BASE64))).toEqual(expected)
+    })
+
+    it('is reported for a body that was changed after it was signed, by a single character', async () => {
+      const { body, headers } = await delivery()
+
+      expect((await rejectionOf(body.replace(TASK_ID, 'task-skin-2'), headers)).reason).toBe('signature-mismatch')
+      expect((await rejectionOf(body + ' ', headers)).reason).toBe('signature-mismatch')
+    })
+
+    it('is reported for a delivery whose webhook id or timestamp was changed after signing, even inside the time window', async () => {
+      const { body, headers, signature } = await delivery()
+      const otherId = new Headers({ 'webhook-id': WEBHOOK_ID + 'x', 'webhook-timestamp': headers.get('webhook-timestamp')!, 'webhook-signature': `v1,${signature}` })
+      const otherTime = new Headers({ 'webhook-id': WEBHOOK_ID, 'webhook-timestamp': String(NOW_SECONDS - 1), 'webhook-signature': `v1,${signature}` })
+
+      expect((await rejectionOf(body, otherId)).reason).toBe('signature-mismatch')
+      expect((await rejectionOf(body, otherTime)).reason).toBe('signature-mismatch')
+    })
+
+    it('lists each version it saw once, with how many entries there were, when none matches', async () => {
+      const { body, timestamp } = await delivery()
+      const wrong = base64(new Uint8Array(32).fill(9))
+
+      expect(await rejectionOf(body, withSignature(timestamp, `v2,${wrong} v1,${wrong} v1,${wrong}`))).toEqual({
+        ...MISMATCH,
+        versions: ['v1', 'v2'],
+        signatureCount: 3,
+      })
+    })
+
+    it('ignores a signature of a version it does not know: v2 alone does not match', async () => {
+      const { body, timestamp, signature } = await delivery()
+
+      expect(await rejectionOf(body, withSignature(timestamp, `v2,${signature}`))).toEqual({ ...MISMATCH, versions: ['v2'] })
+    })
+
+    it('sorts the versions, and names a prefix that is not v and one to three digits "other", never as it was written', async () => {
+      const { body, timestamp } = await delivery()
+      const wrong = base64(new Uint8Array(32).fill(9))
+      const header = `v1000,${wrong} leaky-prefix-482913,${wrong} v1,${wrong} v999,${wrong} v1234,${wrong}`
+
+      const rejection = await rejectionOf(body, withSignature(timestamp, header))
+
+      expect(rejection).toEqual({ ...MISMATCH, versions: ['other', 'v1', 'v999'], signatureCount: 5 })
+      expect(JSON.stringify(rejection)).not.toContain('leaky-prefix-482913')
+    })
+
+    it.each(['v1', 'v1,', 'v1,!!!not-base64!!!', 'garbage', ',', 'v1,AAAA,BBBB'])('is reported, without throwing, for a signature header of "%s"', async (value) => {
+      const { body, timestamp } = await delivery()
+
+      await expect(rejectionOf(body, withSignature(timestamp, value))).resolves.toMatchObject({ reason: 'signature-mismatch', signatureCount: 1 })
+    })
+
+    // The configured secret is the base64 text. A sender that keyed with its own characters (not decoded) would sign like this.
+    describe('undecodedSecretWouldMatch', () => {
+      it('is true when the delivery was signed with the configured secret string as UTF-8 bytes, whsec_ prefix included', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, headers } = await delivery({ keyBytes: new TextEncoder().encode(secret) })
+
+        expect(await rejectionOf(body, headers, client(secret))).toEqual({ ...MISMATCH, undecodedSecretWouldMatch: true })
+      })
+
+      it('is true when the delivery was signed with the part after whsec_ as UTF-8 bytes', async () => {
+        const { body, headers } = await delivery({ keyBytes: new TextEncoder().encode(SECRET_BASE64) })
+
+        expect(await rejectionOf(body, headers, client(`whsec_${SECRET_BASE64}`))).toMatchObject({ reason: 'signature-mismatch', undecodedSecretWouldMatch: true })
+      })
+
+      it('is true for a secret configured without the prefix, signed with that text as UTF-8 bytes', async () => {
+        const { body, headers } = await delivery({ keyBytes: new TextEncoder().encode(SECRET_BASE64) })
+
+        expect(await rejectionOf(body, headers, client(SECRET_BASE64))).toMatchObject({ reason: 'signature-mismatch', undecodedSecretWouldMatch: true })
+      })
+
+      it('is true when the matching entry is one of several', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, timestamp, signature } = await delivery({ keyBytes: new TextEncoder().encode(secret) })
+        const wrong = base64(new Uint8Array(32).fill(9))
+
+        expect(await rejectionOf(body, withSignature(timestamp, `v1,${wrong} v1,${signature}`), client(secret))).toMatchObject({
+          signatureCount: 2,
+          undecodedSecretWouldMatch: true,
+        })
+      })
+
+      it('is false for a signature made with a random key', async () => {
+        const random = crypto.getRandomValues(new Uint8Array(24))
+        const { body, headers } = await delivery({ keyBytes: random })
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ reason: 'signature-mismatch', undecodedSecretWouldMatch: false })
+      })
+
+      it('is false when only a v2 entry was made with the secret text, since only v1 counts', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, timestamp, signature } = await delivery({ keyBytes: new TextEncoder().encode(secret) })
+
+        expect(await rejectionOf(body, withSignature(timestamp, `v2,${signature}`), client(secret))).toMatchObject({ undecodedSecretWouldMatch: false })
+      })
+    })
+
+    // Real deliveries carry ids like `msg_…:122998323166`. A sender that signs over the id without the part from its first ':' on would
+    // be accepted if we did the same, and the log should say so.
+    describe('idWithoutSuffixWouldMatch and undecodedAndIdWithoutSuffixWouldMatch', () => {
+      const BASE_ID = 'msg_2zq0xYk4WpP3eK8vNn1aBcDeFgH'
+      const SUFFIXED_ID = `${BASE_ID}:122998323166`
+
+      /** A delivery that carries `headerId` but was signed over `signedId`, with `keyBytes`. */
+      const signedOver = async (headerId: string, signedId: string, keyBytes: Uint8Array = KEY_BYTES, body = BODY) => {
+        const timestamp = String(NOW_SECONDS)
+        return { body, headers: new Headers({ 'webhook-id': headerId, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${await sign(signedId, timestamp, body, keyBytes)}` }) }
+      }
+
+      it('is true, and the others false, when the signature is over the id up to its first colon, with the decoded secret', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID)
+
+        expect(await rejectionOf(body, headers)).toEqual({ ...MISMATCH, idWithoutSuffixWouldMatch: true })
+      })
+
+      it('is false when the id has a suffix but was signed over the whole id (that is accepted, not a mismatch)', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, SUFFIXED_ID)
+
+        expect(await client().checkWebhook(body, headers)).toEqual({ ok: true, delivery: { webhookId: SUFFIXED_ID, taskId: TASK_ID, taskStatus: 'success' } })
+      })
+
+      it('is false when the signature is over the id up to its first colon but made with another secret', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID, OTHER_KEY_BYTES)
+
+        expect(await rejectionOf(body, headers)).toEqual(MISMATCH)
+      })
+
+      it('is false when the id has no colon, whatever the signature', async () => {
+        const { body, headers } = await signedOver(BASE_ID, BASE_ID, OTHER_KEY_BYTES)
+
+        expect(await rejectionOf(body, headers)).toEqual(MISMATCH)
+      })
+
+      it('cuts the id at its FIRST colon: the text before it matches, the text before the last colon does not', async () => {
+        const first = await signedOver('a:b:c', 'a')
+        const last = await signedOver('a:b:c', 'a:b')
+
+        expect(await rejectionOf(first.body, first.headers)).toMatchObject({ idWithoutSuffixWouldMatch: true })
+        expect(await rejectionOf(last.body, last.headers)).toMatchObject({ idWithoutSuffixWouldMatch: false })
+      })
+
+      it('is true when the matching entry is one of several', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID)
+        const wrong = base64(new Uint8Array(32).fill(9))
+        headers.set('webhook-signature', `v1,${wrong} ${headers.get('webhook-signature')}`)
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ signatureCount: 2, idWithoutSuffixWouldMatch: true })
+      })
+
+      it('is false when the matching entry is not v1', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID)
+        headers.set('webhook-signature', headers.get('webhook-signature')!.replace('v1,', 'v2,'))
+
+        expect(await rejectionOf(body, headers)).toMatchObject({ idWithoutSuffixWouldMatch: false })
+      })
+
+      it('puts the both-ways flag up, and only it, when the signature is over the id without its suffix and keyed with the secret text, prefix included', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID, new TextEncoder().encode(secret))
+
+        expect(await rejectionOf(body, headers, client(secret))).toEqual({ ...MISMATCH, undecodedAndIdWithoutSuffixWouldMatch: true })
+      })
+
+      it('puts the both-ways flag up when the key is the part after whsec_ as UTF-8 bytes', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID, new TextEncoder().encode(SECRET_BASE64))
+
+        expect(await rejectionOf(body, headers, client(`whsec_${SECRET_BASE64}`))).toEqual({ ...MISMATCH, undecodedAndIdWithoutSuffixWouldMatch: true })
+      })
+
+      it('puts the both-ways flag up for a secret configured without the prefix', async () => {
+        const { body, headers } = await signedOver(SUFFIXED_ID, BASE_ID, new TextEncoder().encode(SECRET_BASE64))
+
+        expect(await rejectionOf(body, headers, client(SECRET_BASE64))).toMatchObject({ undecodedAndIdWithoutSuffixWouldMatch: true })
+      })
+
+      it('leaves the both-ways flag down when the text key signed over the whole id: that is the undecoded deviation alone', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, headers } = await signedOver(SUFFIXED_ID, SUFFIXED_ID, new TextEncoder().encode(secret))
+
+        expect(await rejectionOf(body, headers, client(secret))).toEqual({ ...MISMATCH, undecodedSecretWouldMatch: true })
+      })
+
+      it('leaves the both-ways flag down for an id with no colon', async () => {
+        const secret = `whsec_${SECRET_BASE64}`
+        const { body, headers } = await signedOver(BASE_ID, BASE_ID, new TextEncoder().encode(secret))
+
+        expect(await rejectionOf(body, headers, client(secret))).toEqual({ ...MISMATCH, undecodedSecretWouldMatch: true })
+      })
+    })
+
+    describe('topLevelKeys and dataKeys', () => {
+      const mismatchOf = async (body: string) => {
+        const { headers } = await delivery({ body, keyBytes: OTHER_KEY_BYTES })
+        return rejectionOf(body, headers)
+      }
+
+      it('lists the key names of the real body, sorted, so its layout is learned', async () => {
+        const body = JSON.stringify({ type: 'x', created_at: 1, data: { task_status: 'success', task_id: 't', extra_field: 2 } })
+
+        expect(await mismatchOf(body)).toMatchObject({ reason: 'signature-mismatch', topLevelKeys: ['created_at', 'data', 'type'], dataKeys: ['extra_field', 'task_id', 'task_status'] })
+      })
+
+      it('lists no data keys when data is not an object, and still the top-level ones', async () => {
+        expect(await mismatchOf(JSON.stringify({ created_at: 1, data: 'text' }))).toMatchObject({ topLevelKeys: ['created_at', 'data'], dataKeys: [] })
+      })
+
+      it.each([['not JSON', 'not json at all'], ['null', 'null'], ['a list', '[1, 2]'], ['empty', '']])('lists no keys when the body is %s', async (_label, body) => {
+        expect(await mismatchOf(body)).toMatchObject({ reason: 'signature-mismatch', topLevelKeys: [], dataKeys: [] })
+      })
+
+      it('drops a key that is not code-shaped and keeps one of exactly 40 characters, as bad-shape does', async () => {
+        const forty = 'k'.repeat(40)
+        const body = JSON.stringify({ [forty]: 1, ['k'.repeat(41)]: 2, 'user@example.com': 3, 'has space': 4, data: { 'a b': 1, fine_1: 2 } })
+
+        expect(await mismatchOf(body)).toMatchObject({ topLevelKeys: ['data', forty], dataKeys: ['fine_1'] })
+      })
+
+      it('lists at most 20 keys of each kind: the first 20 in sorted order, however they were written', async () => {
+        const keys = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`a${String(count - i).padStart(2, '0')}`, i]))
+        const sortedFirst = Array.from({ length: 20 }, (_, i) => `a${String(i + 1).padStart(2, '0')}`)
+
+        expect(await mismatchOf(JSON.stringify({ ...keys(21), data: keys(21) }))).toMatchObject({ topLevelKeys: sortedFirst, dataKeys: sortedFirst })
+      })
+    })
+
+    it('comes before the body is read: a wrongly signed body that is not JSON is a mismatch', async () => {
+      const { body, headers } = await delivery({ body: 'not json at all', keyBytes: OTHER_KEY_BYTES })
+
+      expect((await rejectionOf(body, headers)).reason).toBe('signature-mismatch')
+    })
+  })
+
+  describe('rejection: bad-shape', () => {
+    it('is not-json for a correctly signed body that is not JSON, with no keys', async () => {
+      expect(await shapeOf('not json at all')).toEqual({ reason: 'bad-shape', problem: 'not-json', topLevelKeys: [], dataKeys: [] })
+    })
+
+    it('is no-data when there is no data, and lists the top-level keys it has', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, type: 'x' }))).toEqual({ reason: 'bad-shape', problem: 'no-data', topLevelKeys: ['created_at', 'type'], dataKeys: [] })
+    })
+
+    it.each([
+      ['null', 'null'],
+      ['a number', '5'],
+      ['a list', '[1, 2]'],
+    ])('is no-data, with no keys and no throw, when the body is JSON that is %s', async (_label, body) => {
+      expect(await shapeOf(body)).toEqual({ reason: 'bad-shape', problem: 'no-data', topLevelKeys: [], dataKeys: [] })
+    })
+
+    it('is no-data when data is not an object, with no data keys', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: 'text' }))).toEqual({
+        reason: 'bad-shape',
+        problem: 'no-data',
+        topLevelKeys: ['created_at', 'data'],
+        dataKeys: [],
+      })
+    })
+
+    it('is no-data when data is null', async () => {
+      expect(await shapeOf(JSON.stringify({ data: null }))).toEqual({ reason: 'bad-shape', problem: 'no-data', topLevelKeys: ['data'], dataKeys: [] })
+    })
+
+    it('is no-task-id when data has no task id, and lists the keys of data', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_status: 'success' } }))).toEqual({
+        reason: 'bad-shape',
+        problem: 'no-task-id',
+        topLevelKeys: ['created_at', 'data'],
+        dataKeys: ['task_status'],
+      })
+    })
+
+    it('is no-task-id when the task id is not text', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_id: 5, task_status: 'success' } }))).toMatchObject({ problem: 'no-task-id', dataKeys: ['task_id', 'task_status'] })
+    })
+
+    it('is no-task-id when the task id is empty text', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_id: '', task_status: 'success' } }))).toMatchObject({ problem: 'no-task-id' })
+    })
+
+    it('is bad-task-status for a status other than success or error', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_id: 't', task_status: 'running' } }))).toEqual({
+        reason: 'bad-shape',
+        problem: 'bad-task-status',
+        topLevelKeys: ['created_at', 'data'],
+        dataKeys: ['task_id', 'task_status'],
+      })
+    })
+
+    it('is bad-task-status when there is no status', async () => {
+      expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_id: 't' } }))).toMatchObject({ problem: 'bad-task-status', dataKeys: ['task_id'] })
+    })
+
+    it('reports the task id problem before the status problem when both are wrong', async () => {
+      expect(await shapeOf(JSON.stringify({ data: { task_status: 'running' } }))).toMatchObject({ problem: 'no-task-id' })
+    })
+
+    it('sorts the keys it lists', async () => {
+      expect(await shapeOf(JSON.stringify({ zeta: 1, alpha: 2, mid: 3 }))).toMatchObject({ topLevelKeys: ['alpha', 'mid', 'zeta'] })
+    })
+
+    it('drops a key that is not code-shaped (letters, digits and underscores, 1 to 40 of them), and keeps one of exactly 40', async () => {
+      const forty = 'k'.repeat(40)
+      const body = JSON.stringify({
+        [forty]: 1,
+        ['k'.repeat(41)]: 2,
+        'user@example.com': 3,
+        'has space': 4,
+        'dash-ed': 5,
+        '': 6,
+        'ok_Key9': 7,
+        data: { 'Bearer abc.def': 1, 'a b': 2, fine_1: 3, task_status: 'running' },
+      })
+
+      expect(await shapeOf(body)).toEqual({
+        reason: 'bad-shape',
+        problem: 'no-task-id',
+        topLevelKeys: ['data', forty, 'ok_Key9'],
+        dataKeys: ['fine_1', 'task_status'],
+      })
+    })
+
+    it('lists at most 20 keys of each kind: all 20 when there are 20, the first 20 in sorted order when there are 21', async () => {
+      const keys = (count: number) => Object.fromEntries(Array.from({ length: count }, (_, i) => [`a${String(count - i).padStart(2, '0')}`, i]))
+      const sortedFirst = (count: number) => Array.from({ length: count }, (_, i) => `a${String(i + 1).padStart(2, '0')}`)
+
+      // Written in reverse, so keeping the first 20 written and keeping the first 20 sorted are different answers.
+      const exactly = await shapeOf(JSON.stringify({ ...keys(20) }))
+      const over = await shapeOf(JSON.stringify({ ...keys(21) }))
+      const overData = await shapeOf(JSON.stringify({ data: { ...keys(21) } }))
+
+      expect(exactly).toMatchObject({ topLevelKeys: sortedFirst(20) })
+      expect(over).toMatchObject({ topLevelKeys: sortedFirst(20) })
+      expect(overData).toMatchObject({ topLevelKeys: ['data'], dataKeys: sortedFirst(20) })
+    })
+
+    it('is checked last: it comes only after the signature is good', async () => {
+      const wrongKey = await delivery({ body: JSON.stringify({ created_at: 1 }), keyBytes: OTHER_KEY_BYTES })
+
+      expect((await rejectionOf(wrongKey.body, wrongKey.headers)).reason).toBe('signature-mismatch')
+    })
+  })
+
+  describe('what a rejection never holds', () => {
+    const VALUE = 'distinctive-body-value-482913'
+
+    it('carries no secret, no signature, no webhook id and no value from the body, whichever way the delivery fails', async () => {
+      const secret = `whsec_${SECRET_BASE64}`
+      const leakyBody = (data: Record<string, unknown>) => JSON.stringify({ created_at: 1, note: VALUE, data: { task_id: TASK_ID, ...data } })
+      const wrong = base64(new Uint8Array(32).fill(9))
+      const scenarios: { name: string; make: () => Promise<{ rejection: Awaited<ReturnType<typeof rejectionOf>>; signature: string }> }[] = []
+      const add = (name: string, build: () => Promise<{ body: string; headers: Headers; signature: string; secret?: string }>) =>
+        scenarios.push({
+          name,
+          make: async () => {
+            const built = await build()
+            return { rejection: await rejectionOf(built.body, built.headers, client(built.secret ?? secret)), signature: built.signature }
+          },
+        })
+
+      add('missing header', async () => {
+        const d = await delivery({ body: leakyBody({ task_status: 'success' }) })
+        d.headers.delete('webhook-timestamp')
+        return d
+      })
+      add('bad timestamp', () => delivery({ timestamp: 'abc', body: leakyBody({ task_status: 'success' }) }))
+      add('stale', () => delivery({ ageSeconds: 5000, body: leakyBody({ task_status: 'success' }) }))
+      add('stale in milliseconds', () => delivery({ timestamp: String(NOW.getTime()), body: leakyBody({ task_status: 'success' }) }))
+      add('unreadable secret', async () => ({ ...(await delivery({ body: leakyBody({ task_status: 'success' }) })), secret: 'whsec_!!!not-base64!!!' }))
+      add('mismatch', async () => {
+        const d = await delivery({ body: leakyBody({ task_status: 'success' }), keyBytes: OTHER_KEY_BYTES })
+        d.headers.set('webhook-signature', `v1,${d.signature} leaky-prefix-482913,${wrong}`)
+        return d
+      })
+      add('mismatch signed with the secret text', async () => delivery({ body: leakyBody({ task_status: 'success' }), keyBytes: new TextEncoder().encode(secret) }))
+      add('mismatch with an id suffix, signed over the id without it', async () => {
+        const id = `${WEBHOOK_ID}:122998323166`
+        const timestamp = String(NOW_SECONDS)
+        const body = leakyBody({ task_status: 'success' })
+        const signature = await sign(WEBHOOK_ID, timestamp, body)
+        return { body, headers: new Headers({ 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` }), signature }
+      })
+      add('mismatch with an id suffix, signed with the secret text over the id without it', async () => {
+        const id = `${WEBHOOK_ID}:122998323166`
+        const timestamp = String(NOW_SECONDS)
+        const body = leakyBody({ task_status: 'success' })
+        const signature = await sign(WEBHOOK_ID, timestamp, body, new TextEncoder().encode(secret))
+        return { body, headers: new Headers({ 'webhook-id': id, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` }), signature }
+      })
+      add('mismatch with keys that hold values', () =>
+        delivery({
+          keyBytes: OTHER_KEY_BYTES,
+          body: JSON.stringify({ [`not code shaped ${VALUE}`]: 1, note: VALUE, data: { task_id: TASK_ID, task_status: VALUE, [`${TASK_ID}:${VALUE}`]: 2 } }),
+        }),
+      )
+      add('not json', () => delivery({ body: `not json, ${VALUE}` }))
+      add('no data', () => delivery({ body: JSON.stringify({ note: VALUE }) }))
+      add('no task id', () => delivery({ body: JSON.stringify({ data: { note: VALUE, task_status: 'success' } }) }))
+      add('bad status', () => delivery({ body: leakyBody({ task_status: VALUE }) }))
+      add('keys that hold values', () => delivery({ body: JSON.stringify({ [`not code shaped ${VALUE}`]: 1, data: { task_status: VALUE, [TASK_ID]: 1, [`${TASK_ID}:${VALUE}`]: 2 } }) }))
+
+      for (const scenario of scenarios) {
+        const { rejection, signature } = await scenario.make()
+        const text = JSON.stringify(rejection)
+
+        for (const [what, secretValue] of [
+          ['the secret', secret],
+          ['the secret without its prefix', SECRET_BASE64],
+          ['the signature', signature],
+          ['the other signature', wrong],
+          ['the webhook id', WEBHOOK_ID],
+          ['the id suffix', '122998323166'],
+          ['the task id', TASK_ID],
+          ['a body value', VALUE],
+          ['a prefix as written', 'leaky-prefix-482913'],
+        ] as const) {
+          expect(text, `${scenario.name}: ${what}`).not.toContain(secretValue)
+        }
+      }
+    })
+
+    it('never throws, whatever the headers and body hold', async () => {
+      const oddHeaders = ['', ' ', 'v1,', ',,,', 'v1,é', 'v1 v1 v1', 'v1,' + 'A'.repeat(10_000)]
+      for (const value of oddHeaders) {
+        const { body, timestamp } = await delivery()
+        await expect(client().checkWebhook(body, withSignature(timestamp, value))).resolves.toMatchObject({ ok: false })
+      }
+      for (const body of ['', '{', '"text"', '{"data":{"task_id":{"a":1},"task_status":[]}}']) {
+        const signed = await delivery({ body })
+        await expect(client().checkWebhook(signed.body, signed.headers)).resolves.toMatchObject({ ok: false })
+      }
+    })
   })
 })
