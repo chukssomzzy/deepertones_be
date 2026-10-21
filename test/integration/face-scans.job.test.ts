@@ -39,6 +39,7 @@ afterEach(() => {
   recorder.messages.length = 0
   recorder.state.failing = false
   pushRecorder.messages.length = 0
+  pushRecorder.state.failing = false
 })
 
 const dispatch = async (queue: string, message: { id?: string; attempts?: number; body: unknown }) => {

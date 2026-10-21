@@ -515,7 +515,7 @@ export class FaceScanService {
       await this.deleteMasks(masks)
       throw error
     }
-    // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. Before the steps that can still throw, so a retry cannot lose it.
+    // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. At most once: a push lost here (the worker dies, or the queue refuses it) is not sent again.
     await this.notifications.faceScanReady({ userId, profileId, faceScanId: id })
     await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)

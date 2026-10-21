@@ -262,7 +262,14 @@ export class NotificationsService {
   private async wanted(body: SendPushMessage): Promise<boolean> {
     if (body.kind === 'new-sign-in') return true
     const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
-    return body.kind === 'scan-finished' || body.kind === 'face-scan-ready' ? switches.scanFinished : switches.scanNeedsYou
+    switch (body.kind) {
+      case 'scan-finished':
+      case 'face-scan-ready':
+        return switches.scanFinished
+      case 'scan-needs-you':
+      case 'face-scan-needs-retake':
+        return switches.scanNeedsYou
+    }
   }
 
   /** Scan and face scan notifications go to the phones on the scan's profile; the sign-in alert goes to every phone of the account. */

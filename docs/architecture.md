@@ -685,7 +685,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
-  `back-photo`, `confirm` or `identify`, optional `ask`) `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
+  `back-photo`, `confirm` or `identify`, optional `ask`), `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
   `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
   `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
@@ -1195,7 +1195,7 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
 
 ### Face scans
-`modules/face-scans` is the face scan (#112), built as four stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
+`modules/face-scans` is the face scan (#112), built as five stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
 provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), the third the **analysis
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
@@ -1342,7 +1342,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
   scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
   change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
-- **Pushes.** A face scan notifies the person's phone twice at most per state, through the same `NotificationsService` and `send-push` job as the product scans
+- **Pushes.** A face scan notifies the person's phone at most once when it is ready and once for each rejected front photo, through the same `NotificationsService` and `send-push` job as the product scans
   (see "Sending push notifications"). `copyResults` calls `faceScanReady` once `completeFaceScan` returned true (a completion that lost, or a second fetch of a
   ready scan, says nothing), before the steps after the write that can still throw, so a retry cannot lose it. `needRetake` calls `faceScanNeedsRetake` once the
   conditional `analysing` to `needs-retake` update applied, in the upload or the fetch step, with the `updatedAt` it wrote as `at`: a step delivered again finds
