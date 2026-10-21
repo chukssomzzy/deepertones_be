@@ -433,6 +433,18 @@ describe('AnthropicProductAnalyst system prompts', () => {
     expect(system).toMatch(/each give an area[^.]*give different areas are different products; an area in only one name is not a difference/i)
   })
 
+  it('tells the judge that a sub-line or range name in one name and missing from the other was not read and is not a difference', async () => {
+    const { calls, analyst } = analystOver(structured({ same: true }))
+
+    await analyst.sameProduct(PRODUCT, OTHER)
+
+    const system = calls[0]!.body.system as string
+    expect(system).toMatch(/range[^.]*(one name|one listing)[^.]*(missing|absent|not)[^.]*not a difference/i)
+    expect(system).toMatch(/not read/i)
+    // The rules it must keep: a bare range name against a specific product is still false.
+    expect(system).toMatch(/only a product line or range that holds several products[^;]*say false/i)
+  })
+
   it('tells the image check to refuse a picture of several products, since it is shown as this product alone', async () => {
     const { calls, analyst } = analystOver(structured({ matches: true }))
 

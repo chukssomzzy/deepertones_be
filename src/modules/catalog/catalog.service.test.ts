@@ -4473,3 +4473,71 @@ describe('ProductCatalogService.resolve tolerant near misses', () => {
     expect(result.productId).not.toBe(stored.productId)
   })
 })
+
+describe('ProductCatalogService.resolve: spellings, % names and range-less readings', () => {
+  it('asks the judge about a UK reading for a US row, and a "yes" records an alias', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ brand: 'CeraVe', name: 'Moisturizing Lotion', category: 'body' }))
+    ctx.analyst.sameProductWith(() => true)
+    const scanned = identity({ brand: 'CeraVe', name: 'Moisturising Lotion', category: 'body' })
+
+    const result = await ctx.service.resolve(scanned)
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).toBe(stored.productId)
+    expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: stored.productId })
+  })
+
+  it('makes a new product when the judge says the UK reading is not the US row', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ brand: 'CeraVe', name: 'Moisturizing Lotion', category: 'body' }))
+    ctx.analyst.sameProductWith(() => false)
+
+    const result = await ctx.service.resolve(identity({ brand: 'CeraVe', name: 'Moisturising Lotion', category: 'body' }))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).not.toBe(stored.productId)
+  })
+
+  it('asks the judge about the L-Ascorbic reading with variant 100% for the row 100% L-Ascorbic Acid Powder, and a "yes" lands on that row', async () => {
+    const ctx = setup()
+    const stored = await ctx.service.resolve(identity({ brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder', category: 'skin' }))
+    ctx.analyst.sameProductWith(() => true)
+
+    const result = await ctx.service.resolve(identity({ brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder', variant: '100%', category: 'skin' }))
+
+    expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+    expect(result.productId).toBe(stored.productId)
+  })
+
+  describe('a reading with no range name', () => {
+    const SHEA = { brand: 'Cantu', name: 'Shea Butter Coconut Curling Cream', category: 'hair' } as const
+    const AVOCADO = { brand: 'Cantu', name: 'Avocado Coconut Curling Cream', category: 'hair' } as const
+    const READING = { brand: 'Cantu', name: 'Coconut Curling Cream', category: 'hair' } as const
+
+    // Guards behaviour that already holds: the ambiguity guard keeps this apart without a judge call.
+    it('is kept apart, with no judge call, when the catalog holds two products of different ranges it could be', async () => {
+      const ctx = setup()
+      const shea = await ctx.service.resolve(identity(SHEA))
+      const avocado = await ctx.service.resolve(identity(AVOCADO))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(0)
+      expect([shea.productId, avocado.productId]).not.toContain(result.productId)
+    })
+
+    // Guards behaviour that already holds: one candidate reaches the judge.
+    it('reaches the judge when the catalog holds only one of them', async () => {
+      const ctx = setup()
+      const shea = await ctx.service.resolve(identity(SHEA))
+      ctx.analyst.sameProductWith(() => true)
+
+      const result = await ctx.service.resolve(identity(READING))
+
+      expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
+      expect(result.productId).toBe(shea.productId)
+    })
+  })
+})

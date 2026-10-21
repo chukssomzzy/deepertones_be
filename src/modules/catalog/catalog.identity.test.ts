@@ -611,3 +611,126 @@ describe('pagesByNameMatch', () => {
     expect(pagesByNameMatch([], PALMERS)).toEqual([])
   })
 })
+
+describe('a number written with % is never a pack size', () => {
+  const keyName = (name: string, variant?: string) => identityKey({ brand: 'The Ordinary', name, variant }).split('|')[1]!.split(' ')
+
+  it.each([
+    ['100% L-Ascorbic Acid Powder', '100'],
+    ['10% L-Lactic Acid Serum', '10'],
+    ['20% G-Peptide Serum', '20'],
+  ])('keeps the number and the l or g word of %j in the identity key', (name, number) => {
+    const tokens = keyName(name)
+
+    expect(tokens.some((t) => t.includes(number))).toBe(true)
+    expect(tokens).toContain(name.includes('L-') ? 'l' : 'g')
+  })
+
+  it('keeps the words ascorbic acid powder in the key of 100% L-Ascorbic Acid Powder', () => {
+    const key = identityKey({ brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder' })
+
+    expect(key).toContain('ascorbic acid powder')
+    expect(key).toContain('100')
+  })
+
+  it('gives "100% L-Ascorbic Acid Powder" a different key from "L-Ascorbic Acid Powder" and from "Ascorbic Acid Powder"', () => {
+    const full = identityKey({ brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder' })
+
+    expect(full).not.toBe(identityKey({ brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder' }))
+    expect(full).not.toBe(identityKey({ brand: 'The Ordinary', name: 'Ascorbic Acid Powder' }))
+  })
+
+  it('keeps the % number when it sits in the variant', () => {
+    const tokens = identityKey({ brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder', variant: '100%' }).split('|')[2]!
+
+    expect(tokens).toContain('100')
+  })
+
+  it('does not strip the l of a % number in stripSizes called on the raw text (guards existing behaviour)', () => {
+    expect(tidy(stripSizes('100% L-Ascorbic Acid Powder'))).toContain('L-Ascorbic')
+  })
+
+  it('still strips a real size beside a % number', () => {
+    const tokens = keyName('10% L-Lactic Acid Serum 100 ml')
+
+    expect(tokens).not.toContain('ml')
+    expect(tokens).toContain('l')
+  })
+
+  it.each([
+    [{ brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: '236ml' }, 'cerave|hydrating facial cleanser||'],
+    [{ brand: 'Dove', name: 'Bar', variant: '100 g' }, 'dove|bar||'],
+    [{ brand: 'Dove', name: 'Lotion 50 ml' }, 'dove|lotion||'],
+    [{ brand: 'Brand', name: 'Mist 3.4 fl oz' }, 'brand|mist||'],
+    [{ brand: 'Water Co', name: 'Water 1 l' }, 'water co|water 1 l||'],
+    [{ brand: 'Water Co', name: 'Water 10 l' }, 'water co|water||'],
+    [{ brand: 'X', name: 'Vitamin C 2.5% Serum' }, 'x|vitamin c 2.5 serum||'],
+    [{ brand: 'The Ordinary.', name: 'Niacinamide 10% + Zinc 1%' }, 'the ordinary|niacinamide 10 zinc 1||'],
+  ])('leaves the key of %j unchanged', (product, expected) => {
+    expect(identityKey(product)).toBe(expected)
+  })
+})
+
+describe('UK and US spellings in near-miss scoring', () => {
+  it('scores CeraVe Moisturising Lotion against CeraVe Moisturizing Lotion as 1', () => {
+    expect(nameSimilarity({ brand: 'CeraVe', name: 'Moisturising Lotion' }, { brand: 'CeraVe', name: 'Moisturizing Lotion' })).toBe(1)
+  })
+
+  it.each([
+    ['moisturising', 'moisturizing'],
+    ['moisturiser', 'moisturizer'],
+    ['sanitiser', 'sanitizer'],
+    ['normalising', 'normalizing'],
+    ['colour', 'color'],
+    ['centre', 'center'],
+    ['grey', 'gray'],
+  ])('treats %s and %s as the same word', (uk, us) => {
+    expect(nameSimilarity({ brand: 'Acme', name: `Soft ${uk} Cream` }, { brand: 'Acme', name: `Soft ${us} Cream` })).toBe(1)
+  })
+
+  it('folds the spelling in a variant too', () => {
+    expect(nameSimilarity({ brand: 'Acme', name: 'Tint', variant: 'Grey' }, { brand: 'Acme', name: 'Tint', variant: 'Gray' })).toBe(1)
+  })
+
+  it('finds a US row as a near miss for a UK reading, and the other way round', () => {
+    const us = { id: 'p1', brand: 'CeraVe', name: 'Moisturizing Lotion' }
+    const uk = { id: 'p2', brand: 'CeraVe', name: 'Moisturising Lotion' }
+
+    expect(nearMissCandidates(uk, [us])).toEqual([us])
+    expect(nearMissCandidates(us, [uk])).toEqual([uk])
+  })
+
+  it('counts a UK reading as less specific than a longer US name that holds its words', () => {
+    expect(lessSpecific({ brand: 'CeraVe', name: 'Moisturising Lotion' }, { brand: 'CeraVe', name: 'Daily Moisturizing Lotion' })).toBe(true)
+  })
+
+  it.each([['rise', 'rize'], ['wise', 'wize'], ['promise', 'promize'], ['anise', 'anize'], ['greyhound', 'grayhound'], ['centred', 'centered']])(
+    'does not fold %s into %s: only the reviewed pairs fold, whole words only',
+    (a, b) => {
+      expect(nameSimilarity({ brand: 'Acme', name: `${a} Cream` }, { brand: 'Acme', name: `${b} Cream` })).toBeLessThan(1)
+    },
+  )
+
+  it('does not fold in identityKey: UK and US names keep different keys', () => {
+    expect(identityKey({ brand: 'CeraVe', name: 'Moisturising Lotion' })).toBe('cerave|moisturising lotion||')
+    expect(identityKey({ brand: 'CeraVe', name: 'Moisturizing Lotion' })).toBe('cerave|moisturizing lotion||')
+  })
+})
+
+describe('namesAnotherEdition with a % variant', () => {
+  it('is false when the variant 100% is already in the product name', () => {
+    expect(
+      namesAnotherEdition({ brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder', variant: '100%' }, { brand: 'The Ordinary', name: '100% L-Ascorbic Acid Powder' }),
+    ).toBe(false)
+  })
+
+  it('is still true when the variant % number is not in the product', () => {
+    expect(
+      namesAnotherEdition({ brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder', variant: '100%' }, { brand: 'The Ordinary', name: 'L-Ascorbic Acid Powder' }),
+    ).toBe(true)
+  })
+
+  it('folds spellings: a UK variant word held by a US product is not another edition', () => {
+    expect(namesAnotherEdition({ brand: 'Acme', name: 'Tint', variant: 'Grey' }, { brand: 'Acme', name: 'Gray Tint' })).toBe(false)
+  })
+})
