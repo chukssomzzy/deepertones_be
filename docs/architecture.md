@@ -1257,6 +1257,10 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
   other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
   product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
+- **The list.** `GET /scans/faces` (`listFaceScans`, `signedIn`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
+  like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
+  consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
+  about the profile, so the service works it out once and hands it to each `view`.
 - **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters

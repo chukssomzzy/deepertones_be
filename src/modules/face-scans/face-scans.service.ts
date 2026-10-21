@@ -40,6 +40,9 @@ export type FaceScanPolicy = {
 // The longest side is capped at 4096 px by readImageHeader, which reads a larger header as no image at all.
 export const FACE_SCAN_POLICY: FaceScanPolicy = { maxPhotoBytes: 6_000_000, minShortSide: 1080 }
 
+/** How many scans `listFaceScans` returns: the latest ones. Face scans are rare (one per goal or check-in), so this covers years. */
+export const FACE_SCAN_LIST_LIMIT = 20
+
 /** The photos of a scan, by position. Only the front one is required. */
 export type FacePhotos = { front: ProductImage; right?: ProductImage; left?: ProductImage }
 
@@ -225,6 +228,18 @@ export class FaceScanService {
   async getFaceScan(id: string): Promise<FaceScanView> {
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
+  }
+
+  /**
+   * The profile's latest scans, newest first, in every state, each the view `getFaceScan` gives. Needs no consent and no goal, so it still works after the consent
+   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
+   */
+  async listFaceScans(): Promise<FaceScanView[]> {
+    const { profileId } = requireUser()
+    const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
+    if (scans.length === 0) return []
+    const rescanSuggested = await this.rescanSuggested(profileId)
+    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested)))
   }
 
   /**
@@ -685,7 +700,8 @@ export class FaceScanService {
     return { bytes: photo.bytes, mediaType: 'image/jpeg' }
   }
 
-  private async view(scan: FaceScan, photos: FaceScanPhoto[]): Promise<FaceScanView> {
+  /** `rescanSuggested` is worked out here unless the caller, building many views for one profile, already has it. */
+  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
     const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
@@ -698,7 +714,7 @@ export class FaceScanService {
       goal: scan.goalAtScan,
       createdAt: scan.createdAt,
       photos: links,
-      rescanSuggested: await this.rescanSuggested(scan.profileId),
+      rescanSuggested: rescanSuggested ?? (await this.rescanSuggested(scan.profileId)),
       result: scan.state === 'ready' ? await this.result(scan, link) : null,
     }
   }

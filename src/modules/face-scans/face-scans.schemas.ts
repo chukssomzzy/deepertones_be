@@ -121,3 +121,9 @@ export const FaceScanResponse = z
     result: FaceScanResult.nullable().openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
   })
   .openapi('FaceScanResponse')
+
+export const FaceScanListResponse = z
+  .object({
+    faceScans: z.array(FaceScanResponse).openapi({ description: 'The profile\'s face scans in every state, latest first, at most 20. Each is what `GET /api/v1/scans/faces/{id}` shows.' }),
+  })
+  .openapi('FaceScanListResponse')

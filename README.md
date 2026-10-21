@@ -250,6 +250,10 @@ has the `words` for how each concern moved. Never show a number or invent wordin
 result by design. `overlay.url` is a signed link to a PNG mask of where the concern shows and **expires after 5 minutes**: when it has, fetch the scan
 again for fresh links. Field details are in `docs/openapi.json` (`FaceScanResult`).
 
+`GET /api/v1/scans/faces` lists the profile's face scans, latest first, at most 20, in every state (`{ faceScans }`, each the same as `GET /scans/faces/{id}`).
+Use it to find a scan without remembering its id, or to offer a retake of one that `needs-retake`. It is empty (200) before the first scan and keeps working after
+the face consent is withdrawn, so the user can still find and delete their scans.
+
 ## ZeptoMail setup
 
 Sign-in codes go out by email through ZeptoMail (Zoho). The code is in `src/modules/otp` and

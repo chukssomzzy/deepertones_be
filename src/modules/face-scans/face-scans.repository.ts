@@ -118,6 +118,11 @@ export class D1FaceScansRepository {
     return row ?? null
   }
 
+  /** The profile's newest `limit` scans, in every state, newest first; scans made at the same time go to the higher id. */
+  async listForProfile(profileId: string, limit: number): Promise<FaceScan[]> {
+    return this.db.select().from(faceScans).where(eq(faceScans.profileId, profileId)).orderBy(desc(faceScans.createdAt), desc(faceScans.id)).limit(limit)
+  }
+
   /**
    * The day-one scan of the scan taken at `at` under `goal`: the profile's earliest ready scan under that goal, taken at or before `at`, with no ready scan
    * under another goal between it and `at`. That is the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, found in one

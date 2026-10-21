@@ -1360,3 +1360,132 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
     expect(ended).toBe(true)
   })
 })
+
+// --- the profile's list of face scans ---
+
+const listFaces = (guest: Guest | undefined) => json(guest, 'GET', FACES)
+type FaceScanList = { faceScans: FaceScanView[] }
+/** Each read signs its own links, good for 5 minutes from that read, so two reads a millisecond apart differ in the token and in nothing else. */
+const withoutTokens = (value: unknown) => JSON.parse(JSON.stringify(value).replace(/\/photos\/[A-Za-z0-9_-]+/g, '/photos/<token>')) as unknown
+/** Two scans made a moment apart get different times, so which is latest never rests on a tie. */
+const aMomentLater = () => new Promise((resolve) => setTimeout(resolve, 5))
+
+describe('GET /api/v1/scans/faces', () => {
+  it('refuses a caller who is not signed in: 401 AUTH_REQUIRED', async () => {
+    const res = await listFaces(undefined)
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+
+  it('answers 200 with an empty list, not 404, for a profile that has no scans, no consent and no goal', async () => {
+    const guest = await newGuest()
+
+    const res = await listFaces(guest)
+
+    expect(res.status).toBe(200)
+    expect(await dataOf<FaceScanList>(res)).toEqual({ faceScans: [] })
+  })
+
+  it('lists two scans newest first, each as GET /scans/faces/{id} shows it', async () => {
+    const guest = await readyGuest('glow')
+    const older = await createdFace(guest, threeFiles())
+    await setGoal(guest, 'brighter')
+    await aMomentLater()
+    const newer = await createdFace(guest, { front: fileOf(face({}, 2), 'front') })
+
+    const res = await listFaces(guest)
+
+    expect(res.status).toBe(200)
+    const { faceScans } = await dataOf<FaceScanList>(res)
+    expect(faceScans.map((scan) => scan.id)).toEqual([newer.id, older.id])
+    expect(faceScans.map((scan) => scan.goal)).toEqual(['brighter', 'glow'])
+    expect(Object.keys(faceScans[0]!).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
+    expect(Object.keys(faceScans[1]!.photos).sort()).toEqual(['front', 'left', 'right'])
+    for (const scan of faceScans) expect(withoutTokens(scan)).toEqual(withoutTokens(await dataOf<FaceScanView>(await getFace(guest, scan.id))))
+  })
+
+  it('shows a ready scan with its result and an analysing one with a null result', async () => {
+    const guest = await readyGuest('glow')
+    const stub = stubPerfectCorp()
+    const ready = await createdFace(guest)
+    await runFaceJob(queued.at(-1))
+    stub.answerSkin((await rowOf(ready.id))!.task!, () => skinSuccess(glowOutput()))
+    await runFaceJob(stepOf(ready.id, 'fetch'))
+    await setGoal(guest, 'brighter')
+    await aMomentLater()
+    const analysing = await createdFace(guest)
+
+    const { faceScans } = await dataOf<FaceScanList>(await listFaces(guest))
+
+    expect(faceScans.map((scan) => [scan.id, scan.state])).toEqual([[analysing.id, 'analysing'], [ready.id, 'ready']])
+    expect(faceScans[0]!.result).toBeNull()
+    expect(faceScans[1]!.result).toMatchObject({ skinType: 'dry', skinAge: { years: 31, words: 'Your skin looks about 31' }, sinceDayOne: null, tablesVersion: TABLES_VERSION })
+    expect(faceScans[1]!.result!.seen.map((seen) => seen.concern)).toEqual(['glow', 'texture'])
+  })
+
+  it('shows a scan that needs a retake and one that failed, with their reasons', async () => {
+    const guest = await readyGuest('glow')
+    const { view: needsRetake } = await needingRetake(guest, 'error_lighting_dark')
+    await setGoal(guest, 'brighter')
+    queueFails = true
+    await aMomentLater()
+    const failed = await createdFace(guest)
+    queueFails = false
+
+    const { faceScans } = await dataOf<FaceScanList>(await listFaces(guest))
+
+    expect(faceScans.map((scan) => [scan.id, scan.state, scan.reason])).toEqual([
+      [failed.id, 'failed', 'unavailable'],
+      [needsRetake.id, 'needs-retake', 'too-dark'],
+    ])
+  })
+
+  it('lists only the caller\'s profile: not the account\'s other profile\'s scan, nor another account\'s', async () => {
+    const owner = await readyGuest('glow')
+    const mine = await createdFace(owner)
+    const sister = await asSecondProfile(owner)
+    expect((await putConsent(sister)).status).toBe(200)
+    await setGoal(sister, 'glow')
+    const sisters = await createdFace(sister)
+    const stranger = await readyGuest('glow')
+    const strangers = await createdFace(stranger)
+    const nobody = await newGuest()
+
+    expect((await dataOf<FaceScanList>(await listFaces(owner))).faceScans.map((scan) => scan.id)).toEqual([mine.id])
+    expect((await dataOf<FaceScanList>(await listFaces(sister))).faceScans.map((scan) => scan.id)).toEqual([sisters.id])
+    expect((await dataOf<FaceScanList>(await listFaces(stranger))).faceScans.map((scan) => scan.id)).toEqual([strangers.id])
+    expect((await dataOf<FaceScanList>(await listFaces(nobody))).faceScans).toEqual([])
+  })
+
+  it('still lists the scans after the consent is withdrawn, so the user can find them and delete them', async () => {
+    const guest = await readyGuest('glow')
+    const made = await createdFace(guest)
+    expect((await deleteConsent(guest)).status).toBe(204)
+
+    const res = await listFaces(guest)
+
+    expect(res.status).toBe(200)
+    expect((await dataOf<FaceScanList>(res)).faceScans.map((scan) => scan.id)).toEqual([made.id])
+    expect((await deleteFace(guest, made.id)).status).toBe(204)
+    expect((await dataOf<FaceScanList>(await listFaces(guest))).faceScans).toEqual([])
+  })
+
+  it('leaves GET /scans/faces/{id} and GET /scans/faces/photos/{token} as they were: an id from the list opens that scan, and a photo link from the list opens its photo', async () => {
+    const guest = await readyGuest('glow')
+    const made = await createdFace(guest, threeFiles())
+    const { faceScans } = await dataOf<FaceScanList>(await listFaces(guest))
+
+    const byId = await getFace(guest, faceScans[0]!.id)
+    const photo = await openPhoto(tokenOf(faceScans[0]!.photos.front.url))
+    const notAToken = await openPhoto('not-a-token')
+
+    expect(byId.status).toBe(200)
+    expect((await dataOf<FaceScanView>(byId)).id).toBe(made.id)
+    expect(photo.status).toBe(200)
+    expect(photo.headers.get('content-type')).toBe('image/jpeg')
+    expect(new Uint8Array(await photo.arrayBuffer())).toEqual(new Uint8Array(face({}, 1).bytes))
+    expect(notAToken.status).toBe(404)
+    expect(await errorCodeOf(notAToken)).toBe('PHOTO_NOT_FOUND')
+  })
+})

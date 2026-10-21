@@ -2306,6 +2306,21 @@
           "front"
         ]
       },
+      "FaceScanListResponse": {
+        "type": "object",
+        "properties": {
+          "faceScans": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FaceScanResponse"
+            },
+            "description": "The profile's face scans in every state, latest first, at most 20. Each is what `GET /api/v1/scans/faces/{id}` shows."
+          }
+        },
+        "required": [
+          "faceScans"
+        ]
+      },
       "RetakeFaceScanBody": {
         "type": "object",
         "properties": {
@@ -5987,6 +6002,77 @@
           },
           "429": {
             "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listFaceScans",
+        "tags": [
+          "Face scans"
+        ],
+        "summary": "The profile's face scans, latest first",
+        "description": "The current profile's scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. Another profile's scans, of this account or any other, are never listed.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The scans",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/FaceScanListResponse"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
             "content": {
               "application/json": {
                 "schema": {

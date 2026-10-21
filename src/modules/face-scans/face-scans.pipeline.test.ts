@@ -29,7 +29,7 @@ import { jpegPhoto } from '../scans/scans.photos.fake'
 import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { analyseFaceScanSpec } from './face-scans.job-specs'
 import { FakeFaceScansRepository } from './face-scans.repository.fake'
-import { FaceScanService } from './face-scans.service'
+import { FACE_SCAN_LIST_LIMIT, FaceScanService } from './face-scans.service'
 import { TABLES_VERSION } from './face-scans.tables'
 import { FakeVendorSpendLedger } from './face-scans.vendor-spend.fake'
 
@@ -2161,5 +2161,208 @@ describe('FaceScanService.getFaceScan: what the result never shows', () => {
 
     expect(result.seen.map((seen: { concern: string }) => seen.concern)).toEqual(['glow', 'dryness', 'texture'])
     expect(result.sinceDayOne.concerns.map((concern: { concern: string }) => concern.concern)).toEqual(['glow', 'dryness', 'texture'])
+  })
+})
+
+
+// --- the profile's list of face scans ---
+//
+// `listFaceScans()` is `GET /scans/faces`: the current profile's scans, latest first, each the very view `getFaceScan` gives, every state included, cut
+// at 20. Scans are made the way a person makes them (the goal changes between two scans, because a scan under the goal of the latest one is not due), and
+// brought to the state a test needs by the pipeline's own steps.
+
+/** The cap the brief sets: the latest 20 scans. Written out here so the test does not take it from the code it checks. */
+const LIST_CAP = 20
+const OTHER_USER = 'user-2'
+const OTHER_ACCOUNT_PROFILE = 'profile-3'
+
+const listScans = (ctx: Ctx, profileId = PROFILE): Promise<any[]> => asUser(() => ctx.service.listFaceScans(), profileId)
+const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'anonymous', profileId: OTHER_ACCOUNT_PROFILE }, fn)
+/** A scan by a profile of the account (`profileId`) under `goal`: consent, the goal and the front photo, the way the create route takes it. Resolves to the scan's id. */
+const startedBy = async (ctx: Ctx, profileId: string, goal: Goal): Promise<string> => {
+  await giveConsent(ctx, profileId)
+  await setGoal(ctx, goal, profileId)
+  return (await asUser(() => ctx.service.create({ front: face(5) }), profileId)).id
+}
+const GOAL_CYCLE: Goal[] = ['glow', 'brighter']
+/** `count` scans under alternating goals, a day apart and none finished, oldest first. Resolves to their ids. */
+const manyScans = async (ctx: Ctx, count: number): Promise<string[]> => {
+  const ids: string[] = []
+  for (let n = 0; n < count; n += 1) ids.push(await takenUnder(ctx, GOAL_CYCLE[n % GOAL_CYCLE.length]!))
+  return ids
+}
+/** One scan in each state, oldest first: ready (glow), failed (brighter), needs-retake (clear-skin) and analysing (even-tone). */
+const oneInEachState = async (ctx: Ctx) => {
+  const ready = await readyUnder(ctx, 'glow', analysed())
+  const failed = await takenUnder(ctx, 'brighter')
+  await failScan(ctx, failed)
+  const needsRetake = await takenUnder(ctx, 'clear-skin')
+  ctx.perfectCorp.script('getSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+  await fetchStep(ctx, needsRetake)
+  const analysing = await takenUnder(ctx, 'even-tone')
+  return { ready, failed, needsRetake, analysing }
+}
+
+describe('FaceScanService.listFaceScans', () => {
+  it('lists the latest 20 scans, and the cap is exported as FACE_SCAN_LIST_LIMIT from the service module', () => {
+    expect(FACE_SCAN_LIST_LIMIT).toBe(LIST_CAP)
+  })
+
+  it('lists nothing, without an error, for a profile that has no scans, no consent and no goal', async () => {
+    const ctx = setup()
+
+    expect(await listScans(ctx)).toEqual([])
+  })
+
+  it('refuses a caller who is not signed in with 401 AUTH_REQUIRED', async () => {
+    const ctx = setup()
+
+    const error = await errorOf(runAs({ kind: 'public' }, () => ctx.service.listFaceScans()))
+
+    expect(error).toBeInstanceOf(UnauthorizedError)
+    expect(error.code).toBe('AUTH_REQUIRED')
+  })
+
+  it('lists the profile\'s scans latest first', async () => {
+    const ctx = setup()
+    const [first, second, third] = await manyScans(ctx, 3)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([third, second, first])
+    expect(listed.map((scan) => scan.goal)).toEqual(['glow', 'brighter', 'glow'])
+  })
+
+  it('lists exactly 20 scans when there are 20, and only the latest 20 when a 21st is taken: the oldest drops off', async () => {
+    const ctx = setup()
+    const ids = await manyScans(ctx, LIST_CAP)
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([...ids].reverse())
+
+    ids.push(await takenUnder(ctx, GOAL_CYCLE[LIST_CAP % GOAL_CYCLE.length]!))
+
+    const listed = (await listScans(ctx)).map((scan) => scan.id)
+    expect(listed).toHaveLength(LIST_CAP)
+    expect(listed).toEqual(ids.slice(1).reverse())
+    expect(listed).not.toContain(ids[0])
+  })
+
+  it('lists a scan whatever state it is in: ready with its result, needs-retake and failed with their reasons, analysing with none', async () => {
+    const ctx = setup()
+    const { ready, failed, needsRetake, analysing } = await oneInEachState(ctx)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => [scan.id, scan.state, scan.reason])).toEqual([
+      [analysing, 'analysing', null],
+      [needsRetake, 'needs-retake', 'too-dark'],
+      [failed, 'failed', 'unavailable'],
+      [ready, 'ready', null],
+    ])
+    expect(listed.map((scan) => scan.result !== null)).toEqual([false, false, false, true])
+    expect(listed[3].result.seen.length).toBeGreaterThan(0)
+  })
+
+  it('shows each scan as getFaceScan shows it, links and rescanSuggested included', async () => {
+    const ctx = setup()
+    await oneInEachState(ctx)
+    // The profile moves on to a goal none of its scans were taken under, so every view says a rescan is worth it.
+    await setGoal(ctx, 'calm-repair')
+
+    const listed = await listScans(ctx)
+
+    expect(listed).toHaveLength(4)
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+    expect(listed.map((scan) => scan.rescanSuggested)).toEqual([true, true, true, true])
+    expect(Object.keys(listed[0]).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
+  })
+
+  it('shows rescanSuggested false on every scan while the goal is the one the latest scan was taken under', async () => {
+    const ctx = setup()
+    await manyScans(ctx, 3)
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.rescanSuggested)).toEqual([false, false, false])
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+  })
+
+  it('shows the change since day one on a ready scan as getFaceScan does', async () => {
+    const ctx = setup()
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
+    await takenUnder(ctx, 'brighter')
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }))
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([second, expect.any(String), first])
+    expect(listed[0].result.sinceDayOne).toMatchObject({ dayOneScanId: first })
+    expect(listed[0]).toEqual(await getScan(ctx, second))
+    expect(listed[2].result.sinceDayOne).toBeNull()
+  })
+
+  it('gives overlay and photo links that open, for the bytes of the mask and of the photo', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysed())
+
+    const [scan] = await listScans(ctx)
+
+    expect(scan.id).toBe(id)
+    expect(await bytesBehind(ctx, scan.result.seen[0].overlay.url)).toBe(maskUrl('radiance'))
+    const photo = await asUser(() => ctx.service.photoForLink(tokenOfLink(scan.photos.front.url)))
+    expect(photo.mediaType).toBe('image/jpeg')
+  })
+
+  it('lists only the current profile\'s scans: neither the account\'s other profile\'s nor another account\'s', async () => {
+    const ctx = setup()
+    const mine = await startedBy(ctx, PROFILE, 'glow')
+    const sisters = await startedBy(ctx, OTHER_PROFILE, 'glow')
+    await asOtherAccount(() => ctx.service.giveConsent(CURRENT_FACE_CONSENT_VERSION))
+    await asOtherAccount(() => ctx.goals.set({ goal: 'glow' }))
+    const strangers = (await asOtherAccount(() => ctx.service.create({ front: face(6) }))).id
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([mine])
+    expect((await listScans(ctx, OTHER_PROFILE)).map((scan) => scan.id)).toEqual([sisters])
+    expect((await asOtherAccount(() => ctx.service.listFaceScans())).map((scan: { id: string }) => scan.id)).toEqual([strangers])
+  })
+
+  it('does not let another profile\'s scans use up the cap', async () => {
+    const ctx = setup()
+    const mine = await manyScans(ctx, 1)
+    for (let n = 0; n < LIST_CAP + 1; n += 1) {
+      ctx.advanceClock(DAY)
+      await startedBy(ctx, OTHER_PROFILE, GOAL_CYCLE[n % GOAL_CYCLE.length]!)
+    }
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual(mine)
+  })
+
+  it('still lists the scans after the consent is withdrawn, so the user can find them and delete them', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+    await asUser(() => ctx.service.withdrawConsent())
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => scan.id)).toEqual([second, first])
+    for (const scan of listed) expect(scan).toEqual(await getScan(ctx, scan.id))
+  })
+
+  it('still lists the scans when the profile\'s goal is typed words nobody sorted into a goal, with rescanSuggested false', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+    await asUser(() => ctx.goals.set({ text: 'something the reader finds no goal in' }))
+
+    const listed = await listScans(ctx)
+
+    expect(listed.map((scan) => [scan.id, scan.rescanSuggested])).toEqual([[second, false], [first, false]])
+  })
+
+  it('lists a scan no more once the user deletes it', async () => {
+    const ctx = setup()
+    const [first, second] = await manyScans(ctx, 2)
+
+    await asUser(() => ctx.service.deleteFaceScan(second!))
+
+    expect((await listScans(ctx)).map((scan) => scan.id)).toEqual([first])
   })
 })
