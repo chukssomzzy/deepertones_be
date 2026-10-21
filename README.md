@@ -414,7 +414,7 @@ There are only two long-lived branches. "production" is the name of the deploy t
 (the GitHub environment and `env.production` in `wrangler.jsonc`), never a branch.
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
-unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
+unit, integration (four parallel shards behind one `Integration` check), typecheck, architecture rules, the API contract (`docs/openapi.json` is current
 and valid), the prompts (CI regenerates `src/prompts/prompts.generated.ts` and fails if it is stale),
 and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.
