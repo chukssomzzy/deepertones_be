@@ -74,18 +74,21 @@ const UK_TO_US_SPELLING: Readonly<Record<string, string>> = {
 /** A whole word's UK spelling as its US one, from the reviewed list above; any other word passes through unchanged. */
 const foldSpelling = (word: string): string => UK_TO_US_SPELLING[word] ?? word
 
-const words = (product: Named): Set<string> =>
-  new Set(comparable(`${product.brand ?? ''} ${product.name} ${product.variant ?? ''}`).split(' ').filter(Boolean).map(foldSpelling))
+/** Brand, name and variant pooled into one normalised string, word order kept: what `words` then splits, and what a suitability phrase (below) is found in. */
+const pooledText = (product: Named): string => comparable(`${product.brand ?? ''} ${product.name} ${product.variant ?? ''}`)
 
-/** Jaccard ratio of the words in the brand, name and variant, pooled so a word may sit in any of them: 1 for the same words, 0 for none shared. */
-export const nameSimilarity = (a: Named, b: Named): number => {
-  const wa = words(a)
-  const wb = words(b)
+const words = (product: Named): Set<string> => new Set(pooledText(product).split(' ').filter(Boolean).map(foldSpelling))
+
+/** Jaccard ratio of two word sets: 1 for the same words, 0 for none shared. */
+const jaccard = (a: Set<string>, b: Set<string>): number => {
   let shared = 0
-  for (const w of wa) if (wb.has(w)) shared++
-  const union = wa.size + wb.size - shared
+  for (const w of a) if (b.has(w)) shared++
+  const union = a.size + b.size - shared
   return union === 0 ? 0 : shared / union
 }
+
+/** Jaccard ratio of the words in the brand, name and variant, pooled so a word may sit in any of them: 1 for the same words, 0 for none shared. */
+export const nameSimilarity = (a: Named, b: Named): number => jaccard(words(a), words(b))
 
 type WordRelation = 'equal' | 'subset' | 'superset' | 'other'
 
@@ -167,10 +170,10 @@ export const pagesByNameMatch = (pages: string[], product: Named & { brand: stri
 /**
  * Whether every word of the shorter reading is in the longer one ("NIVEA soft" in "NIVEA Soft Light Moisturiser"): the recognizer
  * often adds or drops descriptors, which Jaccard punishes. A reading with no word beyond its brand is contained in every product of
- * the brand, so on either side it is never a containment; nor is one whose only words beyond the brand are generic.
+ * the brand, so on either side it is never a containment; nor is one whose only words beyond the brand are generic. Takes the word
+ * sets rather than computing them, so `nearMissCandidates` can pass in sets with a one-sided suitability phrase already set aside.
  */
-const contains = (a: Branded, b: Branded): boolean => {
-  const [wa, wb] = [words(a), words(b)]
+const containsWords = (a: Branded, wa: Set<string>, b: Branded, wb: Set<string>): boolean => {
   const beyond = (p: Branded, w: Set<string>, ignore: Set<string> = new Set()): boolean => {
     const brand = new Set(comparable(p.brand).split(' ').map(foldSpelling))
     return !['subset', 'equal'].includes(relation(w, new Set([...brand, ...ignore])))
@@ -178,6 +181,34 @@ const contains = (a: Branded, b: Branded): boolean => {
   if (!beyond(a, wa) || !beyond(b, wb)) return false
   const [short, shortProduct, long] = wa.size <= wb.size ? [wa, a, wb] : [wb, b, wa]
   return ['subset', 'equal'].includes(relation(short, long)) && beyond(shortProduct, short, GENERIC_WORDS)
+}
+
+// A pack's suitability line ("for Natural Hair", "for All Hair Types", "for Normal to Oily Skin") carries up to 3 words
+// between "for" and "hair"/"skin", with an optional trailing "type"/"types". Four words between is too many to be the
+// line, so nothing matches and nothing is set aside. Run on the pooled, already-normalised text, so the matched words
+// are exactly the ones `nearMissCandidates` removes.
+const SUITABILITY_PHRASE = /\bfor(?: \S+){0,3} (?:hair|skin)\b(?: types?\b)?/
+
+/** The words of a suitability phrase in this pooled text, for `nearMissCandidates` to set aside on one side only; null when there is none. */
+const suitabilityPhraseWords = (text: string): string[] | null => SUITABILITY_PHRASE.exec(text)?.[0].split(' ') ?? null
+
+/**
+ * The pooled words of `target` and `product`, for near-miss scoring only, with a suitability phrase removed from whichever
+ * side alone gives one: the extra words should neither sink a match the rest of the name would make, nor manufacture one
+ * neither listing meant. A phrase on both sides (the same line, or two that differ) and no phrase on either side are left
+ * exactly as `words` gives them.
+ */
+const wordsForNearMiss = (target: Branded, product: Branded): [Set<string>, Set<string>] => {
+  const targetPhrase = suitabilityPhraseWords(pooledText(target))
+  const productPhrase = suitabilityPhraseWords(pooledText(product))
+  const without = (w: Set<string>, phrase: string[]): Set<string> => {
+    const kept = new Set(w)
+    for (const word of phrase.map(foldSpelling)) kept.delete(word)
+    return kept
+  }
+  if (targetPhrase && !productPhrase) return [without(words(target), targetPhrase), words(product)]
+  if (productPhrase && !targetPhrase) return [words(target), without(words(product), productPhrase)]
+  return [words(target), words(product)]
 }
 
 /**
@@ -195,8 +226,11 @@ export const nearMissCandidates = <P extends Branded & { id: string; identityKey
   const targetKey = identityKey(target)
   return products
     .filter((p) => sameBrandFamily(p.brand, target.brand) && (p.identityKey ?? identityKey(p)) !== targetKey)
-    .map((p) => ({ product: p, similarity: nameSimilarity(target, p) }))
-    .filter((c) => c.similarity >= threshold || contains(target, c.product))
+    .map((p) => {
+      const [wt, wp] = wordsForNearMiss(target, p)
+      return { product: p, similarity: jaccard(wt, wp), wt, wp }
+    })
+    .filter((c) => c.similarity >= threshold || containsWords(target, c.wt, c.product, c.wp))
     .sort((a, b) => b.similarity - a.similarity || (a.product.id < b.product.id ? -1 : 1))
     .slice(0, limit)
     .map((c) => c.product)

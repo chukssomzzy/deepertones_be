@@ -7,7 +7,7 @@ import type { ProductAnalyst } from '../../providers/product-analysis/product-an
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../providers/product-research/product-researcher.provider'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { type AnalysisProblem, checkAnalysis } from './catalog.analysis'
-import { brandFirstWord, brandKey, identityKey, lessSpecific, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
+import { brandFirstWord, brandKey, identityKey, lessSpecific, nameSimilarity, namesAnotherEdition, nearMissCandidates, normaliseText, pagesByNameMatch } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import { REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
 import type { CatalogRepository } from './catalog.repository'
@@ -202,6 +202,22 @@ export class ProductCatalogService {
   /** A form missing on either side is compatible (the label may simply not print it); two different known forms are different products. */
   private static formsCompatible = (a: string | null | undefined, b: string | null | undefined): boolean => !a || !b || a === b
 
+  /**
+   * Which near-miss candidates the judge is asked about: a reading strictly less specific than two or more of them
+   * ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either, so none are judged and a duplicate is
+   * made instead. When the reading gives a form and exactly one of those less-specific candidates shares it (any of a
+   * different known form was already dropped before `candidates` was built), the ones with no form recorded settle
+   * nothing: they are not counted towards the guard above, and are not judged either, so a vaguer, formless sibling
+   * never stands in front of the one candidate that already agrees on form.
+   */
+  private static ambiguityFiltered<P extends Product>(identity: { brand: string; name: string; variant?: string; form?: string | null }, candidates: P[]): P[] {
+    const lessSpecificOnes = candidates.filter((c) => lessSpecific(identity, c))
+    const sameForm = identity.form ? lessSpecificOnes.filter((c) => c.form === identity.form) : []
+    const exempt = sameForm.length === 1 ? lessSpecificOnes.filter((c) => !c.form) : []
+    const counted = exempt.length > 0 ? sameForm : lessSpecificOnes
+    return counted.length >= 2 ? [] : candidates.filter((c) => !exempt.includes(c))
+  }
+
   private static readonly SKIN_OR_BODY: ReadonlySet<ProductCategory> = new Set<ProductCategory>(['skin', 'body'])
 
   /**
@@ -311,9 +327,13 @@ export class ProductCatalogService {
       threshold: this.policy.nearMissThreshold,
       limit: this.policy.nearMissLimit,
     })
-    // A reading that says less than two or more candidates ("Body Wash" among Deeply Nourishing and Go Fresh) cannot be told from either: a duplicate is safer than a wrong merge.
-    const ambiguous = candidates.filter((c) => lessSpecific(identity, c)).length >= 2
-    for (const candidate of ambiguous ? [] : candidates) {
+    // A candidate with exactly the reading's words is not held back by the guard: when the guard holds the reading back from
+    // its longer look-alikes, the equal ones are still judged (a "no" then makes a new row); otherwise every candidate is judged
+    // as before, equal ones first (they sort first by similarity).
+    const equal = candidates.filter((c) => nameSimilarity(identity, c) === 1)
+    const filtered = ProductCatalogService.ambiguityFiltered(identity, candidates)
+    const toJudge = filtered.length === 0 ? equal : [...equal, ...filtered.filter((c) => !equal.includes(c))]
+    for (const candidate of toJudge) {
       if (await this.isSameProduct({ ...identity, category: identity.category ?? candidate.category }, candidate)) {
         // A reading that says less than the product ("Hydro Boost"), or more than a vague row, or prints no form where the product does, would as an alias claim a
         // look-alike's next reading by exact key; only a reading of equal specificity is remembered.

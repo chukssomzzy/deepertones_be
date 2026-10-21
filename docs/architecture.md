@@ -1283,7 +1283,14 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   That is intended: a UK reading is treated exactly as its US spelling would be, so a UK reading less specific than
   two US rows of different ranges is held back just as the US reading is, and a UK reading landing on a US row by an
   equally-specific match is aliased just as the US spelling would be. `identityKey` never folds, so a UK and a US
-  reading keep different keys until the judge is asked. Best first by
+  reading keep different keys until the judge is asked. **A suitability phrase named on only one side is ignored here**
+  ("for" then up to 3 words then "hair" or "skin", optionally followed by "type"/"types" — "for Natural Hair", "for All
+  Hair Types", "for Normal to Oily Skin"; four words between "for" and the hair/skin word is too many to be the phrase,
+  so nothing is set aside). It is dropped from the similarity ratio and the containment check only when exactly one of
+  the two listings gives one; the same phrase on both sides, two that differ on both sides, and no phrase on either side
+  score on the full words, as before. This is local to `nearMissCandidates`: it never reaches `identityKey`,
+  `namesAnotherEdition`, `lessSpecific`, the ambiguity guard's equal-words check, or the alias-equality check, all of
+  which still see the phrase's words. Best first by
   similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
@@ -1414,6 +1421,18 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  **An equal candidate is never held back by it.** Whenever one or more of the near-miss candidates have exactly the reading's
+  words (full words, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
+  judged even when the guard holds the reading back from the rest: then only the equal ones are asked about, so a "no" still
+  makes a new row and the longer look-alikes are never asked (a "Moisturizing Lotion" reading against stored "Moisturising
+  Lotion", "Daily Moisturizing Lotion" and "Night Moisturizing Lotion" rows judges only the first). When the guard would not
+  have fired, every candidate is judged as usual, equal ones first.
+  **A candidate of the reading's own form outranks one with none.** When the reading gives a form and, among the candidates it
+  is less specific than, exactly one shares that form (a candidate of a *different* known form was already dropped by the form
+  check above), the ones with no form recorded do not count towards the guard and are not judged either: that one candidate,
+  and any candidate the reading is not less specific than, is judged as usual ("Cocoa Butter Formula" (oil) against "Cocoa
+  Butter Formula Body Oil" (oil) and "Cocoa Butter Formula Solid Jar" (no form) judges only the oil). Two or more less-specific
+  candidates sharing the reading's form are still held back, and a reading that gives no form is unaffected by either rule.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
   (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
   missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this
