@@ -1157,7 +1157,8 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
   `webhook-timestamp` (seconds, digits only, within 5 minutes either way) and `webhook-signature` (space-separated `v1,<base64>`
   entries; any one may match, other versions are ignored). The signature is HMAC-SHA-256 over `id.timestamp.body` with `crypto.subtle`,
   keyed with the base64-DECODED secret (`whsec_` stripped when present), compared in constant time. Only after that is the body read: it
-  needs `data.task_id` and a `data.task_status` of `success` or `error`. Anything else resolves to a rejection naming the reason (never throws), and the route
+  needs `data.taskId` and a `data.taskStatus` (what Perfect Corp sends) or the documented `data.task_id` and `data.task_status` (snake_case wins per field when
+  usable), the status being `success` or `error`. A rejected status that is an enum-like word is logged as `taskStatusValue`. Anything else resolves to a rejection naming the reason (never throws), and the route
   answers 401. A rejected delivery is logged as `perfect-corp-webhook-rejected` with that reason (read with `npx wrangler tail --env staging`), never the
   secret, a signature or the body. The clock is injected.
 - **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,

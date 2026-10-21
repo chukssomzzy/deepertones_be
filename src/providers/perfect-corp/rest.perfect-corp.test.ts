@@ -717,6 +717,44 @@ describe('RestPerfectCorpClient.checkWebhook', () => {
       expect(await client().checkWebhook(body, headers)).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'task-9', taskStatus: 'error' } })
     })
 
+    // What Perfect Corp really sends (seen in a staging delivery): data.taskId and data.taskStatus, in camelCase, 153 bytes.
+    it.each(['success', 'error'] as const)('accepts the delivery as Perfect Corp really sends it, in camelCase, with a task status of %s', async (taskStatus) => {
+      const real = `{"created_at":1761112848,"data":{"taskId":"${TASK_ID}","taskStatus":"${taskStatus}"}}`
+      const { body, headers } = await delivery({ body: real })
+
+      expect(await client().checkWebhook(body, headers)).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: TASK_ID, taskStatus } })
+    })
+
+    it('still accepts the snake_case body the documentation describes, task_id and task_status', async () => {
+      const documented = '{"created_at":1761112848,"data":{"task_id":"task-skin-1","task_status":"error"}}'
+      const { body, headers } = await delivery({ body: documented })
+
+      expect(await client().checkWebhook(body, headers)).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'task-skin-1', taskStatus: 'error' } })
+    })
+
+    describe('when a body carries both spellings', () => {
+      const accept = async (data: Record<string, unknown>) => {
+        const { body, headers } = await delivery({ body: JSON.stringify({ created_at: 1, data }) })
+        return client().checkWebhook(body, headers)
+      }
+
+      it('reads the snake_case task id and status, each on its own', async () => {
+        expect(await accept({ task_id: 'a', taskId: 'b', task_status: 'error', taskStatus: 'success' })).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'a', taskStatus: 'error' } })
+        expect(await accept({ taskId: 'b', task_id: 'a', taskStatus: 'error', task_status: 'success' })).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'a', taskStatus: 'success' } })
+      })
+
+      it('reads the camelCase task id when the snake_case one is empty or not text, and the camelCase status when the snake_case one is absent', async () => {
+        expect(await accept({ task_id: '', taskId: 'b', taskStatus: 'success' })).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'b', taskStatus: 'success' } })
+        expect(await accept({ task_id: 5, taskId: 'b', taskStatus: 'error' })).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'b', taskStatus: 'error' } })
+        expect(await accept({ task_id: 'a', taskStatus: 'error' })).toEqual({ ok: true, delivery: { webhookId: WEBHOOK_ID, taskId: 'a', taskStatus: 'error' } })
+      })
+
+      it('does not fall back to the camelCase status when the snake_case one is there but wrong', async () => {
+        expect(await accept({ task_id: 'a', task_status: 'running', taskStatus: 'success' })).toMatchObject({ ok: false, rejection: { problem: 'bad-task-status', taskStatusValue: 'running' } })
+        expect(await accept({ task_id: 'a', task_status: '', taskStatus: 'success' })).toMatchObject({ ok: false, rejection: { problem: 'bad-task-status' } })
+      })
+    })
+
     it('accepts a secret with the whsec_ prefix and the same secret without it', async () => {
       const { body, headers } = await delivery()
 
@@ -1212,8 +1250,89 @@ describe('RestPerfectCorpClient.checkWebhook', () => {
       expect(await shapeOf(JSON.stringify({ created_at: 1, data: { task_id: 't', task_status: 'running' } }))).toEqual({
         reason: 'bad-shape',
         problem: 'bad-task-status',
+        taskStatusValue: 'running',
         topLevelKeys: ['created_at', 'data'],
         dataKeys: ['task_id', 'task_status'],
+      })
+    })
+
+    describe('camelCase, as Perfect Corp sends it', () => {
+      const camel = (data: Record<string, unknown>) => shapeOf(JSON.stringify({ created_at: 1, data }))
+
+      it.each([
+        ['absent', { taskStatus: 'success' }, ['taskStatus']],
+        ['empty text', { taskId: '', taskStatus: 'success' }, ['taskId', 'taskStatus']],
+        ['a number', { taskId: 5, taskStatus: 'success' }, ['taskId', 'taskStatus']],
+        ['null', { taskId: null, taskStatus: 'success' }, ['taskId', 'taskStatus']],
+      ])('is no-task-id when taskId is %s, and lists the keys of data', async (_label, data, dataKeys) => {
+        const rejection = await camel(data)
+
+        expect(rejection).toEqual({ reason: 'bad-shape', problem: 'no-task-id', topLevelKeys: ['created_at', 'data'], dataKeys })
+      })
+
+      it('is bad-task-status, carrying the status, for a status of running', async () => {
+        expect(await camel({ taskId: 't', taskStatus: 'running' })).toEqual({
+          reason: 'bad-shape',
+          problem: 'bad-task-status',
+          taskStatusValue: 'running',
+          topLevelKeys: ['created_at', 'data'],
+          dataKeys: ['taskId', 'taskStatus'],
+        })
+      })
+
+      it('is bad-task-status, carrying the status as written, for SUCCESS: the status is matched exactly', async () => {
+        expect(await camel({ taskId: 't', taskStatus: 'SUCCESS' })).toMatchObject({ problem: 'bad-task-status', taskStatusValue: 'SUCCESS' })
+      })
+
+      it('is bad-task-status with no status carried when there is no status', async () => {
+        const rejection = await camel({ taskId: 't' })
+
+        expect(rejection).toMatchObject({ problem: 'bad-task-status', dataKeys: ['taskId'] })
+        expect('taskStatusValue' in rejection).toBe(false)
+      })
+    })
+
+    describe('taskStatusValue', () => {
+      const statusOf = async (taskStatus: unknown, spelling: 'taskStatus' | 'task_status' = 'taskStatus') =>
+        shapeOf(JSON.stringify({ created_at: 1, data: { [spelling === 'taskStatus' ? 'taskId' : 'task_id']: 't', [spelling]: taskStatus } }))
+
+      it.each([
+        ['a space in it', 'a b'],
+        ['30 characters', 'x'.repeat(30)],
+        ['21 characters', 'x'.repeat(21)],
+        ['a number', 5],
+        ['an email address', 'amara@example.com'],
+        ['a digit in it', 'run1'],
+        ['empty text', ''],
+        ['null', null],
+        ['a list', ['running']],
+      ])('is left out, as a key, when the status is %s: it is not an enum-like word, so it is not safe to log', async (_label, taskStatus) => {
+        for (const spelling of ['taskStatus', 'task_status'] as const) {
+          const rejection = await statusOf(taskStatus, spelling)
+
+          expect(rejection).toMatchObject({ reason: 'bad-shape', problem: 'bad-task-status' })
+          expect('taskStatusValue' in rejection, `${spelling}: ${JSON.stringify(taskStatus)}`).toBe(false)
+        }
+      })
+
+      it.each([
+        ['running'],
+        ['SUCCESS'],
+        ['in_progress'],
+        ['in-progress'],
+        ['x'],
+        ['x'.repeat(20)],
+      ])('is carried, as written, when the status is the enum-like word "%s"', async (taskStatus) => {
+        for (const spelling of ['taskStatus', 'task_status'] as const) {
+          expect(await statusOf(taskStatus, spelling)).toMatchObject({ problem: 'bad-task-status', taskStatusValue: taskStatus })
+        }
+      })
+
+      it('is not on a rejection that is not about the status', async () => {
+        const rejection = await shapeOf(JSON.stringify({ created_at: 1, data: { taskStatus: 'running' } }))
+
+        expect(rejection).toMatchObject({ problem: 'no-task-id' })
+        expect('taskStatusValue' in rejection).toBe(false)
       })
     })
 
@@ -1273,6 +1392,7 @@ describe('RestPerfectCorpClient.checkWebhook', () => {
 
   describe('what a rejection never holds', () => {
     const VALUE = 'distinctive-body-value-482913'
+    const CAMEL_TASK_ID = 'camel-task-id-739104'
 
     it('carries no secret, no signature, no webhook id and no value from the body, whichever way the delivery fails', async () => {
       const secret = `whsec_${SECRET_BASE64}`
@@ -1328,6 +1448,15 @@ describe('RestPerfectCorpClient.checkWebhook', () => {
       add('no task id', () => delivery({ body: JSON.stringify({ data: { note: VALUE, task_status: 'success' } }) }))
       add('bad status', () => delivery({ body: leakyBody({ task_status: VALUE }) }))
       add('keys that hold values', () => delivery({ body: JSON.stringify({ [`not code shaped ${VALUE}`]: 1, data: { task_status: VALUE, [TASK_ID]: 1, [`${TASK_ID}:${VALUE}`]: 2 } }) }))
+      // The camelCase body Perfect Corp really sends, refused in each way the shape check can, with a task id that is easy to find in the output.
+      const camelBody = (data: Record<string, unknown>) => JSON.stringify({ created_at: 1, note: VALUE, data: { taskId: CAMEL_TASK_ID, ...data } })
+      add('camelCase, bad status', () => delivery({ body: camelBody({ taskStatus: VALUE }) }))
+      add('camelCase, bad status that is the task id', () => delivery({ body: camelBody({ taskStatus: CAMEL_TASK_ID }) }))
+      add('camelCase, no status', () => delivery({ body: camelBody({}) }))
+      add('camelCase, status of running', () => delivery({ body: camelBody({ taskStatus: 'running' }) }))
+      add('camelCase, wrongly signed', () => delivery({ body: camelBody({ taskStatus: 'success' }), keyBytes: OTHER_KEY_BYTES }))
+      add('camelCase, stale', () => delivery({ ageSeconds: 5000, body: camelBody({ taskStatus: 'success' }) }))
+      add('camelCase, keys that hold values', () => delivery({ body: JSON.stringify({ data: { taskStatus: VALUE, [CAMEL_TASK_ID]: 1, [`${CAMEL_TASK_ID}:${VALUE}`]: 2 } }) }))
 
       for (const scenario of scenarios) {
         const { rejection, signature } = await scenario.make()
@@ -1341,6 +1470,7 @@ describe('RestPerfectCorpClient.checkWebhook', () => {
           ['the webhook id', WEBHOOK_ID],
           ['the id suffix', '122998323166'],
           ['the task id', TASK_ID],
+          ['the camelCase task id', CAMEL_TASK_ID],
           ['a body value', VALUE],
           ['a prefix as written', 'leaky-prefix-482913'],
         ] as const) {
