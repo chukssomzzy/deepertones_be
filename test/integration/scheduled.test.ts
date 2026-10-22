@@ -1,6 +1,6 @@
 import { env } from 'cloudflare:workers'
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
@@ -12,7 +12,7 @@ import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
-import { queueRecorder } from './perfect-corp.stub'
+import { queueRecorder, stubPerfectCorp } from './perfect-corp.stub'
 
 // The Worker's scheduled handler is one export for every cron in wrangler.jsonc. Each cron runs its own job and no other:
 // the daily guest cleanup must not run every 10 minutes, nor the reaper once a day. The crons are pinned to the config in
@@ -284,7 +284,12 @@ describe('the Worker scheduled handler: face scans stuck analysing', () => {
     await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), { ...env, FACE_SCANS_QUEUE: recorder.queue } as typeof env, ctx)
     await waitOnExecutionContext(ctx)
   }
+  // Failing a scan deletes its Perfect Corp task; without the stub that call goes to the real API and waits for the network.
+  beforeEach(() => {
+    stubPerfectCorp()
+  })
   afterEach(() => {
+    vi.unstubAllGlobals()
     recorder.messages.length = 0
   })
 

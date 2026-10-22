@@ -308,6 +308,65 @@ describe('ScanStream clients going away', () => {
     await stubFor(scanId).publish(itemEvent({ id: 'item-1', state: 'matching' }))
     expect((await staying.stream.read(1)).frames).toHaveLength(1)
   })
+
+  // Aborting the writer of a client that already left errors a response body that workerd is still reading, with nobody to
+  // receive the error: workerd logs `uncaught exception; source = Uncaught (in promise); exception = undefined`, no test
+  // fails, and the vitest workers pool stops making progress. That rejection is not visible to JS (no unhandledrejection
+  // event fires for it), so the only thing a test can pin is that a gone client is closed and never aborted.
+  it('closes the stream of a client that left instead of aborting it, so nothing is left rejected', async () => {
+    const abort = vi.spyOn(WritableStreamDefaultWriter.prototype, 'abort')
+    try {
+      const scanId = freshScanId()
+      const leaving = await subscribe(scanId)
+      await leaving.stream.read(1)
+
+      await leaving.stream.cancel()
+      await vi.waitFor(async () => expect(await clientCount(scanId)).toBe(0), { timeout: 2 * SECOND, interval: 20 })
+      await stubFor(scanId).publish(itemEvent({ id: 'item-1', state: 'matching' }))
+
+      expect(abort).not.toHaveBeenCalled()
+    } finally {
+      abort.mockRestore()
+    }
+  })
+
+  it('does not abort a client that left while pings keep being written to it', async () => {
+    const abort = vi.spyOn(WritableStreamDefaultWriter.prototype, 'abort')
+    try {
+      const scanId = freshScanId()
+      Object.assign(SCAN_STREAM_TIMING, { pingMs: 50 })
+      const leaving = await subscribe(scanId)
+      await leaving.stream.read(1)
+
+      await leaving.stream.cancel()
+      await vi.waitFor(async () => expect(await clientCount(scanId)).toBe(0), { timeout: 2 * SECOND, interval: 20 })
+      await new Promise((resolve) => setTimeout(resolve, 150))
+
+      expect(abort).not.toHaveBeenCalled()
+    } finally {
+      abort.mockRestore()
+    }
+  })
+
+  it('ends a client dropped for lagging with a real error as the reason, never with undefined', { timeout: 15 * SECOND }, async () => {
+    const abort = vi.spyOn(WritableStreamDefaultWriter.prototype, 'abort')
+    try {
+      const scanId = freshScanId()
+      await subscribe(scanId) // never read
+      const healthy = await subscribe(scanId)
+      await healthy.stream.read(1)
+      const total = 40
+      const arriving = healthy.stream.read(total, 10 * SECOND)
+
+      for (let n = 0; n < total; n++) await stubFor(scanId).publish(itemEvent({ id: 'item-1', n }))
+      await arriving
+
+      expect(abort).toHaveBeenCalledTimes(1)
+      expect(abort.mock.calls[0]![0]).toBeInstanceOf(Error)
+    } finally {
+      abort.mockRestore()
+    }
+  })
 })
 
 describe('ScanStream keep-alive', () => {

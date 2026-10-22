@@ -45,8 +45,8 @@ jobs:
   integration:
     name: Integration
     runs-on: ubuntu-24.04
-    # Two 8-minute tries plus setup. A normal run takes about 4 minutes.
-    timeout-minutes: 19
+    # Two 14-minute tries plus setup. A normal run takes about 5 minutes locally (one file at a time) and longer here.
+    timeout-minutes: 33
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -56,17 +56,19 @@ jobs:
       - run: npm ci
       # The whole Worker through its default export, in workerd, with local
       # bindings simulated by Miniflare. No network, no credentials.
-      # workerd occasionally freezes the whole run (no test fails, nothing more is
-      # printed), so a run still going after 8 minutes is killed and tried once
-      # more. The limit is about twice a normal run: at 5 minutes, normal runs of
-      # over 4 minutes were being killed as hangs. Only a hang (timeout's exit 124) is retried: a failing test fails the job.
+      # The files run one at a time (vitest.config.ts): a parallel full run hung at
+      # the end in the workers pool after every test had passed. The guard is still
+      # for a frozen run (no test fails, nothing more is printed): one still going
+      # after 14 minutes is killed and tried once more. A sequential run takes about
+      # 5 minutes locally and more here, so the limit leaves room for a slow runner.
+      # Only a hang (timeout's exit 124) is retried: a failing test fails the job.
       - name: Integration tests
         run: |
           for attempt in 1 2; do
             status=0
-            timeout --kill-after=15s 8m npx vitest run --project integration || status=$?
+            timeout --kill-after=15s 14m npx vitest run --project integration || status=$?
             [ "$status" -ne 124 ] && exit "$status"
-            echo "::warning::Integration tests hung for 8 minutes (attempt $attempt of 2)"
+            echo "::warning::Integration tests hung for 14 minutes (attempt $attempt of 2)"
           done
           exit 124
 
