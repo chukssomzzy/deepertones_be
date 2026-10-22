@@ -548,7 +548,7 @@ const runShelfPhoto = async (photo: ShelfPhoto, seeds: ShelfSeed[], recognizer: 
   })
   const labelled = photo.products.map((product) => {
     const id = product.folder ?? `shelf:${identityKey(identityOfLabel(product))}`
-    return { id, rowId: rows.get(id)!, brand: product.label.brand, inSet: product.folder !== undefined }
+    return { id, rowId: rows.get(id)!, brand: product.label.brand, name: product.label.name, variant: product.label.variant ?? null, inSet: product.folder !== undefined }
   })
   const failed = (error: string): ShelfDetail => ({ input: { photo: photo.name, labelled, listed: [], error }, listed: [] })
 
@@ -578,7 +578,7 @@ const runShelfPhoto = async (photo: ShelfPhoto, seeds: ShelfSeed[], recognizer: 
       return { ...failed(errorName(error)), classification: seen.classification, excluded: seen.excluded }
     }
   }
-  return { input: { photo: photo.name, labelled, listed: listed.map(({ identity, landed, onCreatedRow }) => ({ brand: identity.brand, landed, ...(onCreatedRow ? { onCreatedRow } : {}) })) }, classification: seen.classification, excluded: seen.excluded, listed }
+  return { input: { photo: photo.name, labelled, listed: listed.map(({ identity, landed, onCreatedRow }) => ({ brand: identity.brand, name: identity.name, variant: identity.variant ?? null, landed, ...(onCreatedRow ? { onCreatedRow } : {}) })) }, classification: seen.classification, excluded: seen.excluded, listed }
 }
 
 const labelledName = (product: ShelfPhoto['products'][number]): string => product.folder ?? `${product.label.brand} / ${product.label.name}`

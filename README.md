@@ -118,7 +118,7 @@ Every success response is `{ success, status, message, data }`; `data` below is 
    `GET`/`PATCH /api/v1/me/notification-settings` read and change `{ scanFinished, scanNeedsYou }` (both on by default; PATCH names at
    least one). The pushes sent are "your scan is ready" (to the phones on the profile that made the scan), "your scan needs you" (an item
    needs a confirmation or a photo of the back; once per scan and kind, and once more when a back photo was unreadable) and, always,
-   a security alert to the account's other phones when a guest signs in to an existing account. Each carries `data.url`, `kind` and
+   a security alert to the account's other phones when a guest signs in to an existing account. The same two switches cover face scans: "your face scan is ready" follows `scanFinished`, and "your face photo needs a retake" follows `scanNeedsYou` (no push for a face scan that fails). Each carries `data.url`, `kind` and
    the ids to route the tap.
 7. **For shelf scans**, `POST /api/v1/scans/products/shelf` takes 1 to 3 `photos` (multipart) and answers 202 with the scan. Every scan
    response and the stream's `snapshot` now carry `kind` (`product` or `shelf`) and `photos[]` (`id`, `position`, `state`, and the
@@ -253,6 +253,11 @@ again for fresh links. Field details are in `docs/openapi.json` (`FaceScanResult
 `GET /api/v1/scans/faces` lists the profile's face scans, latest first, at most 20, in every state (`{ faceScans }`, each the same as `GET /scans/faces/{id}`).
 Use it to find a scan without remembering its id, or to offer a retake of one that `needs-retake`. It is empty (200) before the first scan and keeps working after
 the face consent is withdrawn, so the user can still find and delete their scans.
+
+A face scan sends a push when it becomes `ready` (`data.kind` `face-scan-ready`, `data.url` `/scans/faces/{faceScanId}`) and when its front photo needs a retake
+(`face-scan-needs-retake`, `/scans/faces/{faceScanId}/retake`, with `data.reason`), once per transition; a failed scan sends none. The app needs those two
+screens. The server always sends, so if the user is watching that scan's live stream (`GET /scans/faces/{id}/events`) when the push lands, the app should
+suppress the foreground notification.
 
 ## ZeptoMail setup
 
@@ -409,7 +414,7 @@ There are only two long-lived branches. "production" is the name of the deploy t
 (the GitHub environment and `env.production` in `wrangler.jsonc`), never a branch.
 
 Every pull request and every push to `staging`/`main` runs `.github/workflows/tests.yml`:
-unit, integration, typecheck, architecture rules, the API contract (`docs/openapi.json` is current
+unit, integration (four parallel shards behind one `Integration` check), typecheck, architecture rules, the API contract (`docs/openapi.json` is current
 and valid), the prompts (CI regenerates `src/prompts/prompts.generated.ts` and fails if it is stale),
 and a dry-run build of both environments.
 None of these take a secret. Tests currently run alongside the deploy, not before it, so a red test does not stop a deploy.

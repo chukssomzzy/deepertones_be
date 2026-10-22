@@ -13,6 +13,7 @@ import { RestPerfectCorpClient } from './rest.perfect-corp'
 // UNVERIFIED VENDOR SHAPES (pinned here from the brief, to check against a real staging response before relying on them):
 //   skin analysis result:  data.results.output = [ { type, region, raw_score, ui_score, mask_urls }, { type: 'hd_skin_type', region,
 //                          skin_type }, { type: 'skin_age', score }, { type: 'all', score } ]  (per Perfect Corp's own format_json_success example)
+//                          A concern item with no string region (hd_age_spot and others have no subcategories) is read as region 'whole'.
 //   fitzpatrick result:    data.results.fitzpatrick_scale = 'I' .. 'VI'
 //   error body:            { status, error, error_code } with error_code 'CreditInsufficiency' on 400
 //   GET paths:             /s2s/v2.0/task/skin-analysis/<id> and /s2s/v2.0/task/fitzpatrick-scale-analyzer/<id>
@@ -287,6 +288,7 @@ describe('RestPerfectCorpClient.getSkinAnalysis', () => {
       ],
       skinAge: 29.4,
       all: 72.5,
+      skipped: [],
     })
   })
 
@@ -305,6 +307,7 @@ describe('RestPerfectCorpClient.getSkinAnalysis', () => {
       skinTypes: [{ region: 'whole', skinType: 'Oily' }],
       skinAge: 31,
       all: 70,
+      skipped: [],
     })
   })
 
@@ -317,7 +320,167 @@ describe('RestPerfectCorpClient.getSkinAnalysis', () => {
       skinTypes: [],
       skinAge: null,
       all: null,
+      skipped: [],
     })
+  })
+
+  // Perfect Corp's reference lists hd_acne and hd_texture with a [whole] subcategory, and hd_age_spot (like hd_redness, hd_radiance...) with none,
+  // so its item has no region. Staging scan 36f451ae lost its age-spot result to exactly this.
+  const MASK_ACNE = 'https://masks.test/acne.png?sig=private-mask-482913'
+  const MASK_TEXTURE = 'https://masks.test/texture.png?sig=private-mask-482913'
+  const REGIONLESS_OUTPUT = [
+    { type: 'hd_acne', region: 'whole', raw_score: 80, ui_score: 85, mask_urls: [MASK_ACNE] },
+    { type: 'hd_texture', region: 'whole', raw_score: 55, ui_score: 63, mask_urls: [MASK_TEXTURE] },
+    { type: 'hd_age_spot', raw_score: 57.33, ui_score: 68, mask_urls: [MASK_URL] },
+    { type: 'hd_skin_type', region: 'whole', skin_type: 'Oily' },
+    { type: 'skin_age', score: 29.4 },
+  ]
+
+  it('keeps an hd item that has no region as a whole-face concern, with its scores and mask urls, next to the items that do have one', async () => {
+    const { client } = make(() => taskReply('success', { results: { output: REGIONLESS_OUTPUT } }))
+
+    await expect(client.getSkinAnalysis('t')).resolves.toEqual({
+      status: 'success',
+      concerns: [
+        { concern: 'hd_acne', region: 'whole', rawScore: 80, uiScore: 85, maskUrls: [MASK_ACNE] },
+        { concern: 'hd_texture', region: 'whole', rawScore: 55, uiScore: 63, maskUrls: [MASK_TEXTURE] },
+        { concern: 'hd_age_spot', region: 'whole', rawScore: 57.33, uiScore: 68, maskUrls: [MASK_URL] },
+      ],
+      skinTypes: [{ region: 'whole', skinType: 'Oily' }],
+      skinAge: 29.4,
+      all: null,
+      skipped: [],
+    })
+  })
+
+  it('keeps a region-less item that has no mask urls, with an empty list', async () => {
+    const output = [{ type: 'hd_redness', raw_score: 71, ui_score: 75 }]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({ concerns: [{ concern: 'hd_redness', region: 'whole', rawScore: 71, uiScore: 75, maskUrls: [] }], skipped: [] })
+  })
+
+  it.each([
+    ['null', null],
+    ['a number', 7],
+    ['an object', { name: 'left_cheek' }],
+    ['a list', ['left_cheek']],
+    ['a boolean', true],
+  ])('reads a region that is %s, not text, as the whole face', async (_label, region) => {
+    const output = [{ type: 'hd_age_spot', region, raw_score: 57.33, ui_score: 68, mask_urls: [MASK_URL] }]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({
+      concerns: [{ concern: 'hd_age_spot', region: 'whole', rawScore: 57.33, uiScore: 68, maskUrls: [MASK_URL] }],
+      skipped: [],
+    })
+  })
+
+  it('keeps the region it was given on an item that has one, and does not turn it into the whole face', async () => {
+    const output = [{ type: 'hd_redness', region: 'forehead', raw_score: 33, ui_score: 41 }]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({ concerns: [{ concern: 'hd_redness', region: 'forehead', rawScore: 33, uiScore: 41, maskUrls: [] }] })
+  })
+
+  it.each([
+    ['no raw_score', { type: 'hd_acne', region: 'whole', ui_score: 85 }],
+    ['no ui_score', { type: 'hd_acne', region: 'whole', raw_score: 80 }],
+    ['neither score', { type: 'hd_acne', region: 'whole' }],
+    ['a raw_score that is text', { type: 'hd_acne', region: 'whole', raw_score: '80', ui_score: 85 }],
+    ['a ui_score that is text', { type: 'hd_acne', region: 'whole', raw_score: 80, ui_score: '85' }],
+    ['no region and no scores', { type: 'hd_acne', mask_urls: [MASK_ACNE] }],
+    ['no region and only one score', { type: 'hd_acne', raw_score: 80, mask_urls: [MASK_ACNE] }],
+  ])('leaves an hd item with %s out of the concerns and reports it as skipped, by type and problem only', async (_label, item) => {
+    const output = [{ type: 'hd_texture', region: 'whole', raw_score: 55, ui_score: 63 }, item]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({
+      status: 'success',
+      concerns: [{ concern: 'hd_texture', region: 'whole', rawScore: 55, uiScore: 63, maskUrls: [] }],
+      skipped: [{ type: 'hd_acne', problem: 'no-scores' }],
+    })
+    expect((result as { skipped: unknown[] }).skipped).toHaveLength(1)
+    expect(JSON.stringify((result as { skipped: unknown[] }).skipped)).not.toContain('masks.test')
+  })
+
+  it('lists every skipped item, in the order the vendor sent them', async () => {
+    const output = [{ type: 'hd_redness', raw_score: 71 }, { type: 'hd_pore', region: 'whole', ui_score: 4 }, { type: 'hd_acne', region: 'whole', raw_score: 80, ui_score: 85 }]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({
+      concerns: [{ concern: 'hd_acne' }],
+      skipped: [
+        { type: 'hd_redness', problem: 'no-scores' },
+        { type: 'hd_pore', problem: 'no-scores' },
+      ],
+    })
+  })
+
+  it('names a skipped type only when it looks like an hd code: lowercase letters and underscores, 1 to 40 after hd_', async () => {
+    const longest = 'hd_' + 'a'.repeat(40)
+    const tooLong = 'hd_' + 'a'.repeat(41)
+    const output = [
+      { type: 'hd_a' },
+      { type: longest },
+      { type: tooLong },
+      { type: 'hd_' },
+      { type: 'hd_Acne' },
+      { type: 'hd_acne spot' },
+      { type: 'hd_acne\nspot' },
+      { type: 'hd_acne-1' },
+      { type: 'hd_<script>' },
+    ]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    const result = await client.getSkinAnalysis('t')
+
+    expect(result).toMatchObject({
+      concerns: [],
+      skipped: [
+        { type: 'hd_a', problem: 'no-scores' },
+        { type: longest, problem: 'no-scores' },
+      ],
+    })
+    expect((result as { skipped: unknown[] }).skipped).toHaveLength(2)
+  })
+
+  it('does not report as skipped an item that is not an hd concern: the skin type, skin age and overall items, a type that is not text, and a type that does not start hd_', async () => {
+    const output = [
+      { type: 'hd_skin_type', skin_type: 'Oily' },
+      { type: 'skin_age' },
+      { type: 'all' },
+      { type: 'mystery', raw_score: 1 },
+      { type: 7 },
+      {},
+    ]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    await expect(client.getSkinAnalysis('t')).resolves.toEqual({
+      status: 'success',
+      concerns: [],
+      skinTypes: [],
+      skinAge: null,
+      all: null,
+      skipped: [],
+    })
+  })
+
+  it('still needs a region on a skin type item: one without is not read as the whole face', async () => {
+    const output = [{ type: 'hd_skin_type', skin_type: 'Oily' }]
+    const { client } = make(() => taskReply('success', { results: { output } }))
+
+    await expect(client.getSkinAnalysis('t')).resolves.toMatchObject({ skinTypes: [], concerns: [], skipped: [] })
   })
 
   it.each([

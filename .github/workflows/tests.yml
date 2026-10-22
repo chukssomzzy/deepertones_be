@@ -42,11 +42,18 @@ jobs:
       - name: Unit tests
         run: npm run test:unit
 
-  integration:
-    name: Integration
+  # The suite is split by test file across 4 runners (vitest --shard), so it finishes in
+  # roughly the slowest slice. Each shard is its own job with its own workerd, so shards
+  # share nothing. fail-fast is off so one red shard does not hide failures in the others.
+  integration-shard:
+    name: Integration (${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
-    # Two 14-minute tries plus setup. A normal run takes about 5 minutes locally (one file at a time) and longer here.
-    timeout-minutes: 33
+    # Two 4-minute tries plus setup. A normal shard takes about 1 to 2 minutes.
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -56,21 +63,37 @@ jobs:
       - run: npm ci
       # The whole Worker through its default export, in workerd, with local
       # bindings simulated by Miniflare. No network, no credentials.
-      # The files run one at a time (vitest.config.ts): a parallel full run hung at
-      # the end in the workers pool after every test had passed. The guard is still
-      # for a frozen run (no test fails, nothing more is printed): one still going
-      # after 14 minutes is killed and tried once more. A sequential run takes about
-      # 5 minutes locally and more here, so the limit leaves room for a slow runner.
-      # Only a hang (timeout's exit 124) is retried: a failing test fails the job.
-      - name: Integration tests
+      # workerd occasionally freezes the whole run (no test fails, nothing more is
+      # printed), so a shard still going after 4 minutes is killed and tried once
+      # more. The limit is about twice a normal shard run (a quarter of a suite that
+      # takes 3 to 6 minutes whole); the single job this replaced was being killed
+      # as a hang at 5 minutes while running normally. Only a hang (timeout's exit
+      # 124) is retried: a failing test fails the job.
+      - name: Integration tests (shard ${{ matrix.shard }}/4)
         run: |
           for attempt in 1 2; do
             status=0
-            timeout --kill-after=15s 14m npx vitest run --project integration || status=$?
+            timeout --kill-after=15s 4m npx vitest run --project integration --shard=${{ matrix.shard }}/4 || status=$?
             [ "$status" -ne 124 ] && exit "$status"
-            echo "::warning::Integration tests hung for 14 minutes (attempt $attempt of 2)"
+            echo "::warning::Integration tests (shard ${{ matrix.shard }}/4) hung for 4 minutes (attempt $attempt of 2)"
           done
           exit 124
+
+  # One check named Integration for the four shards above, so a required check and the
+  # PR checks list keep a single stable name however many shards there are.
+  integration:
+    name: Integration
+    needs: [integration-shard]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every shard passed
+        run: |
+          if [ "${{ needs.integration-shard.result }}" != "success" ]; then
+            echo "::error::Integration shards finished as: ${{ needs.integration-shard.result }}"
+            exit 1
+          fi
 
   scripts:
     name: Scripts

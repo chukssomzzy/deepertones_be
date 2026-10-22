@@ -2,7 +2,7 @@ import deepLinks from './deep-links.json'
 import type { NotificationKind } from './notifications.job-specs'
 
 /** The ids a path template may name; which kind provides which is pinned by deep-links.test.ts. */
-export type DeepLinkIds = { scanId?: string; itemId?: string }
+export type DeepLinkIds = { scanId?: string; itemId?: string; faceScanId?: string }
 
 /**
  * The Expo Router path a tap on this kind of notification opens: the kind's template from deep-links.json with each

@@ -522,7 +522,8 @@ Both run inside workerd via `@cloudflare/vitest-plugin`; they differ in scope.
 - **Integration** (`test/integration/`): repositories against real local D1 with every migration
   applied, and the whole Worker through its entrypoint with the frontend's typed client. The files run one
   at a time (`fileParallelism: false` in `vitest.config.ts`): a parallel full run hangs at the end in the
-  workers pool after every test has passed. Unit tests stay parallel.
+  workers pool after every test has passed. Unit tests stay parallel. CI splits the files across four shards
+  (`vitest --shard=i/4`), each run one file at a time.
 - **Contracts**: `<feature>.repository.contract.ts` runs against the fake (unit) and the D1
   implementation (integration), so the fake cannot drift from the real thing.
 - No test may need a secret or reach a real service.
@@ -681,17 +682,20 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 `check-push-receipts` on `push-receipts`. That is four more queues per environment, in all three `wrangler.jsonc` blocks
 (env blocks do not inherit), created before the first deploy that binds them (README, "Before the first deploy").
 
-- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou` and `newSignIn` queue a `send-push` job
-  and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId? }` and return: a scan step or a sign-in must not fail
+- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake` and `newSignIn` queue a `send-push` job
+  and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId?, faceScanId? }` and return: a scan step or a sign-in must not fail
   because a push could not be queued. (Who calls them, and when, is in "What triggers a push".)
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
-  `back-photo`, `confirm` or `identify`, optional `ask`) and `new-sign-in` (user, `platform` or null, `eventId`, `at`).
+  `back-photo`, `confirm` or `identify`, optional `ask`), `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
+  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
   `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
-  first ask); `new-sign-in:<eventId>`. `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
+  first ask); `new-sign-in:<eventId>`; `face-scan-ready:<faceScanId>` (a scan becomes ready once);
+  `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
+  notification). `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
   deduplicated by the key. The receipt job's key is its ticket ids.
 - **What triggers a push.** Only a guarded update that APPLIED notifies, and the call comes after the update (never inside it), so a repeated or
@@ -704,9 +708,11 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | `research` | `not-found` and the item moved to `needs-back-photo` | `scanNeedsYou({ need: 'back-photo' })` | `scan-needs-you:<scanId>:back-photo` |
   | `labelUnreadable` | the item moved back to `needs-identification` when it has no product, else to `needs-back-photo` | `scanNeedsYou({ need: 'identify' \| 'back-photo', ask: n })` (`identify` when it has no product), `n` = the item's back-photo count at the time of the re-ask | `scan-needs-you:<scanId>:<itemId>:ask-<n>` |
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
+  | `FaceScanService.copyResults` | `completeFaceScan` returned true | `faceScanReady()` | `face-scan-ready:<faceScanId>` |
+  | `FaceScanService.needRetake` | the conditional `analysing` to `needs-retake` update applied (upload or fetch step) | `faceScanNeedsRetake({ reason, at })` | `face-scan-needs-retake:<faceScanId>:<at>` |
   | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
 
-  An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
+  A face scan that ends `failed` (any path) notifies nothing, nor does the Fitzpatrick step, a retake or a create. An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
   rest), linking to the first item that asked.
   - **Keys.** `userId` and `profileId` are the scan row's (a step runs as a system actor, so there is no session to take them from).
     `notifyNeedsYou` reads the scan for them after the update; that read is guarded (a failure is logged as
@@ -723,9 +729,9 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   - **Sign-in.** `AuthService.verifyOtp` calls `guestSignedIn` (deletes the guest's rows and answers the platform of the phone it deleted: the
     most recently updated row's, null if none), then `newSignIn` with that platform and `at` = the injected clock's now. The alert fires only when the caller was a
     guest and the outcome is `existing`; promotion in place and a verified user signing in again do not.
-- **Targeting is decided at send time.** Scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
+- **Targeting is decided at send time.** Scan and face scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
   account the message names); the sign-in alert goes to the account's phones (`forUser`), on any profile, EXCEPT the phone that signed
-  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on); the sign-in alert has no switch.
+  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on): `scan-finished` and `face-scan-ready` follow `scanFinished`, `scan-needs-you` and `face-scan-needs-retake` follow `scanNeedsYou`; the sign-in alert has no switch.
 - **The sign-in alert skips the phone that signed in, by time.** The body carries `at`, when the sign-in happened (epoch ms; `newSignIn`
   defaults it to now). `deliver` alerts only the account's rows with `createdAt < at`. Why: the signing-in phone gets a session first and
   registers its push token after, so any row created at or after `at` is that phone registering under the account (a guest's row is
@@ -734,9 +740,10 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   Scan notifications ignore `at`.
 - **The text is generic** and is built in the service: it shows on a lock screen, so it names no product and no skin detail ("Your scan
   is ready", "3 products analysed", "We need a photo of the back of a product", "New sign-in to your Deeper Tones account", "on an
-  iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, profileId? }`; the sign-in alert has only `url` and `kind`.
+  iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, faceScanId?, reason?, profileId? }`; the sign-in alert has only `url` and `kind`. The face scan pushes say "Your face scan is ready" / "Open the app to see what we noticed"
+  and "Your face photo needs a retake" with one line per retake reason ("Find more light and take it again", "We couldn't find a face. Take it again", ...): no condition word, score, digit or lightness word.
 - **Deep links are a JSON file.** `deep-links.json` maps each kind to an Expo Router path template (`/scans/{scanId}`,
-  `/scans/{scanId}/items/{itemId}`, `/settings/security`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
+  `/scans/{scanId}/items/{itemId}`, `/settings/security`, `/scans/faces/{faceScanId}`, `/scans/faces/{faceScanId}/retake`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
   with the URL-encoded id, so an id cannot add a path segment or a query. Changing a path is a PR and goes live with the next deploy.
   `deep-links.test.ts` fails when a kind has no path, a path starts without `/`, or it uses a placeholder its kind does not provide;
   adding a kind means updating that test's table on purpose.
@@ -1166,6 +1173,9 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 - **Unverified vendor shapes.** The skin-analysis result (`data.results.output` items with `type`, `region`, `raw_score`, `ui_score`,
   `mask_urls`, `skin_type`, and the `skin_age` and `all` items), the Fitzpatrick result (`data.results.fitzpatrick_scale`), the `error_code` body and the GET
   and delete paths are pinned from the brief and Perfect Corp's documents. Check them against a real staging response before relying on them.
+  An `hd_*` item with both scores but no string `region` (the reference gives hd_age_spot, hd_redness, hd_radiance and others no subcategories) is read
+  as region `whole`; one missing a score is left out and reported in the result's `skipped` (type and `no-scores` only). `FaceScanService` logs
+  `face-scan-concern-missing` (concern, the concern names that did come back, `skipped`; no scores, links or photo) once per goal concern absent from a stored result.
 - **The memory fake** logs every call in order with its arguments (a scripted failure too, since the call was made), and `script(method,
   ...answers)` queues answers handed out one per call (an `Error` is thrown as itself). Its defaults keep a service waiting (tasks are
   `running`) and fail a webhook closed.
@@ -1191,12 +1201,13 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `Combination` and `Normal`, with or without `& Redness`, in any case; plain `Redness` is normal; anything else is null.
 
 ### Face scans
-`modules/face-scans` is the face scan (#112), built as four stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
+`modules/face-scans` is the face scan (#112), built as five stacked changes. The first was the pure rules (`face-scans.tables.ts`) and the Perfect Corp
 provider, the second the **records** (consent, the scan and its photos, the routes, the queue and the cleaner), the third the **analysis
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
-check, the live stream and the spend. This one (4 of 4) is the **result view**: what a ready scan shows (see "The result view" below).
+check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
+notifications** (see "Pushes" below).
 `FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
-store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events and the ops alerts (`Pick<OpsAlertsService,
+store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
 - **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
@@ -1337,6 +1348,14 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
   scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
   change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.
+- **Pushes.** A face scan notifies the person's phone at most once when it is ready and once for each rejected front photo, through the same `NotificationsService` and `send-push` job as the product scans
+  (see "Sending push notifications"). `copyResults` calls `faceScanReady` once `completeFaceScan` returned true (a completion that lost, or a second fetch of a
+  ready scan, says nothing), before the steps after the write that can still throw, so a retry cannot lose it. `needRetake` calls `faceScanNeedsRetake` once the
+  conditional `analysing` to `needs-retake` update applied, in the upload or the fetch step, with the `updatedAt` it wrote as `at`: a step delivered again finds
+  the scan no longer `analysing` and queues nothing, and a retaken photo that is refused again is a new notification under a new key. Nothing is sent for
+  `failed` (credit, bad request, consent withdrawn, the reaper, the dead letter), the Fitzpatrick step, a retake or a create. The switches are the account's
+  `scanFinished` (ready) and `scanNeedsYou` (needs a retake). The enqueue never throws, so a push that cannot be queued never fails or retries the step.
+  The server always sends: the app suppresses the foreground notification when it is watching the scan's live stream.
 - **Spend** goes through `VendorSpendLedger` (see "Vendor spend ledger"), as soon as Perfect Corp reports a task successful (before our copy of the result is
   stored: they bill on success), and a failure to record it is logged and does not fail the step.
 - **Guest cleanup.** `FaceDataCleaner` is in `guestDataCleaners` beside the scans'. It deletes the users' face photos and masks from the bucket
@@ -1545,12 +1564,43 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   centre and grey. No generic suffix rule, so "rise", "wise", "promise" and "anise" never fold, and the fold is
   whole-word, so "greyhound" and "centred" do not either. The fold lives in the one shared word set (`words`, pooling
   brand, name and variant), so it reaches `nameSimilarity`, containment, `lessSpecific` and the edition check
-  (`namesAnotherEdition`) alike — and through `lessSpecific`, the ambiguity guard and the alias-equality check too.
+  (`namesAnotherEdition`) alike — and through `lessSpecific` and `lessSpecificForNearMiss`, the alias-equality check
+  and the ambiguity guard too.
   That is intended: a UK reading is treated exactly as its US spelling would be, so a UK reading less specific than
   two US rows of different ranges is held back just as the US reading is, and a UK reading landing on a US row by an
   equally-specific match is aliased just as the US spelling would be. `identityKey` never folds, so a UK and a US
-  reading keep different keys until the judge is asked. Best first by
-  similarity, then id, at most 3 after ranking. The family is the first word of the normalised brand
+  reading keep different keys until the judge is asked. **A suitability phrase named on only one side is ignored here**
+  ("for" then up to 3 words then "hair" or "skin", optionally followed by "type"/"types" — "for Natural Hair", "for All
+  Hair Types", "for Normal to Oily Skin"; four words between "for" and the hair/skin word is too many to be the phrase,
+  so nothing is set aside). **An edition marker is not a suitability line:** a phrase whose words between "for" and
+  "hair"/"skin" include any of men, mens, man, mans, women, womens, woman, womans, kids, kid, baby, babys, babies, child,
+  childs, children, childrens, teen, teens, boys, boy, girls, girl, ladies, lady, gents, gent, toddler, toddlers, infant,
+  infants ("for Men's Skin", "for Kids Hair", "for Boys Hair") is never treated as the phrase and never
+  set aside — it names an edition of the range, a real difference, not the pack's wording of the same suitability
+  (apostrophes are already dropped by `normaliseText`, so "men's" reads as "mens"). The phrase is dropped from the
+  similarity ratio and the containment check only when exactly one of the two listings gives one; the same phrase on
+  both sides, two that differ on both sides, and no phrase on either side score on the full words, as before. **Two or
+  more distinct phrases switch the ignoring off for the whole call, but the count is scoped to the near misses
+  themselves, not the whole family window:** `ignoresOneSidedSuitability(target, products)` first finds the near
+  misses with the ignoring on (the same brand-family, different-key, threshold-or-containment pass `nearMissCandidates`
+  runs, before sorting and the limit), then counts distinct suitability phrases across the reading and only those near
+  misses (a reading with a phrase and a near-miss sibling with a different one; or a reading with none among near-miss
+  rows with two different ones). With 2 or more, nothing is set aside for any pair in that call, because the near
+  misses themselves then show the words tell products apart rather than restate a shared suitability; otherwise the
+  first pass (ignoring on) stands. One distinct phrase, on whichever side, still gets ignored. A row of the family
+  that is no near miss settles nothing: its own suitability line is never read for this count, even when the row sits
+  in the same brand family as the reading and the near misses. This is local to `nearMissCandidates` and
+  `lessSpecificForNearMiss` (both call `ignoresOneSidedSuitability` so they decide the same way for one reading): it
+  never reaches `identityKey`, `namesAnotherEdition`, the exported `lessSpecific`, the ambiguity guard's equal-words
+  check, or the alias-equality check, all of which still see the phrase's words — but it does reach the ambiguity
+  guard's specificity check below (`lessSpecificForNearMiss`) and the form-outranking rule's count, which uses the
+  same less-specific set, so a line that bought (or cost) a candidate its place here is seen the same way there.
+  Ranking (best first by similarity, then id, at most 3 after ranking) sorts on this phrase-ignored similarity too, not
+  the full words'. Switching the ignoring off can itself add a candidate, not only drop one: once the phrase's words
+  ("for", "hair"/"skin", and the word(s) between) are no longer set aside, a row with no suitability line of its own
+  that happens to hold some of those same words gets credit for sharing them, which can be enough to cross the
+  threshold where the words would otherwise have been removed from the comparison — the judge still decides whether
+  it is the same product. The family is the first word of the normalised brand
   (`brandFirstWord`), and the words are pooled across brand, name and variant, because the recognizer splits one label
   differently from scan to scan: `NIVEA MEN` / `DRY IMPACT` and `NIVEA` / `MEN DRY IMPACT` are one product. They are
   looked up newest first with `productsByBrandFamily`, a range on the `brand_key` index (`brand_key = w or
@@ -1680,6 +1730,33 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   **Ambiguity guard:** when the reading is strictly less specific than two or more of the near-miss candidates ("Body Wash" with
   "Deeply Nourishing Body Wash" and "Go Fresh Body Wash" stored), the model is not asked about any of them and the reading is created
   as its own product: a duplicate is recoverable, a wrong merge is not. With exactly one such candidate the model is asked as usual.
+  This specificity test (`lessSpecificForNearMiss`) weighs the same words the suitability-phrase ignoring (near-miss
+  candidates, above) used to find the candidate in the first place — a one-sided phrase set aside, or not, by the same
+  two-or-more-distinct-phrases switch-off, decided from the same comparable list and the same `nearMissThreshold` —
+  not the full words `lessSpecific` gives: a phrase that bought a candidate past the threshold, or kept one out, is
+  seen the same way here, so a line no row of the family gives cannot buy the reading a judge call it would not
+  otherwise have earned.
+  **An equal candidate is never held back by it.** Whenever one or more of the near-miss candidates have exactly the reading's
+  words (full words, `sameWords`, pooled as `nameSimilarity` pools them; the suitability-phrase ignoring above does not apply here), they are
+  judged even when the guard holds the reading back from the rest: then only the equal ones are asked about, so a "no" still
+  makes a new row and the longer look-alikes are never asked (a "Moisturizing Lotion" reading against stored "Moisturising
+  Lotion", "Daily Moisturizing Lotion" and "Night Moisturizing Lotion" rows judges only the first). When the guard would not
+  have fired, every candidate is judged as usual, equal ones first.
+  **A candidate of the reading's own form outranks one with none.** When the reading gives a form and, among the candidates it
+  is less specific than, exactly one shares that form (a candidate of a *different* known form was already dropped by the form
+  check above), the ones with no form recorded do not count towards the guard and are not judged either: that one candidate,
+  and any candidate the reading is not less specific than, is judged as usual ("Cocoa Butter Formula" (oil) against "Cocoa
+  Butter Formula Body Oil" (oil) and "Cocoa Butter Formula Solid Jar" (no form) judges only the oil). Two or more less-specific
+  candidates sharing the reading's form are still held back, and a reading that gives no form is unaffected by either rule.
+  **A partial read is not judged against a vaguer row:** when the reading is less specific than at least one candidate (by the
+  same `lessSpecificForNearMiss` test), the candidates less specific than the reading on those same words (`vaguerForNearMiss`, so a row
+  that differs only by a suitability line the reading alone gives counts as its equal, not as vaguer) are not asked about ("Facial
+  Moisturizing Lotion" with "PM Facial Moisturizing Lotion" and "Moisturising Lotion" stored asks only about the PM lotion, and a "no"
+  makes a new row): the reading is most likely the more specific product read in part, so landing it on a row vaguer still would be a
+  guess. Equal candidates are never vaguer, so they are unaffected. Like the ambiguity guard, it sees only the near misses left after
+  `nearMissLimit`: a more specific row ranked out of the top 3 by closer, vaguer ones does not trigger it. A suitability line read into
+  the variant is still weighed in full by the edition check (`namesAnotherEdition`), so it can keep a variantless row out of the near
+  misses altogether: "for Dry Skin" printed as a variant may really be an edition.
   **Judge rule:** the same-product prompt (`product-analyst.same-product.md`) says false when one listing names less than the other
   (a product line, range or bare descriptor against a specific product). A sub-line or range name present in one listing and
   missing from the other (Shea Butter, MEN, Hydro Boost) was not read on that pack, so it is not a difference by itself; this
