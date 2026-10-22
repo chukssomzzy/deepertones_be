@@ -192,12 +192,12 @@ describe('AnthropicCatalogDrafter request', () => {
     expect(sent).toMatch(/currenc/i)
   })
 
-  it('allows 8192 output tokens, since a drafted answer for several countries is long', async () => {
+  it('allows 16000 output tokens, since adaptive thinking and the search rounds count against the limit as well as the answer', async () => {
     const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
 
     await drafter.draft(REQUEST)
 
-    expect(calls[0]!.body.max_tokens).toBe(8192)
+    expect(calls[0]!.body.max_tokens).toBe(16000)
   })
 
   it.each([

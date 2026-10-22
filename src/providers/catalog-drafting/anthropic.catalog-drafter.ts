@@ -6,8 +6,9 @@ import { type CatalogDrafter, checkedDraft, DRAFT_VOCABULARY, type DraftRequest,
 
 /** Drafts a product's empty catalog cells with Claude and its web search tool. */
 export class AnthropicCatalogDrafter implements CatalogDrafter {
-  // Several countries' prices, each with a shop and a page, come to a long answer; one cut off at the limit is refused, not read.
-  private static readonly MAX_TOKENS = 8192
+  // Haiku's adaptive thinking and up to 6 search rounds count against max_tokens along with the answer; a smaller limit cut
+  // answers off, and one cut off is refused, not read, after a paid call. Only the tokens used are billed.
+  private static readonly MAX_TOKENS = 16000
   // Two searches for the product's pages, then one for its price in each country, to a most of 6.
   private static readonly BASE_SEARCHES = 2
   private static readonly MAX_SEARCHES = 6
