@@ -225,6 +225,44 @@ describe('AnthropicCatalogDrafter request', () => {
     expect(sent).toMatch(/instructions/i)
     expect(sent).toMatch(/memory/i)
   })
+
+  it('tells the model a price row is for one pack size, never a mix of sizes, bundles or multipacks', async () => {
+    const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await drafter.draft(REQUEST)
+
+    const sent = requestText(calls[0]!.body)
+    expect(sent).toMatch(/one pack size/i)
+    expect(sent).toMatch(/multipack/i)
+  })
+
+  it('tells the model to leave out the skincare cells for a product that is not a skincare product', async () => {
+    const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await drafter.draft(REQUEST)
+
+    expect(requestText(calls[0]!.body)).toMatch(/not a skincare product/i)
+  })
+
+  it('tells the model to prefer the maker or an established retailer and never a classified-ad, auction or second-hand listing', async () => {
+    const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await drafter.draft(REQUEST)
+
+    const sent = requestText(calls[0]!.body)
+    expect(sent).toMatch(/manufacturer/i)
+    expect(sent).toMatch(/classified/i)
+    expect(sent).toMatch(/auction/i)
+    expect(sent).toMatch(/second-hand/i)
+  })
+
+  it('tells the model to use a page only when it names this exact brand and product', async () => {
+    const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+
+    await drafter.draft(REQUEST)
+
+    expect(requestText(calls[0]!.body)).toMatch(/exact brand and product/i)
+  })
 })
 
 describe('AnthropicCatalogDrafter answers that were cut off or refused', () => {
@@ -379,6 +417,45 @@ describe('AnthropicCatalogDrafter.draft', () => {
       expect(result.cells).toEqual({ steps: { value: ['cleanse'], sourceUrl: BRAND_PAGE } })
     })
 
+    it.each([
+      'https://www.ebay.com/itm/1',
+      'https://www.ebay.co.uk/itm/1',
+      'https://EBAY.de/itm/1',
+      'https://jiji.ng/lagos/health/1',
+      'https://www.jiji.com.ng/health/1',
+      'https://craigslist.org/p/1',
+      'https://lagos.craigslist.org/p/1',
+      'https://www.gumtree.com/p/1',
+      'https://www.gumtree.com.au/p/1',
+      'https://olx.pl/p/1',
+      'https://www.olx.com.ng/p/1',
+    ])('leaves out a cell and a price row sourced from the classified or auction site %s, even though the search returned it', async (listing) => {
+      const result = await draftFrom(
+        answer({
+          cells: { frequency: { value: 'pm', sourceUrl: listing }, steps: { value: ['cleanse'], sourceUrl: BRAND_PAGE } },
+          availability: [row({ sourceUrl: listing })],
+        }),
+        REQUEST,
+        [BRAND_PAGE, listing],
+      )
+
+      expect(result.cells).toEqual({ steps: { value: ['cleanse'], sourceUrl: BRAND_PAGE } })
+      expect(result.availability).toEqual([])
+    })
+
+    it.each([
+      'https://www.jumia.com.ng/p/1',
+      'https://www.amazon.com/dp/1',
+      'https://notebay.com/p/1',
+      'https://ebay-shop.example/p/1',
+      'https://shop.example/ebay',
+      'https://olx.shop.example/p/1',
+    ])('keeps a source on %s, since only the classified and auction sites are refused', async (page) => {
+      const result = await draftFrom(cellsOf({ frequency: { value: 'pm', sourceUrl: page } }), REQUEST, [page])
+
+      expect(result.cells.frequency).toEqual({ value: 'pm', sourceUrl: page })
+    })
+
     it('never invents: an answer from a model that did not search has no value, whatever pages it names', async () => {
       const result = await draft([textBlock(JSON.stringify(answer()))])
 
@@ -436,6 +513,18 @@ describe('AnthropicCatalogDrafter.draft', () => {
         ['NG', 1, 1],
         ['GB', 5000, 5000],
       ])
+    })
+
+    it('keeps a row whose highest price is exactly 2.5 times the lowest, and drops one above it, since a wider spread is not one product\'s price', async () => {
+      const result = await draftFrom(rowsOf(row({ country: 'NG', priceMin: 4000, priceMax: 10000 }), row({ country: 'GB', priceMin: 4000, priceMax: 10001 })))
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['NG', 4000, 10000]])
+    })
+
+    it('drops a range that runs across pack sizes, and keeps the other country', async () => {
+      const result = await draftFrom(rowsOf(row({ country: 'NG', priceMin: 9000, priceMax: 31000 }), row({ country: 'GB', priceMin: 9, priceMax: 12 })))
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
     })
 
     it('keeps the row but leaves out where_sold when it holds a link or markup, since the workbook takes plain words only', async () => {

@@ -67,8 +67,25 @@ const cellValue = (column: DraftColumn, value: unknown): string | string[] | und
   return typeof value === 'string' && (FREQUENCIES as readonly string[]).includes(value) ? value : undefined
 }
 
-/** A public https page that can sit in a `draft_cells` entry: the cell is split at ";", so a link holding one would be cut in two. */
-export const isUsableSource = (value: unknown): value is string => isSafePublicHttpsUrl(value) && !value.includes(';')
+// Classified-ad and auction sites: a listing there is one seller's unchecked claim, never evidence for a catalog. Matched on the registrable name
+// (the label before the TLD, or before co/com/... under a country TLD), so any TLD and any subdomain is covered. Kept short: general retailers and
+// marketplaces are not on it.
+const LISTING_SITES: ReadonlySet<string> = new Set(['ebay', 'jiji', 'craigslist', 'gumtree', 'olx'])
+const SECOND_LEVEL_LABELS: ReadonlySet<string> = new Set(['co', 'com', 'net', 'org', 'gov', 'edu', 'ac'])
+
+const isListingSite = (url: string): boolean => {
+  const labels = new URL(url).hostname.toLowerCase().replace(/\.+$/, '').split('.')
+  const tld = labels.pop()!
+  if (tld.length === 2 && labels.length > 1 && SECOND_LEVEL_LABELS.has(labels.at(-1)!)) labels.pop()
+  return LISTING_SITES.has(labels.at(-1)!)
+}
+
+/** A public https page that can sit in a `draft_cells` entry (the cell is split at ";", so a link holding one would be cut in two), and not a listing site. */
+export const isUsableSource = (value: unknown): value is string => isSafePublicHttpsUrl(value) && !value.includes(';') && !isListingSite(value)
+
+// A price row is for one pack size, so its highest price is at most a little above its lowest (shops and pack-size rounding). A wider spread means
+// sizes, bundles or unrelated listings were mixed, which is not one product's price.
+const MAX_PRICE_SPREAD = 2.5
 
 // A price a source gave is a whole number of at least 1: 0 is a missing price read as free, and a number past 2^53 is not exact. (The workbook itself
 // still takes 0 in a price typed by hand.)
@@ -76,7 +93,7 @@ const isPrice = (value: unknown): value is number => typeof value === 'number' &
 
 /**
  * What of a drafter's answer the workbook can take: only the columns and countries asked for, only values in the vocabularies, prices as whole
- * numbers, and only a page that is a public https address. `searched`, when given, is also the only set of pages a source may be (the model can
+ * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `searched`, when given, is also the only set of pages a source may be (the model can
  * name a page it never saw). A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
  */
 export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: ReadonlySet<string>): DraftResult => {
@@ -103,6 +120,7 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: Rea
     const sourceUrl = sourceOf(row.sourceUrl)
     if (typeof country !== 'string' || !request.countries.some((asked) => asked.code === country) || taken.has(country)) continue
     if (!isPrice(priceMin) || !isPrice(priceMax) || priceMin > priceMax || sourceUrl === undefined) continue
+    if (priceMax > priceMin * MAX_PRICE_SPREAD) continue
     taken.add(country)
     const shop = typeof whereSold === 'string' ? whereSold.trim() : ''
     const plain = shop !== '' && shop.length <= MAX_WHERE_SOLD && !CONTROL_CHARACTER.test(shop) && !hasLinkOrMarkup(shop)
