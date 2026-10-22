@@ -372,6 +372,15 @@ describe('runUpload: what it prints when the server answers', () => {
     expect(out.stdout()).toMatch(/no changes/i)
   })
 
+  it('does not tell the person to run again with --apply when a dry run has no changes, since there is nothing to apply', async () => {
+    const { deps, out } = setup({ reply: okReply({ applied: false, catalogVersion: 7, diff: EMPTY_DIFF }) })
+
+    expect(await runUpload(args({ apply: false }), deps)).toBe(0)
+
+    expect(out.stdout()).toMatch(/dry run/i)
+    expect(out.stdout()).not.toContain('--apply')
+  })
+
   it('exits non-zero rather than claim success when a 200 holds no diff', async () => {
     const { deps, out } = setup({ reply: okReply({ applied: false, catalogVersion: 7 }) })
 
