@@ -1,7 +1,7 @@
 import { PermanentJobError } from '../../jobs/job'
 import { requireUser } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
-import { readImageHeader } from '../../lib/image-header'
+import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
 import { describeUnexpectedError } from '../../lib/safe-error'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
@@ -490,12 +490,15 @@ export class FaceScanService {
   private async copyResults(scan: FaceScan, taskId: string, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): Promise<void> {
     const { id, userId, profileId } = scan
     const masks: FaceMask[] = []
+    await this.logFrontPhotoSize(scan)
     try {
       for (const concern of concernsForGoal(scan.goalAtScan)) {
         const url = FaceScanService.maskUrlOf(analysis.concerns, concern)
         if (!url) continue
         const maskKey = this.objectKey(scan, FaceScanService.maskName(concern))
-        await this.photos.put(maskKey, { bytes: await this.perfectCorp.downloadMask(url), mediaType: 'image/png' })
+        const bytes = await this.perfectCorp.downloadMask(url)
+        console.log({ outcome: 'mask-read', faceScanId: id, concern, ...describeImageBytes(bytes), bytes: bytes.length })
+        await this.photos.put(maskKey, { bytes, mediaType: 'image/png' })
         masks.push({ faceScanId: id, userId, concern, maskKey })
       }
       const written = await this.repository.completeFaceScan(id, {
@@ -529,6 +532,17 @@ export class FaceScanService {
     const returned = [...present].sort()
     for (const concern of concernsForGoal(scan.goalAtScan)) {
       if (!present.has(concern)) console.warn({ outcome: 'face-scan-concern-missing', faceScanId: scan.id, concern, returned, skipped: analysis.skipped })
+    }
+  }
+
+  /** The size of the photo Perfect Corp was given, to set beside what it measured. Best effort: a photo that cannot be read is logged without a size, never a failure. */
+  private async logFrontPhotoSize(scan: FaceScan): Promise<void> {
+    try {
+      const photo = await this.photos.get(this.objectKey(scan, 'front.jpg'))
+      const header = photo ? readImageHeader(photo.bytes) : null
+      console.log({ outcome: 'front-photo-read', faceScanId: scan.id, width: header?.width ?? null, height: header?.height ?? null })
+    } catch (error) {
+      console.error({ outcome: 'front-photo-read-failed', faceScanId: scan.id, error: describeUnexpectedError(error) })
     }
   }
 

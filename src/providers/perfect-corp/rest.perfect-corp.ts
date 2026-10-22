@@ -44,6 +44,12 @@ const REJECTIONS: Record<string, RejectedPhotoReason> = {
   error_no_face: 'no-face',
   error_below_min_image_size: 'image-size',
   error_exceed_max_image_size: 'image-size',
+  // The Fitzpatrick analyzer's own codes.
+  error_insufficient_lighting: 'too-dark',
+  error_face_angle_invalid: 'turn-to-camera',
+  error_face_position_too_small: 'move-closer',
+  error_face_position_invalid: 'face-not-centred',
+  error_face_position_out_of_boundary: 'face-not-centred',
 }
 
 type Json = Record<string, unknown>

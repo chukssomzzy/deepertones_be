@@ -1041,6 +1041,99 @@ describe('FaceScanService.advance: the fetch step', () => {
   })
 })
 
+/** The lines the fetch step logged with `outcome`, across every level, with the level they were logged at. */
+const loggedOutcomes = async (fn: () => Promise<unknown>, outcome: string) => {
+  const spies = (['log', 'info', 'warn', 'error'] as const).map((level) => ({ level, spy: vi.spyOn(console, level).mockImplementation(() => undefined) }))
+  try {
+    await fn()
+    return spies.flatMap(({ level, spy }) =>
+      spy.mock.calls.filter(([line]) => (line as { outcome?: string } | undefined)?.outcome === outcome).map(([line]) => ({ level, line: line as Record<string, unknown> })),
+    )
+  } finally {
+    spies.forEach(({ spy }) => spy.mockRestore())
+  }
+}
+
+const PNG_MASK = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52, 0, 0, 4, 56, 0, 0, 5, 160, 8, 6, 0, 0, 0])
+
+describe('FaceScanService.advance: what the fetch step logs about the masks and the front photo', () => {
+  it('logs each mask once, with its format, size and byte count, and no address or pixel', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    ctx.perfectCorp.downloadMask = async () => PNG_MASK.slice()
+
+    const lines = await loggedOutcomes(() => fetchStep(ctx, id), 'mask-read')
+
+    expect(lines.map((entry) => entry.level)).toEqual(['log', 'log'])
+    expect(lines.map((entry) => entry.line)).toEqual([
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_radiance', format: 'png', width: 1080, height: 1440, bytes: PNG_MASK.length },
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_moisture', format: 'png', width: 1080, height: 1440, bytes: PNG_MASK.length },
+    ])
+  })
+
+  it('calls a mask that is not a PNG or JPEG other, with no size', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    const lines = await loggedOutcomes(() => fetchStep(ctx, id), 'mask-read')
+
+    // The harness answers with the text of the address, which is not an image.
+    expect(lines.map((entry) => entry.line)).toEqual([
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_radiance', format: 'other', width: null, height: null, bytes: maskUrl('radiance').length },
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_moisture', format: 'other', width: null, height: null, bytes: maskUrl('moisture').length },
+    ])
+  })
+
+  it('logs the front photo\'s size once per read', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    const lines = await loggedOutcomes(() => fetchStep(ctx, id), 'front-photo-read')
+
+    expect(lines).toEqual([{ level: 'log', line: { outcome: 'front-photo-read', faceScanId: id, width: 1080, height: 1440 } }])
+  })
+
+  it('still makes the scan ready, and logs the photo with no size, when the front photo is gone from the bucket', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    await ctx.photos.delete(frontKey(ctx, id))
+
+    const lines = await loggedOutcomes(() => fetchStep(ctx, id), 'front-photo-read')
+
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+    expect(lines.map((entry) => entry.line)).toEqual([{ outcome: 'front-photo-read', faceScanId: id, width: null, height: null }])
+  })
+
+  it('still makes the scan ready when the front photo cannot be read from the bucket', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    ctx.photos.get = async () => {
+      throw new Error('the bucket is down')
+    }
+
+    await loggedOutcomes(() => fetchStep(ctx, id), 'front-photo-read')
+
+    expect((await rowOf(ctx, id)).state).toBe('ready')
+  })
+
+  it('logs no address, score or text from the vendor in any of these lines', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    const logged = await loggedDuring(() => fetchStep(ctx, id))
+
+    expect(logged).not.toContain('masks.test')
+    expect(logged).not.toContain('sig=abc')
+    expect(logged).not.toContain('41.5')
+  })
+})
+
 describe('FaceScanService.advance: the fitzpatrick step', () => {
   it('stores the type for the profile, records 10 units keyed by the Fitzpatrick task, and deletes the vendor\'s copy', async () => {
     const ctx = setup()
