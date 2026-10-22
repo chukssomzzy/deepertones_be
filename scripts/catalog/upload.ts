@@ -154,7 +154,7 @@ export async function runUpload(args: { file: string; env: Environment; by: stri
       terminal.log(`Applied. The ${args.env} catalog is now at version ${liveVersion}.`)
     } else {
       terminal.log('Dry run: nothing was changed.')
-      terminal.log(`To apply these changes, run again with --apply: npm run catalog:upload -- ${args.file} --env ${args.env} --by ${JSON.stringify(args.by)} --apply`)
+      if (lines.length > 0) terminal.log(`To apply these changes, run again with --apply: npm run catalog:upload -- ${args.file} --env ${args.env} --by ${JSON.stringify(args.by)} --apply`)
     }
     return 0
   } catch (error) {
