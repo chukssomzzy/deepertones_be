@@ -53,7 +53,7 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
     }
     this.clients.add(client)
     // Needs the enable_request_signal compatibility flag; without it nothing here learns that a client left.
-    request.signal.addEventListener('abort', () => this.drop(client))
+    request.signal.addEventListener('abort', () => this.end(client, null))
     this.send(client, frame('snapshot', snapshot))
     return new Response(readable, { headers: SSE_HEADERS })
   }
@@ -86,10 +86,14 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
       this.drop(client)
       return
     }
-    client.writer.write(bytes).catch(() => this.drop(client))
+    client.writer.write(bytes).catch(() => this.end(client, null))
   }
 
-  /** Writes the last frame, if any, and closes the stream after it. */
+  /**
+   * Writes the last frame, if any, and closes the stream after it. Also how a client that has already left is forgotten:
+   * aborting its writer would error a response body that workerd is still reading with nobody left to receive the error,
+   * and workerd reports that as `uncaught exception ... exception = undefined`, which hangs the test run.
+   */
   private end(client: Client, last: Uint8Array | null): void {
     if (!this.clients.delete(client)) return
     client.stopTimers()
@@ -97,10 +101,10 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
     client.writer.close().catch(() => {})
   }
 
-  /** Forgets a client that is gone or too slow; abort discards whatever it had queued. */
+  /** Forgets a client that is still connected but too slow; abort discards whatever it had queued and tells it, with a real reason, to reconnect. */
   private drop(client: Client): void {
     if (!this.clients.delete(client)) return
     client.stopTimers()
-    client.writer.abort().catch(() => {})
+    client.writer.abort(new Error('scan stream client is too far behind')).catch(() => {})
   }
 }

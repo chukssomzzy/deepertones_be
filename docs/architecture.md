@@ -520,7 +520,10 @@ Both run inside workerd via `@cloudflare/vitest-plugin`; they differ in scope.
 - **Unit** (`src/**/*.test.ts`): a service with in-memory fakes. Fakes are written once per
   interface and reused; tests assert outcomes, not call sequences.
 - **Integration** (`test/integration/`): repositories against real local D1 with every migration
-  applied, and the whole Worker through its entrypoint with the frontend's typed client.
+  applied, and the whole Worker through its entrypoint with the frontend's typed client. The files run one
+  at a time (`fileParallelism: false` in `vitest.config.ts`): a parallel full run hangs at the end in the
+  workers pool after every test has passed. Unit tests stay parallel. CI splits the files across four shards
+  (`vitest --shard=i/4`), each run one file at a time.
 - **Contracts**: `<feature>.repository.contract.ts` runs against the fake (unit) and the D1
   implementation (integration), so the fake cannot drift from the real thing.
 - No test may need a secret or reach a real service.

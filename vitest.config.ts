@@ -28,6 +28,8 @@ export default defineConfig(async () => {
           test: {
             name: 'integration',
             include: ['test/integration/**/*.test.ts'],
+            // A parallel full run hangs at the end in the workers pool after every test has passed; one file at a time is clean.
+            fileParallelism: false,
             setupFiles: ['./test/integration/setup.ts'],
           },
         },
