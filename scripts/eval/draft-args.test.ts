@@ -53,11 +53,13 @@ describe('parseArgs: --mode draft', () => {
     expect(parseArgs(['--out-dir', 'o', '--limit', '2', '--max-usd', '3', '--mode', 'draft'])).toEqual({ mode: 'draft', limit: 2, maxUsd: 3, models: {}, set: 'main', outDir: 'o' })
   })
 
-  it('measures the main set unless told otherwise, and takes --set main|holdout as --set X and --set=X', () => {
+  it('measures the main set unless told otherwise, and takes --set main|holdout|dev as --set X and --set=X', () => {
     expect(parseArgs(['--mode', 'draft']).set).toBe('main')
     expect(parseArgs(['--mode', 'draft', '--set', 'main']).set).toBe('main')
     expect(parseArgs(['--mode', 'draft', '--set', 'holdout']).set).toBe('holdout')
     expect(parseArgs(['--set=holdout', '--mode=draft']).set).toBe('holdout')
+    expect(parseArgs(['--mode', 'draft', '--set', 'dev']).set).toBe('dev')
+    expect(parseArgs(['--set=dev', '--mode=draft']).set).toBe('dev')
   })
 
   it('has no set for the other modes, which have no draft set to choose', () => {
@@ -72,6 +74,7 @@ describe('parseArgs: --mode draft', () => {
     ['--set with an empty value', ['--mode', 'draft', '--set=']],
     ['--set without --mode draft: it would be silently ignored', ['--set', 'holdout']],
     ['--set with another mode', ['--mode', 'research', '--set', 'holdout']],
+    ['--set dev without --mode draft', ['--set', 'dev']],
   ])('throws for %s', (_label, argv) => {
     expect(() => parseArgs(argv)).toThrow()
   })

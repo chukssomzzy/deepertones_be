@@ -4,6 +4,7 @@
  * src/providers, because nothing in the product asks it anything.
  */
 import { z } from 'zod'
+import { comparableUrl } from '../../src/lib/url-safety'
 import { draftJudgeJudgeDraftPrompt } from '../../src/prompts/prompts.generated'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 import type { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
@@ -40,19 +41,6 @@ const ANSWER_SCHEMA = z.object({
 
 const CURRENCY_CODE = /^[A-Z]{3}$/
 
-/**
- * An address as the judge's fetch is matched to the cited page: scheme and host in lower case (the URL parser does that), no fragment, no trailing slash. The
- * query stays: a page at another query is not known to be the same page. Undefined when it is not a web address.
- */
-const comparable = (address: string): string | undefined => {
-  try {
-    const url = new URL(address)
-    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}${url.search}`
-  } catch {
-    return undefined
-  }
-}
-
 const hostOf = (address: string): string | undefined => {
   try {
     return new URL(address).hostname
@@ -77,7 +65,7 @@ export class AnthropicDraftJudge implements DraftJudge {
   async judge(request: JudgeRequest): Promise<Verdict> {
     // The tool is restricted to the cited page's host, and only a fetch of that very page counts below, so the verdict is about the page the drafter cited.
     const host = hostOf(request.sourceUrl)
-    const cited = comparable(request.sourceUrl)
+    const cited = comparableUrl(request.sourceUrl)
     if (host === undefined || cited === undefined) return unverifiable('not-fetched')
 
     let message
@@ -114,7 +102,7 @@ export class AnthropicDraftJudge implements DraftJudge {
     const results = message.content.flatMap((block) => (block.type === 'web_fetch_tool_result' ? [block.content as { type?: unknown; url?: unknown } | null | undefined] : []))
     const pages = results.filter((result) => result?.type === 'web_fetch_result')
     if (pages.length === 0) return unverifiable(results.length > 0 ? 'fetch-failed' : 'not-fetched')
-    if (!pages.some((page) => typeof page?.url === 'string' && comparable(page.url) === cited)) return unverifiable('not-fetched')
+    if (!pages.some((page) => typeof page?.url === 'string' && comparableUrl(page.url) === cited)) return unverifiable('not-fetched')
 
     const answer = lastJsonObjectIn(textOf(message), ANSWER_SCHEMA)
     if (!answer) return unverifiable('unreadable-answer')

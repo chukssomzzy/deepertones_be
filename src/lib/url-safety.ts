@@ -34,3 +34,16 @@ const hasColonInAuthority = (raw: string): boolean => {
   const authority = afterScheme.split(/[/\\?#]/, 1)[0]!
   return authority.slice(authority.lastIndexOf('@') + 1).includes(':')
 }
+
+/**
+ * An address as two of them are compared to tell whether they name the same page: scheme and host in lower case (the URL parser does that), no fragment,
+ * no trailing slash. The query stays: a page at another query is not known to be the same page. Undefined when it is not a web address.
+ */
+export const comparableUrl = (address: string): string | undefined => {
+  try {
+    const url = new URL(address)
+    return `${url.protocol}//${url.host}${url.pathname.replace(/\/+$/, '')}${url.search}`
+  } catch {
+    return undefined
+  }
+}

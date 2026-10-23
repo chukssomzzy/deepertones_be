@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { catalogDrafterDraftCatalogRowPrompt } from '../../prompts/prompts.generated'
 import type { AnthropicClient } from '../anthropic/anthropic.client'
-import { AnthropicRefusalError, AnthropicRequestError, lastJsonObjectIn, sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
+import { AnthropicRefusalError, AnthropicRequestError, fetchedUrlsOf, lastJsonObjectIn, sourceUrlsOf, textOf } from '../anthropic/anthropic.provider'
 import { type CatalogDrafter, checkedDraft, DRAFT_VOCABULARY, type DraftRequest, type DraftResult } from './catalog-drafter.provider'
 
 /** Drafts a product's empty catalog cells with Claude and its web search tool. */
@@ -12,6 +12,9 @@ export class AnthropicCatalogDrafter implements CatalogDrafter {
   // Two searches for the product's pages, then one for its price in each country, to a most of 6.
   private static readonly BASE_SEARCHES = 2
   private static readonly MAX_SEARCHES = 6
+  // One fetch of a price page for each country, to a most of 4. A fetched page is billed as input tokens, so what one fetch may bring in is bounded too.
+  private static readonly MAX_FETCHES = 4
+  private static readonly MAX_PAGE_TOKENS = 12_000
 
   // What of the shape matters here: whether it is an answer at all. Every value in it is checked by checkedDraft.
   private static readonly ANSWER_SCHEMA = z.object({
@@ -44,6 +47,19 @@ export class AnthropicCatalogDrafter implements CatalogDrafter {
             name: 'web_search',
             max_uses: Math.min(AnthropicCatalogDrafter.MAX_SEARCHES, AnthropicCatalogDrafter.BASE_SEARCHES + request.countries.length),
           },
+          // Only a price is read from a page, so with no country to price there is nothing to fetch.
+          ...(request.countries.length > 0
+            ? [
+                {
+                  type: 'web_fetch_20260318',
+                  name: 'web_fetch',
+                  max_uses: Math.min(AnthropicCatalogDrafter.MAX_FETCHES, request.countries.length),
+                  max_content_tokens: AnthropicCatalogDrafter.MAX_PAGE_TOKENS,
+                  // By default this tool version runs through code execution (dynamic filtering), whose fetch results may not come back as top-level blocks for fetchedUrlsOf.
+                  allowed_callers: ['direct'],
+                },
+              ]
+            : []),
         ],
       },
       { job: catalogDrafterDraftCatalogRowPrompt.job },
@@ -53,10 +69,10 @@ export class AnthropicCatalogDrafter implements CatalogDrafter {
     if (message.stop_reason === 'refusal') throw new AnthropicRefusalError('Claude refused to answer')
     if (message.stop_reason === 'max_tokens') throw new AnthropicRequestError('Claude ran out of max_tokens before finishing the answer')
 
-    // The model can name a page it never saw, so a source must be one the search returned. A model that did not search has no source to give.
+    // The model can name a page it never saw, so a source must be one the search returned or it fetched, and a price must come from a page it fetched. A model that did neither has no source to give.
     // An answer that cannot be read is nothing: the caller leaves the cells for a person.
     const answer = lastJsonObjectIn(textOf(message), AnthropicCatalogDrafter.ANSWER_SCHEMA)
     if (!answer) return { cells: {}, availability: [] }
-    return checkedDraft(answer, request, sourceUrlsOf(message))
+    return checkedDraft(answer, request, { searched: sourceUrlsOf(message), fetched: fetchedUrlsOf(message) })
   }
 }

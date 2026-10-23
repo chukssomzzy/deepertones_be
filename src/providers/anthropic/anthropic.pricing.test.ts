@@ -241,6 +241,41 @@ describe('estimateMicros (the worst case reserved before a call)', () => {
     expect(costMicros(SONNET, spent)).toBeLessThanOrEqual(estimateMicros(SONNET, allowance))
   })
 
+  describe('pages the fetch tool may read (maxFetchedTokens: its uses times the most one page brings in)', () => {
+    it('is exactly today\'s estimate when maxFetchedTokens is left out, undefined or 0', () => {
+      // Sonnet: (10000 + 5 x 25000) x 2 + 4096 x 10 + 5 x 10000 = 360960, as in the search test above.
+      const request = { inputTokens: 10_000, maxOutputTokens: 4_096, maxSearches: 5 }
+
+      expect(estimateMicros(SONNET, request)).toBe(360_960)
+      expect(estimateMicros(SONNET, { ...request, maxFetchedTokens: undefined })).toBe(360_960)
+      expect(estimateMicros(SONNET, { ...request, maxFetchedTokens: 0 })).toBe(360_960)
+    })
+
+    it('adds the fetched tokens at the input price and nothing else: no search price, no search allowance', () => {
+      // Sonnet: (10000 + 15000) x 2 + 4096 x 10 = 50000 + 40960
+      expect(estimateMicros(SONNET, { inputTokens: 10_000, maxOutputTokens: 4_096, maxSearches: 0, maxFetchedTokens: 15_000 })).toBe(90_960)
+    })
+
+    it('adds the fetched tokens on top of the search allowance when a call has both', () => {
+      // Sonnet: (10000 + 25000 + 15000) x 2 + 4096 x 10 + 10000 = 100000 + 40960 + 10000
+      expect(estimateMicros(SONNET, { inputTokens: 10_000, maxOutputTokens: 4_096, maxSearches: 1, maxFetchedTokens: 15_000 })).toBe(150_960)
+    })
+
+    it('puts a Haiku call at the long tier when the fetched tokens take the prompt over 100000, and not one token before', () => {
+      // 60001 + 40000 = 100001 input tokens at 0.50 and 1000 out at 2.50: 50000.5 + 2500 -> 52501
+      expect(estimateMicros(HAIKU, { inputTokens: 60_001, maxOutputTokens: 1000, maxSearches: 0, maxFetchedTokens: 40_000 })).toBe(52_501)
+      // 60000 + 40000 = 100000 stays low: 100000 x 0.10 + 1000 x 0.50 = 10500
+      expect(estimateMicros(HAIKU, { inputTokens: 60_000, maxOutputTokens: 1000, maxSearches: 0, maxFetchedTokens: 40_000 })).toBe(10_500)
+    })
+
+    it('is exactly the cost of a call that reads every page it may, each page adding its tokens to the prompt', () => {
+      const allowance = { inputTokens: 10_000, maxOutputTokens: 4_096, maxSearches: 0, maxFetchedTokens: 15_000 }
+      const spent = usage({ inputTokens: 10_000 + 15_000, outputTokens: 4_096 })
+
+      expect(costMicros(SONNET, spent)).toBe(estimateMicros(SONNET, allowance))
+    })
+  })
+
   it('refuses an unknown model', () => {
     expect(() => estimateMicros('claude-test-model', { inputTokens: 1, maxOutputTokens: 1, maxSearches: 0 })).toThrow()
   })

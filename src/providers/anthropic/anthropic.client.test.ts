@@ -10,6 +10,7 @@ import {
   AnthropicUnavailableError,
   estimateInputTokens,
   estimateMicros,
+  fetchedUrlsOf,
   sourceUrlsOf,
   textOf,
 } from './anthropic.provider'
@@ -23,6 +24,9 @@ import {
   citation,
   DEFAULT_API_URL,
   errorResponse,
+  fetchCall,
+  fetchedPage,
+  fetchError,
   hangingFetch,
   json,
   MODEL,
@@ -552,6 +556,61 @@ describe('sourceUrlsOf', () => {
   })
 })
 
+describe('fetchedUrlsOf', () => {
+  const A = 'https://a.example/page'
+  const B = 'https://b.example/page'
+  const C = 'https://c.example/page'
+
+  it('collects the url of every page the fetch tool read, once', () => {
+    const message = {
+      content: [
+        fetchCall('srvtoolu_1', A),
+        fetchedPage('srvtoolu_1', A),
+        fetchCall('srvtoolu_2', B),
+        fetchedPage('srvtoolu_2', B),
+        fetchCall('srvtoolu_3', A),
+        fetchedPage('srvtoolu_3', A),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)].sort()).toEqual([A, B])
+  })
+
+  it('does not count a page the search returned or the answer cites, only one that was fetched', () => {
+    const message = {
+      content: [
+        searchCall('srvtoolu_1', 'q'),
+        searchResults('srvtoolu_1', [A, B]),
+        fetchCall('srvtoolu_2', B),
+        fetchedPage('srvtoolu_2', B),
+        textBlock('cited', [citation(C)]),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)]).toEqual([B])
+  })
+
+  it('does not count a fetch that failed, even when the error names the url', () => {
+    const message = {
+      content: [
+        fetchCall('srvtoolu_1', A),
+        fetchError('srvtoolu_1', A),
+        fetchCall('srvtoolu_2', B),
+        fetchError('srvtoolu_2'),
+        fetchCall('srvtoolu_3', C),
+        { type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_3', content: null },
+        textBlock('none'),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)]).toEqual([])
+  })
+
+  it('returns nothing when nothing was fetched', () => {
+    expect([...fetchedUrlsOf({ content: [textBlock('hello')] } as never)]).toEqual([])
+  })
+})
+
 /*
  * Spend accounting. Expected costs are worked out by hand from Anthropic's prices (see anthropic.pricing.test.ts);
  * the worst-case reservation is checked against the formula applied to the request the test saw being sent.
@@ -642,6 +701,129 @@ describe('AnthropicClient reserving before a request', () => {
     const sent = calls[0]!.body
     const expected = estimateMicros(MODEL, { inputTokens: estimateInputTokens(sent), maxOutputTokens: 1024, maxSearches: 7 })
     expect(ledger.entries[0]!.estimateMicros).toBe(expected)
+  })
+
+  describe('web_fetch tools', () => {
+    const FETCH_TOOL = { type: 'web_fetch_20250910', name: 'web_fetch', max_uses: 3, max_content_tokens: 5_000 }
+    const HAIKU = 'claude-haiku-5-5'
+    const ask = (tools?: Record<string, unknown>[]) => ({ ...BODY, ...(tools ? { tools } : {}) })
+
+    it('reserves exactly the fetched-input allowance more than for the same request without the tool: max_uses x max_content_tokens at the input price', async () => {
+      const without = stubFetch(ok())
+      const withTool = stubFetch(ok())
+      const ledgerWithout = newLedger()
+      const ledgerWith = newLedger()
+
+      await make(without.fetch, { ledger: ledgerWithout }).createMessage(ask(), RESEARCH)
+      await make(withTool.fetch, { ledger: ledgerWith }).createMessage(ask([FETCH_TOOL]), RESEARCH)
+
+      // Sonnet is 2 micros per input token. The tool's own definition also makes the prompt longer, so that is counted as well.
+      const toolDefinitionTokens = estimateInputTokens(withTool.calls[0]!.body) - estimateInputTokens(without.calls[0]!.body)
+      const allowanceMicros = 3 * 5_000 * 2
+      expect(ledgerWith.entries[0]!.estimateMicros - ledgerWithout.entries[0]!.estimateMicros).toBe(toolDefinitionTokens * 2 + allowanceMicros)
+      expect(allowanceMicros).toBe(30_000)
+    })
+
+    it('reserves the whole allowance in the formula: (prompt + 15000) input tokens at 2 plus 1024 output tokens at 10', async () => {
+      const { calls, fetch } = stubFetch(ok())
+      const ledger = newLedger()
+
+      await make(fetch, { ledger }).createMessage(ask([FETCH_TOOL]), RESEARCH)
+
+      expect(ledger.entries[0]!.estimateMicros).toBe((estimateInputTokens(calls[0]!.body) + 15_000) * 2 + 1024 * 10)
+    })
+
+    it('adds up every web_fetch tool, and ignores other tools\' max_uses', async () => {
+      const { calls, fetch } = stubFetch(ok())
+      const ledger = newLedger()
+      const tools = [FETCH_TOOL, { ...FETCH_TOOL, max_uses: 2, max_content_tokens: 1_000 }, { type: 'custom', name: 'lookup', max_uses: 40, max_content_tokens: 9_000 }]
+
+      await make(fetch, { ledger }).createMessage(ask(tools), RESEARCH)
+
+      // 3 x 5000 + 2 x 1000 = 17000 fetched tokens
+      expect(ledger.entries[0]!.estimateMicros).toBe((estimateInputTokens(calls[0]!.body) + 17_000) * 2 + 1024 * 10)
+    })
+
+    describe('the long-prompt tier on Haiku (up to 100000 input tokens: $0.10 in / $0.50 out; over: $0.50 / $2.50)', () => {
+      // 2 uses x 20000 = 40000 fetched tokens, so a prompt of 60000 tokens is exactly at the line and 60001 is over it.
+      const HAIKU_FETCH_TOOL = { ...FETCH_TOOL, max_uses: 2, max_content_tokens: 20_000 }
+
+      /** A request whose prompt, as the client sizes it for Haiku, is exactly `tokens` input tokens. */
+      const requestOf = (tokens: number) => {
+        const sized = (pad: number) => ({ ...BODY, messages: [{ role: 'user', content: PROMPT + 'x'.repeat(pad) }], tools: [HAIKU_FETCH_TOOL] })
+        // A byte is 0.4 of a token, so start a few bytes short of where the prompt should land and walk up to it.
+        const start = Math.max(0, Math.floor((tokens - estimateInputTokens({ ...sized(0), model: HAIKU })) * 2.5) - 5)
+        for (let pad = start; ; pad++) {
+          const body = sized(pad)
+          const size = estimateInputTokens({ ...body, model: HAIKU })
+          if (size === tokens) return body
+          if (size > tokens) throw new Error(`cannot size a prompt to ${tokens} tokens`)
+        }
+      }
+
+      it('reserves at the low tier when the prompt plus the fetched tokens is exactly 100000: 100000 x 0.10 + 1024 x 0.50 = 10512', async () => {
+        const { fetch } = stubFetch(ok())
+        const ledger = newLedger()
+
+        await make(fetch, { models: { ...MODELS, research: HAIKU }, ledger }).createMessage(requestOf(60_000), RESEARCH)
+
+        expect(ledger.entries[0]!.estimateMicros).toBe(10_512)
+      })
+
+      it('reserves at the long tier, for the output too, when the fetched tokens take it to 100001: 100001 x 0.50 + 1024 x 2.50 = 52560.5 -> 52561', async () => {
+        const { fetch } = stubFetch(ok())
+        const ledger = newLedger()
+
+        await make(fetch, { models: { ...MODELS, research: HAIKU }, ledger }).createMessage(requestOf(60_001), RESEARCH)
+
+        expect(ledger.entries[0]!.estimateMicros).toBe(52_561)
+      })
+    })
+
+    describe('a web_fetch tool without both limits', () => {
+      const { max_uses: _uses, ...noMaxUses } = FETCH_TOOL
+      const { max_content_tokens: _tokens, ...noMaxContentTokens } = FETCH_TOOL
+      const MESSAGE = 'A web_fetch tool must set max_uses and max_content_tokens'
+
+      it.each([
+        ['max_uses', noMaxUses],
+        ['max_content_tokens', noMaxContentTokens],
+      ])('throws before reserving or calling the API when it has no %s (createMessage)', async (_missing, tool) => {
+        const { calls, fetch } = stubFetch(ok())
+        const ledger = newLedger()
+
+        const error = await caught(make(fetch, { ledger }).createMessage(ask([tool]), RESEARCH))
+
+        expect((error as Error).message).toBe(MESSAGE)
+        expect(ledger.entries).toEqual([])
+        expect(calls).toEqual([])
+      })
+
+      it.each([
+        ['max_uses', noMaxUses],
+        ['max_content_tokens', noMaxContentTokens],
+      ])('throws before reserving or calling the API when it has no %s (structured)', async (_missing, tool) => {
+        const { calls, fetch } = stubFetch(ok([textBlock('{"same":true}')]))
+        const ledger = newLedger()
+
+        const error = await caught(make(fetch, { ledger }).structured(ask([tool]), SCHEMA, RESEARCH))
+
+        expect((error as Error).message).toBe(MESSAGE)
+        expect(ledger.entries).toEqual([])
+        expect(calls).toEqual([])
+      })
+
+      it('throws even when another web_fetch tool on the request is complete', async () => {
+        const { calls, fetch } = stubFetch(ok())
+        const ledger = newLedger()
+
+        const error = await caught(make(fetch, { ledger }).createMessage(ask([FETCH_TOOL, noMaxContentTokens]), RESEARCH))
+
+        expect((error as Error).message).toBe(MESSAGE)
+        expect(ledger.entries).toEqual([])
+        expect(calls).toEqual([])
+      })
+    })
   })
 
   it('reserves again before each pause_turn continuation, from the larger request it is about to send', async () => {
