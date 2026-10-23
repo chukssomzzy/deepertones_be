@@ -265,6 +265,13 @@ describe('AnthropicDraftJudge: the verdict', () => {
     it('is asked for in the judge\'s instructions, or the judge would never give it', () => {
       expect(draftJudgeJudgeDraftPrompt.text).toContain('pricesShown')
     })
+
+    it('says the prices are for the same pack size as the drafted row, or a larger tube on the page would read as a dearer product', () => {
+      const text = draftJudgeJudgeDraftPrompt.text
+      // Loose on purpose: the words may change, but the instruction must sit with the pricesShown one, not elsewhere in the prompt.
+      const nearPricesShown = [...text.matchAll(/pricesShown/g)].some((match) => /same (pack )?size/i.test(text.slice(Math.max(0, match.index - 400), match.index + 400)))
+      expect(nearPricesShown).toBe(true)
+    })
   })
 
   it('reads the verdict from the last JSON object of a reply that has chatter before it', async () => {

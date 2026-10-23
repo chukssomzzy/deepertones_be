@@ -1278,8 +1278,51 @@ describe('draftWorkbook: retry passes', () => {
       ['Vanicream', 3],
     ])
     expect(outcome.stoppedBy).toBeNull()
+    // A retry that fails is no product failing: its cells were drafted in the first pass.
+    expect(outcome.failed).toEqual([])
     expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
     expect(availabilityOf(outcome.workbook, 'PRD-VANICREAM').map((r) => r.country)).toEqual(['NG', 'GB'])
+  })
+
+  it('does not record a product as failed when only its retries fail: the pair stays unpriced and is listed as missing, and every pass is still made', async () => {
+    const { calls, drafter } = scripted((request) => {
+      if (attemptOf(request) > 1) throw new Error('overloaded')
+      return pricing(request, [])
+    })
+
+    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter })
+
+    expect(outcome.failed).toEqual([])
+    expect(outcome.stoppedBy).toBeNull()
+    expect(calls.map(attemptOf)).toEqual([1, 1, 2, 2, 3, 3])
+    expect(outcome.prices.missing).toEqual([
+      { code: 'PRD-CERAVE', countries: ['NG', 'GB'] },
+      { code: 'PRD-VANICREAM', countries: ['NG', 'GB'] },
+    ])
+    expect(formatReport(outcome)).not.toContain('Failed')
+  })
+
+  it('records only the first pass\'s failure of a product: a product that failed in the researcher and again in a retry is listed once', async () => {
+    const made = fakes()
+    made.researcher.failNextWith(new Error('overloaded'))
+    const { drafter } = scripted((request) => {
+      if (attemptOf(request) > 1) throw new Error('overloaded again')
+      return pricing(request, [])
+    })
+
+    const { outcome } = await run(workbook(), { researcher: made.researcher, drafter })
+
+    expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'researcher-error' }])
+  })
+
+  it('records a product whose drafter failed in the first pass once, however many retries fail too', async () => {
+    const { drafter } = scripted(() => {
+      throw new Error('overloaded')
+    })
+
+    const { outcome } = await run(workbook(), { drafter })
+
+    expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'drafter-error' }])
   })
 
   it('stops everything on a bad key, billing or permission met in a later pass, asking no further product or pass', async () => {

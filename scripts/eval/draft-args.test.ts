@@ -10,8 +10,8 @@ describe('parseArgs: --mode draft', () => {
     expect(parseArgs(['--mode=draft']).mode).toBe('draft')
   })
 
-  it('caps spend at 5 dollars unless told otherwise, since a draft run drafts and then judges every value on a page', () => {
-    expect(parseArgs(['--mode', 'draft']).maxUsd).toBe(5)
+  it('caps spend at 10 dollars unless told otherwise, since a draft run drafts and then judges every value on a page', () => {
+    expect(parseArgs(['--mode', 'draft']).maxUsd).toBe(10)
   })
 
   it.each([

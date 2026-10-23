@@ -83,6 +83,9 @@ const COUNTRY_ROWS: RawRow[] = [
 
 const EVAL_COUNTRIES: DraftCountry[] = COUNTRY_ROWS.map((row) => ({ code: row.code as string, currency: row.currency as string }))
 
+// The eval measures catalog:draft as it runs by default, pinned here so a change to that default is a deliberate eval change.
+const EVAL_PASSES = 3
+
 const EVAL_BANDS: Record<string, Bands> = Object.fromEntries(COUNTRY_ROWS.map((row) => [row.code as string, { lowMax: Number(row.low_max), midMax: Number(row.mid_max) }]))
 
 const headersOf = (key: TabKey): string[] => CONTRACT.tabs.find((tab) => tab.key === key)!.columns.map((column) => column.name)
@@ -210,7 +213,7 @@ export const runDraftEval = async ({ cases: allCases, set = 'main', humanChecks 
 
     const spentBefore = ledger.spentMicros()
     recorded.takeErrorName()
-    const outcome = await draftWorkbook(workbookOf([workbook.products.rows[index]!], []), { researcher: recorded.researcher, drafter: recorded.drafter, ledger, countries: c.countries })
+    const outcome = await draftWorkbook(workbookOf([workbook.products.rows[index]!], []), { researcher: recorded.researcher, drafter: recorded.drafter, ledger, countries: c.countries, passes: EVAL_PASSES })
     const errorName = recorded.takeErrorName()
     workbook.products.rows[index] = outcome.workbook.products.rows[0]!
     workbook.availability.rows.push(...outcome.workbook.availability.rows)

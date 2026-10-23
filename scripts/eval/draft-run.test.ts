@@ -409,6 +409,21 @@ describe('runDraftEval: exit code and gate', () => {
     expect(t.researcher.products).toHaveLength(4)
   })
 
+  it('keeps a case drafted when only a retry for its missing prices fails: the price stays missing, the case is not a failed product, and the run exits as it would have', async () => {
+    const t = setup({ outDir: OUT })
+    // The first pass answers as usual; every later pass, which only asks for the prices still missing (Neutrogena's NG, the unbranded product's NG), throws.
+    t.drafter.failure = (request) => ((request.attempt ?? 1) > 1 ? new Error(ERROR_SENTINEL) : undefined)
+
+    const { exitCode } = await t.run()
+
+    expect(t.drafter.requests.some((request) => (request.attempt ?? 1) > 1)).toBe(true)
+    const reported = reportOf(t.files)
+    expect(reported.cases.map((c) => c.state)).toEqual(['drafted', 'drafted', 'drafted', 'drafted'])
+    for (const c of reported.cases) expect(c, c.id).not.toHaveProperty('errorName')
+    expect(exitCode).toBe(0)
+    expect(t.logs.join('\n')).not.toMatch(/drafter-error|researcher-error/)
+  })
+
   // The class name of an error says what kind of failure it was (Anthropic's request, refusal or a network error) and holds no model words, so it is shown
   // next to the fixed code; the message stays out.
   describe('the class name of the error behind a failed product', () => {
@@ -762,7 +777,7 @@ describe('runDraftEval: the console', () => {
 })
 
 // Beside the gate the run reports what the drafted prices are for: coverage (of the product-country pairs asked in ordinary cases that were drafted, how
-// many got a price row) and band accuracy (of the rows whose page the judge could read a price for, how many put the product in the page's budget band,
+// many got a price row) and band accuracy (of the rows whose page the judge could read a price for, how many put the product's lowest price in the page's lowest price's budget band,
 // from the Countries tab's low_max and mid_max: NG 5000 and 15000, GB 10 and 30). Neither is part of the gate.
 describe('runDraftEval: price coverage and band accuracy', () => {
   const ordinary = (id: string, brand: string, countries: string[] = ['NG', 'GB']): DraftCase => ({ id, kind: 'ordinary', product: { brand, name: 'Body Lotion', category: 'body' }, countries })
@@ -771,7 +786,7 @@ describe('runDraftEval: price coverage and band accuracy', () => {
   const ZELVO = ordinary('zelvo-body-lotion', 'Zelvo')
   const PRICES_CASES = [AMBER, KURUVO, ZELVO, FOREIGN]
 
-  /** The drafted range for each product and country: NG 4000-6500 is mid (5250), GB 8-12 is low (10). Kuruvo gets no GB price; Zelvo's drafting fails. */
+  /** The drafted range for each product and country: NG 4000-6500 is low by its lowest price, 4000 (its midpoint, 5250, would be mid), GB 8-12 is low (8). Kuruvo gets no GB price; Zelvo's drafting fails. */
   const priceAnswer = (request: DraftRequest): DraftResult => {
     const base = answerFor(request)
     if (request.product.brand === 'Neutrogena') return base
@@ -780,11 +795,11 @@ describe('runDraftEval: price coverage and band accuracy', () => {
     return { ...base, availability: countries.map(({ code }) => ({ country: code, ...rows[code as 'NG' | 'GB'], sourceUrl: PRICE_PAGE(code) })) }
   }
 
-  /** What each judged price page showed: Amber NG 5200 (mid, as drafted), Amber GB 25 (mid, not the low drafted), Kuruvo nothing, the foreign trap 5000 (which would be known if it were counted). */
+  /** What each judged price page showed: Amber NG 4500 (low, as drafted), Amber GB 25 (mid, not the low drafted), Kuruvo nothing, the foreign trap 5000 (which would be known if it were counted). */
   const pricesShownFor = (request: JudgeRequest): number[] | undefined => {
     const country = (request.value as { country: string }).country
     const brand = request.product.brand
-    if (brand === 'Amber') return country === 'NG' ? [5200] : [25]
+    if (brand === 'Amber') return country === 'NG' ? [4500] : [25]
     if (brand === 'Neutrogena') return [5000]
     return undefined
   }
@@ -811,7 +826,7 @@ describe('runDraftEval: price coverage and band accuracy', () => {
     expect(line).toMatch(/coverage 3\/4 \(75(\.0)?%\)/)
     expect(line).toMatch(/NG 2\/2/)
     expect(line).toMatch(/GB 1\/2/)
-    // Amber NG: drafted 5250 is mid, the page's 5200 is mid. Amber GB: drafted 10 is low, the page's 25 is mid. Kuruvo NG: the page showed no price.
+    // Amber NG: the drafted lowest price, 4000, is low, and so is the page's 4500. Amber GB: drafted 8 is low, the page's 25 is mid. Kuruvo NG: the page showed no price.
     expect(line).toMatch(/band-correct 1\/2 \(50(\.0)?%\)/)
     expect(line).toMatch(/band unknown 1/)
     expect(line).not.toContain('NaN')

@@ -108,7 +108,7 @@ export const bandOf = (amount: number, { lowMax, midMax }: Bands): Band => (amou
 /**
  * Price coverage and band accuracy, reported beside the gate and never part of it. Coverage: of the product-country pairs a drafted ordinary case asked
  * about, how many got a price row. Band accuracy: of the rows whose page the judge could read a price on, how many put the product in the band the page puts
- * it in (the drafted range's midpoint against the median of the prices shown). A row with no readable page price is band-unknown, neither right nor wrong.
+ * it in (the drafted range's lowest price against the lowest price shown, since the recommendations filter places a product by its lowest price). A row with no readable page price is band-unknown, neither right nor wrong.
  */
 export type PriceScore = {
   asked: number
@@ -227,12 +227,6 @@ const agreementOf = ({ cells, prices, expected }: CaseInput): CaseScore['agreeme
   return agreement
 }
 
-const medianOf = (numbers: number[]): number => {
-  const sorted = [...numbers].sort((a, b) => a - b)
-  const middle = sorted.length >> 1
-  return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2
-}
-
 /** Only an ordinary case that was drafted is asked for prices; a trap's prices are held against the tool by the trap, and a case that stopped part-way asked nothing. */
 const priceScoreOf = (input: CaseInput, bands: Record<string, Bands>): PriceScore => {
   const score = noPrices()
@@ -243,7 +237,7 @@ const priceScoreOf = (input: CaseInput, bands: Record<string, Bands>): PriceScor
     score.asked++
     if (priced) score.priced++
   }
-  for (const { country, priceMin, priceMax, verdict } of input.prices) {
+  for (const { country, priceMin, verdict } of input.prices) {
     const countryBands = bands[country]
     const shown = verdict.fetched ? (verdict.pricesShown ?? []) : []
     if (countryBands === undefined || shown.length === 0) {
@@ -251,7 +245,7 @@ const priceScoreOf = (input: CaseInput, bands: Record<string, Bands>): PriceScor
       continue
     }
     score.bandKnown++
-    if (bandOf((priceMin + priceMax) / 2, countryBands) === bandOf(medianOf(shown), countryBands)) score.bandCorrect++
+    if (bandOf(priceMin, countryBands) === bandOf(Math.min(...shown), countryBands)) score.bandCorrect++
   }
   return score
 }

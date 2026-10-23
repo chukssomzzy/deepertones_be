@@ -918,36 +918,44 @@ describe('price coverage and band accuracy (reported, never a gate)', () => {
   })
 
   describe('band accuracy', () => {
-    // The drafted range's midpoint against the median of the prices the page showed: each boundary of NG's bands (100, 300), both sides.
+    // The recommendations filter keeps a product for a budget when the row's LOWEST price is at most the band's top, so a row is band-correct when the band
+    // of its drafted lowest price (price_min) is the band of the lowest price the page showed. The top of the range plays no part.
+    // Each boundary of NG's bands (100, 300), both sides.
     it.each([
-      ['a midpoint at low_max is low, the same as a page price at low_max', 90, 110, [100], true],
-      ['a midpoint at low_max is low, not the mid a page price just above gives', 90, 110, [101], false],
-      ['a midpoint just above low_max is mid, not the low a page price at low_max gives', 91, 111, [100], false],
-      ['a midpoint just above low_max is mid, the same as a page price just above it', 91, 111, [101], true],
-      ['a midpoint at mid_max is mid, the same as a page price at mid_max', 290, 310, [300], true],
-      ['a midpoint at mid_max is mid, not the high a page price just above gives', 290, 310, [301], false],
-      ['a midpoint just above mid_max is high, not the mid a page price at mid_max gives', 291, 311, [300], false],
-      ['a midpoint just above mid_max is high, the same as a page price just above it', 291, 311, [301], true],
-    ])('%s', (_label, min, max, shown, correct) => {
-      expect(scoreOf({ prices: [row('NG', min, max, shown)] }).prices).toMatchObject({ bandKnown: 1, bandUnknown: 0, bandCorrect: correct ? 1 : 0 })
+      ['a lowest price at low_max is low, the same as a page price at low_max', 100, [100], true],
+      ['a lowest price at low_max is low, not the mid a page price just above gives', 100, [101], false],
+      ['a lowest price just above low_max is mid, not the low a page price at low_max gives', 101, [100], false],
+      ['a lowest price just above low_max is mid, the same as a page price just above it', 101, [101], true],
+      ['a lowest price at mid_max is mid, the same as a page price at mid_max', 300, [300], true],
+      ['a lowest price at mid_max is mid, not the high a page price just above gives', 300, [301], false],
+      ['a lowest price just above mid_max is high, not the mid a page price at mid_max gives', 301, [300], false],
+      ['a lowest price just above mid_max is high, the same as a page price just above it', 301, [301], true],
+    ])('%s', (_label, min, shown, correct) => {
+      expect(scoreOf({ prices: [row('NG', min, min + 50, shown)] }).prices).toMatchObject({ bandKnown: 1, bandUnknown: 0, bandCorrect: correct ? 1 : 0 })
     })
 
-    it('is correct when the range spans bands but its midpoint is in the page\'s band', () => {
-      // 50-250 is a low-to-mid range; its midpoint 150 is mid.
-      expect(scoreOf({ prices: [row('NG', 50, 250, [200])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
+    it('ignores the top of the drafted range: 100-1000 is low, as the filter puts it, however high it reaches', () => {
+      // Its midpoint, 550, would be high.
+      expect(scoreOf({ prices: [row('NG', 100, 1000, [100])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
     })
 
-    it('takes the median of the prices shown, not their mean or their first: [10, 20, 400] is low, and a range in the low band is correct', () => {
-      // The mean, 143, would be mid; the last, 400, high.
-      expect(scoreOf({ prices: [row('NG', 50, 150, [400, 10, 20])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
+    it('is wrong when the range spans bands but its lowest price is not in the page\'s band', () => {
+      // 50-250 starts low; the page's 200 is mid. Its midpoint, 150, would be mid and call this right.
+      expect(scoreOf({ prices: [row('NG', 50, 250, [200])] }).prices).toMatchObject({ bandCorrect: 0, bandKnown: 1 })
     })
 
-    it('takes the median of an even number of prices as the mean of the middle two: [50, 350] is 200, mid', () => {
-      // The lower middle (50) would be low and the upper (350) high; only the mean puts it in mid.
-      expect(scoreOf({ prices: [row('NG', 150, 250, [50, 350])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
+    it('takes the lowest of the prices shown, not their median, their mean or their first', () => {
+      // [150, 400, 90]: the lowest, 90, is low; the median, 150, and the mean, 213, are mid; the first, 150, is mid.
+      expect(scoreOf({ prices: [row('NG', 50, 150, [150, 400, 90])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
+      expect(scoreOf({ prices: [row('NG', 150, 250, [150, 400, 90])] }).prices).toMatchObject({ bandCorrect: 0, bandKnown: 1 })
     })
 
-    it('reads each country\'s row against that country\'s bands: GB 5-9 is low (7), and a GB page price of 8 is mid', () => {
+    it('takes the lowest of an even number of prices, not the mean of the middle two: [50, 350] is low, not the mid of 200', () => {
+      expect(scoreOf({ prices: [row('NG', 150, 250, [50, 350])] }).prices).toMatchObject({ bandCorrect: 0, bandKnown: 1 })
+      expect(scoreOf({ prices: [row('NG', 20, 250, [50, 350])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
+    })
+
+    it('reads each country\'s row against that country\'s bands: a GB lowest price of 5 is low (7), and a GB page price of 8 is mid', () => {
       // Against NG's bands (100, 300) an 8 would be low too, and this row would be wrongly right.
       expect(scoreOf({ prices: [row('GB', 5, 9, [8])] }).prices).toMatchObject({ bandCorrect: 0, bandKnown: 1 })
       expect(scoreOf({ prices: [row('GB', 5, 9, [7])] }).prices).toMatchObject({ bandCorrect: 1, bandKnown: 1 })
@@ -967,11 +975,11 @@ describe('price coverage and band accuracy (reported, never a gate)', () => {
         { countries: [NG, GB], prices: [row('NG', 50, 150, [90]), row('GB', 5, 9)] },
       ])
 
-      // NG 100 and 90 are low with the range's midpoint 100 (low); GB 25 is high against the range's 7 (low); the last GB row has no prices to check.
+      // NG 100 and 90 are low, the same as the ranges' lowest price 50; GB 25 is high against the range's lowest, 5 (low); the last GB row has no prices to check.
       expect(prices).toMatchObject({ bandCorrect: 2, bandKnown: 3, bandUnknown: 1, priced: 4 })
     })
 
-    it('does not need the judge to call the value grounded: the band is the page\'s prices against the range\'s', () => {
+    it('does not need the judge to call the value grounded: the band is the page\'s lowest price against the range\'s', () => {
       const { prices } = summaryOf([{ prices: [row('NG', 50, 150, [100], { supports: 'no' }), row('NG', 50, 150, [250], { supports: 'yes' })] }])
 
       expect(prices).toMatchObject({ bandCorrect: 1, bandKnown: 2 })
@@ -985,7 +993,7 @@ describe('price coverage and band accuracy (reported, never a gate)', () => {
 
       for (const verdictOf of ['correct', 'wrong'] as const) {
         const score = scoreDraftCase(checked(verdictOf), BANDS)
-        // 15 is low, the page's 250 is mid: wrong, whatever the person says about the value.
+        // The lowest price, 14, is low and the page's 250 is mid: wrong, whatever the person says about the value.
         expect(score.prices, verdictOf).toMatchObject({ priced: 1, bandKnown: 1, bandCorrect: 0, bandUnknown: 0 })
       }
     })

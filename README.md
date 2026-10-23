@@ -261,7 +261,10 @@ deployed ones (the same gitignored files as above). The token is sent only in th
 page, skin concerns, skin types, steps and frequency) and adds an Availability row for each active country that has none, never adding or removing a product
 and never writing to the input file. Every cell it fills is listed in `draft_cells` with the page it came from, and a row stays `draft` with no approval, so a
 person must check each cell against its page, clear its `draft_cells` entry and approve the row. It makes real, billed Claude calls (key from `.dev.vars`) and
-stops at `--max-usd` (2 dollars by default), keeping what it has. Prices are hard to find, so after the first pass it makes up to `--passes` passes in all (1 to 5, 3 by default), each one asking again, with a wider look, only for the products and countries still without a price; the report says how many product-country pairs are priced and lists the ones still missing. The report lists what is still wrong, by tab, row and column; the output file is a normal
+stops at `--max-usd` (2 dollars by default), keeping what it has. Prices are hard to find, so after the first pass it makes up to `--passes` passes in
+all (1 to 5, 3 by default), each one asking again, with a wider look, only for the products and countries still without a price; the report says how
+many product-country pairs are priced and lists the ones still missing. Each extra pass is another billed drafter call for every product still
+unpriced, so a higher `--passes` costs more. The report lists what is still wrong, by tab, row and column; the output file is a normal
 workbook to finish and upload as above. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
 contract version), so it uploads to the environment it was exported from, and a file with no stamp stays refused by the upload.
 

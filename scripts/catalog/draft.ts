@@ -102,10 +102,10 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
     return wanted.filter((country) => !have.has(country.code))
   }
   const fail = (code: string, reason: FailureReason): void => {
-    if (!failed.some((f) => f.code === code && f.reason === reason)) failed.push({ code, reason })
+    if (!failed.some((f) => f.code === code)) failed.push({ code, reason })
   }
-  /** Asks the drafter and writes what it gave to the row, checked at the workbook's door. Returns the draft_cells marks. A stop is left in `stoppedBy`. */
-  const ask = async ({ row, code }: Target, request: DraftRequest): Promise<string[]> => {
+  /** Asks the drafter and writes what it gave to the row, checked at the workbook's door. Returns the draft_cells marks. A stop is left in `stoppedBy`. Only a first-pass error is a product failing; a retry that errors just leaves the pair unpriced. */
+  const ask = async ({ row, code }: Target, request: DraftRequest, firstPass: boolean): Promise<string[]> => {
     const marks: string[] = []
     try {
       // The adapter has checked its answer, but this is the workbook's door: nothing is written that the vocabularies or the https rule refuse.
@@ -128,7 +128,7 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
       }
     } catch (error) {
       stoppedBy = stopOf(error)
-      if (stoppedBy === null) fail(code, 'drafter-error')
+      if (stoppedBy === null && firstPass) fail(code, 'drafter-error')
     }
     return marks
   }
@@ -168,7 +168,7 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
     if (stoppedBy === null) {
       const columns = DRAFT_COLUMNS.filter((column) => isEmpty(row[column]))
       const request: DraftRequest = { product, columns, countries: missingFor(code) }
-      if (request.columns.length > 0 || request.countries.length > 0) marks.push(...(await ask(target, request)))
+      if (request.columns.length > 0 || request.countries.length > 0) marks.push(...(await ask(target, request, true)))
     }
 
     if (marks.length > 0) row.draft_cells = [...entriesOf(row.draft_cells), ...marks].join('; ')
@@ -176,13 +176,13 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
   }
 
   // Prices only feed a budget band, so coverage matters more than exactness: a later pass revisits just the products still lacking a price, for those countries alone,
-  // and never researches again. A product that failed above is tried again here, for its prices.
+  // and never researches again. A product that failed above is tried again here, for its prices; an error here is not recorded as a failure, the pair just shows in the missing list.
   for (let pass = 2; pass <= passes && stoppedBy === null; pass++) {
     const due = targets.filter(({ code }) => missingFor(code).length > 0)
     if (due.length === 0) break
     passesMade = pass
     for (const target of due) {
-      await ask(target, { product: target.product, columns: [], countries: missingFor(target.code), attempt: pass })
+      await ask(target, { product: target.product, columns: [], countries: missingFor(target.code), attempt: pass }, false)
       if (stoppedBy !== null) break
     }
   }
