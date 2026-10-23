@@ -1244,13 +1244,19 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 `modules/face-scans/face-scans.tables.ts` holds the face-scan rules as pure, versioned tables: no I/O, no clock, no model, so the same
 results always give the same words. Everything reads `raw_score` (1 to 100, HIGHER IS HEALTHIER), never `ui_score`.
 
-- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `VISIBILITY_VERSION` and `WORDING_VERSION`, which are `2`: `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
+- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `VISIBILITY_VERSION` (`3`) and `WORDING_VERSION` (`2`): `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
   three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
   and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
   `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
-- **The thresholds are placeholders to calibrate** against real staging results, and the overlays and skin age have not been checked on
-  darker skin (see CONTEXT.md). A concern is visible at a `raw_score` of 60 or less; bands are `a-little` (above 45), `some` (above 30) and
-  `clear` (30 or less), and above 60 is `faint` (`bandFor` returns it; `isVisible` means "not faint"). A change counts only when it is bigger than 5 points for a concern or 2 years for skin age; exactly that much is noise.
+- **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
+  three cut-offs (a score at or below one is in that band): `visible` (the `a-little` band's top), `some` and `clear`. Above `visible` is `faint` (`bandFor`
+  returns it; `isVisible` means "not faint"). The values are in `THRESHOLDS` in `face-scans.tables.ts` (`face-scans.tables.test.ts` pins every boundary and
+  that they are strictly ordered). Provenance: calibrated 2026-10-23 on 40 Chicago Face Database photos (mostly Black, some Indian and multiracial) against
+  blind visual ratings by an AI rater, so a first calibration, to be re-checked by a human rater experienced with skin of colour and on real app selfies
+  (`research-visibility-thresholds.md`, "Evaluation results"). Confidence: redness, texture and moisture are low (redness was at chance on the darker half;
+  texture and moisture barely tracked the ratings); pore is low too (39 of 40 photos rated visible); acne and shine are weaker on the darker half.
+  The change thresholds (5 points for a concern, 2 years for skin age) are still placeholders, and the overlays and skin age have not been checked on
+  darker skin (see CONTEXT.md). A change counts only when it is bigger than that; exactly that much is noise.
   A rise in a concern is "fainter", a fall "more visible"; no change is ever worded as lightness.
 - **The wording** is one text per concern and band (`faint`, `a-little`, `some`, `clear`), with a `whole` text that answers any region without words of its own (region-specific
   words are added once Perfect Corp's region names are confirmed). Every text describes only what can be seen, in 80 characters or fewer, with
@@ -1313,12 +1319,12 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 - **The result view.** `view()` fills `result` only when `state` is `ready` (create and retake answers always have `result: null`). It is built when the
   scan is read, from the stored rows, by the pure `resultView` in `face-scans.tables.ts`, so a change to the wording tables reaches scans already stored;
   `tablesVersion` in the view is the version in force now, not the one the scan was stored under (`face_scans.tables_version` still says which wrote it).
-  - **Seen (visibility v2: show all).** For each of the goal's three concerns, in goal order, the `raw_score` of its `whole` region row (else the first region
+  - **Seen (visibility v3, show all).** For each of the goal's three concerns, in goal order, the `raw_score` of its `whole` region row (else the first region
     by name), through `bandFor`. Every concern with a row is listed; one Perfect Corp did not return is left out. A score above the cut-off is the `faint` band:
     shown, but worded as hardly there ("Hardly any spots", "Skin looks smooth"), never claimed to be clearly seen. Each item carries `level`
     (`faint` | `a-little` | `some` | `clear`), a word and never a number, so the app can style it (a faint one subdued, its overlay off until tapped). Why: the
-    cut-offs are uncalibrated placeholders (see `research-visibility-thresholds.md` in `.humanlayer/tasks/face-scan/`), and a real scan hid texture, which the owner doubted;
-    until they are calibrated, hiding a concern on a guessed number is worse than showing it as faint. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`,
+    cut-offs are a first calibration, low-confidence for some concerns (see `research-visibility-thresholds.md` in `.humanlayer/tasks/face-scan/`), and a real scan hid texture, which the owner doubted;
+    until they are re-checked, hiding a concern on a doubtful number is worse than showing it as faint. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`,
     `marks`, `redness`, `glow`, `texture`, `under-eyes`, `dryness`), never Perfect Corp's `hd_*` names. `nothingStandsOut` is `NOTHING_STANDS_OUT` when every item is
     `faint` or `seen` is empty, and null otherwise.
   - **Overlays.** The mask key of every concern in `seen`, faint ones included, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
