@@ -2825,22 +2825,27 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
 })
 
 // The check-in scan at a chase's review point looks wider than a normal scan: it asks Perfect Corp for every concern the app can show plus the skin
-// type (10 actions, 20 units, against 4 and 12), and every score it reads is stored. What it SHOWS is unchanged: the goal's own three concerns and
-// their masks, and nothing else (issue #145). The six concerns outside the goal serve the next-goal rule and are never returned by the API.
+// type (10 actions, 20 units, against the 5 to 8 actions and 16 units of a normal scan), whatever the goal, and every score it reads is stored. What
+// it SHOWS is unchanged (issue #145): the goal's own three concerns as `seen`, the measured core extras that can be seen as `alsoNoticed`, and the
+// concerns outside what the goal measures never, however plainly they could be seen. Those serve the next-goal rule alone.
 describe('FaceScanService: the check-in scan at the review point', () => {
-  /** Perfect Corp's answer to a check-in: all nine concerns, whole face, each with a mask of its own. */
+  /**
+   * Perfect Corp's answer to a glow check-in: all nine concerns, whole face, each with a mask of its own. Glow measures radiance, moisture and texture
+   * (its own) then the core age spot, acne, pore and oiliness; redness and the dark circle are outside that, and are scored here well inside their
+   * visible cut-offs, so only the rule can be keeping them out of the view. Acne and pore are above theirs, which is the faint rule, not this one.
+   */
   const checkInScores = {
+    hd_radiance: 44,
+    hd_moisture: 32,
+    hd_texture: 40,
+    hd_age_spot: 52,
     hd_acne: 70,
     hd_pore: 65,
     hd_oiliness: 58,
-    hd_age_spot: 52,
     hd_redness: 48,
-    hd_radiance: 44,
-    hd_texture: 40,
     hd_dark_circle: 36,
-    hd_moisture: 32,
   }
-  /** The ten actions a check-in asks for, written out from the issue. */
+  /** The ten actions a check-in asks for, written out from the issue: every concern the app can show, then the skin type. */
   const CHECK_IN_ACTIONS = [
     'hd_acne',
     'hd_pore',
@@ -2853,9 +2858,12 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     'hd_moisture',
     'hd_skin_type',
   ]
-  const GLOW_ACTIONS = ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type']
+  /** What a normal glow scan asks for: its own three, then the core concerns it lacks, then the skin type. */
+  const GLOW_ACTIONS = ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type']
+  /** The concerns outside what glow measures, by their public ids: a check-in reads them and the API never returns them. */
+  const OUTSIDE_GLOW = /"(redness|under-eyes)"/
 
-  it('asks for every concern plus the skin type at the check-in, where a normal scan asks for the goal\'s three plus the skin type', async () => {
+  it('asks for every concern plus the skin type at the check-in, where a normal glow scan asks for its three, the core extras and the skin type', async () => {
     const ctx = setup()
     const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
 
@@ -2864,7 +2872,16 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     expect(callsOf(ctx, 'createSkinAnalysis').map((call) => (call.args[0] as { actions: string[] }).actions)).toEqual([GLOW_ACTIONS, CHECK_IN_ACTIONS])
   })
 
-  it('records 20 units for the check-in, against the 12 of a normal scan, each keyed by its own task', async () => {
+  it('asks for the same ten actions at a check-in whatever the goal: a clear-skin check-in reads the whole nine too', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'clear-skin', analysisOf({ hd_acne: 60, hd_pore: 40, hd_oiliness: 70, hd_age_spot: 80 }))
+
+    await checkInTakenUnder(ctx, 'clear-skin', dayOne)
+
+    expect((callsOf(ctx, 'createSkinAnalysis')[1]!.args[0] as { actions: string[] }).actions).toEqual(CHECK_IN_ACTIONS)
+  })
+
+  it('records 20 units for the check-in, against the 16 of a normal scan, each keyed by its own task', async () => {
     const ctx = setup()
     const dayOne = await uploaded(ctx, 'glow')
     ctx.perfectCorp.script('getSkinAnalysis', analysisOf(glowScores(40, 50, 55)))
@@ -2875,12 +2892,12 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     await fetchStep(ctx, checkIn.id)
 
     expect(ctx.aiUsage.recorded).toEqual([
-      { vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: dayOne.analysisTask },
+      { vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: dayOne.analysisTask },
       { vendor: 'perfect-corp', job: 'face-analysis', units: 20, key: checkIn.analysisTask },
     ])
   })
 
-  it('shows only the goal\'s three concerns on the check-in\'s result, and names none of the other six', async () => {
+  it('shows the goal\'s three concerns as seen on the check-in\'s result, and the core extras that can be seen as also noticed', async () => {
     const ctx = setup()
     const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     const checkIn = await checkInReadyUnder(ctx, 'glow', analysisOf(checkInScores), dayOne)
@@ -2888,33 +2905,47 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     const result = await resultOf(ctx, checkIn)
 
     expect(result.seen.map((item: { concern: string }) => item.concern)).toEqual(['glow', 'dryness', 'texture'])
+    // Core order: marks (52, clear) and shine (58, clear); spots (70) and pores (65) are above their cut-offs, so they are faint and not noticed.
+    expect(result.alsoNoticed.map((item: { concern: string }) => item.concern)).toEqual(['marks', 'shine'])
     expect(result.sinceDayOne.concerns.map((item: { concern: string }) => item.concern)).toEqual(['glow', 'dryness', 'texture'])
-    // The public ids of the six concerns outside glow, which a check-in reads and must never show.
-    expect(JSON.stringify(result)).not.toMatch(/"(spots|pores|shine|marks|redness|under-eyes)"/)
   })
 
-  it('downloads and keeps a mask for the goal\'s three concerns only, though Perfect Corp sent one for all nine', async () => {
+  it('never returns the concerns outside what the goal measures, though the check-in read them well inside their visible cut-offs', async () => {
     const ctx = setup()
     const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     const checkIn = await checkInReadyUnder(ctx, 'glow', analysisOf(checkInScores), dayOne)
 
-    expect(masksStored(ctx).filter((key) => key.includes(checkIn))).toEqual(
-      [maskKey(ctx, checkIn, 'hd-radiance'), maskKey(ctx, checkIn, 'hd-moisture'), maskKey(ctx, checkIn, 'hd-texture')].sort(),
-    )
-    expect((await ctx.repository.masksOf(checkIn)).map((mask) => mask.concern).sort()).toEqual(['hd_moisture', 'hd_radiance', 'hd_texture'])
+    const view = await getScan(ctx, checkIn)
+
+    expect(JSON.stringify(view)).not.toMatch(OUTSIDE_GLOW)
+    for (const item of [...view.result.seen, ...view.result.alsoNoticed]) expect(['redness', 'under-eyes']).not.toContain(item.concern)
   })
 
-  // The six concerns outside the goal are stored like any other score, so the next-goal rule has them to read; the view above is what proves they are
-  // never shown. The stored rows are read here directly because by design nothing in the API exposes them.
-  it('stores every concern the check-in read, the six outside the goal included', async () => {
+  it('keeps a mask for the concerns the goal measures, and none for those outside them, though Perfect Corp sent one for all nine', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const checkIn = await checkInReadyUnder(ctx, 'glow', analysisOf(checkInScores), dayOne)
+
+    const concerns = (await ctx.repository.masksOf(checkIn)).map((mask) => mask.concern)
+
+    expect(concerns.sort()).toEqual([...measuredConcernsForGoal('glow')].sort())
+    expect(concerns).not.toContain('hd_redness')
+    expect(concerns).not.toContain('hd_dark_circle')
+    expect(masksStored(ctx).filter((key) => key.includes(checkIn))).toHaveLength(measuredConcernsForGoal('glow').length)
+  })
+
+  // The concerns outside the goal are stored like any other score, so the next-goal rule has them to read; the view above is what proves they are never
+  // shown. The stored rows are read here directly because by design nothing in the API exposes them.
+  it('stores every concern the check-in read, the ones outside the goal included', async () => {
     const ctx = setup()
     const dayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     const checkIn = await checkInReadyUnder(ctx, 'glow', analysisOf(checkInScores), dayOne)
 
     const rows = await ctx.repository.resultsOf(checkIn)
 
-    expect(rows.map((row) => row.concern).sort()).toEqual([...Object.keys(checkInScores).sort(), 'all'].sort())
-    expect(rows.find((row) => row.concern === 'hd_acne')).toMatchObject({ region: 'whole', rawScore: 70 })
+    expect(rows.map((row) => row.concern).sort()).toEqual([...Object.keys(checkInScores), 'all'].sort())
+    expect(rows.find((row) => row.concern === 'hd_redness')).toMatchObject({ region: 'whole', rawScore: 48 })
+    expect(rows.find((row) => row.concern === 'hd_dark_circle')).toMatchObject({ region: 'whole', rawScore: 36 })
   })
 })
 
