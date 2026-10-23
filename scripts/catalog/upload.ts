@@ -19,7 +19,7 @@ const KINDS = ['added', 'updated', 'retired', 'reactivated'] as const
 type Deps = {
   readText: (path: string) => Promise<string>
   readBytes: (path: string) => Promise<Uint8Array>
-  readWorkbook: (bytes: Uint8Array) => Promise<WorkbookFile>
+  readWorkbook: (bytes: Uint8Array, name?: string) => Promise<WorkbookFile>
   request: AdminRequest
   log: (line: string) => void
   error: (line: string) => void
@@ -87,7 +87,7 @@ export async function runUpload(args: { file: string; env: Environment; by: stri
   try {
     // Read once: the bytes that are checked are the bytes that are sent.
     const bytes = await deps.readBytes(args.file)
-    const read = await deps.readWorkbook(bytes)
+    const read = await deps.readWorkbook(bytes, args.file)
     const { workbook, catalogVersion } = read
 
     const stale = staleStamp(args.file, args.env, read)

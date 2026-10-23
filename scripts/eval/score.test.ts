@@ -4,7 +4,7 @@ import type { ResearchResult } from '../../src/providers/product-research/produc
 import type { Mention } from '../../src/providers/mention-reading/mention-reader.provider'
 import type { AnalysisCase, GoalCase, MentionCase, ResearchCase } from './cases'
 import { AI_JOBS } from '../../src/providers/anthropic/ai-spend.provider'
-import { loadEnv, parseArgs, scoreAnalysis, scoreGoalReading, scoreMentions, scoreResearch, summarise } from './score'
+import { loadEnv, MissingApiKeyError, parseArgs, scoreAnalysis, scoreGoalReading, scoreMentions, scoreResearch, summarise } from './score'
 
 const PRODUCT = { brand: 'Test Brand', name: 'Test Cream', category: 'skin' } as const
 
@@ -564,6 +564,10 @@ describe('loadEnv', () => {
     })
 
     expect(result).toEqual({ apiKey: 'env-key' })
+  })
+
+  it('throws a MissingApiKeyError when there is no key, so a caller can tell the person\'s setup from a failure', async () => {
+    await expect(load({ env: {}, readFile: noFile })).rejects.toBeInstanceOf(MissingApiKeyError)
   })
 
   it('treats a missing .dev.vars as no file, and then names the missing key', async () => {

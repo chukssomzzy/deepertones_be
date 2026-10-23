@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { parseUploadArgs } from './catalog/args'
 import { httpRequest } from './catalog/admin-api'
 import { runUpload } from './catalog/upload'
-import { readWorkbookBytes } from './catalog/xlsx'
+import { readFileBytes, readWorkbookBytes } from './catalog/xlsx'
 
 async function main(): Promise<number> {
   let args: ReturnType<typeof parseUploadArgs>
@@ -16,7 +16,7 @@ async function main(): Promise<number> {
   }
   return runUpload(args, {
     readText: (path) => readFile(path, 'utf8'),
-    readBytes: (path) => readFile(path),
+    readBytes: readFileBytes,
     readWorkbook: readWorkbookBytes,
     request: httpRequest,
     log: console.log,
