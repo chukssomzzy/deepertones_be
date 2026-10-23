@@ -85,16 +85,17 @@ const isListingSite = (url: string): boolean => LISTING_SITES.has(registrableLab
 /** A public https page that can sit in a `draft_cells` entry (the cell is split at ";", so a link holding one would be cut in two), and not a listing site. */
 export const isUsableSource = (value: unknown): value is string => isSafePublicHttpsUrl(value) && !value.includes(';') && !isListingSite(value)
 
-// A price row is one product's price, so its page must be that product's own: a price-comparison site's or Google Shopping's low end is often an
-// auction seller, and a search, brand, category or collection page lists many products and prices. Matched on the registrable name like LISTING_SITES,
-// on whole path segments and query-parameter names (so "research-serum" is not a search page), and case-insensitively.
+// A price row is one product's price, so its page must be that product's own: a price-comparison site or Google Shopping shows other shops' offers,
+// and a search, brand, category or collection page lists many products and prices. Comparison sites are matched on the registrable name like
+// LISTING_SITES (Google Shopping on its host or first path segment), the rest on whole path segments and query-parameter names (so "research-serum" is
+// not a search page), all case-insensitively.
 const PRICE_COMPARISON_SITES: ReadonlySet<string> = new Set(['pricespy', 'pricerunner', 'idealo', 'kelkoo', 'trolley'])
 const SEARCH_SEGMENTS: ReadonlySet<string> = new Set(['search', 'catalogsearch', 'slp'])
 const SEARCH_PARAMETERS: ReadonlySet<string> = new Set(['q', 'query', 'search', 's', 'k', 'keyword', 'searchterm'])
 const LISTING_SEGMENTS: ReadonlySet<string> = new Set(['brands', 'brand', 'category', 'categories', 'collections'])
 const LISTING_PREFIX = 'mlp-'
 
-const isNotOneProductsPage = (url: string): boolean => {
+const isListingOrComparisonPage = (url: string): boolean => {
   const { hostname, pathname, searchParams } = new URL(url)
   const segments = pathname.toLowerCase().split('/').filter(Boolean)
   const label = registrableLabel(hostname)
@@ -116,8 +117,9 @@ const isPrice = (value: unknown): value is number => typeof value === 'number' &
 
 /**
  * What of a drafter's answer the workbook can take: only the columns and countries asked for, only values in the vocabularies, prices as whole
- * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped, nor is a row whose page is a price-comparison, search, brand or category page, though a cell may cite one), and only a public https page that is not a classified or auction listing. `searched`, when given, is also the only set of pages a source may be (the model can
- * name a page it never saw). A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
+ * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `searched`, when given, is also the only set of pages a source may be (the model can
+ * name a page it never saw). A price row's page must also be one product's own: a price-comparison, Google Shopping, search or listing page drops the row,
+ * though a cell may cite one. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
  */
 export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: ReadonlySet<string>): DraftResult => {
   const answer = asRecord(raw)
@@ -143,7 +145,7 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: Rea
     const sourceUrl = sourceOf(row.sourceUrl)
     if (typeof country !== 'string' || !request.countries.some((asked) => asked.code === country) || taken.has(country)) continue
     if (!isPrice(priceMin) || !isPrice(priceMax) || priceMin > priceMax || sourceUrl === undefined) continue
-    if (priceMax > priceMin * MAX_PRICE_SPREAD || isNotOneProductsPage(sourceUrl)) continue
+    if (priceMax > priceMin * MAX_PRICE_SPREAD || isListingOrComparisonPage(sourceUrl)) continue
     taken.add(country)
     const shop = typeof whereSold === 'string' ? whereSold.trim() : ''
     const plain = shop !== '' && shop.length <= MAX_WHERE_SOLD && !CONTROL_CHARACTER.test(shop) && !hasLinkOrMarkup(shop)
