@@ -279,7 +279,7 @@ The face scan sends the front photo to Perfect Corp (YouCam) and gets the analys
 2. Register the webhook URL in Perfect Corp's console, once per environment, for task results:
    `https://<that Worker's host>/api/v1/webhooks/perfect-corp`. Until it is registered nothing wakes the analysis, and the reaper's single check 15
    minutes after the photo is what finds the result.
-3. Confirm `PERFECT_CORP_USD_PER_UNIT` in `wrangler.jsonc` (a placeholder) and create the `face-scans` queues (see [Before the first deploy](#before-the-first-deploy)).
+3. Check `PERFECT_CORP_USD_PER_UNIT` in `wrangler.jsonc` matches your Perfect Corp plan (0.055 is pay-as-you-go; a subscription is 0.046–0.048) and create the `face-scans` queues (see [Before the first deploy](#before-the-first-deploy)).
 
 The webhook route has its own per-address limit (`PERFECT_CORP_WEBHOOK_LIMITER`, 300 a minute) and refuses a body over 64 KB. The tests never reach Perfect
 Corp: they stub `fetch`.
