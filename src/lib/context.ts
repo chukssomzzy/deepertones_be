@@ -1,6 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { type Actor, type TokenProblem, notSignedIn } from './actor'
-import { ForbiddenError } from './errors'
+import { type Actor, type TokenProblem, notSignedIn, verificationRequired } from './actor'
 
 export type { Actor, TokenProblem }
 
@@ -53,8 +52,6 @@ export const requireUser = (): Extract<Actor, { kind: 'user' }> => {
 /** requireUser, and the account must be verified: a guest gets 403 VERIFICATION_REQUIRED. */
 export const requireVerified = (): Extract<Actor, { kind: 'user' }> => {
   const user = requireUser()
-  if (user.status !== 'verified') {
-    throw new ForbiddenError('VERIFICATION_REQUIRED', 'Verify your account to do this')
-  }
+  if (user.status !== 'verified') throw verificationRequired()
   return user
 }

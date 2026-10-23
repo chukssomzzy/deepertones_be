@@ -21,7 +21,7 @@ import type { ProductImage } from '../../providers/product-analysis/product-anal
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import { FakeGoalsRepository } from '../goals/goals.repository.fake'
 import { GoalsService } from '../goals/goals.service'
-import type { Goal } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { type SendPushMessage, sendPushSpec } from '../notifications/notifications.job-specs'
 import { NotificationsService } from '../notifications/notifications.service'
@@ -35,7 +35,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { analyseFaceScanSpec } from './face-scans.job-specs'
 import { FakeFaceScansRepository } from './face-scans.repository.fake'
 import { FACE_SCAN_LIST_LIMIT, FaceScanService } from './face-scans.service'
-import { TABLES_VERSION } from './face-scans.tables'
+import { measuredConcernsForGoal, TABLES_VERSION } from './face-scans.tables'
 import { FakeVendorSpendLedger } from './face-scans.vendor-spend.fake'
 
 // The face scan's analysis pipeline through FaceScanService: the three job steps (advance), the webhook (receiveWebhook), the retake, the
@@ -205,7 +205,7 @@ const setup = (options: SetupOptions = {}) => {
 }
 type Ctx = ReturnType<typeof setup>
 
-const asUser = <T>(fn: () => Promise<T>, profileId = PROFILE) => runAs({ kind: 'user', userId: USER, status: 'anonymous', profileId }, fn)
+const asUser = <T>(fn: () => Promise<T>, profileId = PROFILE) => runAs({ kind: 'user', userId: USER, status: 'verified', profileId }, fn)
 const asSystem = <T>(fn: () => Promise<T>) => runAs({ kind: 'system', job: 'analyse-face-scan' }, fn)
 
 const errorOf = async (promise: Promise<unknown>) => {
@@ -316,7 +316,7 @@ const finished = async (ctx: Ctx, goal: Goal = 'glow') => {
 }
 
 describe('FaceScanService.advance: the upload step', () => {
-  it('sends the front photo once and starts the goal\'s three HD concerns plus the skin type as one analysis, and a Fitzpatrick read for a profile that has none', async () => {
+  it('sends the front photo once and starts the goal\'s measured HD concerns plus the skin type as one analysis, and a Fitzpatrick read for a profile that has none', async () => {
     const ctx = setup()
     const id = await started(ctx, 'glow')
 
@@ -326,7 +326,7 @@ describe('FaceScanService.advance: the upload step', () => {
     const [bytes, options] = callsOf(ctx, 'uploadFile')[0]!.args as [Uint8Array, unknown]
     expect(Array.from(bytes)).toEqual(Array.from(face(1).bytes))
     expect(options).toEqual({ contentType: 'image/jpeg', fileName: 'front.jpg' })
-    expect(callsOf(ctx, 'createSkinAnalysis')[0]!.args).toEqual([{ fileId: 'file-1', actions: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type'] }])
+    expect(callsOf(ctx, 'createSkinAnalysis')[0]!.args).toEqual([{ fileId: 'file-1', actions: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type'] }])
     expect(callsOf(ctx, 'createFitzpatrick')[0]!.args).toEqual([{ fileId: 'file-1' }])
   })
 
@@ -336,7 +336,22 @@ describe('FaceScanService.advance: the upload step', () => {
 
     await upload(ctx, id)
 
-    expect(callsOf(ctx, 'createSkinAnalysis')[0]!.args).toEqual([{ fileId: 'file-1', actions: ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type'] }])
+    expect(callsOf(ctx, 'createSkinAnalysis')[0]!.args).toEqual([{ fileId: 'file-1', actions: ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_skin_type'] }])
+  })
+
+  // One goal per action count (5, 6, 7, 8): the goal's own three, then the core concerns it lacks, then the skin type.
+  it.each([
+    ['clear-skin', ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_skin_type']],
+    ['fade-dark-marks', ['hd_age_spot', 'hd_acne', 'hd_texture', 'hd_pore', 'hd_oiliness', 'hd_skin_type']],
+    ['even-tone', ['hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type']],
+    ['calm-repair', ['hd_redness', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type']],
+  ] as const)('asks for exactly the measured actions of %s, with the skin type last', async (goal, actions) => {
+    const ctx = setup()
+    const id = await started(ctx, goal)
+
+    await upload(ctx, id)
+
+    expect(callsOf(ctx, 'createSkinAnalysis')[0]!.args).toEqual([{ fileId: 'file-1', actions }])
   })
 
   it('stores both task ids and the environment at once, leaves the scan analysing and queues nothing', async () => {
@@ -589,24 +604,59 @@ describe('FaceScanService.advance: the fetch step', () => {
     )
   })
 
-  it('downloads the mask of each of the goal\'s concerns that has one, stores each as a PNG under its mask key with the bytes it got, and records the keys', async () => {
+  it('downloads the mask of each measured concern that has one, stores each as a PNG under its mask key with the bytes it got, and records the keys', async () => {
     const ctx = setup()
     const { id } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
 
     await fetchStep(ctx, id)
 
-    // hd_acne has a mask too, but it is not one of glow's concerns; hd_texture is and has none.
-    expect(callsOf(ctx, 'downloadMask').map((call) => call.args[0]).sort()).toEqual([maskUrl('moisture'), maskUrl('radiance')])
-    expect(masksStored(ctx)).toEqual([maskKey(ctx, id, 'hd-moisture'), maskKey(ctx, id, 'hd-radiance')])
+    // hd_acne is a core concern, measured for glow too; hd_texture has no mask.
+    expect(callsOf(ctx, 'downloadMask').map((call) => call.args[0]).sort()).toEqual([maskUrl('acne'), maskUrl('moisture'), maskUrl('radiance')])
+    expect(masksStored(ctx)).toEqual([maskKey(ctx, id, 'hd-acne'), maskKey(ctx, id, 'hd-moisture'), maskKey(ctx, id, 'hd-radiance')])
     const radiance = ctx.photos.stored.get(maskKey(ctx, id, 'hd-radiance'))!
     expect(radiance.mediaType).toBe('image/png')
     expect(new TextDecoder().decode(radiance.bytes)).toBe(maskUrl('radiance'))
     expect(new TextDecoder().decode(ctx.photos.stored.get(maskKey(ctx, id, 'hd-moisture'))!.bytes)).toBe(maskUrl('moisture'))
     expect((await ctx.repository.masksOf(id)).sort((a, b) => a.concern.localeCompare(b.concern))).toEqual([
+      { faceScanId: id, userId: USER, concern: 'hd_acne', maskKey: maskKey(ctx, id, 'hd-acne') },
       { faceScanId: id, userId: USER, concern: 'hd_moisture', maskKey: maskKey(ctx, id, 'hd-moisture') },
       { faceScanId: id, userId: USER, concern: 'hd_radiance', maskKey: maskKey(ctx, id, 'hd-radiance') },
     ])
+  })
+
+  it.each([...GOALS])('records the spend of a %s scan as 16 units, whatever its action count (5 to 8)', async (goal) => {
+    const ctx = setup()
+    const { id, analysisTask } = await uploaded(ctx, goal)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+
+    await fetchStep(ctx, id)
+
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
+  })
+
+  it('stores the results and downloads and stores the mask of every measured concern, the core extras too, not only the goal\'s three', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'glow')
+    ctx.perfectCorp.script('getSkinAnalysis', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 70) }))
+
+    await fetchStep(ctx, id)
+
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'ready' })
+    expect((await ctx.repository.resultsOf(id)).map((row) => row.concern).sort()).toEqual(['all', 'hd_acne', 'hd_age_spot', 'hd_moisture', 'hd_oiliness', 'hd_pore', 'hd_radiance', 'hd_texture'])
+    expect(callsOf(ctx, 'downloadMask').map((call) => call.args[0]).sort()).toEqual(['acne', 'age_spot', 'moisture', 'oiliness', 'pore', 'radiance', 'texture'].map(maskUrl))
+    expect(masksStored(ctx)).toEqual(['hd-acne', 'hd-age-spot', 'hd-moisture', 'hd-oiliness', 'hd-pore', 'hd-radiance', 'hd-texture'].map((slug) => maskKey(ctx, id, slug)))
+    expect((await ctx.repository.masksOf(id)).map((mask) => mask.concern).sort()).toEqual(['hd_acne', 'hd_age_spot', 'hd_moisture', 'hd_oiliness', 'hd_pore', 'hd_radiance', 'hd_texture'])
+  })
+
+  it('stores no mask for a concern that is not measured for the goal, even when Perfect Corp sent one', async () => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, 'clear-skin')
+    ctx.perfectCorp.script('getSkinAnalysis', analysisOf({ hd_acne: 50, hd_age_spot: 80, hd_radiance: 50, hd_redness: 50 }))
+
+    await fetchStep(ctx, id)
+
+    expect(masksStored(ctx)).toEqual([maskKey(ctx, id, 'hd-acne'), maskKey(ctx, id, 'hd-age-spot')])
   })
 
   it('keeps the front photo and the masks listed for the scan, so deleting the scan empties the bucket', async () => {
@@ -618,14 +668,14 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(ctx.photos.stored.size).toBe(0)
   })
 
-  it('records the spend once: face-analysis, 12 units for the 4 actions, keyed by the analysis task id', async () => {
+  it('records the spend once: face-analysis, 16 units for the 8 actions, keyed by the analysis task id', async () => {
     const ctx = setup()
     const { id, analysisTask } = await uploaded(ctx)
     ctx.perfectCorp.script('getSkinAnalysis', analysed())
 
     await fetchStep(ctx, id)
 
-    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
   })
 
   it('deletes the vendor\'s copy of the task once the results are ours', async () => {
@@ -651,7 +701,7 @@ describe('FaceScanService.advance: the fetch step', () => {
 
     await fetchStep(ctx, id)
 
-    expect(spendWhenDownloading).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(spendWhenDownloading).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
     expect(stateWhenDownloading).toBe('analysing')
   })
 
@@ -775,7 +825,7 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(await ctx.repository.resultsOf(id)).toEqual([])
     expect(await ctx.repository.masksOf(id)).toEqual([])
     // Perfect Corp charged for the task when it succeeded, whatever became of our copy.
-    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
   })
 
   it('leaves no mask in the bucket, and the scan as it moved to, but still records the spend, when the scan stopped being analysing while the masks were being fetched', async () => {
@@ -790,7 +840,7 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(ctx.photos.stored.has(frontKey(ctx, id))).toBe(true)
     expect(await rowOf(ctx, id)).toMatchObject({ state: 'failed', reason: 'unavailable', skinAge: null })
     expect(await ctx.repository.resultsOf(id)).toEqual([])
-    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
   })
 
   it('stores the age-spot result of a fade-dark-marks scan, and its mask, like the other concerns, when Perfect Corp sent it without a region (read as the whole face)', async () => {
@@ -992,7 +1042,7 @@ describe('FaceScanService.advance: the fetch step', () => {
     expect(await errorOf(fetchStep(ctx, id))).toBeInstanceOf(PerfectCorpUnavailableError)
 
     expect((await rowOf(ctx, id)).state).toBe('analysing')
-    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 12, key: analysisTask }])
+    expect(ctx.aiUsage.recorded).toEqual([{ vendor: 'perfect-corp', job: 'face-analysis', units: 16, key: analysisTask }])
     expect(await ctx.repository.resultsOf(id)).toEqual([])
   })
 
@@ -1065,10 +1115,11 @@ describe('FaceScanService.advance: what the fetch step logs about the masks and 
 
     const lines = await loggedOutcomes(() => fetchStep(ctx, id), 'mask-read')
 
-    expect(lines.map((entry) => entry.level)).toEqual(['log', 'log'])
+    expect(lines.map((entry) => entry.level)).toEqual(['log', 'log', 'log'])
     expect(lines.map((entry) => entry.line)).toEqual([
       { outcome: 'mask-read', faceScanId: id, concern: 'hd_radiance', format: 'png', width: 1080, height: 1440, bytes: PNG_MASK.length },
       { outcome: 'mask-read', faceScanId: id, concern: 'hd_moisture', format: 'png', width: 1080, height: 1440, bytes: PNG_MASK.length },
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_acne', format: 'png', width: 1080, height: 1440, bytes: PNG_MASK.length },
     ])
   })
 
@@ -1083,6 +1134,7 @@ describe('FaceScanService.advance: what the fetch step logs about the masks and 
     expect(lines.map((entry) => entry.line)).toEqual([
       { outcome: 'mask-read', faceScanId: id, concern: 'hd_radiance', format: 'other', width: null, height: null, bytes: maskUrl('radiance').length },
       { outcome: 'mask-read', faceScanId: id, concern: 'hd_moisture', format: 'other', width: null, height: null, bytes: maskUrl('moisture').length },
+      { outcome: 'mask-read', faceScanId: id, concern: 'hd_acne', format: 'other', width: null, height: null, bytes: maskUrl('acne').length },
     ])
   })
 
@@ -1973,12 +2025,40 @@ describe('FaceScanService: races with the bucket', () => {
     repository.afterKeysRead = async () => {
       ctx.perfectCorp.script('getSkinAnalysis', analysed())
       await fetchStep(ctx, id)
-      expect(masksStored(ctx)).toHaveLength(2)
+      expect(masksStored(ctx)).toHaveLength(3)
     }
 
     await asUser(() => ctx.service.deleteFaceScan(id))
 
     expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it('leaves nothing in the bucket, extra masks included, for a scan deleted while an analysis commits all its measured masks between the key read and the row delete', async () => {
+    const repository = new HookedRepository()
+    const ctx = setup({ repository })
+    const { id } = await uploaded(ctx, 'glow')
+    repository.afterKeysRead = async () => {
+      ctx.perfectCorp.script('getSkinAnalysis', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 70) }))
+      await fetchStep(ctx, id)
+      expect(masksStored(ctx)).toHaveLength(7)
+    }
+
+    await asUser(() => ctx.service.deleteFaceScan(id))
+
+    expect(await ctx.repository.findFaceScan(id)).toBeNull()
+    expect(ctx.photos.stored.size).toBe(0)
+  })
+
+  it.each([...GOALS])('empties the bucket when a ready %s scan with a mask for every measured concern is deleted', async (goal) => {
+    const ctx = setup()
+    const { id } = await uploaded(ctx, goal)
+    ctx.perfectCorp.script('getSkinAnalysis', analysisOf(Object.fromEntries(measuredConcernsForGoal(goal).map((concern) => [concern, 50]))))
+    await fetchStep(ctx, id)
+    expect(masksStored(ctx)).toHaveLength(measuredConcernsForGoal(goal).length)
+
+    await asUser(() => ctx.service.deleteFaceScan(id))
+
     expect(ctx.photos.stored.size).toBe(0)
   })
 
@@ -2084,6 +2164,133 @@ describe('FaceScanService.watch: the live stream', () => {
   })
 })
 
+describe('FaceScanService: a guest may run the scan flow, and the stream carries status only', () => {
+  // A guest (status 'anonymous') may give consent, start a scan, retake it and follow it live; a verified user may too. Whoever watches, every `face` frame
+  // and the snapshot is exactly { id, state, reason }: where the scan has got to and why, never the result, the scores, the skin type or age, the overlays,
+  // the photo links or the goal. The result is only for GET /scans/faces/{id}, which is for verified users.
+  const actors = [
+    ['a guest', 'anonymous'],
+    ['a verified user', 'verified'],
+  ] as const
+  const asStatus = (status: 'anonymous' | 'verified') => <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: USER, status, profileId: PROFILE }, fn)
+  const STATUS_KEYS = ['id', 'reason', 'state']
+
+  /** Consent, a goal and the front photo, all as `run` would do them. Resolves to the scan's id. */
+  const startedBy = async (ctx: Ctx, run: ReturnType<typeof asStatus>, goal: Goal = 'glow'): Promise<string> => {
+    await run(() => ctx.service.giveConsent(CURRENT_FACE_CONSENT_VERSION))
+    await run(() => ctx.goals.set({ goal }))
+    return (await run(() => ctx.service.create({ front: face(1) }))).id
+  }
+  const faceFramesOf = (ctx: Ctx, id: string) => ctx.events.eventsFor(id).flatMap((event) => (event.type === 'face' ? [event.faceScan] : []))
+  const snapshotsOf = (ctx: Ctx, id: string) => ctx.events.subscribed.filter((s) => s.scanId === id).map((s) => s.snapshot)
+  const expectStatusOnly = (ctx: Ctx, id: string) => {
+    const frames = [...faceFramesOf(ctx, id), ...snapshotsOf(ctx, id)]
+    expect(frames.length).toBeGreaterThan(0)
+    for (const frame of frames) expect(Object.keys(frame).sort()).toEqual(STATUS_KEYS)
+  }
+
+  describe.each(actors)('%s', (_who, status) => {
+    const run = asStatus(status)
+
+    it('starts a scan, follows it to ready, and sees only id, state and reason in the snapshots and the frames, though the scan has a full result', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      await run(() => ctx.service.watch(id))
+      await upload(ctx, id)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+
+      await run(() => ctx.service.watch(id))
+
+      expect(snapshotsOf(ctx, id)).toStrictEqual([
+        { id, state: 'analysing', reason: null },
+        { id, state: 'ready', reason: null },
+      ])
+      expect(ctx.events.eventsFor(id)).toStrictEqual([
+        { type: 'face', faceScan: { id, state: 'analysing', reason: null } },
+        { type: 'face', faceScan: { id, state: 'ready', reason: null } },
+        { type: 'done' },
+        { type: 'done' },
+      ])
+      expectStatusOnly(ctx, id)
+      // The result exists, for a verified reader: it is the frames that leave it out.
+      expect((await getScan(ctx, id)).result).not.toBeNull()
+    })
+
+    it('sees only id, state and reason when the photo needs a retake, through the retake and on to ready', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await upload(ctx, id)
+      await run(() => ctx.service.watch(id))
+
+      const retaken = await run(() => ctx.service.retake(id, { front: face(9) }))
+      await upload(ctx, id)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+
+      expect(retaken).toMatchObject({ id, state: 'analysing', reason: null })
+      expect(snapshotsOf(ctx, id)).toStrictEqual([{ id, state: 'needs-retake', reason: 'too-dark' }])
+      expect(ctx.events.eventsFor(id)).toStrictEqual([
+        { type: 'face', faceScan: { id, state: 'needs-retake', reason: 'too-dark' } },
+        { type: 'done' },
+        { type: 'done' },
+        { type: 'face', faceScan: { id, state: 'analysing', reason: null } },
+        { type: 'face', faceScan: { id, state: 'ready', reason: null } },
+        { type: 'done' },
+      ])
+      expectStatusOnly(ctx, id)
+    })
+
+    it('sees only id, state and reason when the scan fails, and when it follows a scan that has already failed', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      await upload(ctx, id)
+      await asSystem(() => ctx.service.markFailed(id))
+
+      await run(() => ctx.service.watch(id))
+
+      expect(snapshotsOf(ctx, id)).toStrictEqual([{ id, state: 'failed', reason: 'unavailable' }])
+      expect(faceFramesOf(ctx, id)).toStrictEqual([
+        { id, state: 'analysing', reason: null },
+        { id, state: 'failed', reason: 'unavailable' },
+      ])
+      expectStatusOnly(ctx, id)
+    })
+  })
+
+  it('moves a guest\'s scan that needed a retake to analysing, replaces the front photo and queues the upload again', async () => {
+    const ctx = setup()
+    const guest = asStatus('anonymous')
+    const id = await startedBy(ctx, guest)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+    await upload(ctx, id)
+    clearQueue(ctx)
+
+    const view = await guest(() => ctx.service.retake(id, { front: face(9) }))
+
+    expect(view).toMatchObject({ id, state: 'analysing', reason: null })
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'analysing', reason: null, pcAnalysisTaskId: null })
+    expect(Array.from(ctx.photos.stored.get(frontKey(ctx, id))!.bytes)).toEqual(Array.from(face(9).bytes))
+    expect(queuedSteps(ctx)).toEqual([{ faceScanId: id, step: 'upload', at: ctx.now().getTime() }])
+  })
+
+  it('refuses a guest the result with 403 VERIFICATION_REQUIRED, though its scan is ready', async () => {
+    const ctx = setup()
+    const guest = asStatus('anonymous')
+    const id = await startedBy(ctx, asStatus('verified'))
+    await upload(ctx, id)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    await fetchStep(ctx, id)
+
+    const error = await errorOf(guest(() => ctx.service.getFaceScan(id)))
+
+    expect(error.code).toBe('VERIFICATION_REQUIRED')
+    expect((await getScan(ctx, id)).result).not.toBeNull()
+  })
+})
+
+
 // --- PR 4: the result view ---
 //
 // A ready scan shows what the analysis stored: the goal's concerns that can be seen, with links to their masks, the skin type and skin age, and
@@ -2104,6 +2311,8 @@ const analysisOf = (scores: Record<string, number>, over: Partial<Extract<SkinAn
     ...over,
   })
 const glowScores = (radiance: number, moisture: number, texture: number) => ({ hd_radiance: radiance, hd_moisture: moisture, hd_texture: texture })
+/** The core extras (age spot, acne, pore, oiliness) as scores, in core order. */
+const coreScores = (ageSpot: number, acne: number, pore: number, oiliness: number) => ({ hd_age_spot: ageSpot, hd_acne: acne, hd_pore: pore, hd_oiliness: oiliness })
 const brighterScores = (radiance: number, darkCircle: number, ageSpot: number) => ({ hd_radiance: radiance, hd_dark_circle: darkCircle, hd_age_spot: ageSpot })
 
 /** A scan under `goal` taken a day after the last, and sent to Perfect Corp: analysing, with its task. */
@@ -2123,6 +2332,84 @@ const resultOf = async (ctx: Ctx, id: string) => (await getScan(ctx, id)).result
 const tokenOfLink = (url: string) => LINK.exec(url)![1]!
 const bytesBehind = async (ctx: Ctx, url: string) => new TextDecoder().decode((await asUser(() => ctx.service.photoForLink(tokenOfLink(url)))).bytes)
 
+describe('FaceScanService.getFaceScan: also noticed', () => {
+  // glow measures radiance, moisture, texture, then the core extras in core order: age_spot (marks), acne (spots), pore (pores), oiliness (shine).
+  it('lists the visible extras in core order with their words, leaves out the faint one, and keeps the goal\'s own three in seen', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 90) }))
+
+    const result = await resultOf(ctx, id)
+
+    expect(result.seen.map((item: { concern: string }) => item.concern)).toEqual(['glow', 'dryness', 'texture'])
+    // pore 70 and oiliness 90 are above their cut-offs: faint, so left out.
+    expect(result.alsoNoticed).toEqual([
+      { concern: 'marks', region: 'whole', level: 'a-little', words: 'A few faint dark marks', overlay: { url: expect.stringMatching(LINK) } },
+      { concern: 'spots', region: 'whole', level: 'some', words: 'Some spots and breakouts across the face', overlay: { url: expect.stringMatching(LINK) } },
+    ])
+  })
+
+  it('gives each listed extra a signed link that opens its own mask, and no link at all for a faint extra', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 70) }))
+
+    const { alsoNoticed } = await resultOf(ctx, id)
+
+    expect(alsoNoticed.map((item: { concern: string }) => item.concern)).toEqual(['marks', 'spots', 'shine'])
+    expect(await Promise.all(alsoNoticed.map((item: { overlay: { url: string } }) => bytesBehind(ctx, item.overlay.url)))).toEqual([maskUrl('age_spot'), maskUrl('acne'), maskUrl('oiliness')])
+    const links = [...JSON.stringify(await getScan(ctx, id)).matchAll(/\/photos\/([A-Za-z0-9_-]+)/g)].map((match) => match[1]!)
+    const opened = await Promise.all(links.map(async (token) => new TextDecoder().decode((await asUser(() => ctx.service.photoForLink(token))).bytes)))
+    expect(opened).not.toContain(maskUrl('pore'))
+  })
+
+  it('gives an extra link the life and the profile claim of a photo link: good for 5 minutes, then PHOTO_NOT_FOUND', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 70) }))
+    const { url } = (await resultOf(ctx, id)).alsoNoticed[0].overlay
+
+    ctx.advanceClock(PHOTO_LINK_LIFETIME - SECOND)
+    await expect(asUser(() => ctx.service.photoForLink(tokenOfLink(url)))).resolves.toMatchObject({ mediaType: 'image/png' })
+
+    ctx.advanceClock(2 * SECOND)
+    expect((await errorOf(asUser(() => ctx.service.photoForLink(tokenOfLink(url))))).code).toBe('PHOTO_NOT_FOUND')
+  })
+
+  it('is [] for a scan taken before the core extras were measured (three concerns and their masks only)', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(65, 32, 35)))
+
+    const result = await resultOf(ctx, id)
+
+    expect(result.alsoNoticed).toEqual([])
+    expect(result.seen).toHaveLength(3)
+  })
+
+  it('leaves out a measured extra Perfect Corp did not return, and keeps the ones it did', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(65, 32, 35), hd_oiliness: 70 }))
+
+    expect((await resultOf(ctx, id)).alsoNoticed.map((item: { concern: string }) => item.concern)).toEqual(['shine'])
+  })
+
+  it('is [] when every extra is faint, and then says nothing about them: the scan keeps its own nothing-stands-out rule', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(76, 90, 100), ...coreScores(95, 90, 90, 95) }))
+
+    const result = await resultOf(ctx, id)
+
+    expect(result.alsoNoticed).toEqual([])
+    expect(result.nothingStandsOut).toBe('Nothing stands out for your goal right now')
+  })
+
+  it('is on every scan of a list and on the one view, the same', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ ...glowScores(65, 32, 35), ...coreScores(84, 58, 70, 70) }))
+
+    const listed = await asUser(() => ctx.service.listFaceScans())
+
+    expect(listed.find((scan: { id: string }) => scan.id === id)!.result!.alsoNoticed.map((item: { concern: string }) => item.concern)).toEqual(['marks', 'spots', 'shine'])
+  })
+})
+
 describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
   it('shows what can be seen for the goal, with the skin type and skin age, and no change since day one for the first scan', async () => {
     const ctx = setup()
@@ -2131,12 +2418,14 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
     const view = await getScan(ctx, id)
 
     // analysed(): radiance 41.5 is "clear", moisture 62 and texture 55 are faint (above their cut-offs, still shown); a mask for radiance and moisture, none for texture.
+    // acne (80, faint) is measured as a core extra, so it is stored but not listed in alsoNoticed.
     expect(view.result).toEqual({
       seen: [
         { concern: 'glow', region: 'whole', level: 'clear', words: 'Less glow across most of the face', overlay: { url: expect.stringMatching(LINK) } },
         { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(LINK) } },
         { concern: 'texture', region: 'whole', level: 'faint', words: 'Skin looks smooth', overlay: null },
       ],
+      alsoNoticed: [],
       nothingStandsOut: null,
       skinType: 'dry',
       skinAge: { years: 31, words: 'Your skin looks about 31' },
@@ -2593,7 +2882,7 @@ const OTHER_USER = 'user-2'
 const OTHER_ACCOUNT_PROFILE = 'profile-3'
 
 const listScans = (ctx: Ctx, profileId = PROFILE): Promise<any[]> => asUser(() => ctx.service.listFaceScans(), profileId)
-const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'anonymous', profileId: OTHER_ACCOUNT_PROFILE }, fn)
+const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'verified', profileId: OTHER_ACCOUNT_PROFILE }, fn)
 /** A scan by a profile of the account (`profileId`) under `goal`: consent, the goal and the front photo, the way the create route takes it. Resolves to the scan's id. */
 const startedBy = async (ctx: Ctx, profileId: string, goal: Goal): Promise<string> => {
   await giveConsent(ctx, profileId)

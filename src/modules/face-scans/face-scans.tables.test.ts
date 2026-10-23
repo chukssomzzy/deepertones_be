@@ -21,6 +21,7 @@ import {
   concernsForGoal,
   hdActionsForGoal,
   isVisible,
+  measuredConcernsForGoal,
   resultView,
   SHOWN_CONCERNS as EXPORTED_SHOWN_CONCERNS,
   SKIN_TYPE_LABELS,
@@ -67,6 +68,16 @@ const GOAL_CONCERNS = {
   'calm-repair': ['hd_redness', 'hd_moisture', 'hd_texture'],
 } as const
 
+// Written out from the brief: the goal's own three, then the core concerns (age spot, acne, pore, oiliness) the goal lacks, in that order.
+const MEASURED = {
+  'clear-skin': ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot'],
+  'even-tone': ['hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  'fade-dark-marks': ['hd_age_spot', 'hd_acne', 'hd_texture', 'hd_pore', 'hd_oiliness'],
+  brighter: ['hd_radiance', 'hd_dark_circle', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  glow: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  'calm-repair': ['hd_redness', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+} as const
+
 /** Every concern some goal can show (hd_skin_type is read for the skin type, never shown as a concern). */
 const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
 const BANDS = ['a-little', 'some', 'clear'] as const
@@ -88,7 +99,7 @@ const FAINT_WORDS = [
 
 describe('the version constants', () => {
   it.each([
-    ['GOAL_CONCERNS_VERSION', GOAL_CONCERNS_VERSION, 1],
+    ['GOAL_CONCERNS_VERSION', GOAL_CONCERNS_VERSION, 2],
     ['VISIBILITY_VERSION', VISIBILITY_VERSION, 3],
     ['WORDING_VERSION', WORDING_VERSION, 2],
     ['SKIN_TYPE_VERSION', SKIN_TYPE_VERSION, 1],
@@ -99,9 +110,10 @@ describe('the version constants', () => {
   })
 
   // Visibility v3 gives each concern its own cut-offs (v2 showed every goal concern with one shared set) and wording v2 adds the faint words.
-  // The chase rule (issue #145) joins the others, so a stored result says which resume window worked out its day one.
-  it('puts every version in TABLES_VERSION, with visibility:3 and wording:2 and the chase rule last', () => {
-    expect(TABLES_VERSION).toBe('concerns:1,visibility:3,wording:2,skin-type:1,change:1,chase:1')
+  // Concerns v2 measures the core set on every scan. The chase rule (issue #145) joins the others, so a stored result says which resume
+  // window worked out its day one.
+  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2 and the chase rule last', () => {
+    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1')
   })
 })
 
@@ -120,11 +132,12 @@ describe('goal to concerns', () => {
     expect(table).toEqual(GOAL_CONCERNS)
   })
 
-  it.each([...GOALS])('asks Perfect Corp for %s as its three concerns plus hd_skin_type: four actions, the 1 to 4 tier', (goal) => {
+  it.each([...GOALS])('asks Perfect Corp for %s as everything measured plus hd_skin_type: 5 to 8 actions, the 16-unit tier', (goal) => {
     const actions = hdActionsForGoal(goal)
 
-    expect(actions).toEqual([...GOAL_CONCERNS[goal], 'hd_skin_type'])
-    expect(actions).toHaveLength(4)
+    expect(actions).toEqual([...MEASURED[goal], 'hd_skin_type'])
+    expect(actions.length).toBeGreaterThanOrEqual(5)
+    expect(actions.length).toBeLessThanOrEqual(8)
   })
 
   it.each([...GOALS])('uses only names on Perfect Corp\'s HD list for %s, every one prefixed hd_', (goal) => {
@@ -152,8 +165,33 @@ describe('goal to concerns', () => {
     first.push('hd_wrinkle')
     ;(concernsForGoal('glow') as string[]).length = 0
 
-    expect(hdActionsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type'])
+    expect(hdActionsForGoal('glow')).toEqual([...MEASURED.glow, 'hd_skin_type'])
     expect(concernsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture'])
+    ;(measuredConcernsForGoal('glow') as string[]).length = 0
+    expect(measuredConcernsForGoal('glow')).toEqual(MEASURED.glow)
+  })
+})
+
+describe('the concerns measured for a goal', () => {
+  it.each([...GOALS])('measures %s as its own three, in goal order, then the core concerns it lacks, in core order', (goal) => {
+    expect(measuredConcernsForGoal(goal)).toEqual(MEASURED[goal])
+  })
+
+  it.each([...GOALS])('measures 4 to 7 concerns for %s, none twice, and starts with the goal\'s own', (goal) => {
+    const measured = measuredConcernsForGoal(goal)
+
+    expect(measured.length).toBeGreaterThanOrEqual(4)
+    expect(measured.length).toBeLessThanOrEqual(7)
+    expect(new Set(measured).size).toBe(measured.length)
+    expect(measured.slice(0, 3)).toEqual(GOAL_CONCERNS[goal])
+  })
+
+  it.each([...GOALS])('always measures the four core concerns for %s', (goal) => {
+    expect(measuredConcernsForGoal(goal)).toEqual(expect.arrayContaining(['hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness']))
+  })
+
+  it.each(['not-a-goal', '', 'toString', '__proto__'])('refuses "%s", which is not a goal', (name) => {
+    expect(() => measuredConcernsForGoal(name as never)).toThrow()
   })
 })
 
@@ -956,6 +994,91 @@ describe('resultView: overlays', () => {
   })
 })
 
+describe('resultView: also noticed', () => {
+  const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
+  const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
+  // glow measures radiance, moisture, texture, then the core extras age_spot (marks), acne (spots), pore (pores), oiliness (shine).
+  // Visible: age_spot <= 86, acne <= 68, pore <= 60, oiliness <= 82 (a-little above `some`, some above `clear`).
+
+  it('lists the visible extras in core order, whatever the order of the rows, each shaped like a seen item', () => {
+    const result = build({ results: [row('hd_oiliness', 'whole', 70), row('hd_pore', 'whole', 50), row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 84)] })
+
+    expect(result.alsoNoticed).toEqual([
+      { concern: 'marks', region: 'whole', level: 'a-little', words: 'A few faint dark marks', overlay: null },
+      { concern: 'spots', region: 'whole', level: 'clear', words: 'Many spots and breakouts across the face', overlay: null },
+      { concern: 'pores', region: 'whole', level: 'a-little', words: 'Pores a little more open in places', overlay: null },
+      { concern: 'shine', region: 'whole', level: 'some', words: 'Some shine across the face', overlay: null },
+    ])
+    expect(Object.keys(result.alsoNoticed[0]!).sort()).toEqual(['concern', 'level', 'overlay', 'region', 'words'])
+  })
+
+  it('leaves out a faint extra: it is stored for the routine stage but not shown', () => {
+    const result = build({ results: [row('hd_age_spot', 'whole', 90), row('hd_acne', 'whole', 58), row('hd_pore', 'whole', 70), row('hd_oiliness', 'whole', 95)] })
+
+    expect(result.alsoNoticed.map((item) => item.concern)).toEqual(['spots'])
+    expect(JSON.stringify(result.alsoNoticed)).not.toContain('faint')
+  })
+
+  it('counts an extra at exactly its visible cut-off as visible and just above it as faint', () => {
+    expect(build({ results: [row('hd_acne', 'whole', 68)] }).alsoNoticed.map((item) => item.level)).toEqual(['a-little'])
+    expect(build({ results: [row('hd_acne', 'whole', 68.1)] }).alsoNoticed).toEqual([])
+  })
+
+  it('never lists one of the goal\'s own concerns, visible or not, and never lists the skin type or the overall score', () => {
+    const result = build({
+      goal: 'clear-skin',
+      results: [row('hd_acne', 'whole', 50), row('hd_pore', 'whole', 20), row('hd_oiliness', 'whole', 50), row('hd_skin_type', 'whole', 10), row('all', 'whole', 5), row('hd_radiance', 'whole', 10)],
+    })
+
+    expect(result.seen.map((item) => item.concern)).toEqual(['spots', 'pores', 'shine'])
+    expect(result.alsoNoticed).toEqual([])
+  })
+
+  it('lists, under another goal, the extras of that goal: acne is a goal concern for clear-skin and an extra for glow', () => {
+    const results = [row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 70)]
+
+    expect(build({ goal: 'clear-skin', results }).alsoNoticed.map((item) => item.concern)).toEqual(['marks'])
+    expect(build({ goal: 'glow', results }).alsoNoticed.map((item) => item.concern)).toEqual(['marks', 'spots'])
+    expect(build({ goal: 'fade-dark-marks', results }).alsoNoticed.map((item) => item.concern)).toEqual([])
+  })
+
+  it('leaves out a measured extra that has no row, and is [] when there are no extras at all', () => {
+    expect(build({ results: [row('hd_acne', 'whole', 50)] }).alsoNoticed.map((item) => item.concern)).toEqual(['spots'])
+    expect(build({ results: [] }).alsoNoticed).toEqual([])
+    expect(build({ results: [row('hd_radiance', 'whole', 41.5), row('hd_moisture', 'whole', 20), row('hd_texture', 'whole', 10)] }).alsoNoticed).toEqual([])
+  })
+
+  it('does not list a concern that is not measured for the goal, even when it has a row (a non-core concern outside the goal)', () => {
+    const result = build({ goal: 'clear-skin', results: [row('hd_redness', 'whole', 10), row('hd_texture', 'whole', 5), row('hd_dark_circle', 'whole', 5)] })
+
+    expect(result.alsoNoticed).toEqual([])
+  })
+
+  it('gives a listed extra the link it was signed with, and null when there is none; a faint extra gets no link', () => {
+    const result = build({
+      results: [row('hd_age_spot', 'whole', 84), row('hd_acne', 'whole', 58), row('hd_pore', 'whole', 70), row('hd_oiliness', 'whole', 70)],
+      overlays: { hd_age_spot: { url: '/link/age-spot' }, hd_pore: { url: '/link/pore' }, hd_radiance: { url: '/link/radiance' } },
+    })
+
+    expect(result.alsoNoticed.map((item) => [item.concern, item.overlay])).toEqual([
+      ['marks', { url: '/link/age-spot' }],
+      ['spots', null],
+      ['shine', null],
+    ])
+    expect(JSON.stringify(result.alsoNoticed)).not.toContain('/link/pore')
+  })
+
+  it('takes no part in nothingStandsOut or sinceDayOne', () => {
+    const faintGoal = [row('hd_radiance', 'whole', 90), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 90)]
+    const extras = [row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 70)]
+    const result = build({ results: [...faintGoal, ...extras], dayOne: { id: 'd', createdAt: new Date('2030-06-15T12:00:00.000Z'), results: [...faintGoal, row('hd_acne', 'whole', 20), row('hd_age_spot', 'whole', 20)], skinAge: null } })
+
+    expect(result.alsoNoticed).toHaveLength(2)
+    expect(result.nothingStandsOut).toBe(NOTHING_STANDS_OUT)
+    expect(result.sinceDayOne!.concerns.map((change) => change.concern)).toEqual(['glow', 'dryness', 'texture'])
+  })
+})
+
 describe('resultView: skin type, skin age and the rest of the shape', () => {
   const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
 
@@ -981,7 +1104,7 @@ describe('resultView: skin type, skin age and the rest of the shape', () => {
     const result = build({ results: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5 }] })
 
     expect(result.tablesVersion).toBe(TABLES_VERSION)
-    expect(Object.keys(result).sort()).toEqual(['nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
+    expect(Object.keys(result).sort()).toEqual(['alsoNoticed', 'nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
     expect(Object.keys(result.seen[0]!).sort()).toEqual(['concern', 'level', 'overlay', 'region', 'words'])
   })
 

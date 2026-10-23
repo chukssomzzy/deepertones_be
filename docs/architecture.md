@@ -510,7 +510,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 - **Rate limits** are Workers rate-limit bindings (`ratelimits` in `wrangler.jsonc`, restated in every environment
   block), applied by `rateLimit(binding, 'ip' | 'user')` (`middleware/rate-limit.ts`) as route middleware in
   `defineRoute`. It runs after `auth`, outside the request context, so it reads `c.var.auth`, never
-  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller (a route that must refuse them puts `signedIn()`, `middleware/signed-in.ts`, before it). Over the limit
+  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller (a route that must refuse them puts `signedIn()`, `middleware/signed-in.ts`, before it; a route that must also refuse guests uses `verifiedUser()`, `middleware/verified-user.ts`). Over the limit
   is 429 `RATE_LIMITED` with `Retry-After: 60`. A `namespace_id` is an account-wide counter, so each binding in
   each environment has its own. Counts are per Cloudflare location and approximate: the OTP per-recipient cooldown
   and cap still apply underneath.
@@ -1246,9 +1246,12 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 `modules/face-scans/face-scans.tables.ts` holds the face-scan rules as pure, versioned tables: no I/O, no clock, no model, so the same
 results always give the same words. Everything reads `raw_score` (1 to 100, HIGHER IS HEALTHIER), never `ui_score`.
 
-- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `VISIBILITY_VERSION` (`3`) and `WORDING_VERSION` (`2`): `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
-  three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
-  and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
+- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `GOAL_CONCERNS_VERSION` (`2`), `VISIBILITY_VERSION` (`3`) and `WORDING_VERSION` (`2`): `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
+  the goal's own three concerns, which drive `seen`, `sinceDayOne` and `nothingStandsOut`; `measuredConcernsForGoal`, those three in goal order and then the core
+  concerns the goal lacks, in core order (`hd_age_spot`, `hd_acne`, `hd_pore`, `hd_oiliness`), 4 to 7 per goal; and `hdActionsForGoal`, the measured concerns plus
+  `hd_skin_type`, 5 to 8 actions, the 16-unit HD tier. Why every goal measures the core four: the routine stage needs the whole picture (a glow user with spots needs
+  products that do not clog pores; on darker skin dark marks are the most common concern), and a concern not measured on day one can never show change since
+  day one; the goals come from `goals.vocabulary.ts` and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
   `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`) and `CHASE_VERSION` (`chaseStartFor`, the 90-day
   resume rule, `RESUME_DAYS`; issue #145). Change a table, bump its version.
 - **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
@@ -1275,6 +1278,7 @@ provider, the second the **records** (consent, the scan and its photos, the rout
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
 notifications** (see "Pushes" below).
+Face scans split by what a guest may do. A guest may **run the scan flow**: give consent (`PUT /me/face-consent`), start a scan, retake it and follow it live; those four routes use `signedIn()` as their early exit and their `FaceScanService` methods (`giveConsent`, `create`, `retake`, `watch`) need only `requireUser()`. Everything that shows or manages what the scan found is for **verified users**: reading and withdrawing the consent, the list, reading a scan and deleting one. Those five routes use `verifiedUser()` as their early exit (403 `VERIFICATION_REQUIRED` for a guest, 401 with no token) and their methods (`consent`, `withdrawConsent`, `listFaceScans`, `getFaceScan`, `deleteFaceScan`) start with `requireVerified()`, before the ownership check, so a guest gets 403 for any id, never 404. The live stream carries **status only**: every `face` frame is exactly `{ id, state, reason }` (plus `done`), for every state including `ready`, and never a result, score, skin age or type, overlay or photo link, or goal and rescan information, so a guest learns the next step (analysing, needs a retake and why, failed and why, ready) and must verify and `GET /scans/faces/{id}` to see the result. The create and retake `202` answers show no result either. `latestSkinType()` (read by the recommendations) stays `requireUser`. The photo link and the Perfect Corp webhook are credential-gated (a signed link, a signature), and the job-driven methods run as the system.
 `FaceScanService` takes the goals service (`requireGoal`, `current` and `history`, as a type-only `Pick`; services may depend on services), the photo
 store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
@@ -1316,7 +1320,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
   a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
   service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
-  `mask-<concern>.png` of its goal's concerns) once more, so a mask written by an analysis that committed between the key read and the row delete does not
+  `mask-<concern>.png` of every concern measured for its goal, the core extras too) once more, so a mask written by an analysis that committed between the key read and the row delete does not
   stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
 - **The result view.** `view()` fills `result` only when `state` is `ready` (create and retake answers always have `result: null`). It is built when the
@@ -1330,8 +1334,12 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     until they are re-checked, hiding a concern on a doubtful number is worse than showing it as faint. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`,
     `marks`, `redness`, `glow`, `texture`, `under-eyes`, `dryness`), never Perfect Corp's `hd_*` names. `nothingStandsOut` is `NOTHING_STANDS_OUT` when every item is
     `faint` or `seen` is empty, and null otherwise.
-  - **Overlays.** The mask key of every concern in `seen`, faint ones included, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
-    photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` (not in the goal, or not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
+  - **Also noticed.** `alsoNoticed` lists the measured concerns that are not the goal's own three (`measuredConcernsForGoal` minus `concernsForGoal`: the core extras)
+    whose band is visible (`a-little`, `some` or `clear`), in core order, each shaped like a `seen` item. A faint extra is not listed (it stays stored for the
+    routine stage), nor is one Perfect Corp did not return. Extras are never part of `sinceDayOne` or `nothingStandsOut`. A scan taken before the core extras
+    were measured has no rows for them, so its `alsoNoticed` is `[]`; it is `[]` too when no extra is visible. The never-rules hold for it as for `seen`.
+  - **Overlays.** The mask key of every concern in `seen`, faint ones included, and of every concern in `alsoNoticed`, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
+    photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` and `alsoNoticed` (a faint extra, or one not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
   - **Day one.** A goal's *chase* is a continuous run of working on it, read from the profile's own goal history, never from scan dates (issue #145).
     Leaving a goal and taking it up again within `RESUME_DAYS` (90) of leaving continues its chase; a longer gap starts a new one. Day one is the first
     `ready` scan of the chase that contains the scan's own time: a short detour to another goal is a break in the chase, not the end of it, so the
@@ -1354,7 +1362,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
   other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
   product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
-- **The list.** `GET /scans/faces` (`listFaceScans`, `signedIn`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
+- **The list.** `GET /scans/faces` (`listFaceScans`, `verifiedUser`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
@@ -1377,15 +1385,15 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
     A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
     never fails the scan.
-  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each of the goal's
-    three concerns that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
+  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each concern measured for the goal (its own three and the core extras)
+    that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
     `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
     region, plus the overall score as concern `all`, region `whole`), the `face_masks` rows, `skin_type` (`skinTypeLabel`), `skin_age`, `tables_version`
     (`TABLES_VERSION`) and `state = 'ready'` as one batch that holds only while the scan exists and is `analysing`. When it does not (deleted, or moved on,
     while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
     recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
     scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
-    5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; every goal asks for 5 to 8 actions, so every scan is 16 units), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
     the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
     The step also logs, to learn what Perfect Corp really sends (no address, score or pixel): `{ outcome: 'front-photo-read', faceScanId, width, height }` once
@@ -1430,7 +1438,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   moved on since it was read keeps its own time) and, only if it did, `fetch` is queued, or `upload` if the scan has no task (its first message was lost).
   The check happens once.
 - **The live stream.** The `ScanStream` Durable Object, one per face scan id, carries a `{ type: 'face', faceScan: { id, state, reason } }` event as SSE
-  event `face`; product frames are unchanged. `GET /scans/faces/{id}/events` (signed in, the caller's own scan, else 404 `FACE_SCAN_NOT_FOUND`) opens a
+  event `face`; product frames are unchanged. `GET /scans/faces/{id}/events` (`signedIn`, a guest too; the caller's own scan, else 404 `FACE_SCAN_NOT_FOUND`) opens a
   stream whose `snapshot` is that frame, reads the scan again once it is open (a change stored in between is sent), and sends `done` straight away for a
   scan that is `ready`, `failed` or `needs-retake`. Each state change publishes its frame, and `done` after a final one. Publishing is best effort: the
   change is already stored, so a failure is logged `{ outcome: 'publish-failed' }` and the step goes on.

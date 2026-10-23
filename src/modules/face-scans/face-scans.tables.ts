@@ -10,7 +10,7 @@ import type { Goal } from '../goals/goals.vocabulary'
 // against real staging results, and the overlays and skin age have not been checked on darker skin (see CONTEXT.md). Changing a number means bumping that
 // table's version.
 
-export const GOAL_CONCERNS_VERSION = 1
+export const GOAL_CONCERNS_VERSION = 2
 export const VISIBILITY_VERSION = 3
 export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
@@ -56,8 +56,18 @@ export const concernsForGoal = (goal: Goal): ShownConcern[] => {
   return [...concerns]
 }
 
-/** What to ask Perfect Corp for: the goal's three concerns and the skin type, which is four actions (the HD 1 to 4 tier). */
-export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...concernsForGoal(goal), HD_SKIN_TYPE]
+// Measured for every goal whatever it is: the routine stage needs the whole picture (a glow user with spots needs products that do not clog pores; on
+// darker skin dark marks are the most common concern of all), and a concern not measured on day one can never show change since day one.
+const CORE_CONCERNS: readonly ShownConcern[] = ['hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness']
+
+/** Everything measured for a goal: its own three in goal order, then the core concerns it lacks in core order. 4 to 7 concerns, a fresh list each time. */
+export const measuredConcernsForGoal = (goal: Goal): ShownConcern[] => {
+  const own = concernsForGoal(goal)
+  return [...own, ...CORE_CONCERNS.filter((concern) => !own.includes(concern))]
+}
+
+/** What to ask Perfect Corp for: everything measured for the goal and the skin type, which is 5 to 8 actions (the HD 5 to 8 tier, 16 units). */
+export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...measuredConcernsForGoal(goal), HD_SKIN_TYPE]
 
 // A concern is visible at or below `visible`, and the band is how far below: (some, visible] is a-little, (clear, some] is some, and
 // clear or less is clear. Above `visible` is faint. Each concern has its own cut-offs because Perfect Corp's raw_score sits on a different range for each
@@ -253,8 +263,11 @@ type ScoreRow = { concern: string; region: string; rawScore: number }
 type ViewConcernChange = 'fainter' | 'more-visible' | 'no-clear-change'
 type ViewSkinAgeChange = 'younger' | 'older' | 'no-clear-change'
 
+type SeenItem = { concern: ConcernId; region: string; level: Band; words: string; overlay: { url: string } | null }
+
 export type ResultView = {
-  seen: { concern: ConcernId; region: string; level: Band; words: string; overlay: { url: string } | null }[]
+  seen: SeenItem[]
+  alsoNoticed: SeenItem[]
   nothingStandsOut: string | null
   skinType: SkinTypeLabel | null
   skinAge: { years: number; words: string } | null
@@ -287,11 +300,26 @@ export const shownConcerns = (goal: Goal, results: readonly ScoreRow[]): { conce
   return shown
 }
 
+/** The measured concerns outside the goal's own that have a row and can be seen (not faint), in core order, each with the row read and its band. The same rule `resultView` lists `alsoNoticed` by. */
+export const noticedConcerns = (goal: Goal, results: readonly ScoreRow[]): { concern: ShownConcern; row: ScoreRow; band: Band }[] => {
+  const own = concernsForGoal(goal)
+  const noticed: ReturnType<typeof noticedConcerns> = []
+  for (const concern of measuredConcernsForGoal(goal)) {
+    if (own.includes(concern)) continue
+    const row = rowFor(results, concern)
+    if (!row) continue
+    const band = bandFor(concern, row.rawScore)
+    if (band !== 'faint') noticed.push({ concern, row, band })
+  }
+  return noticed
+}
+
 /**
  * What the app shows for a ready scan, from the stored rows alone: every one of the goal's concerns Perfect Corp measured (a faint one is worded as hardly
  * there), the skin reading, and how each concern has moved since day one. The words are worked out here, when read, so a change to the tables reaches scans
- * already stored. `overlays` are already signed links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a Perfect
- * Corp name or a condition.
+ * already stored. `alsoNoticed` is the other measured concerns that can be seen (not faint), in core order; a faint one stays stored for the routine
+ * stage and is not shown. `overlays` are already signed links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a
+ * Perfect Corp name or a condition.
  */
 export const resultView = (input: {
   goal: Goal
@@ -303,13 +331,15 @@ export const resultView = (input: {
 }): ResultView => {
   const { goal, results, overlays, skinType, skinAge, dayOne } = input
   const concerns = concernsForGoal(goal)
-  const seen: ResultView['seen'] = shownConcerns(goal, results).map(({ concern, row, band }) => ({
+  const item = ({ concern, row, band }: { concern: ShownConcern; row: ScoreRow; band: Band }): SeenItem => ({
     concern: CONCERN_IDS[concern],
     region: row.region,
     level: band,
     words: seenWords(concern, band, row.region),
     overlay: overlays[concern] ? { url: overlays[concern].url } : null,
-  }))
+  })
+  const seen = shownConcerns(goal, results).map(item)
+  const alsoNoticed = noticedConcerns(goal, results).map(item)
 
   let sinceDayOne: ResultView['sinceDayOne'] = null
   if (dayOne) {
@@ -332,6 +362,7 @@ export const resultView = (input: {
 
   return {
     seen,
+    alsoNoticed,
     nothingStandsOut: seen.every(({ level }) => level === 'faint') ? NOTHING_STANDS_OUT : null,
     skinType,
     skinAge: skinAge === null ? null : { years: Math.round(skinAge), words: skinAgeWords(skinAge) },
