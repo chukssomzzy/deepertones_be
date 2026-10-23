@@ -7,6 +7,8 @@ import {
   GOAL_CONCERNS_VERSION,
   NOTHING_STANDS_OUT,
   RESUME_DAYS,
+  REVIEW_VERSION,
+  REVIEW_WEEKS,
   SKIN_TYPE_VERSION,
   TABLES_VERSION,
   VISIBILITY_VERSION,
@@ -19,9 +21,11 @@ import {
   chaseStartFor,
   concernChange,
   concernsForGoal,
+  hdActionsForCheckIn,
   hdActionsForGoal,
   isVisible,
   resultView,
+  reviewPointFor,
   SHOWN_CONCERNS as EXPORTED_SHOWN_CONCERNS,
   SKIN_TYPE_LABELS,
   seenWords,
@@ -94,14 +98,16 @@ describe('the version constants', () => {
     ['SKIN_TYPE_VERSION', SKIN_TYPE_VERSION, 1],
     ['CHANGE_VERSION', CHANGE_VERSION, 1],
     ['CHASE_VERSION', CHASE_VERSION, 1],
+    ['REVIEW_VERSION', REVIEW_VERSION, 1],
   ])('%s is %s, the number a result carries so a client can tell which rules wrote what it shows', (_name, version, expected) => {
     expect(version).toBe(expected)
   })
 
   // Visibility v2 shows every goal concern (a score above the cut-off is the faint band) and wording v2 adds the faint words. The chase
-  // rule (issue #145) joins the others, so a stored result says which resume window worked out its day one.
-  it('puts every version in TABLES_VERSION, with visibility:2 and wording:2 and the chase rule last', () => {
-    expect(TABLES_VERSION).toBe('concerns:1,visibility:2,wording:2,skin-type:1,change:1,chase:1')
+  // rule and the review weeks (issue #145) join the others, so a stored result says which resume window worked out its day one and which
+  // review weeks were in force.
+  it('puts every version in TABLES_VERSION, with visibility:2 and wording:2 and the chase rule then the review weeks last', () => {
+    expect(TABLES_VERSION).toBe('concerns:1,visibility:2,wording:2,skin-type:1,change:1,chase:1,review:1')
   })
 })
 
@@ -154,6 +160,46 @@ describe('goal to concerns', () => {
 
     expect(hdActionsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type'])
     expect(concernsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture'])
+  })
+})
+
+// The check-in scan, taken at a goal's review point, looks a little wider than a normal one: behind the scenes it reads every concern the app can
+// ever show, so the next-goal rule has something to read, even though the result still shows only the goal's own three (issue #145). Ten actions,
+// the 9 to 12 tier, against the four of a normal scan. Written out from the issue, never read from the module.
+describe('what a check-in scan asks Perfect Corp for', () => {
+  const CHECK_IN_ACTIONS = [...SHOWN_CONCERNS, 'hd_skin_type']
+
+  it('asks for all nine concerns the app can show, plus the skin type: ten actions, the 9 to 12 tier', () => {
+    expect(hdActionsForCheckIn()).toEqual(CHECK_IN_ACTIONS)
+    expect(hdActionsForCheckIn()).toHaveLength(10)
+  })
+
+  it('asks for no name that is not on Perfect Corp\'s HD list, and never repeats one', () => {
+    const actions = hdActionsForCheckIn()
+
+    for (const name of actions) {
+      expect(name.startsWith('hd_')).toBe(true)
+      expect(HD_NAMES).toContain(name)
+    }
+    expect(new Set(actions).size).toBe(actions.length)
+  })
+
+  it('covers what every goal asks for, so one check-in can be read for whichever goal it was taken under', () => {
+    for (const goal of GOALS) {
+      for (const action of hdActionsForGoal(goal)) expect(hdActionsForCheckIn()).toContain(action)
+    }
+  })
+
+  it('asks for more than a normal scan does, which is what the extra units pay for', () => {
+    expect(hdActionsForCheckIn().length).toBeGreaterThan(hdActionsForGoal('glow').length)
+  })
+
+  it('hands out a fresh list each time, so a caller that edits one cannot change the next scan\'s actions', () => {
+    const first = hdActionsForCheckIn() as string[]
+    first.push('hd_wrinkle')
+    first.length = 0
+
+    expect(hdActionsForCheckIn()).toEqual(CHECK_IN_ACTIONS)
   })
 })
 
@@ -1167,5 +1213,55 @@ describe('chaseStartFor: which chase of a goal a time falls in', () => {
 
     expect(chaseStartFor(rows, 'glow', on(DAY))).toEqual(on(0))
     expect(chaseStartFor(rows, 'glow', on(fresh + DAY))).toEqual(on(fresh))
+  })
+})
+
+// A goal's review point is when its chase is looked at again: day one plus the goal's review week, which starts at 6 for every goal and is a
+// placeholder to tune per goal later (issue #145, "Review point"). The table is versioned like the others. Every expectation below is a literal
+// written from the issue, never read from the module.
+describe('reviewPointFor: when a goal\'s chase is looked at again', () => {
+  /** Week 6 for every goal, from the issue. */
+  const REVIEW_WEEK = 6
+  const DAY = 24 * 60 * 60 * 1000
+  const WEEK = 7 * DAY
+  /** The day one every fixture here hangs off; the review point is written out as its own literal, not worked out from this one. */
+  const DAY_ONE = new Date('2030-06-15T12:00:00.000Z')
+  /** 2030-06-15 plus 42 days, by the calendar. */
+  const REVIEW_POINT = new Date('2030-07-27T12:00:00.000Z')
+
+  it.each([...GOALS])('gives %s a review week of 6, the placeholder every goal starts at', (goal) => {
+    expect(REVIEW_WEEKS[goal]).toBe(REVIEW_WEEK)
+  })
+
+  it('covers every goal in the vocabulary and nothing else, so no goal is left without a review point', () => {
+    expect(Object.keys(REVIEW_WEEKS).sort()).toEqual([...GOALS].sort())
+  })
+
+  it.each([...GOALS])('puts %s\'s review point six weeks after day one, to the millisecond', (goal) => {
+    expect(reviewPointFor(DAY_ONE, goal)).toEqual(REVIEW_POINT)
+  })
+
+  it('moves with day one: a day one a day later has its review point a day later', () => {
+    expect(reviewPointFor(new Date(DAY_ONE.getTime() + DAY), 'glow')).toEqual(new Date(REVIEW_POINT.getTime() + DAY))
+  })
+
+  it('keeps the time of day of day one: a scan taken in the evening is reviewed in the evening', () => {
+    expect(reviewPointFor(new Date('2030-06-15T19:45:30.250Z'), 'glow')).toEqual(new Date('2030-07-27T19:45:30.250Z'))
+  })
+
+  it('leaves day one alone: the date it was given is not moved on', () => {
+    const dayOne = new Date(DAY_ONE)
+
+    reviewPointFor(dayOne, 'glow')
+
+    expect(dayOne).toEqual(DAY_ONE)
+  })
+
+  it('is six weeks, which is 42 days, for every goal', () => {
+    for (const goal of GOALS) expect(reviewPointFor(DAY_ONE, goal).getTime() - DAY_ONE.getTime()).toBe(REVIEW_WEEK * WEEK)
+  })
+
+  it('is well inside the 90-day resume window, so a chase cannot lapse before its own review point', () => {
+    expect(reviewPointFor(DAY_ONE, 'glow').getTime() - DAY_ONE.getTime()).toBeLessThan(RESUME_DAYS * DAY)
   })
 })
