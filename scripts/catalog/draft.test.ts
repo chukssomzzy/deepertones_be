@@ -143,13 +143,13 @@ const fakes = () => {
   return { researcher, drafter }
 }
 
-type Over = { researcher?: ProductResearcher; drafter?: CatalogDrafter; ledger?: MemoryAiSpendLedger; countries?: string[] }
+type Over = { researcher?: ProductResearcher; drafter?: CatalogDrafter; ledger?: MemoryAiSpendLedger; countries?: string[]; passes?: number }
 const run = async (input: RawWorkbook, over: Over = {}) => {
   const made = fakes()
   const ledger = over.ledger ?? new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
   const researcher = over.researcher ?? made.researcher
   const drafter = over.drafter ?? made.drafter
-  const outcome = await draftWorkbook(input, { researcher, drafter, ledger, countries: over.countries })
+  const outcome = await draftWorkbook(input, { researcher, drafter, ledger, countries: over.countries, passes: over.passes })
   return { outcome, ...made, ledger }
 }
 
@@ -944,7 +944,8 @@ describe('draftWorkbook: a call that fails for another reason', () => {
     const made = fakes()
     made.researcher.failNextWith(unavailable())
 
-    const { outcome, drafter } = await run(workbook({ products: [CERAVE, VANICREAM] }), { researcher: made.researcher })
+    // One pass: what a later pass does with a product that failed is pinned under "draftWorkbook: retry passes".
+    const { outcome, drafter } = await run(workbook({ products: [CERAVE, VANICREAM] }), { researcher: made.researcher, passes: 1 })
 
     expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'researcher-error' }])
     expect(productOf(outcome.workbook, 'PRD-CERAVE')).toEqual(CERAVE)
@@ -958,7 +959,8 @@ describe('draftWorkbook: a call that fails for another reason', () => {
     const made = fakes()
     made.drafter.failNextWith(unavailable())
 
-    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter: made.drafter })
+    // One pass: a later pass would try this product's prices again (see "draftWorkbook: retry passes").
+    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter: made.drafter, passes: 1 })
 
     const failedRow = productOf(outcome.workbook, 'PRD-CERAVE')
     expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'drafter-error' }])
@@ -1071,6 +1073,265 @@ describe('draftWorkbook: a call that fails because the setup is wrong', () => {
   })
 })
 
+// --- retry passes -------------------------------------------------------------------------------------------------------------------------------
+
+// Drafted prices feed a budget band, so coverage matters more than exactness: after the first pass, each later pass revisits only the draft products that
+// still lack a price for some wanted country, asking the drafter for those countries alone (no columns, so no cell is touched) with the attempt number, so
+// it can look more widely. The researcher is never asked again.
+describe('draftWorkbook: retry passes', () => {
+  const attemptOf = (request: DraftRequest) => request.attempt ?? 1
+  const priceRow = (country: string, over: Record<string, unknown> = {}) => ({ country, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies', sourceUrl: SRC.price, ...over })
+  /** A drafter that records every request, and answers from `answer` (nothing at all by default). */
+  const scripted = (answer: (request: DraftRequest) => DraftResult = () => ({ cells: {}, availability: [] })) => {
+    const calls: DraftRequest[] = []
+    const drafter: CatalogDrafter = {
+      draft: async (request) => {
+        calls.push(request)
+        return answer(request)
+      },
+    }
+    return { calls, drafter }
+  }
+  /** The rows for those of the countries asked whose code is in `codes`. */
+  const pricing = (request: DraftRequest, codes: string[]): DraftResult => ({
+    cells: {},
+    availability: request.countries.filter((country) => codes.includes(country.code)).map((country) => priceRow(country.code)),
+  })
+  const countriesOf = (request: DraftRequest) => request.countries.map((country) => country.code)
+  const brandsAndAttempts = (calls: DraftRequest[]) => calls.map((call) => [call.product.brand, attemptOf(call)])
+
+  it('asks again, in a second pass, for only the countries still without a price, with no columns and the attempt number, and adds what it finds', async () => {
+    const { calls, drafter } = scripted((request) => pricing(request, attemptOf(request) === 1 ? ['NG'] : ['GB']))
+
+    const { outcome } = await run(workbook(), { drafter })
+
+    expect(calls).toHaveLength(2)
+    expect(attemptOf(calls[0]!)).toBe(1)
+    expect(calls[0]!.columns).not.toEqual([])
+    expect(countriesOf(calls[0]!)).toEqual(['NG', 'GB'])
+    expect(calls[1]!.attempt).toBe(2)
+    expect(calls[1]!.columns).toEqual([])
+    expect(calls[1]!.countries).toEqual([{ code: 'GB', currency: 'GBP' }])
+    expect(calls[1]!.product).toEqual(calls[0]!.product)
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
+  })
+
+  it('makes no second pass when the first priced every country', async () => {
+    const { calls, drafter } = scripted((request) => pricing(request, ['NG', 'GB']))
+
+    await run(workbook(), { drafter })
+
+    expect(calls).toHaveLength(1)
+  })
+
+  it.each([
+    ['by default, three passes', undefined, 3],
+    ['one pass', 1, 1],
+    ['two passes', 2, 2],
+    ['three passes', 3, 3],
+    ['five passes', 5, 5],
+  ])('asks about a country that is never priced %s, numbering the attempts from 1', async (_label, passes, asked) => {
+    const { calls, drafter } = scripted()
+
+    await run(workbook(), { drafter, passes })
+
+    expect(calls.map(attemptOf)).toEqual(Array.from({ length: asked }, (_, i) => i + 1))
+  })
+
+  it('stops asking once the last missing price is found: the third pass is not made when the second priced the rest', async () => {
+    const { calls, drafter } = scripted((request) => pricing(request, attemptOf(request) === 1 ? [] : ['NG', 'GB']))
+
+    await run(workbook(), { drafter })
+
+    expect(calls.map(attemptOf)).toEqual([1, 2])
+  })
+
+  it('revisits only the products that still lack a price: a product priced in the first pass is not asked about again', async () => {
+    const { calls, drafter } = scripted((request) => pricing(request, request.product.brand === 'CeraVe' || attemptOf(request) > 1 ? ['NG', 'GB'] : []))
+
+    await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter })
+
+    expect(brandsAndAttempts(calls)).toEqual([
+      ['CeraVe', 1],
+      ['Vanicream', 1],
+      ['Vanicream', 2],
+    ])
+  })
+
+  it('does not revisit a product that already had a price for every country, even though its cells are empty and nothing was drafted', async () => {
+    const { calls, drafter } = scripted()
+
+    await run(workbook({ availability: [price('PRD-CERAVE', 'NG'), price('PRD-CERAVE', 'GB')] }), { drafter })
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.countries).toEqual([])
+  })
+
+  it('never asks the researcher again, even for a product whose ingredient list it could not find', async () => {
+    const made = fakes()
+    made.researcher.respondWith(() => ({ found: false }))
+    const { calls, drafter } = scripted()
+
+    await run(workbook({ products: [CERAVE, VANICREAM] }), { researcher: made.researcher, drafter })
+
+    expect(calls).toHaveLength(6)
+    expect(made.researcher.calls.map((c) => c.brand)).toEqual(['CeraVe', 'Vanicream'])
+  })
+
+  it('never asks about a row whose identity the contract would refuse, in any pass', async () => {
+    const nameless = blank('PRD-NAMELESS', 'Brand', 'x', { name: '  ' })
+    const { calls, drafter } = scripted()
+
+    const { outcome } = await run(workbook({ products: [nameless, CERAVE] }), { drafter })
+
+    expect(outcome.skipped).toEqual(['PRD-NAMELESS'])
+    expect(calls.map((c) => c.product.brand)).toEqual(['CeraVe', 'CeraVe', 'CeraVe'])
+  })
+
+  it('writes what a later pass finds like a first pass: one row per country, with the source, and the answer checked at the same door', async () => {
+    const { calls, drafter } = scripted((request) => {
+      if (attemptOf(request) === 1) return pricing(request, ['NG'])
+      return {
+        // A cell nobody asked for, a country that already has a price, and a good row without where_sold.
+        cells: { frequency: { value: 'pm', sourceUrl: SRC.frequency } },
+        availability: [priceRow('NG', { priceMin: 1, priceMax: 2 }), priceRow('GB', { priceMin: 9, priceMax: 12, whereSold: undefined, sourceUrl: 'https://www.pharmacy.example/gb' })],
+      }
+    })
+
+    const { outcome } = await run(workbook(), { drafter, passes: 2 })
+
+    expect(calls).toHaveLength(2)
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE')).toEqual([
+      { product_code: 'PRD-CERAVE', country: 'NG', price_min: 4000, price_max: 6500, where_sold: 'Pharmacies', source_url: SRC.price },
+      { product_code: 'PRD-CERAVE', country: 'GB', price_min: 9, price_max: 12, where_sold: null, source_url: 'https://www.pharmacy.example/gb' },
+    ])
+    // The later pass was asked for no column, so a cell it volunteers is not written and leaves no draft_cells entry.
+    expect(isEmpty(productOf(outcome.workbook, 'PRD-CERAVE').frequency)).toBe(true)
+    expect(draftCellsOf(outcome.workbook, 'PRD-CERAVE').some((entry) => entry.startsWith('frequency='))).toBe(false)
+  })
+
+  it('refuses a price row from a later pass that the workbook door refuses, and asks again in the next pass', async () => {
+    const { calls, drafter } = scripted((request) => {
+      if (attemptOf(request) === 1) return pricing(request, ['NG'])
+      if (attemptOf(request) === 2) return { cells: {}, availability: [priceRow('GB', { sourceUrl: 'http://www.pharmacy.example/gb' })] }
+      return { cells: {}, availability: [priceRow('GB', { sourceUrl: 'https://www.pharmacy.example/gb' })] }
+    })
+
+    const { outcome } = await run(workbook(), { drafter })
+
+    expect(calls.map(attemptOf)).toEqual([1, 2, 3])
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => [r.country, r.source_url])).toEqual([
+      ['NG', SRC.price],
+      ['GB', 'https://www.pharmacy.example/gb'],
+    ])
+  })
+
+  it('retries a product whose drafter call failed, for its prices only, and still records the failure because its cells were not drafted', async () => {
+    const made = fakes()
+    made.drafter.failNextWith(new Error('overloaded'))
+
+    const { outcome } = await run(workbook(), { drafter: made.drafter })
+
+    // The failed call recorded nothing, so the first call on record is the retry.
+    expect(made.drafter.calls).toHaveLength(1)
+    expect(made.drafter.calls[0]!.attempt).toBe(2)
+    expect(made.drafter.calls[0]!.columns).toEqual([])
+    expect(countriesOf(made.drafter.calls[0]!)).toEqual(['NG', 'GB'])
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
+    expect(isEmpty(productOf(outcome.workbook, 'PRD-CERAVE').frequency)).toBe(true)
+    expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'drafter-error' }])
+    expect(outcome.stoppedBy).toBeNull()
+  })
+
+  it('prices, in a later pass, a product whose research failed, without researching it again, and still records the failure', async () => {
+    const made = fakes()
+    made.researcher.failNextWith(new Error('overloaded'))
+
+    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { researcher: made.researcher, drafter: made.drafter })
+
+    // The failed research recorded nothing, so a research call for CeraVe on record would be a second one.
+    expect(brandsAndAttempts(made.drafter.calls)).toEqual([
+      ['Vanicream', 1],
+      ['CeraVe', 2],
+    ])
+    expect(made.drafter.calls[1]!.columns).toEqual([])
+    expect(made.researcher.calls.map((c) => c.brand)).toEqual(['Vanicream'])
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
+    expect(productOf(outcome.workbook, 'PRD-CERAVE')).toEqual({ ...CERAVE })
+    expect(outcome.failed).toEqual([{ code: 'PRD-CERAVE', reason: 'researcher-error' }])
+  })
+
+  it('carries on after a failed call in a later pass: the next product is still asked, and the failed one again in the pass after', async () => {
+    const { calls, drafter } = scripted((request) => {
+      if (attemptOf(request) === 2 && request.product.brand === 'CeraVe') throw new Error('overloaded')
+      return pricing(request, attemptOf(request) === 3 ? ['NG', 'GB'] : [])
+    })
+
+    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter })
+
+    expect(brandsAndAttempts(calls)).toEqual([
+      ['CeraVe', 1],
+      ['Vanicream', 1],
+      ['CeraVe', 2],
+      ['Vanicream', 2],
+      ['CeraVe', 3],
+      ['Vanicream', 3],
+    ])
+    expect(outcome.stoppedBy).toBeNull()
+    expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
+    expect(availabilityOf(outcome.workbook, 'PRD-VANICREAM').map((r) => r.country)).toEqual(['NG', 'GB'])
+  })
+
+  it('stops everything on a bad key, billing or permission met in a later pass, asking no further product or pass', async () => {
+    const { calls, drafter } = scripted((request) => {
+      if (attemptOf(request) === 2) throw new AnthropicConfigError('invalid x-api-key sk-ant-secret-42')
+      return pricing(request, [])
+    })
+
+    const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM] }), { drafter })
+
+    expect(outcome.stoppedBy).toBe('config')
+    expect(brandsAndAttempts(calls)).toEqual([
+      ['CeraVe', 1],
+      ['Vanicream', 1],
+      ['CeraVe', 2],
+    ])
+    expect(outcome.failed).toEqual([])
+    expect(JSON.stringify(outcome)).not.toContain('secret-42')
+  })
+
+  describe('the spend cap', () => {
+    /** One product: a research call and a first drafting call that prices NG only, then a second drafting call that prices GB; each costs CALL_MICROS. */
+    const cappedAt = async (capMicros: number) => {
+      const ledger = new MemoryAiSpendLedger({ capMicros })
+      const made = fakes()
+      const { calls, drafter } = scripted((request) => pricing(request, attemptOf(request) === 1 ? ['NG'] : ['GB']))
+      const outcome = await draftWorkbook(workbook(), { researcher: new CostedResearcher(made.researcher, ledger, CALL_MICROS), drafter: new CostedDrafter(drafter, ledger, CALL_MICROS), ledger })
+      return { outcome, calls }
+    }
+
+    it('stops at the cap met in a later pass, keeping what was priced before it and asking no more', async () => {
+      const { outcome, calls } = await cappedAt(3 * CALL_MICROS - 1)
+
+      expect(outcome.stoppedBy).toBe('cap')
+      expect(outcome.spentMicros).toBe(2 * CALL_MICROS)
+      expect(calls).toHaveLength(1)
+      expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG'])
+      expect(listOf(productOf(outcome.workbook, 'PRD-CERAVE').ingredients)).toEqual(INGREDIENT_LIST)
+      expect(outcome.failed).toEqual([])
+    })
+
+    it('makes the second pass when the cap leaves room for exactly its call', async () => {
+      const { outcome, calls } = await cappedAt(3 * CALL_MICROS)
+
+      expect(outcome.stoppedBy).toBeNull()
+      expect(outcome.spentMicros).toBe(3 * CALL_MICROS)
+      expect(calls.map(attemptOf)).toEqual([1, 2])
+      expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
+    })
+  })
+})
+
 describe('formatReport', () => {
   /** A run of one product: one research call and one drafting call, costing `micros` between them. */
   const spendOf = async (micros: number) => {
@@ -1123,6 +1384,87 @@ describe('formatReport', () => {
     const { outcome } = await run(workbook({ products: [blank('PRD-NAMELESS', 'Brand', 'x', { name: '' })] }))
 
     expect(formatReport(outcome)).toContain('PRD-NAMELESS')
+  })
+
+  describe('the prices line', () => {
+    // CeraVe is priced in both countries, Vanicream only in GB, Aveeno in none: 3 of 6 product-country pairs.
+    const PRICED: Record<string, string[]> = { CeraVe: ['NG', 'GB'], Vanicream: ['GB'], Aveeno: [] }
+    const partlyPriced = (passes?: number) => {
+      const drafter = new MemoryCatalogDrafter()
+      drafter.respondWith((request) => ({
+        cells: {},
+        availability: request.countries
+          .filter((country) => PRICED[request.product.brand]!.includes(country.code))
+          .map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+      }))
+      return run(workbook({ products: [CERAVE, VANICREAM, AVEENO] }), { drafter, passes })
+    }
+    const pricesLine = (report: string) => report.split('\n').find((line) => line.startsWith('Prices:'))
+
+    it('says how many product-country pairs are priced, out of how many were asked, and after how many passes', async () => {
+      const { outcome } = await partlyPriced()
+
+      const line = pricesLine(formatReport(outcome))
+
+      expect(line).toBeDefined()
+      expect(line).toContain('3 of 6')
+      expect(line).toContain('3 passes')
+    })
+
+    it.each([
+      [1, '1 pass'],
+      [2, '2 pass'],
+    ])('counts the passes made: %d', async (passes, expected) => {
+      const { outcome } = await partlyPriced(passes)
+
+      expect(pricesLine(formatReport(outcome))).toContain(expected)
+    })
+
+    it('counts a price the workbook already had as priced, and does not list its country as missing', async () => {
+      const { outcome } = await run(workbook({ availability: [price('PRD-CERAVE', 'NG')] }), { drafter: new MemoryCatalogDrafter() })
+
+      const report = formatReport(outcome)
+
+      expect(pricesLine(report)).toContain('1 of 2')
+      expect(report).toMatch(/PRD-CERAVE: GB(\s|$)/)
+      expect(report).not.toMatch(/PRD-CERAVE: NG/)
+    })
+
+    it('lists, for each product still missing a price, its code and the countries it lacks', async () => {
+      const { outcome } = await partlyPriced()
+
+      const report = formatReport(outcome)
+
+      expect(report).toContain('PRD-AVEENO: NG, GB')
+      expect(report).toMatch(/PRD-VANICREAM: NG(\s|$)/)
+      expect(report).not.toMatch(/PRD-CERAVE: (NG|GB)/)
+    })
+
+    it('says everything is priced, and lists no product, when every pair was', async () => {
+      const { outcome } = await run(workbook({ products: [CERAVE, VANICREAM, AVEENO] }))
+
+      const report = formatReport(outcome)
+
+      expect(pricesLine(report)).toContain('6 of 6')
+      expect(report).not.toMatch(/PRD-\w+: (NG|GB)/)
+    })
+
+    it('counts only the prices that were found, when the spend cap stopped the run in a later pass', async () => {
+      const ledger = new MemoryAiSpendLedger({ capMicros: 2 * CALL_MICROS })
+      const made = fakes()
+      made.drafter.respondWith((request) => ({
+        cells: {},
+        availability: request.countries.filter((country) => country.code === 'NG').map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+      }))
+      const outcome = await draftWorkbook(workbook(), { researcher: new CostedResearcher(made.researcher, ledger, CALL_MICROS), drafter: new CostedDrafter(made.drafter, ledger, CALL_MICROS), ledger })
+
+      const report = formatReport(outcome)
+
+      expect(outcome.stoppedBy).toBe('cap')
+      expect(pricesLine(report)).toContain('1 of 2')
+      expect(report).toContain('PRD-CERAVE: GB')
+      expect(report).toMatch(/cap/i)
+    })
   })
 })
 
@@ -1247,6 +1589,42 @@ describe('runDraft', () => {
 
     expect(drafter.calls[0]!.countries).toEqual([{ code: 'GB', currency: 'GBP' }])
     expect(availabilityOf(files.writes[0]!.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['GB'])
+  })
+
+  it('makes the number of passes it is given, so --passes reaches the drafting', async () => {
+    const made = fakes()
+    made.drafter.respondWith(() => ({ cells: {}, availability: [] }))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft({ ...ARGS, passes: 2 }, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook()) })
+
+    expect(made.drafter.calls.map((call) => call.attempt ?? 1)).toEqual([1, 2])
+  })
+
+  it('makes three passes when it is given no number', async () => {
+    const made = fakes()
+    made.drafter.respondWith(() => ({ cells: {}, availability: [] }))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook()) })
+
+    expect(made.drafter.calls.map((call) => call.attempt ?? 1)).toEqual([1, 2, 3])
+  })
+
+  it('writes the prices a later pass found', async () => {
+    const files = io(workbook())
+    const made = fakes()
+    made.drafter.respondWith((request) => ({
+      cells: {},
+      availability: request.countries
+        .filter((country) => (request.attempt ?? 1) > 1 || country.code === 'NG')
+        .map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+    }))
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: files })
+
+    expect(availabilityOf(files.writes[0]!.workbook, 'PRD-CERAVE').map((r) => r.country)).toEqual(['NG', 'GB'])
   })
 
   it('writes nothing when the input cannot be read', async () => {

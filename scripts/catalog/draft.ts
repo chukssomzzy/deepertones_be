@@ -16,7 +16,12 @@ export type DraftDeps = {
   ledger: MemoryAiSpendLedger
   /** Limit the countries drafted to these; every active country when left out. */
   countries?: string[]
+  /** How many times to try for a price in all, the first pass included; DEFAULT_PASSES when left out. */
+  passes?: number
 }
+
+/** The first pass drafts the cells and prices; each later one asks only for the prices still missing. */
+export const DEFAULT_PASSES = 3
 
 /** A fixed reason, never a message: what Claude said about a product has no business in a report. */
 export type FailureReason = 'researcher-error' | 'drafter-error'
@@ -32,6 +37,8 @@ export type DraftOutcome = {
   /** Why the run ended before the last product: the spend cap, or a setup that is wrong (key, billing, permissions). Null when it did not. */
   stoppedBy: 'cap' | 'config' | null
   spentMicros: number
+  /** How far the prices got. A price the workbook already had counts as priced; `missing` has the countries (in the order asked) each draft product still lacks. */
+  prices: { passes: number; asked: number; priced: number; missing: { code: string; countries: string[] }[] }
 }
 
 const isEmpty = (cell: unknown): boolean => cell === undefined || cell === null || (typeof cell === 'string' && cell.trim() === '')
@@ -79,14 +86,54 @@ const identityOf = (row: RawRow): ProductIdentity | undefined => {
   return { brand, name, ...(variant === '' ? {} : { variant }), ...(form === '' ? {} : { form: form as ProductForm }), category: category as ProductCategory }
 }
 
-/** Fills the empty cells of the draft products of `input`, and stops at the spend cap with what it has. `input` is not changed. */
-export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, ledger, countries }: DraftDeps): Promise<DraftOutcome> => {
+type Target = { row: RawRow; code: string; product: ProductIdentity }
+
+/** Fills the empty cells of the draft products of `input`, then retries the prices still missing, and stops at the spend cap with what it has. `input` is not changed. */
+export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, ledger, countries, passes = DEFAULT_PASSES }: DraftDeps): Promise<DraftOutcome> => {
   const workbook = structuredClone(input)
   const wanted = targetCountries(workbook, countries)
   const skipped: string[] = []
   const failed: DraftOutcome['failed'] = []
+  const targets: Target[] = []
   let stoppedBy: DraftOutcome['stoppedBy'] = null
 
+  const missingFor = (code: string): DraftCountry[] => {
+    const have = new Set(workbook.availability.rows.filter((r) => r.product_code === code).map((r) => r.country))
+    return wanted.filter((country) => !have.has(country.code))
+  }
+  const fail = (code: string, reason: FailureReason): void => {
+    if (!failed.some((f) => f.code === code && f.reason === reason)) failed.push({ code, reason })
+  }
+  /** Asks the drafter and writes what it gave to the row, checked at the workbook's door. Returns the draft_cells marks. A stop is left in `stoppedBy`. */
+  const ask = async ({ row, code }: Target, request: DraftRequest): Promise<string[]> => {
+    const marks: string[] = []
+    try {
+      // The adapter has checked its answer, but this is the workbook's door: nothing is written that the vocabularies or the https rule refuse.
+      const drafted = checkedDraft(await drafter.draft(request), request)
+      for (const column of request.columns) {
+        const cell = drafted.cells[column as DraftColumn]
+        if (!cell) continue
+        row[column] = Array.isArray(cell.value) ? cell.value.join('; ') : cell.value
+        marks.push(`${column}=${cell.sourceUrl}`)
+      }
+      for (const found of drafted.availability) {
+        workbook.availability.rows.push({
+          product_code: code,
+          country: found.country,
+          price_min: found.priceMin,
+          price_max: found.priceMax,
+          where_sold: found.whereSold ?? null,
+          source_url: found.sourceUrl,
+        })
+      }
+    } catch (error) {
+      stoppedBy = stopOf(error)
+      if (stoppedBy === null) fail(code, 'drafter-error')
+    }
+    return marks
+  }
+
+  let passesMade = 1
   for (const row of workbook.products.rows) {
     if (row.status !== 'draft') continue
     const code = String(row.code)
@@ -95,6 +142,8 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
       skipped.push(code)
       continue
     }
+    const target: Target = { row, code, product }
+    targets.push(target)
     const marks: string[] = []
 
     // A list with no source is a person's to finish, not ours to guess a page for: the researcher is asked only when both cells are empty.
@@ -111,48 +160,39 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
     } catch (error) {
       stoppedBy = stopOf(error)
       if (stoppedBy === null) {
-        failed.push({ code, reason: 'researcher-error' })
+        fail(code, 'researcher-error')
         continue
       }
     }
 
     if (stoppedBy === null) {
       const columns = DRAFT_COLUMNS.filter((column) => isEmpty(row[column]))
-      const have = new Set(workbook.availability.rows.filter((r) => r.product_code === row.code).map((r) => r.country))
-      const request: DraftRequest = { product, columns, countries: wanted.filter((country) => !have.has(country.code)) }
-      if (request.columns.length > 0 || request.countries.length > 0) {
-        try {
-          // The adapter has checked its answer, but this is the workbook's door: nothing is written that the vocabularies or the https rule refuse.
-          const drafted = checkedDraft(await drafter.draft(request), request)
-          for (const column of request.columns) {
-            const cell = drafted.cells[column as DraftColumn]
-            if (!cell) continue
-            row[column] = Array.isArray(cell.value) ? cell.value.join('; ') : cell.value
-            marks.push(`${column}=${cell.sourceUrl}`)
-          }
-          for (const found of drafted.availability) {
-            workbook.availability.rows.push({
-              product_code: code,
-              country: found.country,
-              price_min: found.priceMin,
-              price_max: found.priceMax,
-              where_sold: found.whereSold ?? null,
-              source_url: found.sourceUrl,
-            })
-          }
-        } catch (error) {
-          stoppedBy = stopOf(error)
-          if (stoppedBy === null) failed.push({ code, reason: 'drafter-error' })
-        }
-      }
+      const request: DraftRequest = { product, columns, countries: missingFor(code) }
+      if (request.columns.length > 0 || request.countries.length > 0) marks.push(...(await ask(target, request)))
     }
 
     if (marks.length > 0) row.draft_cells = [...entriesOf(row.draft_cells), ...marks].join('; ')
     if (stoppedBy !== null) break
   }
 
+  // Prices only feed a budget band, so coverage matters more than exactness: a later pass revisits just the products still lacking a price, for those countries alone,
+  // and never researches again. A product that failed above is tried again here, for its prices.
+  for (let pass = 2; pass <= passes && stoppedBy === null; pass++) {
+    const due = targets.filter(({ code }) => missingFor(code).length > 0)
+    if (due.length === 0) break
+    passesMade = pass
+    for (const target of due) {
+      await ask(target, { product: target.product, columns: [], countries: missingFor(target.code), attempt: pass })
+      if (stoppedBy !== null) break
+    }
+  }
+
+  const missing = targets.map(({ code }) => ({ code, countries: missingFor(code).map((country) => country.code) })).filter((entry) => entry.countries.length > 0)
+  const asked = targets.length * wanted.length
+  const prices = { passes: passesMade, asked, priced: asked - missing.reduce((sum, entry) => sum + entry.countries.length, 0), missing }
+
   const checked = validateWorkbook(workbook)
-  return { workbook, problems: checked.ok ? [] : checked.problems, skipped, failed, stoppedBy, spentMicros: ledger.spentMicros() }
+  return { workbook, problems: checked.ok ? [] : checked.problems, skipped, failed, stoppedBy, spentMicros: ledger.spentMicros(), prices }
 }
 
 const dollars = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
@@ -164,6 +204,11 @@ export const formatReport = (outcome: DraftOutcome): string => {
   if (outcome.stoppedBy === 'config') lines.push('Stopped: Claude refused our key, billing or permissions. Fix the setup (ANTHROPIC_API_KEY and the account) and run again; the products after this point are exactly as they were.')
   if (outcome.failed.length > 0) lines.push(`Failed, left as far as they got (${outcome.failed.length}):`, ...outcome.failed.map((f) => `  ${f.code}: ${f.reason}`))
   if (outcome.skipped.length > 0) lines.push(`Skipped, with a brand, name, variant, form or category the contract would refuse (${outcome.skipped.length}): ${outcome.skipped.join(', ')}`)
+  const { prices } = outcome
+  if (prices.asked > 0) {
+    lines.push(`Prices: ${prices.priced} of ${prices.asked} product-country pairs priced after ${prices.passes} ${prices.passes === 1 ? 'pass' : 'passes'}`)
+    lines.push(...prices.missing.map((entry) => `  ${entry.code}: ${entry.countries.join(', ')}`))
+  }
   if (outcome.problems.length === 0) lines.push('No problems: the contract accepts the workbook.')
   else lines.push(`Problems still in the workbook (${outcome.problems.length}):`, ...outcome.problems.map((p) => `  ${p.tab} row ${p.row} ${p.column}: ${p.rule}`))
   return lines.join('\n')
@@ -178,9 +223,9 @@ export type DraftIo = {
 }
 
 /** Reads `input`, drafts it, and writes the result to `out`, even when a stop or problems remain: the file is what the person finishes. */
-export const runDraft = async (args: { input: string; out: string; countries?: string[] }, deps: Omit<DraftDeps, 'countries'> & { io: DraftIo }): Promise<DraftOutcome> => {
+export const runDraft = async (args: { input: string; out: string; countries?: string[]; passes?: number }, deps: Omit<DraftDeps, 'countries' | 'passes'> & { io: DraftIo }): Promise<DraftOutcome> => {
   const { workbook, catalogVersion, environment, contractVersion } = await deps.io.readWorkbook(args.input)
-  const outcome = await draftWorkbook(workbook, { researcher: deps.researcher, drafter: deps.drafter, ledger: deps.ledger, countries: args.countries })
+  const outcome = await draftWorkbook(workbook, { researcher: deps.researcher, drafter: deps.drafter, ledger: deps.ledger, countries: args.countries, passes: args.passes })
   // A stamp the input lacked is left out, not made up: the upload refuses such a file, and a draft must not look more trustworthy than its source.
   await deps.io.writeWorkbook(args.out, outcome.workbook, catalogVersion, {
     ...(environment === null ? {} : { environment }),

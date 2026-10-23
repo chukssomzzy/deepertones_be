@@ -1,4 +1,4 @@
-// `npm run catalog:draft -- in.xlsx --out out.xlsx [--max-usd N] [--countries NG,GB]`. The logic is runDraft in scripts/catalog/draft.ts; this only wires the real
+// `npm run catalog:draft -- in.xlsx --out out.xlsx [--max-usd N] [--countries NG,GB] [--passes N]`. The logic is runDraft in scripts/catalog/draft.ts; this only wires the real
 // effects. Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real, billed Claude calls, counted by a MemoryAiSpendLedger capped at --max-usd.
 // It never prints the key, a prompt or what Claude said: only the report. Exit: 0 drafted with nothing left to fix, 1 a problem, a failed product or the cap
 // remains (the file is written all the same), 2 the run could not start or Claude refused our key, billing or permissions.

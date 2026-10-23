@@ -23,6 +23,8 @@ export type DraftRequest = {
   columns: DraftColumn[]
   /** Active countries the product has no price for. */
   countries: DraftCountry[]
+  /** Which try this is, from 1; left out for the first. From 2 the adapter tells the model an earlier try found no usable price, so it looks more widely. */
+  attempt?: number
 }
 
 export type DraftResult = {
@@ -116,9 +118,8 @@ export type DraftSources = { searched: ReadonlySet<string>; fetched: ReadonlySet
 /**
  * What of a drafter's answer the workbook can take: only the columns and countries asked for, only values in the vocabularies, prices as whole
  * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `sources`, when given, limits where a source may come from (the model
- * can name a page it never saw): a cell's page must be one the search returned or the model fetched, and a price row's page must be one the model fetched,
- * since a search snippet is often stale or for another size. A fetched page is matched without regard to a trailing slash, a fragment or the case of
- * its host. Without `sources` there is no such limit. A price row's page must also not be a search or listing page (it lists many products), though a cell may cite one. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
+ * can name a page it never saw): a page must be one the search returned or the model fetched, for a price row as for a cell. Coverage matters more than exactness for a price, since it only feeds a budget band, so a search result's price is taken when no fetch was possible. A fetched page is matched without regard to a trailing slash, a fragment or the case of
+ * its host. Without `sources` there is no such limit. A price row's page must also not be a search or listing page (it lists many products), though a cell may cite one; a price-comparison page is allowed. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
  */
 export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: DraftSources): DraftResult => {
   const answer = asRecord(raw)
@@ -128,7 +129,6 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: Draf
   const wasFetched = (url: string): boolean => fetched.has(comparableUrl(url)!)
   const sourceOf = (value: unknown): string | undefined =>
     isUsableSource(value) && (!sources || sources.searched.has(value) || wasFetched(value)) ? value : undefined
-  const priceSourceOf = (value: unknown): string | undefined => (isUsableSource(value) && (!sources || wasFetched(value)) ? value : undefined)
   const result: DraftResult = { cells: {}, availability: [] }
   if (!cells || !Array.isArray(rows)) return result
 
@@ -145,7 +145,7 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: Draf
     const row = asRecord(item)
     if (!row) continue
     const { country, priceMin, priceMax, whereSold } = row
-    const sourceUrl = priceSourceOf(row.sourceUrl)
+    const sourceUrl = sourceOf(row.sourceUrl)
     if (typeof country !== 'string' || !request.countries.some((asked) => asked.code === country) || taken.has(country)) continue
     if (!isPrice(priceMin) || !isPrice(priceMax) || priceMin > priceMax || sourceUrl === undefined) continue
     if (priceMax > priceMin * MAX_PRICE_SPREAD || isSearchOrListingPage(sourceUrl)) continue
