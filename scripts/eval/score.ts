@@ -152,8 +152,8 @@ export const summarise = (results: CaseResult[]): { total: number; passed: numbe
 
 /** `all` runs the four steps before `draft`; `draft` is its own run (it drafts a whole workbook and judges every value) and is never part of `all`. */
 export type Mode = 'analysis' | 'research' | 'goals' | 'mentions' | 'draft' | 'all'
-/** The two case sets of the draft mode: `main` measures the drafter, `holdout` checks a drafter fix on products the fix was not made against. */
-export const DRAFT_SETS = ['main', 'holdout'] as const
+/** The case sets of the draft mode: `main` measures the drafter, `holdout` checks a drafter fix on products the fix was not made against, `dev` is the set a drafter change is tuned on. */
+export const DRAFT_SETS = ['main', 'holdout', 'dev'] as const
 export type DraftSet = (typeof DRAFT_SETS)[number]
 export type Args = {
   mode: Mode
@@ -172,7 +172,7 @@ const DEFAULT_MAX_USD = 2
 // A draft run drafts every case with web search and then fetches a page for each value it drafted.
 const DEFAULT_DRAFT_MAX_USD = 5
 export const USAGE =
-  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|draft|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--set main|holdout (draft only)] [--out-dir DIR (draft only)] ' +
+  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|draft|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--set main|holdout|dev (draft only)] [--out-dir DIR (draft only)] ' +
   `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */
