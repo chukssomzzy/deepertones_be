@@ -7,7 +7,7 @@ import { AnthropicClient } from '../src/providers/anthropic/anthropic.client'
 import { AnthropicCatalogDrafter } from '../src/providers/catalog-drafting/anthropic.catalog-drafter'
 import { AnthropicProductResearcher } from '../src/providers/product-research/anthropic.product-researcher'
 import { parseArgs } from './catalog/draft-args'
-import { formatReport, runDraft } from './catalog/draft'
+import { DRAFTING_TIMEOUT_MS, formatReport, runDraft } from './catalog/draft'
 import { readWorkbookFile, writeWorkbookFile } from './catalog/xlsx'
 import { DEFAULT_MODELS } from './eval/models'
 import { loadEnv } from './eval/score'
@@ -26,7 +26,7 @@ async function main(): Promise<number> {
   }
 
   const ledger = new MemoryAiSpendLedger({ capMicros: Math.round(args.maxUsd * 1_000_000) })
-  const client = new AnthropicClient({ apiKey, models: DEFAULT_MODELS, ledger })
+  const client = new AnthropicClient({ apiKey, models: DEFAULT_MODELS, ledger, timeoutMs: DRAFTING_TIMEOUT_MS })
   try {
     const outcome = await runDraft(args, {
       researcher: new AnthropicProductResearcher(client),

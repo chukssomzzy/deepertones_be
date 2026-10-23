@@ -21,6 +21,10 @@ export type DraftDeps = {
 }
 
 /** The first pass drafts the cells and prices; each later one asks only for the prices still missing. */
+// A drafting call searches and may fetch a page per country, and Haiku with those tools can take over a minute; the client's 60-second default cut
+// such calls off and left their prices missing. Nobody waits on a script, so its calls get longer.
+export const DRAFTING_TIMEOUT_MS = 180_000
+
 export const DEFAULT_PASSES = 3
 
 /** A fixed reason, never a message: what Claude said about a product has no business in a report. */
