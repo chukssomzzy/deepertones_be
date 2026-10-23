@@ -2130,11 +2130,12 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
 
     const view = await getScan(ctx, id)
 
-    // analysed(): radiance 41.5 is "some", moisture 62 is not visible, texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
+    // analysed(): radiance 41.5 is "some", moisture 62 is faint (above the cut-off, still shown), texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
     expect(view.result).toEqual({
       seen: [
-        { concern: 'glow', region: 'whole', words: 'Less glow across the face', overlay: { url: expect.stringMatching(LINK) } },
-        { concern: 'texture', region: 'whole', words: 'A little roughness in places', overlay: null },
+        { concern: 'glow', region: 'whole', level: 'some', words: 'Less glow across the face', overlay: { url: expect.stringMatching(LINK) } },
+        { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(LINK) } },
+        { concern: 'texture', region: 'whole', level: 'a-little', words: 'A little roughness in places', overlay: null },
       ],
       nothingStandsOut: null,
       skinType: 'dry',
@@ -2169,7 +2170,7 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
     expect(error.code).toBe('PHOTO_NOT_FOUND')
   })
 
-  it('links no mask of a concern that is not shown: of the links in the view, none opens the mask of hd_moisture (visible score 62 is above the line)', async () => {
+  it('links the mask of a faint concern but of no concern outside the goal: hd_moisture (62, above the line) opens its mask, hd_acne (not a glow concern) opens none', async () => {
     const ctx = setup()
     const { id } = await finished(ctx, 'glow')
 
@@ -2179,13 +2180,44 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
     expect(links.length).toBeGreaterThanOrEqual(2)
     const opened = await Promise.all(links.map(async (token) => new TextDecoder().decode((await asUser(() => ctx.service.photoForLink(token))).bytes)))
     expect(opened).toContain(maskUrl('radiance'))
-    expect(opened).not.toContain(maskUrl('moisture'))
+    expect(opened).toContain(maskUrl('moisture'))
     expect(opened).not.toContain(maskUrl('acne'))
   })
 
-  it('says nothing stands out, and links no mask, when no concern of the goal can be seen', async () => {
+  it('shows texture as faint, in "Skin looks smooth", with a link that opens its mask, when it scored above 60', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(41.5, 55, 88)))
+
+    const { seen } = await resultOf(ctx, id)
+
+    expect(seen.map((item: { concern: string; level: string }) => [item.concern, item.level])).toEqual([
+      ['glow', 'some'],
+      ['dryness', 'a-little'],
+      ['texture', 'faint'],
+    ])
+    expect(seen[2]).toEqual({ concern: 'texture', region: 'whole', level: 'faint', words: 'Skin looks smooth', overlay: { url: expect.stringMatching(LINK) } })
+    expect(await bytesBehind(ctx, seen[2].overlay.url)).toBe(maskUrl('texture'))
+  })
+
+  it('shows all three as faint and says nothing stands out, with a link to each mask, when every concern of the goal scored above 60', async () => {
     const ctx = setup()
     const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(61, 90, 100)))
+
+    const result = await resultOf(ctx, id)
+
+    expect(result.seen.map((item: { level: string; words: string }) => [item.level, item.words])).toEqual([
+      ['faint', 'An even glow across the face'],
+      ['faint', 'Hardly any dry patches'],
+      ['faint', 'Skin looks smooth'],
+    ])
+    expect(result.nothingStandsOut).toBe('Nothing stands out for your goal right now')
+    const opened = await Promise.all(result.seen.map((item: { overlay: { url: string } }) => bytesBehind(ctx, item.overlay.url)))
+    expect(opened).toEqual([maskUrl('radiance'), maskUrl('moisture'), maskUrl('texture')])
+  })
+
+  it('says nothing stands out, and shows nothing, when Perfect Corp returned none of the goal\'s concerns', async () => {
+    const ctx = setup()
+    const id = await readyUnder(ctx, 'glow', analysisOf({ hd_acne: 10 }))
 
     const result = await resultOf(ctx, id)
 
@@ -2225,7 +2257,7 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
       }),
     )
 
-    expect((await resultOf(ctx, id)).seen).toEqual([{ concern: 'glow', region: 'whole', words: 'A little less glow in places', overlay: { url: expect.stringMatching(LINK) } }])
+    expect((await resultOf(ctx, id)).seen).toEqual([{ concern: 'glow', region: 'whole', level: 'a-little', words: 'A little less glow in places', overlay: { url: expect.stringMatching(LINK) } }])
   })
 
   it('names the version of the rules in force now, not the one the scan was stored under: the words are worked out when read', async () => {

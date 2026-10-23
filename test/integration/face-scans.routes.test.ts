@@ -79,7 +79,7 @@ type FaceScanView = {
   result: FaceScanResultView | null
 }
 type FaceScanResultView = {
-  seen: { concern: string; region: string; words: string; overlay: { url: string } | null }[]
+  seen: { concern: string; region: string; level: 'faint' | 'a-little' | 'some' | 'clear'; words: string; overlay: { url: string } | null }[]
   nothingStandsOut: string | null
   skinType: string | null
   skinAge: { years: number; words: string } | null
@@ -943,11 +943,12 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
 
     expect(shown).toMatchObject({ id: view.id, state: 'ready', reason: null })
     expect(Object.keys(shown).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
-    // glowOutput(): radiance 41.5 is "some", moisture 62 is not visible, texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
+    // glowOutput(): radiance 41.5 is "some", moisture 62 is faint (above the cut-off, still shown), texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
     expect(shown.result).toEqual({
       seen: [
-        { concern: 'glow', region: 'whole', words: 'Less glow across the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
-        { concern: 'texture', region: 'whole', words: 'A little roughness in places', overlay: null },
+        { concern: 'glow', region: 'whole', level: 'some', words: 'Less glow across the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+        { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+        { concern: 'texture', region: 'whole', level: 'a-little', words: 'A little roughness in places', overlay: null },
       ],
       nothingStandsOut: null,
       skinType: 'dry',
@@ -1421,7 +1422,7 @@ describe('GET /api/v1/scans/faces', () => {
     expect(faceScans.map((scan) => [scan.id, scan.state])).toEqual([[analysing.id, 'analysing'], [ready.id, 'ready']])
     expect(faceScans[0]!.result).toBeNull()
     expect(faceScans[1]!.result).toMatchObject({ skinType: 'dry', skinAge: { years: 31, words: 'Your skin looks about 31' }, sinceDayOne: null, tablesVersion: TABLES_VERSION })
-    expect(faceScans[1]!.result!.seen.map((seen) => seen.concern)).toEqual(['glow', 'texture'])
+    expect(faceScans[1]!.result!.seen.map((seen) => seen.concern)).toEqual(['glow', 'dryness', 'texture'])
   })
 
   it('shows a scan that needs a retake and one that failed, with their reasons', async () => {
