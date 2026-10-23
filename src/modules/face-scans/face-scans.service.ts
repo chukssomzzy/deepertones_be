@@ -260,6 +260,8 @@ export class FaceScanService {
     // Every ready scan in the list reads its chase from the same goal history, so it is fetched once and shared; a list of scans still
     // analysing, needing a retake or failed never needs it.
     const history = scans.some((scan) => scan.state === 'ready') ? this.goals.history() : undefined
+    // Its first reader awaits it only after that scan's photo links, so a failed read is caught here meanwhile; each reader still sees it fail.
+    history?.catch(() => undefined)
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
   }
 
