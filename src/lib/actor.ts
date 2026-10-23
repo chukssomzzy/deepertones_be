@@ -1,6 +1,6 @@
 // Kept apart from context.ts so factory.ts and middleware can use the actor types and the sign-in error without reading the
 // request context (only services may; see context-only-in-services). context.ts re-exports the types.
-import { UnauthorizedError } from './errors'
+import { ForbiddenError, UnauthorizedError } from './errors'
 
 /**
  * Who is doing the work. Every unit of work has one, even an unauthenticated request,
@@ -26,3 +26,6 @@ export const notSignedIn = (tokenProblem?: TokenProblem): UnauthorizedError => {
   if (tokenProblem === 'invalid') return new UnauthorizedError('TOKEN_INVALID', 'Your session is not valid')
   return new UnauthorizedError('AUTH_REQUIRED', 'Sign in to do this')
 }
+
+/** The 403 for a guest who tries what only a verified account may do. One place, so the requireVerified guard and the verifiedUser middleware say the same thing. */
+export const verificationRequired = (): ForbiddenError => new ForbiddenError('VERIFICATION_REQUIRED', 'Verify your account to do this')

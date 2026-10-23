@@ -1,5 +1,5 @@
 import { PermanentJobError } from '../../jobs/job'
-import { requireUser } from '../../lib/context'
+import { requireUser, requireVerified } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -156,12 +156,12 @@ export class FaceScanService {
 
   /** Withdraws the profile's consent, keeping the record. Nothing to withdraw is not an error. */
   async withdrawConsent(): Promise<void> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     await this.repository.withdrawConsent(profileId, this.now())
   }
 
   async consent(): Promise<FaceConsentView> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const found = await this.repository.consentOf(profileId)
     if (!found) throw new NotFoundError('FACE_CONSENT_NOT_FOUND', 'No face photo consent has been given')
     return { version: found.version, givenAt: found.givenAt, withdrawnAt: found.withdrawnAt, current: FaceScanService.isCurrent(found) }
@@ -231,6 +231,7 @@ export class FaceScanService {
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is FACE_SCAN_NOT_FOUND, with no hint that it exists. */
   async getFaceScan(id: string): Promise<FaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
   }
@@ -250,7 +251,7 @@ export class FaceScanService {
    * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
    */
   async listFaceScans(): Promise<FaceScanView[]> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
     const rescanSuggested = await this.rescanSuggested(profileId)
@@ -265,6 +266,7 @@ export class FaceScanService {
    * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
    */
   async deleteFaceScan(id: string): Promise<void> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
