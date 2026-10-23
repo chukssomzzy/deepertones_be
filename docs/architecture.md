@@ -1469,7 +1469,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 Per environment (dev, staging, production) even though one Perfect Corp account is shared today; the code never assumes that.
 
 - Vars in all three `wrangler.jsonc` blocks: `PERFECT_CORP_BASE_URL` (`https://yce-api-01.makeupar.com`) and `PERFECT_CORP_USD_PER_UNIT`.
-  **The price is a placeholder (`0.05`)**: confirm it from Perfect Corp's feature-cost endpoint and the plan price before trusting spend figures.
+  **The price is `0.055`**, Perfect Corp's pay-as-you-go price per unit (checked 2026-10-23); on a monthly subscription set it to that plan's price (0.046–0.048).
 - Secrets `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`, **required** in the secrets plan and in `secrets.required` in all three blocks, so a
   deploy fails until both are set on that environment's Worker. Both are in the two `.dev.vars` example files.
 - The webhook URL for each environment (`https://<that Worker's host>/api/v1/webhooks/perfect-corp`) is registered in Perfect Corp's console (a deploy
