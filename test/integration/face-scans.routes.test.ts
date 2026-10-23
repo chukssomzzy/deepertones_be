@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { TokenService } from '../../src/modules/auth/tokens.service'
+import { D1FaceScansRepository } from '../../src/modules/face-scans/face-scans.repository'
 import { TABLES_VERSION } from '../../src/modules/face-scans/face-scans.tables'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { garbagePhoto, jpegPhoto, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
@@ -26,10 +27,19 @@ const CONSENT_VERSION = 1
 const MAX_FACE_PHOTO_BYTES = 6_000_000
 const OVER_FACE_BODY_BYTES = 3 * MAX_FACE_PHOTO_BYTES + 1_000_000 + 1
 
+const OTP_QUEUE = 'deepertones-otp-delivery-development'
+const ZEPTO_URL = 'https://zeptomail.test/v1.1/email'
+
 const queued: unknown[] = []
+// What the Worker puts on the OTP queue: kept apart from `queued` (the face scan queue), which tests assert on.
+const otpQueued: unknown[] = []
 let queueFails = false
 const WORKER_ENV = {
   ...env,
+  OTP_CHANNELS: 'email',
+  ZEPTOMAIL_API_URL: ZEPTO_URL,
+  ZEPTOMAIL_API_KEY: 'test-key',
+  OTP_DELIVERY_QUEUE: { send: async (body: unknown) => void otpQueued.push(body) } as unknown as Queue,
   FACE_SCANS_QUEUE: {
     send: async (body: unknown) => {
       if (queueFails) throw new Error('queue is down')
@@ -41,7 +51,9 @@ const WORKER_ENV = {
 const fetchWorker = (path: string, init?: RequestInit) => worker.fetch!(new Request(`http://deepertones.test${path}`, init) as never, WORKER_ENV, createExecutionContext())
 
 afterEach(() => {
+  vi.unstubAllGlobals()
   queued.length = 0
+  otpQueued.length = 0
   queueFails = false
 })
 
@@ -93,6 +105,9 @@ type FaceScanResultView = {
 }
 type ConsentView = { version: number; givenAt: string; withdrawnAt: string | null; current: boolean }
 
+/** The account behind a token: a guest (status `anonymous`) from `newGuest`, or a verified user from `newVerified`. */
+type Status = 'anonymous' | 'verified'
+
 /** A guest signed in from its own address. `headers()` is the guest at that address; `headers(ip)` is the same guest from another one. */
 const newGuest = async () => {
   const ip = freshIp()
@@ -110,22 +125,59 @@ const newGuest = async () => {
     profileId,
     token,
     ip,
+    status: 'anonymous' as Status,
     headers: (from: string = ip): Record<string, string> => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${token}` }),
   }
 }
-type Guest = Awaited<ReturnType<typeof newGuest>>
+// Everything below calls a caller an `Account` or (by habit) a `guest`: it is a guest only where the test says `newGuest`. The face scan is for verified users, so
+// the tests of its behaviour use `newVerified`.
+type Account = Awaited<ReturnType<typeof newGuest>>
+
+/** Delivers the queued code email through the Worker's queue handler and reads the code from it. */
+const codeFor = async (): Promise<string> => {
+  const body = otpQueued.pop()
+  if (!body) throw new Error('no OTP delivery was queued')
+  const sent: { textbody: string }[] = []
+  vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+    if (String(url) !== ZEPTO_URL) throw new Error(`unexpected outbound request to ${String(url)}`)
+    sent.push(JSON.parse(init!.body as string))
+    return Response.json({ data: [{ code: 'EM_104', message: 'ok' }], message: 'OK', request_id: 'r' })
+  })
+  const batch = createMessageBatch(OTP_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body }])
+  const ctx = createExecutionContext()
+  await worker.queue!(batch, WORKER_ENV, ctx)
+  expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual(['m'])
+  vi.unstubAllGlobals()
+  const code = /\b(\d{6})\b/.exec(sent[0]!.textbody)?.[1]
+  if (!code) throw new Error('no code in the email')
+  return code
+}
+
+/** A guest who verifies their email the way a person does (send a code, read it from the delivered email, verify): the same account and profile, now verified. */
+const newVerified = async (): Promise<Account> => {
+  const guest = await newGuest()
+  const address = `Face-${runSalt}-${next()}@Example.com`
+  const post = (path: string, body: unknown) =>
+    fetchWorker(path, { method: 'POST', headers: { ...guest.headers(), 'content-type': 'application/json' }, body: JSON.stringify(body) })
+  expect((await post('/api/v1/auth/otp/send', { channel: 'email', address })).status).toBe(200)
+  const res = await post('/api/v1/auth/otp/verify', { channel: 'email', address, code: await codeFor() })
+  const session = await dataOf<{ tokens: { accessToken: string }; user: { id: string; status: Status } }>(res)
+  expect(session.user).toMatchObject({ id: guest.userId, status: 'verified' })
+  const token = session.tokens.accessToken
+  return { ...guest, token, status: 'verified', headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${token}` }) }
+}
 
 const profiles = new D1ProfilesRepository(createDb(env.DB))
 const tokenService = new TokenService({ secret: env.JWT_SECRET })
-/** The same account acting as a second profile of its own: a guest whose token names a new profile. */
-const asSecondProfile = async (guest: Guest): Promise<Guest> => {
+/** The same account acting as a second profile of its own: the same status, whose token names a new profile. */
+const asSecondProfile = async (guest: Account): Promise<Account> => {
   const profile = { id: crypto.randomUUID(), userId: guest.userId, displayName: null, isDefault: false, createdAt: new Date(STARTED + MINUTE) }
   await profiles.insert(profile)
-  const { accessToken } = await tokenService.issue({ id: guest.userId, status: 'anonymous', tokenVersion: 0 }, profile.id)
+  const { accessToken } = await tokenService.issue({ id: guest.userId, status: guest.status, tokenVersion: 0 }, profile.id)
   return { ...guest, profileId: profile.id, token: accessToken, headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${accessToken}` }) }
 }
 
-const json = (guest: Guest | undefined, method: string, path: string, body?: unknown, from?: string) =>
+const json = (guest: Account | undefined, method: string, path: string, body?: unknown, from?: string) =>
   fetchWorker(path, {
     method,
     headers: { ...(guest ? guest.headers(from) : { 'cf-connecting-ip': freshIp() }), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -134,13 +186,13 @@ const json = (guest: Guest | undefined, method: string, path: string, body?: unk
 
 const CONSENT = '/api/v1/me/face-consent'
 const FACES = '/api/v1/scans/faces'
-const putConsent = (guest: Guest | undefined, body: unknown = { version: CONSENT_VERSION }) => json(guest, 'PUT', CONSENT, body)
-const getConsent = (guest: Guest | undefined) => json(guest, 'GET', CONSENT)
-const deleteConsent = (guest: Guest | undefined) => json(guest, 'DELETE', CONSENT)
-const setGoal = async (guest: Guest, goal: string) => expect((await json(guest, 'PUT', '/api/v1/me/goal', { goal })).status).toBe(200)
-/** A guest who has said yes to the face photo consent and picked a goal: one that may scan. */
-const readyGuest = async (goal = 'glow') => {
-  const guest = await newGuest()
+const putConsent = (guest: Account | undefined, body: unknown = { version: CONSENT_VERSION }) => json(guest, 'PUT', CONSENT, body)
+const getConsent = (guest: Account | undefined) => json(guest, 'GET', CONSENT)
+const deleteConsent = (guest: Account | undefined) => json(guest, 'DELETE', CONSENT)
+const setGoal = async (guest: Account, goal: string) => expect((await json(guest, 'PUT', '/api/v1/me/goal', { goal })).status).toBe(200)
+/** A verified user who has said yes to the face photo consent and picked a goal: one that may scan. */
+const readyUser = async (goal = 'glow') => {
+  const guest = await newVerified()
   expect((await putConsent(guest)).status).toBe(200)
   await setGoal(guest, goal)
   return guest
@@ -158,15 +210,15 @@ const formOf = (fields: Record<string, File | undefined>) => {
   for (const [name, file] of Object.entries(fields)) if (file) form.append(name, file)
   return form
 }
-const createFace = (guest: Guest | undefined, fields: Record<string, File | undefined> = { front: fileOf(face(), 'front') }, from?: string) =>
+const createFace = (guest: Account | undefined, fields: Record<string, File | undefined> = { front: fileOf(face(), 'front') }, from?: string) =>
   fetchWorker(FACES, { method: 'POST', body: formOf(fields), headers: guest ? guest.headers(from) : { 'cf-connecting-ip': from ?? freshIp() } })
-const createdFace = async (guest: Guest, fields?: Record<string, File | undefined>) => {
+const createdFace = async (guest: Account, fields?: Record<string, File | undefined>) => {
   const res = await createFace(guest, fields)
   expect(res.status).toBe(202)
   return dataOf<FaceScanView>(res)
 }
-const getFace = (guest: Guest | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}`)
-const deleteFace = (guest: Guest | undefined, id: string) => json(guest, 'DELETE', `${FACES}/${id}`)
+const getFace = (guest: Account | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}`)
+const deleteFace = (guest: Account | undefined, id: string) => json(guest, 'DELETE', `${FACES}/${id}`)
 const openPhoto = (token: string, headers: Record<string, string> = {}) => fetchWorker(`${FACES}/photos/${token}`, { headers })
 const tokenOf = (url: string) => url.replace(`${FACES}/photos/`, '')
 const threeFiles = () => ({ front: fileOf(face({}, 1), 'front'), right: fileOf(face({}, 2), 'right'), left: fileOf(face({}, 3), 'left') })
@@ -175,7 +227,7 @@ const threeFiles = () => ({ front: fileOf(face({}, 1), 'front'), right: fileOf(f
 const bucketKeysOf = async (userId: string) => (await env.PRIVATE_PHOTOS.list({ prefix: `faces/${env.ENVIRONMENT}/${userId}/` })).objects.map((object) => object.key)
 const countOf = async (table: string, userId: string) => (await env.DB.prepare(`SELECT count(*) AS n FROM ${table} WHERE user_id = ?`).bind(userId).first<{ n: number }>())!.n
 const perfectCorpSpendRows = async () => (await env.DB.prepare("SELECT count(*) AS n FROM ai_usage WHERE vendor = 'perfect-corp'").first<{ n: number }>())!.n
-const nothingKept = async (guest: Guest) => {
+const nothingKept = async (guest: Account) => {
   expect(await bucketKeysOf(guest.userId)).toEqual([])
   expect(await countOf('face_scans', guest.userId)).toBe(0)
   expect(await countOf('face_scan_photos', guest.userId)).toBe(0)
@@ -183,7 +235,7 @@ const nothingKept = async (guest: Guest) => {
 
 describe('PUT /api/v1/me/face-consent', () => {
   it('records consent for the current version and answers 200 with the version and when it was given', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await putConsent(guest)
 
@@ -206,7 +258,7 @@ describe('PUT /api/v1/me/face-consent', () => {
     ['an older version', 0],
     ['a version the app does not know yet', 2],
   ])('refuses %s with 400 FACE_CONSENT_VERSION_MISMATCH, saying which is current, and records nothing', async (_label, version) => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await putConsent(guest, { version })
 
@@ -223,7 +275,7 @@ describe('PUT /api/v1/me/face-consent', () => {
     ['a version that is not a whole number', { version: 1.5 }],
     ['a version that is null', { version: null }],
   ])('refuses %s with 400 VALIDATION_FAILED', async (_label, body) => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await putConsent(guest, body)
 
@@ -232,7 +284,7 @@ describe('PUT /api/v1/me/face-consent', () => {
   })
 
   it('giving consent twice is fine and keeps one consent', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     expect((await putConsent(guest)).status).toBe(200)
 
     expect((await putConsent(guest)).status).toBe(200)
@@ -243,7 +295,7 @@ describe('PUT /api/v1/me/face-consent', () => {
 
 describe('GET /api/v1/me/face-consent', () => {
   it('shows the version, when it was given, that it was not withdrawn, and that it is current', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     const given = await dataOf<{ givenAt: string }>(await putConsent(guest))
 
     const res = await getConsent(guest)
@@ -253,7 +305,7 @@ describe('GET /api/v1/me/face-consent', () => {
   })
 
   it('is 404 FACE_CONSENT_NOT_FOUND until consent is given', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await getConsent(guest)
 
@@ -269,7 +321,7 @@ describe('GET /api/v1/me/face-consent', () => {
   })
 
   it('belongs to the profile: the account\'s other profile has none', async () => {
-    const first = await newGuest()
+    const first = await newVerified()
     const second = await asSecondProfile(first)
     expect((await putConsent(first)).status).toBe(200)
 
@@ -283,7 +335,7 @@ describe('GET /api/v1/me/face-consent', () => {
 
 describe('DELETE /api/v1/me/face-consent', () => {
   it('withdraws consent with 204 and no body, and keeps it on record as withdrawn and no longer current', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     const given = await dataOf<{ givenAt: string }>(await putConsent(guest))
 
     const res = await deleteConsent(guest)
@@ -296,7 +348,7 @@ describe('DELETE /api/v1/me/face-consent', () => {
   })
 
   it('is 204 again when it is already withdrawn, and 204 when there was never any consent', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     expect((await deleteConsent(guest)).status).toBe(204)
     expect((await getConsent(guest)).status).toBe(404)
     await putConsent(guest)
@@ -306,7 +358,7 @@ describe('DELETE /api/v1/me/face-consent', () => {
   })
 
   it('is cleared by giving consent again', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     await putConsent(guest)
     await deleteConsent(guest)
 
@@ -323,7 +375,7 @@ describe('DELETE /api/v1/me/face-consent', () => {
   })
 
   it('withdraws the active profile\'s consent only', async () => {
-    const first = await newGuest()
+    const first = await newVerified()
     const second = await asSecondProfile(first)
     await putConsent(first)
     await putConsent(second)
@@ -344,7 +396,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('needs consent: 409 FACE_CONSENT_REQUIRED, with nothing stored in the bucket or the database and nothing queued', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     await setGoal(guest, 'glow')
 
     const res = await createFace(guest)
@@ -356,7 +408,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('counts a withdrawn consent as none', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     await deleteConsent(guest)
 
     const res = await createFace(guest)
@@ -367,7 +419,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('needs the consent of the profile: the account\'s other profile has none of its own, though the first has', async () => {
-    const first = await readyGuest()
+    const first = await readyUser()
     const second = await asSecondProfile(first)
     await setGoal(second, 'glow')
 
@@ -379,7 +431,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('needs a goal: 409 GOAL_REQUIRED, with nothing stored or queued', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
     await putConsent(guest)
 
     const res = await createFace(guest)
@@ -391,7 +443,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('asks for consent before the goal, and for both before it looks at the photos', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await createFace(guest, { front: fileOf(webpPhoto({ width: 1080, height: 1440 }), 'front') })
 
@@ -400,7 +452,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('refuses a second scan under the goal of the latest one: 429 FACE_SCAN_NOT_DUE with the reason, storing and queueing nothing more', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     await createdFace(guest, threeFiles())
     const keysBefore = await bucketKeysOf(guest.userId)
     queued.length = 0
@@ -417,7 +469,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('allows a scan again once the goal has changed', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     await createdFace(guest)
     await setGoal(guest, 'brighter')
 
@@ -428,7 +480,7 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
   })
 
   it('does not let a scan that ended failed stand in the way of trying again', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     queueFails = true
     const failed = await createdFace(guest)
     expect(failed).toMatchObject({ state: 'failed', reason: 'unavailable' })
@@ -446,7 +498,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
     ['a PNG', () => fileOf(pngPhoto({ width: 1080, height: 1440 }), 'front', 'image/png')],
     ['bytes that are no image', () => fileOf(garbagePhoto(), 'front')],
   ])('refuses %s with 400 UNSUPPORTED_IMAGE and stores nothing', async (_label, make) => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const res = await createFace(guest, { front: make() })
 
@@ -457,7 +509,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('refuses the whole scan, storing none of it, when one of the optional photos is bad', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const res = await createFace(guest, { front: fileOf(face(), 'front'), left: fileOf(pngPhoto({ width: 1080, height: 1440 }), 'left', 'image/png') })
 
@@ -467,7 +519,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('refuses a photo one pixel short on its short side with 400 IMAGE_TOO_SMALL, and takes one of exactly 1080', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const small = await createFace(guest, { front: fileOf(face({ width: 1079, height: 1920 }), 'front') })
     expect(small.status).toBe(400)
@@ -478,7 +530,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('refuses a photo over 4096 on its long side with a 400, and stores nothing', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const res = await createFace(guest, { front: fileOf(face({ width: 1080, height: 4097 }), 'front') })
 
@@ -488,7 +540,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('refuses a photo one byte over 6,000,000 with 400 IMAGE_TOO_LARGE, and takes one of exactly 6,000,000', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const over = await createFace(guest, { front: fileOf(face({ size: MAX_FACE_PHOTO_BYTES + 1 }), 'front') })
     expect(over.status).toBe(400)
@@ -499,7 +551,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   }, 30_000)
 
   it('needs a front photo: 400 VALIDATION_FAILED when only a side photo is sent, and when nothing is', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     for (const fields of [{ right: fileOf(face(), 'right') }, { left: fileOf(face(), 'left') }, {}]) {
       const res = await createFace(guest, fields)
@@ -511,7 +563,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('refuses a JSON body with 415', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const res = await fetchWorker(FACES, { method: 'POST', body: JSON.stringify({ front: 'x' }), headers: { ...guest.headers(), 'Content-Type': 'application/json' } })
 
@@ -520,7 +572,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
   })
 
   it('answers 413 on a Content-Length one byte over 3 photos plus 1,000,000 of framing, without reading the body', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const res = await fetchWorker(FACES, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
 
@@ -538,7 +590,7 @@ describe('POST /api/v1/scans/faces: the photos', () => {
 
 describe('POST /api/v1/scans/faces: an accepted scan', () => {
   it('answers 202 with the scan analysing: its goal, its time and a link for each photo sent, and a null result', async () => {
-    const guest = await readyGuest('clear-skin')
+    const guest = await readyUser('clear-skin')
 
     const res = await createFace(guest, { front: fileOf(face({}, 1), 'front'), left: fileOf(face({}, 3), 'left') })
 
@@ -552,7 +604,7 @@ describe('POST /api/v1/scans/faces: an accepted scan', () => {
   })
 
   it('keeps the photos in the private bucket under faces/<environment>/<user>/<profile>/<scan>/, as the bytes that were sent', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const sent = { front: face({}, 1), right: face({}, 2), left: face({}, 3) }
 
     const view = await createdFace(guest, { front: fileOf(sent.front, 'front'), right: fileOf(sent.right, 'right'), left: fileOf(sent.left, 'left') })
@@ -567,7 +619,7 @@ describe('POST /api/v1/scans/faces: an accepted scan', () => {
   })
 
   it('writes the scan and a photo row for each photo, and queues exactly one analyse-face-scan message for the upload step', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
 
     const view = await createdFace(guest, threeFiles())
 
@@ -580,7 +632,7 @@ describe('POST /api/v1/scans/faces: an accepted scan', () => {
   })
 
   it('records nothing in the spend ledger: Perfect Corp is paid for when a result comes back, not when a scan is taken', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const before = await perfectCorpSpendRows()
 
     await createdFace(guest, threeFiles())
@@ -589,7 +641,7 @@ describe('POST /api/v1/scans/faces: an accepted scan', () => {
   })
 
   it('answers 202 with the scan failed as unavailable, keeping it, when the job cannot be queued', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     queueFails = true
 
     const res = await createFace(guest, threeFiles())
@@ -604,7 +656,7 @@ describe('POST /api/v1/scans/faces: an accepted scan', () => {
 
 describe('GET /api/v1/scans/faces/{id}', () => {
   it('shows the profile\'s own scan as it was made, with a link for each photo, and a null result', async () => {
-    const guest = await readyGuest('fade-dark-marks')
+    const guest = await readyUser('fade-dark-marks')
     const made = await createdFace(guest, threeFiles())
 
     const res = await getFace(guest, made.id)
@@ -626,7 +678,7 @@ describe('GET /api/v1/scans/faces/{id}', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND for a scan that does not exist', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await getFace(guest, crypto.randomUUID())
 
@@ -635,9 +687,9 @@ describe('GET /api/v1/scans/faces/{id}', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND for another account\'s scan, the same as for one that does not exist', async () => {
-    const owner = await readyGuest()
+    const owner = await readyUser()
     const made = await createdFace(owner)
-    const stranger = await newGuest()
+    const stranger = await newVerified()
 
     const res = await getFace(stranger, made.id)
 
@@ -646,7 +698,7 @@ describe('GET /api/v1/scans/faces/{id}', () => {
   })
 
   it('shows a scan only to the profile that made it: the account\'s other profile gets 404 FACE_SCAN_NOT_FOUND, and the maker still sees it', async () => {
-    const first = await readyGuest()
+    const first = await readyUser()
     const second = await asSecondProfile(first)
     const made = await createdFace(first)
 
@@ -658,7 +710,7 @@ describe('GET /api/v1/scans/faces/{id}', () => {
   })
 
   it('suggests a rescan once the goal is not the one the latest scan was taken under, and stops when it is again', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const made = await createdFace(guest)
     expect((await dataOf<FaceScanView>(await getFace(guest, made.id))).rescanSuggested).toBe(false)
 
@@ -674,7 +726,7 @@ describe('GET /api/v1/scans/faces/{id}', () => {
 
 describe('GET /api/v1/scans/faces/photos/{token}', () => {
   it('serves the photo a link from a scan opens: the JPEG that was sent, never cached, with no sign-in needed', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const sent = face({}, 7)
     const made = await createdFace(guest, { front: fileOf(sent, 'front') })
 
@@ -687,9 +739,9 @@ describe('GET /api/v1/scans/faces/photos/{token}', () => {
   })
 
   it('ignores any Authorization header: the link is the credential, whoever holds it', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest)
-    const stranger = await newGuest()
+    const stranger = await newVerified()
 
     const res = await openPhoto(tokenOf(made.photos.front.url), { Authorization: `Bearer ${stranger.token}` })
     const garbled = await openPhoto(tokenOf(made.photos.front.url), { Authorization: 'Bearer not-a-token' })
@@ -709,7 +761,7 @@ describe('GET /api/v1/scans/faces/photos/{token}', () => {
   })
 
   it('is 404 PHOTO_NOT_FOUND for a link whose last character was changed', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest)
     const token = tokenOf(made.photos.front.url)
     const tampered = token.slice(0, -1) + (token.endsWith('A') ? 'B' : 'A')
@@ -721,7 +773,7 @@ describe('GET /api/v1/scans/faces/photos/{token}', () => {
   })
 
   it('is 404 PHOTO_NOT_FOUND once the scan is deleted', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest)
     const token = tokenOf(made.photos.front.url)
     expect((await openPhoto(token)).status).toBe(200)
@@ -734,7 +786,7 @@ describe('GET /api/v1/scans/faces/photos/{token}', () => {
   })
 
   it('does not open from the product scan photo route, nor a product link from this one', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest)
 
     const asProduct = await fetchWorker(`/api/v1/scans/products/photos/${tokenOf(made.photos.front.url)}`)
@@ -746,7 +798,7 @@ describe('GET /api/v1/scans/faces/photos/{token}', () => {
 
 describe('DELETE /api/v1/scans/faces/{id}', () => {
   it('deletes the photos and the rows with 204 and no body, and a later read is 404 FACE_SCAN_NOT_FOUND', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest, threeFiles())
     expect(await bucketKeysOf(guest.userId)).toHaveLength(3)
 
@@ -761,7 +813,7 @@ describe('DELETE /api/v1/scans/faces/{id}', () => {
   })
 
   it('leaves the profile\'s consent, and lets it scan again under the same goal', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const made = await createdFace(guest)
     await deleteFace(guest, made.id)
 
@@ -770,7 +822,7 @@ describe('DELETE /api/v1/scans/faces/{id}', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND the second time', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const made = await createdFace(guest)
     expect((await deleteFace(guest, made.id)).status).toBe(204)
 
@@ -788,9 +840,9 @@ describe('DELETE /api/v1/scans/faces/{id}', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND for another account\'s scan and for the account\'s other profile\'s, and deletes nothing', async () => {
-    const first = await readyGuest()
+    const first = await readyUser()
     const second = await asSecondProfile(first)
-    const stranger = await newGuest()
+    const stranger = await newVerified()
     const made = await createdFace(first, threeFiles())
 
     for (const other of [second, stranger]) {
@@ -804,7 +856,7 @@ describe('DELETE /api/v1/scans/faces/{id}', () => {
   })
 
   it('deletes only that scan\'s photos', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const first = await createdFace(guest, threeFiles())
     await setGoal(guest, 'brighter')
     const second = await createdFace(guest, { front: fileOf(face({}, 5), 'front') })
@@ -840,7 +892,7 @@ describe('rate limits on POST /api/v1/scans/faces', () => {
 
   it('answers 429 RATE_LIMITED to the 11th request of one user in a minute, from any address', async () => {
     const { statuses, limited } = await inOneRateWindow(async () => {
-      const guest = await newGuest()
+      const guest = await newVerified()
       const statuses: number[] = []
       let limited: Response | undefined
       for (let i = 0; i < 11; i++) {
@@ -861,7 +913,7 @@ describe('rate limits on POST /api/v1/scans/faces', () => {
 describe('POST /api/v1/scans/faces: two at once', () => {
   // A double tap, or the app on two devices: both requests read "no scan under this goal yet" before either has written one.
   it('makes one scan, queues one job and keeps one set of photos; the other request is 429 FACE_SCAN_NOT_DUE', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const files = (marker: number) => ({ front: fileOf(face({}, marker), 'front'), right: fileOf(face({}, marker + 1), 'right'), left: fileOf(face({}, marker + 2), 'left') })
 
     const replies = await Promise.all([createFace(guest, files(10), freshIp()), createFace(guest, files(20), freshIp())])
@@ -884,7 +936,7 @@ describe('POST /api/v1/scans/faces: two at once', () => {
 
 const MAIN = `deepertones-face-scans-${env.ENVIRONMENT}`
 /** The front photo is replaced under the same key, so the key says where to look. */
-const frontKeyOf = (guest: Guest, scanId: string) => `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${scanId}/front.jpg`
+const frontKeyOf = (guest: Account, scanId: string) => `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${scanId}/front.jpg`
 const bytesOfStored = async (key: string) => new Uint8Array(await (await env.PRIVATE_PHOTOS.get(key))!.arrayBuffer())
 const rowOf = (scanId: string) => env.DB.prepare('SELECT state, reason, pc_analysis_task_id AS task, skin_age AS skinAge FROM face_scans WHERE id = ?').bind(scanId).first<{ state: string; reason: string | null; task: string | null; skinAge: number | null }>()
 
@@ -901,7 +953,7 @@ const nextAt = () => (lastAt = Math.max(Date.now(), lastAt + 1))
 const stepOf = (scanId: string, step: 'upload' | 'fetch') => ({ faceScanId: scanId, step, at: nextAt() })
 
 /** A scan that was analysed up to the point of asking for a retake: made by the route, its upload step run, and its finished task refused for the photo. */
-const needingRetake = async (guest: Guest, reason = 'error_no_face') => {
+const needingRetake = async (guest: Account, reason = 'error_no_face') => {
   const stub = stubPerfectCorp()
   const view = await createdFace(guest)
   expect((await runFaceJob(queued.at(-1))).explicitAcks).toEqual(['m'])
@@ -912,7 +964,7 @@ const needingRetake = async (guest: Guest, reason = 'error_no_face') => {
   return { view, stub }
 }
 
-const retakeFace = (guest: Guest | undefined, id: string, fields: Record<string, File | undefined> = { front: fileOf(face({}, 9), 'front') }, from?: string) =>
+const retakeFace = (guest: Account | undefined, id: string, fields: Record<string, File | undefined> = { front: fileOf(face({}, 9), 'front') }, from?: string) =>
   fetchWorker(`${FACES}/${id}/retake`, { method: 'POST', body: formOf(fields), headers: guest ? guest.headers(from) : { 'cf-connecting-ip': from ?? freshIp() } })
 
 afterEach(() => {
@@ -922,7 +974,7 @@ afterEach(() => {
 
 describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
   it('shows a scan that needs a retake with the reason, and the same fields as before', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest, 'error_lighting_dark')
 
     const shown = await dataOf<FaceScanView>(await getFace(guest, view.id))
@@ -932,7 +984,7 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
   })
 
   it('shows a scan that is ready with a result: what can be seen, the skin type and skin age, and no change since day one for the first scan', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.at(-1))
@@ -959,7 +1011,7 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
   })
 
   it('opens an overlay link to the mask PNG that was stored for the concern', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.at(-1))
@@ -989,7 +1041,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
   ]
   const messageFor = (scanId: string) => queued.find((body) => (body as { faceScanId: string }).faceScanId === scanId)
   /** Scans under `glow`, one after the other, with a scan under another goal still analysing between. Resolves to the first, the one between and the second. */
-  const twoGlowScans = async (guest: Guest, stub: ReturnType<typeof stubPerfectCorp>, first: ReturnType<typeof glowAnalysis>, second: ReturnType<typeof glowAnalysis>) => {
+  const twoGlowScans = async (guest: Account, stub: ReturnType<typeof stubPerfectCorp>, first: ReturnType<typeof glowAnalysis>, second: ReturnType<typeof glowAnalysis>) => {
     const day = await createdFace(guest)
     await runFaceJob(messageFor(day.id))
     stub.answerSkin((await rowOf(day.id))!.task!, () => skinSuccess(first))
@@ -1005,7 +1057,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
   }
 
   it('compares the second ready scan under a goal with the first: which scan, when, how each concern moved, and the skin age', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const stub = stubPerfectCorp()
 
     const { day, between, later } = await twoGlowScans(
@@ -1034,7 +1086,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
   })
 
   it('holds no Perfect Corp name, no score, no overall score and no Fitzpatrick type in the body, and no number but the skin age in years', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const stub = stubPerfectCorp()
     const first = await createdFace(guest)
     await runFaceJob(messageFor(first.id))
@@ -1071,7 +1123,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
 
 describe('POST /api/v1/scans/faces/{id}/retake', () => {
   it('answers 202 with the scan analysing again, no reason, and a link to the new front photo', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
 
     const res = await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
@@ -1085,7 +1137,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('replaces the front photo under the same key, clears the reason and the old analysis task in the database, and stores no second photo', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
     expect(new Uint8Array(await bytesOfStored(frontKeyOf(guest, view.id)))).toEqual(face({}, 1).bytes)
 
@@ -1098,7 +1150,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('queues the upload step for the scan, and nothing else', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
 
     await retakeFace(guest, view.id)
@@ -1107,7 +1159,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('leads to a fresh analysis: the queued upload step sends the new photo and starts a new task', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view, stub } = await needingRetake(guest)
     const oldTask = (await rowOf(view.id))!.task
     await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
@@ -1124,7 +1176,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('may be done again after another refusal: there is no limit on retakes', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view, stub } = await needingRetake(guest)
     for (const marker of [2, 3]) {
       expect((await retakeFace(guest, view.id, { front: fileOf(face({}, marker), 'front') })).status).toBe(202)
@@ -1143,7 +1195,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND for a scan that does not exist and for another profile\'s scan, and changes nothing', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
     const second = await asSecondProfile(guest)
     expect((await putConsent(second)).status).toBe(200)
@@ -1160,7 +1212,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('is 409 FACE_SCAN_NOT_AWAITING_RETAKE for a scan that is analysing, and leaves its photo and queue alone', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const view = await createdFace(guest)
     queued.length = 0
 
@@ -1173,7 +1225,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('is 409 FACE_SCAN_NOT_AWAITING_RETAKE for a scan that is ready', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.splice(0)[0])
@@ -1188,7 +1240,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('is 409 FACE_CONSENT_REQUIRED when the consent was withdrawn, and keeps the old photo', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
     expect((await deleteConsent(guest)).status).toBe(204)
 
@@ -1206,7 +1258,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
     { label: 'a WebP', file: () => fileOf(webpPhoto({ width: 1080, height: 1440 }), 'front', 'image/webp'), code: 'UNSUPPORTED_IMAGE' },
     { label: 'a JPEG whose shorter side is one pixel under 1080', file: () => fileOf(face({ width: 1079, height: 1440 }), 'front'), code: 'IMAGE_TOO_SMALL' },
   ])('is 400 for $label, and keeps the old photo and the scan waiting for a retake', async ({ file, code }) => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
 
     const res = await retakeFace(guest, view.id, { front: file() })
@@ -1219,7 +1271,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('is 400 VALIDATION_FAILED without a front part', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
 
     const res = await retakeFace(guest, view.id, {})
@@ -1229,7 +1281,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('answers 413 on a Content-Length one byte over a photo plus 1,000,000 of framing', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
 
     const res = await fetchWorker(`${FACES}/${view.id}/retake`, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(MAX_FACE_PHOTO_BYTES + 1_000_000 + 1) } })
@@ -1239,7 +1291,7 @@ describe('POST /api/v1/scans/faces/{id}/retake', () => {
   })
 
   it('answers 202 with the scan failed as unavailable, still, when the analysis cannot be queued', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const { view } = await needingRetake(guest)
     queueFails = true
 
@@ -1257,8 +1309,8 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
     await Promise.all(opened.splice(0).map((stream) => stream.cancel()))
     await abortAllDurableObjects()
   })
-  const eventsOf = (guest: Guest | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}/events`)
-  const watch = async (guest: Guest, id: string) => {
+  const eventsOf = (guest: Account | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}/events`)
+  const watch = async (guest: Account, id: string) => {
     const res = await eventsOf(guest, id)
     expect(res.status).toBe(200)
     const stream = sseReader(res)
@@ -1274,7 +1326,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('is 404 FACE_SCAN_NOT_FOUND for a scan that does not exist and for another profile\'s scan', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const view = await createdFace(guest)
     const second = await asSecondProfile(guest)
 
@@ -1285,7 +1337,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('answers 200 as an event stream that no proxy buffers or rewrites, starting with a snapshot of the scan as it is: its id, state and reason', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const view = await createdFace(guest)
 
     const { res, stream } = await watch(guest, view.id)
@@ -1299,7 +1351,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('keeps an analysing scan\'s stream open: nothing but the snapshot comes, and it does not end', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const view = await createdFace(guest)
     const { stream } = await watch(guest, view.id)
     await stream.read(1)
@@ -1311,7 +1363,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('tells a client that is watching when the scan is ready, with a face frame and then done, and ends the stream', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.splice(0)[0])
@@ -1329,7 +1381,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('tells a client that is watching when the scan needs a retake, with the reason', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.splice(0)[0])
@@ -1345,7 +1397,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
   })
 
   it('says done straight after the snapshot for a scan that has already ended, and then closes', async () => {
-    const guest = await readyGuest()
+    const guest = await readyUser()
     queueFails = true
     const failed = await createdFace(guest)
     queueFails = false
@@ -1364,7 +1416,7 @@ describe('GET /api/v1/scans/faces/{id}/events', () => {
 
 // --- the profile's list of face scans ---
 
-const listFaces = (guest: Guest | undefined) => json(guest, 'GET', FACES)
+const listFaces = (guest: Account | undefined) => json(guest, 'GET', FACES)
 type FaceScanList = { faceScans: FaceScanView[] }
 /** Each read signs its own links, good for 5 minutes from that read, so two reads a millisecond apart differ in the token and in nothing else. */
 const withoutTokens = (value: unknown) => JSON.parse(JSON.stringify(value).replace(/\/photos\/[A-Za-z0-9_-]+/g, '/photos/<token>')) as unknown
@@ -1380,7 +1432,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('answers 200 with an empty list, not 404, for a profile that has no scans, no consent and no goal', async () => {
-    const guest = await newGuest()
+    const guest = await newVerified()
 
     const res = await listFaces(guest)
 
@@ -1389,7 +1441,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('lists two scans newest first, each as GET /scans/faces/{id} shows it', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const older = await createdFace(guest, threeFiles())
     await setGoal(guest, 'brighter')
     await aMomentLater()
@@ -1407,7 +1459,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('shows a ready scan with its result and an analysing one with a null result', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const stub = stubPerfectCorp()
     const ready = await createdFace(guest)
     await runFaceJob(queued.at(-1))
@@ -1426,7 +1478,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('shows a scan that needs a retake and one that failed, with their reasons', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const { view: needsRetake } = await needingRetake(guest, 'error_lighting_dark')
     await setGoal(guest, 'brighter')
     queueFails = true
@@ -1443,15 +1495,15 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('lists only the caller\'s profile: not the account\'s other profile\'s scan, nor another account\'s', async () => {
-    const owner = await readyGuest('glow')
+    const owner = await readyUser('glow')
     const mine = await createdFace(owner)
     const sister = await asSecondProfile(owner)
     expect((await putConsent(sister)).status).toBe(200)
     await setGoal(sister, 'glow')
     const sisters = await createdFace(sister)
-    const stranger = await readyGuest('glow')
+    const stranger = await readyUser('glow')
     const strangers = await createdFace(stranger)
-    const nobody = await newGuest()
+    const nobody = await newVerified()
 
     expect((await dataOf<FaceScanList>(await listFaces(owner))).faceScans.map((scan) => scan.id)).toEqual([mine.id])
     expect((await dataOf<FaceScanList>(await listFaces(sister))).faceScans.map((scan) => scan.id)).toEqual([sisters.id])
@@ -1460,7 +1512,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('still lists the scans after the consent is withdrawn, so the user can find them and delete them', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const made = await createdFace(guest)
     expect((await deleteConsent(guest)).status).toBe(204)
 
@@ -1473,7 +1525,7 @@ describe('GET /api/v1/scans/faces', () => {
   })
 
   it('leaves GET /scans/faces/{id} and GET /scans/faces/photos/{token} as they were: an id from the list opens that scan, and a photo link from the list opens its photo', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const made = await createdFace(guest, threeFiles())
     const { faceScans } = await dataOf<FaceScanList>(await listFaces(guest))
 
@@ -1488,5 +1540,120 @@ describe('GET /api/v1/scans/faces', () => {
     expect(new Uint8Array(await photo.arrayBuffer())).toEqual(new Uint8Array(face({}, 1).bytes))
     expect(notAToken.status).toBe(404)
     expect(await errorCodeOf(notAToken)).toBe('PHOTO_NOT_FOUND')
+  })
+})
+
+describe('the face scan is for verified users: a guest is turned away with 403 VERIFICATION_REQUIRED', () => {
+  const faceScansOf = new D1FaceScansRepository(createDb(env.DB))
+  const SOMEONES_SCAN = crypto.randomUUID()
+
+  /** Every route a guest is refused on. The multipart ones are sent with an empty form: the refusal must not need the body. */
+  const refused: [string, (guest: Account, id: string) => Response | Promise<Response>][] = [
+    ['PUT /me/face-consent', (guest) => putConsent(guest)],
+    ['PUT /me/face-consent with a body that would be a 400', (guest) => putConsent(guest, {})],
+    ['GET /me/face-consent', (guest) => getConsent(guest)],
+    ['POST /scans/faces with a photo', (guest) => createFace(guest)],
+    ['POST /scans/faces with an empty form', (guest) => createFace(guest, {})],
+    ['GET /scans/faces', (guest) => json(guest, 'GET', FACES)],
+    ['GET /scans/faces/{id} of an id nobody has', (guest) => getFace(guest, crypto.randomUUID())],
+    ['GET /scans/faces/{id} of a verified user\'s scan', (guest, id) => getFace(guest, id)],
+    ['GET /scans/faces/{id}/events of an id nobody has', (guest) => json(guest, 'GET', `${FACES}/${crypto.randomUUID()}/events`)],
+    ['GET /scans/faces/{id}/events of a verified user\'s scan', (guest, id) => json(guest, 'GET', `${FACES}/${id}/events`)],
+    ['POST /scans/faces/{id}/retake with a photo', (guest, id) => retakeFace(guest, id)],
+    ['POST /scans/faces/{id}/retake with an empty form', (guest, id) => retakeFace(guest, id, {})],
+    ['POST /scans/faces/{id}/retake of an id nobody has', (guest) => retakeFace(guest, crypto.randomUUID())],
+  ]
+
+  it.each(refused)('%s: 403 VERIFICATION_REQUIRED', async (_route, call) => {
+    const owner = await readyUser()
+    const theirs = await createdFace(owner)
+    const guest = await newGuest()
+
+    const res = await call(guest, theirs.id)
+
+    expect(res.status).toBe(403)
+    expect(await errorCodeOf(res)).toBe('VERIFICATION_REQUIRED')
+  })
+
+  it('stores, queues and charges nothing for a guest who tries to scan, and records no consent', async () => {
+    const guest = await newGuest()
+    await setGoal(guest, 'glow')
+    const spendBefore = await perfectCorpSpendRows()
+
+    await putConsent(guest)
+    await createFace(guest, threeFiles())
+    await retakeFace(guest, crypto.randomUUID())
+
+    await nothingKept(guest)
+    expect(await countOf('face_consents', guest.userId)).toBe(0)
+    expect(queued).toEqual([])
+    expect(await perfectCorpSpendRows()).toBe(spendBefore)
+  })
+
+  it('answers a guest\'s upload with 403 before the size of the body matters, as for the empty form', async () => {
+    const guest = await newGuest()
+
+    const create = await fetchWorker(FACES, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
+    const retake = await fetchWorker(`${FACES}/${SOMEONES_SCAN}/retake`, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
+
+    for (const res of [create, retake]) {
+      expect(res.status).toBe(403)
+      expect(await errorCodeOf(res)).toBe('VERIFICATION_REQUIRED')
+    }
+  })
+
+  it('leaves a caller who is not signed in at 401 AUTH_REQUIRED on the same routes', async () => {
+    for (const res of [await putConsent(undefined), await getConsent(undefined), await createFace(undefined, {}), await json(undefined, 'GET', FACES), await retakeFace(undefined, SOMEONES_SCAN, {})]) {
+      expect(res.status).toBe(401)
+      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+    }
+  })
+
+  it('lets a guest withdraw the consent: 204, whoever holds it', async () => {
+    const guest = await newGuest()
+
+    const res = await deleteConsent(guest)
+
+    expect(res.status).toBe(204)
+    expect(await res.text()).toBe('')
+  })
+
+  it('lets a guest delete a face scan it owns: 204, with its photo and rows gone', async () => {
+    const guest = await newGuest()
+    // A guest cannot make a face scan any more, so the scan it owns is written the way the create route would have: the rows and the photo.
+    const id = crypto.randomUUID()
+    const key = `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${id}/front.jpg`
+    const createdAt = new Date(STARTED)
+    await faceScansOf.createFaceScan({ id, userId: guest.userId, profileId: guest.profileId, goalAtScan: 'glow', createdAt }, [{ faceScanId: id, userId: guest.userId, position: 'front', photoKey: key, createdAt }])
+    await env.PRIVATE_PHOTOS.put(key, face().bytes)
+    expect(await bucketKeysOf(guest.userId)).toEqual([key])
+
+    const res = await deleteFace(guest, id)
+
+    expect(res.status).toBe(204)
+    expect(await res.text()).toBe('')
+    await nothingKept(guest)
+  })
+
+  it('answers a guest deleting a scan that is not theirs with 404 FACE_SCAN_NOT_FOUND, and deletes nothing', async () => {
+    const owner = await readyUser()
+    const theirs = await createdFace(owner)
+    const guest = await newGuest()
+
+    const res = await deleteFace(guest, theirs.id)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_FOUND')
+    expect(await bucketKeysOf(owner.userId)).toHaveLength(1)
+  })
+
+  it('opens a face photo link for a caller with no token at all: the signed link is the credential', async () => {
+    const owner = await readyUser()
+    const made = await createdFace(owner)
+
+    const res = await openPhoto(tokenOf(made.photos.front.url), { 'cf-connecting-ip': freshIp() })
+
+    expect(res.status).toBe(200)
+    expect(new Uint8Array(await res.arrayBuffer())).toEqual(new Uint8Array(face().bytes))
   })
 })

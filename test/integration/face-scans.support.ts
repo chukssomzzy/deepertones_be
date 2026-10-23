@@ -23,7 +23,7 @@ export const startFaceScan = async (workerEnv: CloudflareBindings, goal: Goal = 
   const userId = crypto.randomUUID()
   const profileId = crypto.randomUUID()
   await users.createGuestForDevice({ user: { id: userId, createdAt: new Date() }, device: { deviceHash: `face-support-${userId}`, platform: 'ios' }, profile: { id: profileId } })
-  const asUser = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous', profileId }, fn)
+  const asUser = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'verified', profileId }, fn)
   await asUser(() => container.faceScans.giveConsent(1))
   await asUser(() => container.goals.set({ goal }))
   const view = await asUser(() => container.faceScans.create({ front: FRONT_PHOTO() }))

@@ -510,7 +510,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 - **Rate limits** are Workers rate-limit bindings (`ratelimits` in `wrangler.jsonc`, restated in every environment
   block), applied by `rateLimit(binding, 'ip' | 'user')` (`middleware/rate-limit.ts`) as route middleware in
   `defineRoute`. It runs after `auth`, outside the request context, so it reads `c.var.auth`, never
-  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller (a route that must refuse them puts `signedIn()`, `middleware/signed-in.ts`, before it). Over the limit
+  `currentActor()`. IP comes from `cf-connecting-ip`; the user key is skipped for a public caller (a route that must refuse them puts `signedIn()`, `middleware/signed-in.ts`, before it; a route that must also refuse guests uses `verifiedUser()`, `middleware/verified-user.ts`). Over the limit
   is 429 `RATE_LIMITED` with `Retry-After: 60`. A `namespace_id` is an account-wide counter, so each binding in
   each environment has its own. Counts are per Cloudflare location and approximate: the OTP per-recipient cooldown
   and cap still apply underneath.
@@ -1274,6 +1274,7 @@ provider, the second the **records** (consent, the scan and its photos, the rout
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
 notifications** (see "Pushes" below).
+Face scans are for **verified users only**: every user-facing face route and its `FaceScanService` method (consent `PUT`/`GET`, scans create, list, get, events, retake) starts with `requireVerified()` (403 `VERIFICATION_REQUIRED` for a guest), with `verifiedUser()` as the route's early exit, so a guest gets that answer before anything else is checked. Deleting a scan and withdrawing consent stay open to any signed-in user, a guest included, so anyone can remove face data they hold. `latestSkinType()` (read by the recommendations) stays `requireUser`. The photo link and the Perfect Corp webhook are credential-gated (a signed link, a signature), and the job-driven methods run as the system.
 `FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
 store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
@@ -1292,7 +1293,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   with `details.current`; giving again starts it afresh and clears a withdrawal), `GET` shows it (404 `FACE_CONSENT_NOT_FOUND` until given; a
   withdrawn or older one is shown with `current` false), and `DELETE` stamps the withdrawal time and keeps the row (204, also when there is nothing to withdraw).
 - **Creating a scan.** `POST /scans/faces` takes multipart `front` (required) and `right` and `left` (optional). Middleware, in order:
-  `FACE_SCAN_IP_LIMITER` (20 a minute) → `signedIn` → `FACE_SCAN_USER_LIMITER` (10 a minute) → `bodyLimit` (3 x 6,000,000 + 1,000,000 bytes).
+  `FACE_SCAN_IP_LIMITER` (20 a minute) → `verifiedUser` → `FACE_SCAN_USER_LIMITER` (10 a minute) → `bodyLimit` (3 x 6,000,000 + 1,000,000 bytes).
   The service then checks, in this order, and stores and queues nothing until all pass: consent (409 `FACE_CONSENT_REQUIRED`: none, withdrawn, or an
   older version), the goal (409 `GOAL_REQUIRED`, from `GoalsService.requireGoal`), whether a scan is due (429 `FACE_SCAN_NOT_DUE` with `details.reason`),
   then every photo (400). A photo is a JPEG, decided by its bytes and never by what the caller claims: `UNSUPPORTED_IMAGE` for anything else (and for
@@ -1347,7 +1348,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   /scans/faces/photos/{token}` is public (`security: []`): the link is the credential, so the profile in the token is what keeps the account's
   other profiles out. `photoForLink` serves only `faces/` keys (404 `PHOTO_NOT_FOUND` otherwise, including a validly signed product link), and the
   product route refuses `faces/` keys the same way. Routes carry the tag "Face scans"; the error codes are in their descriptions.
-- **The list.** `GET /scans/faces` (`listFaceScans`, `signedIn`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
+- **The list.** `GET /scans/faces` (`listFaceScans`, `verifiedUser`) answers `{ faceScans }`: the current profile's latest 20 scans (`FACE_SCAN_LIST_LIMIT`; no cursor,
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each

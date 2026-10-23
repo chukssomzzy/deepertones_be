@@ -205,7 +205,7 @@ const setup = (options: SetupOptions = {}) => {
 }
 type Ctx = ReturnType<typeof setup>
 
-const asUser = <T>(fn: () => Promise<T>, profileId = PROFILE) => runAs({ kind: 'user', userId: USER, status: 'anonymous', profileId }, fn)
+const asUser = <T>(fn: () => Promise<T>, profileId = PROFILE) => runAs({ kind: 'user', userId: USER, status: 'verified', profileId }, fn)
 const asSystem = <T>(fn: () => Promise<T>) => runAs({ kind: 'system', job: 'analyse-face-scan' }, fn)
 
 const errorOf = async (promise: Promise<unknown>) => {
@@ -2573,7 +2573,7 @@ const OTHER_USER = 'user-2'
 const OTHER_ACCOUNT_PROFILE = 'profile-3'
 
 const listScans = (ctx: Ctx, profileId = PROFILE): Promise<any[]> => asUser(() => ctx.service.listFaceScans(), profileId)
-const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'anonymous', profileId: OTHER_ACCOUNT_PROFILE }, fn)
+const asOtherAccount = <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: OTHER_USER, status: 'verified', profileId: OTHER_ACCOUNT_PROFILE }, fn)
 /** A scan by a profile of the account (`profileId`) under `goal`: consent, the goal and the front photo, the way the create route takes it. Resolves to the scan's id. */
 const startedBy = async (ctx: Ctx, profileId: string, goal: Goal): Promise<string> => {
   await giveConsent(ctx, profileId)

@@ -1,5 +1,5 @@
 import { PermanentJobError } from '../../jobs/job'
-import { requireUser } from '../../lib/context'
+import { requireUser, requireVerified } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -145,7 +145,7 @@ export class FaceScanService {
 
   /** Records the caller's profile's consent for the current wording. Any other version is 400 FACE_CONSENT_VERSION_MISMATCH, which says which is current. */
   async giveConsent(version: number): Promise<FaceConsentGiven> {
-    const { userId, profileId } = requireUser()
+    const { userId, profileId } = requireVerified()
     if (version !== CURRENT_FACE_CONSENT_VERSION) {
       throw new ValidationError('FACE_CONSENT_VERSION_MISMATCH', 'That is not the current version of the face photo consent', { current: CURRENT_FACE_CONSENT_VERSION })
     }
@@ -161,7 +161,7 @@ export class FaceScanService {
   }
 
   async consent(): Promise<FaceConsentView> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const found = await this.repository.consentOf(profileId)
     if (!found) throw new NotFoundError('FACE_CONSENT_NOT_FOUND', 'No face photo consent has been given')
     return { version: found.version, givenAt: found.givenAt, withdrawnAt: found.withdrawnAt, current: FaceScanService.isCurrent(found) }
@@ -174,7 +174,7 @@ export class FaceScanService {
    * the job cannot be queued the scan is marked failed as unavailable and still returned, so the user can see and delete it.
    */
   async create(photos: FacePhotos): Promise<FaceScanView> {
-    const { userId, profileId } = requireUser()
+    const { userId, profileId } = requireVerified()
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
@@ -231,6 +231,7 @@ export class FaceScanService {
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is FACE_SCAN_NOT_FOUND, with no hint that it exists. */
   async getFaceScan(id: string): Promise<FaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
   }
@@ -250,7 +251,7 @@ export class FaceScanService {
    * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
    */
   async listFaceScans(): Promise<FaceScanView[]> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
     const rescanSuggested = await this.rescanSuggested(profileId)
@@ -344,6 +345,7 @@ export class FaceScanService {
    * Nothing changes until all pass. When the analysis cannot be queued the scan is marked failed as unavailable and still returned, as `create` does.
    */
   async retake(id: string, photos: { front: ProductImage }): Promise<RetakenFaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.requireCurrentConsent(scan.profileId)
     if (scan.state !== 'needs-retake') throw FaceScanService.notAwaitingRetake()
@@ -412,6 +414,7 @@ export class FaceScanService {
    * scan is read again once it is open: a change stored in between is sent, and a scan that is over gets `done` straight away. A failure to send is logged.
    */
   async watch(id: string): Promise<Response> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     const stream = await this.events.subscribe(id, FaceScanService.frameOf(scan))
     try {
