@@ -1,12 +1,17 @@
 // Runs the catalog's model-backed steps against fixed cases and reports how many held: `npm run eval:catalog`.
 // Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real, billed calls. It is report-only, is never part
 // of `npm test`, and never prints the key, a prompt or raw model output: only case ids, fixed problem codes and timings.
-//   --mode analysis|research|goals|mentions|all   (default all; goals is about 40 Haiku calls and mentions about 22, a few cents each)    --limit N   cases per mode
-//   --max-usd N   stop spending at N dollars (default 2)    --model JOB=MODEL   run a job on another model (repeatable)
+//   --mode analysis|research|goals|mentions|draft|all   (default all, which is the first four; goals is about 40 Haiku calls and mentions about 22, a few cents each)    --limit N   cases per mode
+//   --max-usd N   stop spending at N dollars (default 2, and 5 for draft)    --model JOB=MODEL   run a job on another model (repeatable)
+//   --set main|holdout   draft only: the measurement set (default) or the holdout set a drafter fix is checked on
+//   --out-dir DIR   draft only: where report.json and draft.xlsx go (default .eval/draft-<timestamp>)
+// --mode draft is its own run: it drafts the DRAFT_CASES products (or DRAFT_HOLDOUT with --set holdout) through the real catalog drafter, has a judge check every drafted value against the page it
+// cites, and gates on the result (see "Catalog eval" in docs/architecture.md). It is slow and costs real money, so it is never part of --mode all.
+// A --limit trial that covers no trap prints `Gate: PASS (no traps covered)`: it is a trial, not the gate.
 // Each job runs on the model wrangler.jsonc gives it (Haiku for research, vision and judging, Sonnet for the analysis)
 // unless --model says otherwise. Spend is counted by a MemoryAiSpendLedger capped at --max-usd, so a runaway run cannot
 // bill more; once the cap is reached the remaining cases fail as AiBudgetExceededError without calling the API.
-// Exit: 0 every case passed, 1 a case failed, 2 the run could not start (bad arguments, missing key, rejected key).
+// Exit: 0 every case passed (draft: the gate holds), 1 a case failed (draft: the gate does not hold), 2 the run could not start (bad arguments, missing key, rejected key).
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { checkAnalysis } from '../src/modules/catalog/catalog.analysis'
 import { REFERENCE } from '../src/modules/catalog/catalog.reference'
@@ -16,11 +21,18 @@ import type { AiJob } from '../src/providers/anthropic/ai-spend.provider'
 import { AnthropicClient } from '../src/providers/anthropic/anthropic.client'
 import { AnthropicConfigError } from '../src/providers/anthropic/anthropic.provider'
 import { MemoryAiSpendLedger } from '../src/providers/anthropic/memory.ai-spend-ledger'
+import { AnthropicCatalogDrafter } from '../src/providers/catalog-drafting/anthropic.catalog-drafter'
 import { AnthropicGoalReader } from '../src/providers/goal-reading/anthropic.goal-reader'
 import { AnthropicMentionReader } from '../src/providers/mention-reading/anthropic.mention-reader'
 import { AnthropicProductAnalyst } from '../src/providers/product-analysis/anthropic.product-analyst'
 import { AnthropicProductResearcher } from '../src/providers/product-research/anthropic.product-researcher'
+import { writeWorkbookFile } from './catalog/xlsx'
 import { ANALYSIS_CASES, GOAL_CASES, MENTION_CASES, RESEARCH_CASES } from './eval/cases'
+import { DRAFT_CASES } from './eval/draft-cases'
+import { DRAFT_HOLDOUT } from './eval/draft-holdout'
+import { HUMAN_CHECKS } from './eval/draft-human-checks'
+import { AnthropicDraftJudge } from './eval/draft-judge'
+import { runDraftEval } from './eval/draft-run'
 import { DEFAULT_MODELS } from './eval/models'
 import {
   type AnalysisOutcome,
@@ -97,6 +109,27 @@ const main = async (): Promise<number> => {
   const mentionReader = new AnthropicMentionReader(client)
 
   const startedAt = new Date()
+  if (args.mode === 'draft') {
+    const draftModels = { research: models.research, 'draft-catalog-row': models['draft-catalog-row'], 'judge-draft': models['judge-draft'] }
+    console.log(`Models: research ${draftModels.research}, draft-catalog-row ${draftModels['draft-catalog-row']}, judge-draft ${draftModels['judge-draft']}`)
+    const { exitCode } = await runDraftEval({
+      cases: args.set === 'holdout' ? DRAFT_HOLDOUT : DRAFT_CASES,
+      set: args.set,
+      humanChecks: HUMAN_CHECKS,
+      limit: args.limit,
+      outDir: args.outDir,
+      startedAt,
+      models: draftModels,
+      deps: { researcher, drafter: new AnthropicCatalogDrafter(client), judge: new AnthropicDraftJudge(client), ledger },
+      io: {
+        log: (line) => console.log(line),
+        mkdir: async (dir) => void mkdirSync(dir, { recursive: true }),
+        writeFile: async (path, text) => writeFileSync(path, text),
+        writeWorkbook: (path, workbook) => writeWorkbookFile(path, workbook, null),
+      },
+    })
+    return exitCode
+  }
   console.log(
     `Catalog eval: mode ${args.mode}${args.limit ? `, up to ${args.limit} cases per mode` : ''}, cap ${usd(ledger.capMicros)}`,
   )
