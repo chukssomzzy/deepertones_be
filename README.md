@@ -169,7 +169,7 @@ Rate limits (per minute, per IP unless noted): bootstrap and logout share 10, re
   `wrangler.jsonc` are skipped, unknown names and an `OTP_PEPPER` shared between the two files are errors.
   The list of secrets and why is in `scripts/secrets/plan.ts`. `npx wrangler secret put NAME --env staging` still
   works as a one-off alternative.
-- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY` and `PERFECT_CORP_WEBHOOK_SECRET` to staging and production before this lands). See [Face scan setup](#face-scan-setup-perfect-corp) for the last two. `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET` and `DEVICE_ID_KEY` with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
+- Required secrets: `ZEPTOMAIL_API_KEY`, `OTP_PEPPER`, `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `ADMIN_API_TOKEN`. All are listed in `secrets.required`, so a deploy fails until they are set on that environment (push `JWT_SECRET`, `DEVICE_ID_KEY`, `ANTHROPIC_API_KEY`, `EXPO_ACCESS_TOKEN`, `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `ADMIN_API_TOKEN` to staging and production before this lands). See [Face scan setup](#face-scan-setup-perfect-corp) for the last two. `JWT_SECRET` signs access/refresh tokens and must differ per environment; to rotate it, move the old value to the optional `JWT_SECRET_PREVIOUS` (accepted for verification only). `DEVICE_ID_KEY` must differ per environment and must NEVER be rotated: it would orphan every device's guest. Generate `JWT_SECRET`, `DEVICE_ID_KEY` and `ADMIN_API_TOKEN` (the `X-Admin-Token` of the `/api/v1/admin` catalog routes; it must differ per environment) with `openssl rand -hex 32`. ZeptoMail setup is in [ZeptoMail setup](#zeptomail-setup). Expo setup is in [Expo push setup](#expo-push-setup). `WHATSAPP_ACCESS_TOKEN` is only needed once `whatsapp` is in `OTP_CHANNELS` (see [WhatsApp OTP setup](#whatsapp-otp-setup)).
 - After changing either, run `npm run cf-typegen` so `c.env` stays typed.
 
 ## Product catalog setup
@@ -196,7 +196,7 @@ bucket, which serves no public URL, so product views show no image. For `wrangle
 ### Private photo storage
 
 Users' product photos go to the private R2 bucket `deepertones-private` (binding `PRIVATE_PHOTOS`), one bucket for every
-environment, keys under `photos/<environment>/`. The bucket already exists (created 2026-10-15), so there is nothing to do:
+environment, keys under `photos/<environment>/` (and `faces/<environment>/` for face scans). The catalog workbook archive, the `.xlsx` of every applied catalog upload, lives in the same bucket under `workbooks/<environment>/` and is kept for good, so set no bucket-wide lifecycle rule (expiry or deletion) on it. The bucket already exists (created 2026-10-15), so there is nothing to do:
 no bucket, domain or secret to create. Keep it private: never attach a custom domain or enable r2.dev. Design in
 "Private photos" in `docs/architecture.md`.
 
@@ -223,6 +223,47 @@ It prints today, the last 7 days and the last N days in dollars, then each job a
 tracking" in `docs/architecture.md`.
 
 To measure the research, analysis, goal-reading and mention-reading steps against fixed cases, run `npm run eval:catalog` (the default `--mode all` includes the goal and mention readers; `-- --mode goals` runs only the first, about 40 Haiku calls and a few cents, and `-- --mode mentions` only the second, about 22 Haiku calls and a few cents; it makes real, billed Claude calls and reads the key from `.dev.vars`; `-- --limit 1` keeps a trial cheap, and `-- --max-usd 0.5` caps what it may spend, 2 dollars by default; it prints the cost of each case and the total). For the weekly CI run, add the same key as a GitHub repository secret named `ANTHROPIC_API_KEY` (Settings → Secrets and variables → Actions); without it the run skips. See "Catalog eval" in `docs/architecture.md`.
+
+## Catalog workbook
+
+The recommendation catalog (products, where they are sold and at what price, ingredient rules, countries) is edited as a spreadsheet, not in the
+database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.md](docs/catalog-workbook-contract.md) (written from the contract by
+`npm run catalog:contract-doc`), and the two commands below move the workbook in and out of an environment.
+
+1. **Export** the live catalog: `npm run catalog:export -- --env staging` (or `local`, `production`; `--out file.xlsx` to name the file). It writes
+   `catalog-<env>-v<version>.xlsx` with the four tabs (Products, Availability, Ingredients, Countries) and a hidden `_meta` sheet that remembers the
+   catalog version the file came from. Leave `_meta` alone.
+2. **Edit** the workbook in Excel or Sheets. Keep the tab names and header rows as they are.
+3. **Upload as a dry run**: `npm run catalog:upload -- catalog-staging-v12.xlsx --env staging --by "Your name"`. The file is checked against the
+   contract on your machine first, and every problem is listed by tab, row and column with nothing sent. If it passes, the server answers with what
+   would change per tab (added, updated, retired, reactivated) and any product it would create as new. A different spelling of a product's name is a
+   new product, so read that list. A dry run changes nothing.
+4. **Apply** it by running the same command with `--apply`. This writes the new catalog version and archives the file. If someone else applied a
+   change after your export, the upload is refused as `CATALOG_STALE`: export again and redo the edits on the new file.
+
+Both commands read `ADMIN_API_TOKEN` from the environment's vars file: `.dev.vars` for `local`, `.dev.vars.staging` and `.dev.vars.production` for the
+deployed ones (the same gitignored files as above). The token is sent only in the `X-Admin-Token` header and is never printed.
+
+- **Creating or rotating the token:** generate a long random value (`openssl rand -hex 32`, as for the other secrets), put it in `.dev.vars.<env>` as
+  `ADMIN_API_TOKEN`, and push it with `npm run secrets:push -- --env <env> --apply`. To rotate, replace the value and push again; the old value stops
+  working as soon as the Worker has the new one. For `local`, the value in `.dev.vars` is what `wrangler dev` reads.
+- **A file only goes back where it came from.** The export stamps the environment, the catalog version and the contract version into the hidden `_meta`
+  sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
+  server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
+  `--force`.
+- **Use Excel or LibreOffice.** Google Sheets and Numbers may drop the hidden `_meta` sheet when they save; a file without it is refused, so use Excel or
+  LibreOffice, or export again.
+- **Keep the cells as text.** Excel may retype a date, or turn a code such as `007` into a number, when you paste over a cell. Dates are written
+  `YYYY-MM-DD` and codes are text, and the contract check lists any cell that no longer fits.
+
+**Drafting with AI.** To fill in a new product's blanks, add its row to the Products tab (brand, name, category, origin, status `draft`), then run
+`npm run catalog:draft -- in.xlsx --out out.xlsx --max-usd 2 [--countries NG,GB]`. It fills only the empty cells of `draft` rows (the ingredient list, its
+page, skin concerns, skin types, steps and frequency) and adds an Availability row for each active country that has none, never adding or removing a product
+and never writing to the input file. Every cell it fills is listed in `draft_cells` with the page it came from, and a row stays `draft` with no approval, so a
+person must check each cell against its page, clear its `draft_cells` entry and approve the row. It makes real, billed Claude calls (key from `.dev.vars`) and
+stops at `--max-usd` (2 dollars by default), keeping what it has. The report lists what is still wrong, by tab, row and column; the output file is a normal
+workbook to finish and upload as above. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
+contract version), so it uploads to the environment it was exported from, and a file with no stamp stays refused by the upload.
 
 ## Face scan setup (Perfect Corp)
 

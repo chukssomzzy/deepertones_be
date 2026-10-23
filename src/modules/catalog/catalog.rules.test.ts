@@ -1,30 +1,69 @@
 import { describe, expect, it } from 'vitest'
 import { normaliseIngredient } from './catalog.ingredients'
-import { REFERENCE, REFERENCE_COVERAGE, REFERENCE_VERSION } from './catalog.reference'
+import { REFERENCE, REFERENCE_COVERAGE, REFERENCE_VERSION, type ReferenceEntry } from './catalog.reference'
 import { flagFacts } from './catalog.rules'
 import { CONCERN_KINDS } from './catalog.vocabulary'
 
 const kindsOf = (ingredient: string) =>
-  flagFacts([ingredient])
+  flagFacts([ingredient], REFERENCE)
     .map((f) => f.kind)
     .sort()
 
 describe('flagFacts', () => {
+  // The rules are an argument now (the live approved set, or REFERENCE as the seed and the eval fixture), so a result may only
+  // ever come from the array it was given: never from a copy of REFERENCE kept somewhere in the module.
+  describe('the rules it is given', () => {
+    const ZZYZX: ReferenceEntry = { name: 'zzyzx extractum', aliases: ['zzyzx oil'], kind: 'irritation', rule: 'Made up for this test.', source: null }
+
+    it('flags nothing at all when given no rules, not even what REFERENCE holds', () => {
+      expect(flagFacts(['Mercury', 'Retinol', 'Linalool'], [])).toEqual([])
+    })
+
+    it('flags an ingredient only a given rule names, and stops flagging it once that rule is not in the array', () => {
+      expect(flagFacts(['Zzyzx Extractum'], REFERENCE)).toEqual([])
+
+      expect(flagFacts(['Zzyzx Extractum'], [...REFERENCE, ZZYZX])).toEqual([
+        { kind: 'irritation', ingredient: 'Zzyzx Extractum', rule: 'Made up for this test.', source: null },
+      ])
+      expect(flagFacts(['Zzyzx Extractum'], REFERENCE)).toEqual([])
+    })
+
+    it('matches a given rule by its aliases and by the parts either side of a bracket', () => {
+      expect(flagFacts(['ZZYZX OIL', 'Aqua (Zzyzx Extractum)'], [ZZYZX]).map((f) => f.ingredient)).toEqual(['ZZYZX OIL', 'Aqua (Zzyzx Extractum)'])
+    })
+
+    it('says only what the given rules say, so a changed statement is the statement a fact carries', () => {
+      const worded = { ...ZZYZX, rule: 'A different statement.', source: 'https://example.com/zzyzx' }
+
+      expect(flagFacts(['Zzyzx Extractum'], [worded])).toEqual([
+        { kind: 'irritation', ingredient: 'Zzyzx Extractum', rule: 'A different statement.', source: 'https://example.com/zzyzx' },
+      ])
+    })
+
+    it('gives one fact per kind per ingredient, and one for each other kind the rules name for it', () => {
+      const asAllergen: ReferenceEntry = { ...ZZYZX, kind: 'allergen', rule: 'Also made up.' }
+
+      const facts = flagFacts(['Zzyzx Extractum'], [ZZYZX, ZZYZX, asAllergen])
+
+      expect(facts.map((f) => f.kind).sort()).toEqual(['allergen', 'irritation'])
+    })
+  })
+
   it('flags nothing for plain ingredients', () => {
-    expect(flagFacts(['Aqua', 'Glycerin', 'Water'])).toEqual([])
-    expect(flagFacts([])).toEqual([])
+    expect(flagFacts(['Aqua', 'Glycerin', 'Water'], REFERENCE)).toEqual([])
+    expect(flagFacts([], REFERENCE)).toEqual([])
   })
 
   it('flags nothing for water written with its INCI alias in brackets', () => {
-    expect(flagFacts(['Aqua (Water)'])).toEqual([])
+    expect(flagFacts(['Aqua (Water)'], REFERENCE)).toEqual([])
   })
 
   it('flags nothing for an unknown ingredient', () => {
-    expect(flagFacts(['Zzyzx Extractum'])).toEqual([])
+    expect(flagFacts(['Zzyzx Extractum'], REFERENCE)).toEqual([])
   })
 
   it('flags undisclosed fragrance once, as an allergen, under the ingredient exactly as written', () => {
-    const facts = flagFacts(['Parfum (Fragrance)'])
+    const facts = flagFacts(['Parfum (Fragrance)'], REFERENCE)
 
     expect(facts).toHaveLength(1)
     expect(facts[0]).toMatchObject({ kind: 'allergen', ingredient: 'Parfum (Fragrance)' })
@@ -35,7 +74,7 @@ describe('flagFacts', () => {
   })
 
   it('flags hydroquinone as banned and a pregnancy caution, keeping the ingredient as given', () => {
-    const facts = flagFacts(['HYDROQUINONE'])
+    const facts = flagFacts(['HYDROQUINONE'], REFERENCE)
 
     expect(facts.map((f) => f.kind).sort()).toEqual(['banned-substance', 'pregnancy-caution'])
     expect(facts.every((f) => f.ingredient === 'HYDROQUINONE')).toBe(true)
@@ -51,7 +90,7 @@ describe('flagFacts', () => {
   })
 
   it('matches on the part inside brackets', () => {
-    const facts = flagFacts(['Water (Mercurous Chloride)'])
+    const facts = flagFacts(['Water (Mercurous Chloride)'], REFERENCE)
 
     expect(facts).toHaveLength(1)
     expect(facts[0]).toMatchObject({ kind: 'banned-substance', ingredient: 'Water (Mercurous Chloride)' })
@@ -62,7 +101,7 @@ describe('flagFacts', () => {
   })
 
   it('gives every fact a rule, and a source that is an https URL or null', () => {
-    const facts = flagFacts(['Retinol', 'Hydroquinone', 'Linalool', 'Isopropyl Myristate'])
+    const facts = flagFacts(['Retinol', 'Hydroquinone', 'Linalool', 'Isopropyl Myristate'], REFERENCE)
 
     expect(facts.length).toBeGreaterThan(0)
     for (const f of facts) {
@@ -72,7 +111,7 @@ describe('flagFacts', () => {
   })
 
   it('cites a regulation for regulatory facts and nothing for commonly cited concerns', () => {
-    const sourceOf = (ingredient: string, kind: string) => flagFacts([ingredient]).find((f) => f.kind === kind)?.source
+    const sourceOf = (ingredient: string, kind: string) => flagFacts([ingredient], REFERENCE).find((f) => f.kind === kind)?.source
 
     expect(sourceOf('Hydroquinone', 'banned-substance')).toMatch(/^https:\/\//)
     expect(sourceOf('Linalool', 'allergen')).toMatch(/^https:\/\//)
@@ -84,14 +123,14 @@ describe('flagFacts', () => {
   })
 
   it('points banned and allergen facts at an https source', () => {
-    const facts = flagFacts(['Hydroquinone', 'Linalool']).filter((f) => f.kind === 'banned-substance' || f.kind === 'allergen')
+    const facts = flagFacts(['Hydroquinone', 'Linalool'], REFERENCE).filter((f) => f.kind === 'banned-substance' || f.kind === 'allergen')
 
     expect(facts).toHaveLength(2)
     for (const f of facts) expect(f.source).toMatch(/^https:\/\//)
   })
 
   it('keeps input order across ingredients and gives one fact per kind per ingredient', () => {
-    const facts = flagFacts(['Aqua', 'Retinol', 'Glycerin', 'Linalool', 'Parfum (Fragrance)'])
+    const facts = flagFacts(['Aqua', 'Retinol', 'Glycerin', 'Linalool', 'Parfum (Fragrance)'], REFERENCE)
 
     expect(facts.map((f) => f.ingredient)).toEqual([
       'Retinol',
@@ -134,13 +173,13 @@ describe('flagFacts', () => {
     })
 
     it.each(['Retinyl Palmitate', 'Sodium Laureth Sulfate', 'Mercury Retrograde Extract'])('does not flag %s, which only resembles a listed name', (ingredient) => {
-      expect(flagFacts([ingredient])).toEqual([])
+      expect(flagFacts([ingredient], REFERENCE)).toEqual([])
     })
 
     it.each(['Hydroquinone 4%', '1,4-Dihydroxybenzene', 'Parfum/Fragrance', 'Cocos Nucifera (Coconut) Oil', 'Clobetasol 17-Propionate'])(
       'reports %s exactly as written',
       (ingredient) => {
-        const facts = flagFacts([ingredient])
+        const facts = flagFacts([ingredient], REFERENCE)
 
         expect(facts.length).toBeGreaterThan(0)
         expect(facts.every((f) => f.ingredient === ingredient)).toBe(true)
@@ -148,7 +187,7 @@ describe('flagFacts', () => {
     )
 
     it('gives one allergen fact for a fragrance written as two names with a slash', () => {
-      expect(flagFacts(['Parfum/Fragrance']).filter((f) => f.kind === 'allergen')).toHaveLength(1)
+      expect(flagFacts(['Parfum/Fragrance'], REFERENCE).filter((f) => f.kind === 'allergen')).toHaveLength(1)
     })
   })
 

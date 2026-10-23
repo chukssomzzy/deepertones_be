@@ -59,3 +59,21 @@ export const ANALYSIS_VERSION = 1
 
 /** A formulation not re-checked for this long is re-checked on its next scan. */
 export const FRESH_FOR_DAYS = 365
+
+// The recommendation catalog's own vocabularies (spec #115). Skin concerns and skin types are the face scan's (`SHOWN_CONCERNS`,
+// `SKIN_TYPE_LABELS`), so a recommendation is written in what a scan can show.
+
+/** The steps of a routine, in the order it is done. */
+export const ROUTINE_STEPS = ['cleanse', 'treat', 'moisturise', 'protect'] as const
+export type RoutineStep = (typeof ROUTINE_STEPS)[number]
+
+export const FREQUENCIES = ['am', 'pm', 'am-pm', 'alternate-days', 'weekly', 'as-needed'] as const
+export type Frequency = (typeof FREQUENCIES)[number]
+
+/** Cheapest first. Each country sets where a band ends (the workbook's Countries tab). */
+export const BUDGET_BANDS = ['low', 'mid', 'high'] as const
+export type BudgetBand = (typeof BUDGET_BANDS)[number]
+
+/** Where a recommendation came from: found by us, or put forward by the brand (which only ever buys a review, never a place). */
+export const ORIGINS = ['sourced', 'brand-submitted'] as const
+export type Origin = (typeof ORIGINS)[number]

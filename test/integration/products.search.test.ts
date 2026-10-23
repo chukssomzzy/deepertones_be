@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
+import { D1CatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { MemoryCatalogImageStore } from '../../src/providers/catalog-images/memory.catalog-image-store'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
@@ -78,6 +79,7 @@ const analyst = new MemoryProductAnalyst()
 const researcher = new MemoryProductResearcher()
 const catalog = new ProductCatalogService({
   repository: new D1CatalogRepository(createDb(env.DB)),
+  workbook: new D1CatalogWorkbookRepository(createDb(env.DB)),
   researcher,
   analyst,
   images: new MemoryCatalogImageStore(),

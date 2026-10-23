@@ -288,6 +288,8 @@ describe('wrangler.jsonc scan, goal, safety, product search and shelf route rate
     // Perfect Corp's webhook: public, and signed, so the limit only keeps a flood of unsigned requests from costing a signature check each. A burst of
     // genuine deliveries (every scan sends one or two) is far under it.
     ['PERFECT_CORP_WEBHOOK_LIMITER', 300],
+    // The admin catalog routes (export and import), per address and before the token is checked, so a guess at the token costs an attempt. Only a few people ever call them.
+    ['ADMIN_IP_LIMITER', 10],
   ]
   const cases = scanLimitBlocks.flatMap(([place, block]) => limiters.map(([name, limit]) => ({ place, block, name, limit })))
 
@@ -409,5 +411,23 @@ describe('wrangler.jsonc face-scans queue', () => {
       PARSE_SAFETY_QUEUE: `deepertones-parse-safety-${environment}`,
       EMAIL_QUEUE: `deepertones-email-${environment}`,
     })
+  })
+})
+
+// The admin catalog routes: the token is a secret in every block (env blocks do not inherit `secrets`), and the limiter has an id of its own in each.
+describe('wrangler.jsonc admin catalog access', () => {
+  const adminBlocks: [string, { secrets?: { required?: string[] }; vars?: Record<string, string>; ratelimits?: { name: string; namespace_id: string }[] } | undefined, string][] = [
+    ['top level', config as never, '1029'],
+    ['env.staging', config.env.staging as never, '2029'],
+    ['env.production', config.env.production as never, '3029'],
+  ]
+
+  it.each(adminBlocks)('%s requires ADMIN_API_TOKEN as a secret, never holds it as a plain var', (_, block) => {
+    expect(block?.secrets?.required).toContain('ADMIN_API_TOKEN')
+    expect(block?.vars).not.toHaveProperty('ADMIN_API_TOKEN')
+  })
+
+  it.each(adminBlocks)('%s gives ADMIN_IP_LIMITER its own namespace_id', (_, block, expected) => {
+    expect(block?.ratelimits?.find((limit) => limit.name === 'ADMIN_IP_LIMITER')?.namespace_id).toBe(expected)
   })
 })

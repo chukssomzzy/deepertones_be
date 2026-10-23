@@ -18,8 +18,10 @@ import { AnalysisRejectedError, CATALOG_POLICY, CatalogBusyError, ProductCatalog
 import type { StockImageOutcome } from './catalog.service'
 import type { DraftConcernRow } from './catalog.types'
 import { ANALYSIS_VERSION, CONCERN_KINDS, FRESH_FOR_DAYS, SEVERITIES, TRAITS } from './catalog.vocabulary'
+import { FakeCatalogWorkbookRepository } from './catalog.workbook.repository.fake'
+import { ruleRow } from './catalog.workbook.repository.contract'
 
-// The repository contract (fake and D1) is mounted by catalog.repository.test.ts and its integration twin.
+// The repository contracts (fake and D1) are mounted by catalog.repository.test.ts, catalog.workbook.repository.test.ts and their integration twins.
 
 const T0 = new Date('2030-06-15T12:00:00.000Z')
 /** Midnight UTC of the day T0 is in: the window the daily budget alerts are kept in. */
@@ -53,6 +55,8 @@ type SetupOptions = {
   policy?: Partial<typeof CATALOG_POLICY>
   images?: MemoryCatalogImageStore
   repository?: FakeCatalogRepository
+  /** The live ingredient rules. A fresh one starts as the migrated database does: the seed REFERENCE rules, under rules version 'seed-2026-10'. */
+  workbook?: FakeCatalogWorkbookRepository
   researcher?: MemoryProductResearcher
 }
 
@@ -60,6 +64,7 @@ const setup = (options: SetupOptions = {}) => {
   let clock = T0
   let n = 0
   const repository = options.repository ?? new FakeCatalogRepository()
+  const workbook = options.workbook ?? new FakeCatalogWorkbookRepository()
   const researcher = options.researcher ?? new MemoryProductResearcher()
   const analyst = new MemoryProductAnalyst()
   const images = options.images ?? new MemoryCatalogImageStore()
@@ -75,6 +80,7 @@ const setup = (options: SetupOptions = {}) => {
   })
   const service = new ProductCatalogService({
     repository,
+    workbook,
     researcher,
     analyst,
     images,
@@ -86,7 +92,7 @@ const setup = (options: SetupOptions = {}) => {
   })
   /** The kind and window of every alert queued so far. */
   const alerts = () => alertJobs.enqueued.map((e) => e.body as { kind: string; windowStart: number })
-  return { service, repository, researcher, analyst, images, alerts, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
+  return { service, repository, workbook, researcher, analyst, images, alerts, advance: (ms: number) => (clock = new Date(clock.getTime() + ms)) }
 }
 type Ctx = ReturnType<typeof setup>
 
@@ -1822,6 +1828,48 @@ describe('ProductCatalogService.productSummary', () => {
   })
 })
 
+describe('ProductCatalogService.latestIngredients', () => {
+  it('gives the ingredient list of the product\'s only formulation, as it was stored', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx, { ingredients: CLEAN })
+
+    expect(await ctx.service.latestIngredients(productId)).toEqual(CLEAN)
+  })
+
+  it('gives the list of the formulation found most recently, when the product has more than one', async () => {
+    const ctx = setup()
+    const { productId } = await researched(ctx, { ingredients: CLEAN })
+    ctx.advance(MINUTE)
+    await ctx.service.addLabelIngredients(productId, [...CLEAN, 'Phenoxyethanol'])
+
+    expect(await ctx.service.latestIngredients(productId)).toEqual([...CLEAN, 'Phenoxyethanol'])
+  })
+
+  it('is null for a product that has no formulation yet (resolved, never researched)', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+
+    expect(await ctx.service.latestIngredients(productId)).toBeNull()
+  })
+
+  it('is null for a product id the catalog does not hold, rather than an error: a caller asking about what a user named must go on', async () => {
+    const ctx = setup()
+
+    expect(await ctx.service.latestIngredients('no-such-product')).toBeNull()
+  })
+
+  it('makes no research call and no model call, and writes nothing', async () => {
+    const ctx = setup()
+    const { productId } = await ctx.service.resolve(identity())
+    ctx.researcher.respondWith(() => {
+      throw new Error('the researcher must not be asked')
+    })
+
+    expect(await ctx.service.latestIngredients(productId)).toBeNull()
+    expect(await ctx.repository.latestFormulation(productId)).toBeNull()
+  })
+})
+
 describe('ProductCatalogService.research without asking the researcher', () => {
   const productFor = async (ctx: Ctx, who = identity()) => (await ctx.service.resolve(who)).productId
 
@@ -2863,6 +2911,7 @@ const buildAround = (analyst: MemoryProductAnalyst, repository: FakeCatalogRepos
   researcher.respondWith(() => ({ found: true, ingredients: WITH_MERCURY, sourceUrl: SOURCE_URL }))
   const service = new ProductCatalogService({
     repository,
+    workbook: new FakeCatalogWorkbookRepository(),
     researcher,
     analyst,
     images: new MemoryCatalogImageStore(),
@@ -4774,6 +4823,135 @@ describe('ProductCatalogService.resolve: a row whose identity key the code no lo
     expect(ctx.analyst.calls.sameProduct).toHaveLength(1)
     expect(result.productId).not.toBe(OLD_ID)
     expect(await ctx.repository.findProductByKey(identityKey(scanned))).toMatchObject({ id: result.productId })
+  })
+})
+
+// The ingredient rules the analysis matches are the live approved ones (the workbook's Ingredients tab), read through the catalog's workbook
+// repository, and the version they are under is the reference version stored with every analysis. The rules a repository serves are pinned by
+// its own contract (a draft or retired rule is never served); here a rule is published through the fake as an upload would.
+describe('ProductCatalogService: the live ingredient rules', () => {
+  const SEED_VERSION = 'seed-2026-10'
+  const NEW_VERSION = 'rules-test-2'
+  /** An ingredient no seed rule names, so only a published rule can flag it. */
+  const ZZYZX = 'Zzyzx Extractum'
+  const zzyzxRule = (over: Parameters<typeof ruleRow>[0] = {}) =>
+    ruleRow({ name: 'zzyzx extractum', aliases: [], kind: 'irritation', statement: 'Commonly reported to sting skin with a weakened barrier.', sourceUrl: null, ...over })
+  /** The seed rules plus these, as the next upload would publish them. */
+  const publishWith = async (ctx: Ctx, version: string, ...added: ReturnType<typeof ruleRow>[]) => {
+    const seed = (await ctx.workbook.liveRules()).entries.map((e, i) =>
+      ruleRow({ code: `ING-SEED-${String(i).padStart(3, '0')}`, name: e.name, aliases: e.aliases, kind: e.kind, statement: e.rule, sourceUrl: e.source }),
+    )
+    await ctx.workbook.publishRules(version, [...seed, ...added])
+  }
+  /** An analyst that covers every fact it is given with a concern of that kind, as a good answer must. */
+  const coveringEveryFact = (ctx: Ctx) =>
+    ctx.analyst.analyseWith((input) =>
+      input.flaggedFacts.map((f) => draft({ kind: f.kind, ingredients: [f.ingredient], sources: f.source === null ? [] : [f.source] })),
+    )
+
+  it('starts under rules version seed-2026-10, which is the version analyses already stored were made at', () => {
+    expect(REFERENCE_VERSION).toBe(SEED_VERSION)
+  })
+
+  it('does not analyse again a formulation analysed at seed-2026-10 before the rules moved into the database', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await researched(ctx)
+    // Written the way the old code wrote it: the literal, since nothing the service does now may be needed to produce it.
+    await ctx.repository.saveAnalysis(formulationId, { concerns: [], analysisVersion: ANALYSIS_VERSION, referenceVersion: SEED_VERSION, analysedAt: T0 })
+
+    expect(await ctx.service.resolve(identity())).toEqual({ kind: 'ready', productId, formulationId })
+    await ctx.service.analyse(formulationId)
+    expect(ctx.analyst.calls.analyse).toHaveLength(0)
+  })
+
+  it('stamps an analysis with the live rules version, not the compiled-in one', async () => {
+    const ctx = setup()
+    await publishWith(ctx, NEW_VERSION)
+    const { formulationId } = await researched(ctx)
+
+    await ctx.service.analyse(formulationId)
+
+    expect(await ctx.repository.findFormulation(formulationId)).toMatchObject({ analysisVersion: ANALYSIS_VERSION, referenceVersion: NEW_VERSION })
+  })
+
+  it('shows the live rules version as the reference version of a result, still saying the coverage is partial', async () => {
+    const ctx = setup()
+    await publishWith(ctx, NEW_VERSION)
+    const { formulationId } = await analysed(ctx)
+
+    expect((await ctx.service.productView(formulationId)).reference).toEqual({ version: NEW_VERSION, coverage: REFERENCE_COVERAGE })
+  })
+
+  it('shows seed-2026-10 as the reference version before any upload', async () => {
+    const ctx = setup()
+    const { formulationId } = await analysed(ctx)
+
+    expect((await ctx.service.productView(formulationId)).reference.version).toBe(SEED_VERSION)
+  })
+
+  it('asks for the analysis again, on the next scan, once the live rules version moves', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx, { ingredients: [...CLEAN, ZZYZX] })
+    expect(await ctx.service.resolve(identity())).toEqual({ kind: 'ready', productId, formulationId })
+
+    await publishWith(ctx, NEW_VERSION, zzyzxRule())
+
+    // The same service object: it must not keep serving the version it read first.
+    expect(await ctx.service.resolve(identity())).toEqual({ kind: 'needs-analysis', productId, formulationId })
+  })
+
+  it('gives the analyst the fact a newly approved rule flags, and is ready again once that analysis is stored', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await analysed(ctx, { ingredients: [...CLEAN, ZZYZX] })
+    expect(ctx.analyst.calls.analyse[0]!.flaggedFacts).toEqual([])
+    await publishWith(ctx, NEW_VERSION, zzyzxRule({ statement: 'A statement from the workbook.', sourceUrl: 'https://example.com/zzyzx' }))
+    coveringEveryFact(ctx)
+
+    await ctx.service.analyse(formulationId)
+
+    expect(ctx.analyst.calls.analyse[1]!.flaggedFacts).toEqual([
+      { kind: 'irritation', ingredient: ZZYZX, rule: 'A statement from the workbook.', source: 'https://example.com/zzyzx' },
+    ])
+    expect(await ctx.service.resolve(identity())).toEqual({ kind: 'ready', productId, formulationId })
+    expect(await ctx.repository.findFormulation(formulationId)).toMatchObject({ referenceVersion: NEW_VERSION })
+  })
+
+  it('still flags what the seed rules flag, since an upload that keeps them keeps them', async () => {
+    const ctx = setup()
+    await publishWith(ctx, NEW_VERSION)
+    const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+    coveringEveryFact(ctx)
+
+    await ctx.service.analyse(formulationId)
+
+    expect(ctx.analyst.calls.analyse[0]!.flaggedFacts).toEqual([{ kind: 'banned-substance', ingredient: 'Mercury', rule: expect.any(String), source: EUR_LEX }])
+  })
+
+  it('flags nothing for a rule an upload retired, and nothing for one that is only a draft', async () => {
+    const ctx = setup()
+    // The whole set, so there is no approved Mercury rule left: the only one is retired.
+    await ctx.workbook.publishRules(NEW_VERSION, [
+      zzyzxRule({ status: 'draft', approvedBy: null, approvedOn: null }),
+      zzyzxRule({ name: 'mercury', aliases: [], kind: 'banned-substance', status: 'retired' }),
+    ])
+    const { formulationId } = await researched(ctx, { ingredients: ['Aqua', 'Mercury', ZZYZX] })
+
+    await ctx.service.analyse(formulationId)
+
+    expect(ctx.analyst.calls.analyse[0]!.flaggedFacts).toEqual([])
+  })
+
+  it('counts a rejection against the rules version it happened under, so a new version gets a fresh start', async () => {
+    const ctx = setup()
+    const { formulationId } = await researched(ctx, { ingredients: WITH_MERCURY })
+    ctx.analyst.analyseWith(() => [])
+    for (let i = 0; i < 3; i++) await errorOf(ctx.service.analyse(formulationId))
+    expect(await ctx.repository.rejectedAnalyses(formulationId, ANALYSIS_VERSION, SEED_VERSION)).toBe(3)
+    expect((await ctx.service.resolve(identity())).kind).toBe('analysis-failed')
+
+    await publishWith(ctx, NEW_VERSION)
+
+    expect((await ctx.service.resolve(identity())).kind).toBe('needs-analysis')
   })
 })
 

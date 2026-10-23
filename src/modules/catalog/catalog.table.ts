@@ -49,7 +49,8 @@ export const formulations = sqliteTable(
     // In label (INCI) order, as a JSON array.
     ingredients: text('ingredients', { mode: 'json' }).$type<string[]>().notNull(),
     ingredientsKey: text('ingredients_key').notNull(),
-    sourceKind: text('source_kind', { enum: ['web', 'label'] }).notNull(),
+    // 'workbook' is a list the catalog workbook holds for a recommended product; no model read it.
+    sourceKind: text('source_kind', { enum: ['web', 'label', 'workbook'] }).notNull(),
     sourceUrl: text('source_url'),
     foundAt: integer('found_at', { mode: 'timestamp_ms' }).notNull(),
     // Null until analysed.

@@ -19,6 +19,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'split-name': 'ANTHROPIC_MODEL_JUDGE',
   'read-goal': 'ANTHROPIC_MODEL_JUDGE',
   'read-mentions': 'ANTHROPIC_MODEL_JUDGE',
+  'draft-catalog-row': 'ANTHROPIC_MODEL_RESEARCH',
 }
 
 describe('the eval default models', () => {

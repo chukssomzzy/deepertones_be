@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, expectTypeOf, it } from 'vitest'
 import { GOALS } from '../goals/goals.vocabulary'
 import {
   CHANGE_VERSION,
@@ -10,6 +10,8 @@ import {
   VISIBILITY_VERSION,
   WORDING,
   WORDING_VERSION,
+  type ShownConcern,
+  type SkinTypeLabel,
   bandFor,
   changeWords,
   concernChange,
@@ -17,6 +19,8 @@ import {
   hdActionsForGoal,
   isVisible,
   resultView,
+  SHOWN_CONCERNS as EXPORTED_SHOWN_CONCERNS,
+  SKIN_TYPE_LABELS,
   seenWords,
   skinAgeChange,
   skinAgeChangeWords,
@@ -509,6 +513,32 @@ describe('skin age wording', () => {
 
   it('gives the same words every time for the same age', () => {
     expect(skinAgeWords(41)).toBe(skinAgeWords(41))
+  })
+})
+
+// The recommendation catalog (spec #115) is written in these two vocabularies, so they are runtime lists here and the types come from them.
+describe('the shown concerns and skin type labels as runtime lists', () => {
+  it('lists the nine concerns a goal can show, by their Perfect Corp names', () => {
+    // SHOWN_CONCERNS above is this file's own literal list, so the exported one is compared with an independent source.
+    expect([...EXPORTED_SHOWN_CONCERNS].sort()).toEqual([...SHOWN_CONCERNS].sort())
+    expect(new Set(EXPORTED_SHOWN_CONCERNS).size).toBe(EXPORTED_SHOWN_CONCERNS.length)
+  })
+
+  it('holds every concern any goal shows, so a goal can never show one the catalog cannot name', () => {
+    for (const goal of GOALS) for (const concern of concernsForGoal(goal)) expect(EXPORTED_SHOWN_CONCERNS, `${goal}: ${concern}`).toContain(concern)
+  })
+
+  it('lists the four skin type labels', () => {
+    expect([...SKIN_TYPE_LABELS]).toEqual(['oily', 'dry', 'combination', 'normal'])
+  })
+
+  it('is the same set as the types, so a label added to one list is added to the other', () => {
+    expectTypeOf<(typeof EXPORTED_SHOWN_CONCERNS)[number]>().toEqualTypeOf<ShownConcern>()
+    expectTypeOf<(typeof SKIN_TYPE_LABELS)[number]>().toEqualTypeOf<SkinTypeLabel>()
+  })
+
+  it('reads every label the skin type table can produce from this list', () => {
+    for (const label of SKIN_TYPE_LABELS) expect(skinTypeLabel([{ region: 'whole', skinType: label }]), label).toBe(label)
   })
 })
 

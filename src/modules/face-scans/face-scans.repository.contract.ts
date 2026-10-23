@@ -439,6 +439,88 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
       })
     })
 
+    describe('latestReadyForProfile', () => {
+      const ready = async (repository: FaceScansRepository, scan: NewFaceScan, skinType: FaceScanCompletion['skinType'] = 'dry') => {
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        await repository.completeFaceScan(scan.id, { results: [], masks: [], skinType, skinAge: null, tablesVersion: '1', updatedAt: at(MINUTE) })
+      }
+
+      it('has none for a profile with no face scan', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.latestReadyForProfile(profileId)).toBeNull()
+      })
+
+      it('is the newest ready scan of the profile by time, however the scans were written', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const newest = newScan(account, { createdAt: at(10 * MINUTE), goalAtScan: 'brighter' })
+        const oldest = newScan(account, { createdAt: at(MINUTE), goalAtScan: 'glow' })
+        const middle = newScan(account, { createdAt: at(5 * MINUTE), goalAtScan: 'clear-skin' })
+        for (const scan of [newest, oldest, middle]) await ready(repository, scan)
+
+        expect((await repository.latestReadyForProfile(account.profileId))!.id).toBe(newest.id)
+      })
+
+      it('goes to the scan written last when two ready scans share a time, the same way every time', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const first = newScan(account, { createdAt: at(MINUTE) })
+        const second = newScan(account, { createdAt: at(MINUTE) })
+        await ready(repository, first)
+        await ready(repository, second)
+
+        expect((await repository.latestReadyForProfile(account.profileId))!.id).toBe(second.id)
+        expect((await repository.latestReadyForProfile(account.profileId))!.id).toBe(second.id)
+      })
+
+      it.each(['analysing', 'needs-retake', 'failed'] as const)('passes over a newer scan that is %s, to the newest scan that is ready', async (state) => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const good = newScan(account, { createdAt: at(MINUTE) })
+        const newer = newScan(account, { createdAt: at(5 * MINUTE), goalAtScan: 'brighter' })
+        await ready(repository, good)
+        await repository.createFaceScan(newer, [newPhoto(newer, 'front')])
+        if (state !== 'analysing') await repository.updateFaceScan(newer.id, 'analysing', { state, updatedAt: at(6 * MINUTE) })
+
+        expect((await repository.latestReadyForProfile(account.profileId))!.id).toBe(good.id)
+      })
+
+      it('has none for a profile whose only scan is not ready', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const scan = newScan(account)
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+
+        expect(await repository.latestReadyForProfile(account.profileId)).toBeNull()
+      })
+
+      it('answers the newest ready scan whether or not it found a skin type: it does not fall back to an older one', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const older = newScan(account, { createdAt: at(MINUTE) })
+        const newer = newScan(account, { createdAt: at(5 * MINUTE) })
+        await ready(repository, older, 'dry')
+        await ready(repository, newer, null)
+
+        expect(await repository.latestReadyForProfile(account.profileId)).toMatchObject({ id: newer.id, skinType: null })
+      })
+
+      it('belongs to the profile: the account\'s other profile, and other accounts, do not see it', async () => {
+        const { repository, newAccount, newProfile } = await make()
+        const mine = await newAccount()
+        const other = await newAccount()
+        const second = await newProfile(mine.userId)
+        const scan = newScan(mine)
+        await ready(repository, scan)
+
+        expect((await repository.latestReadyForProfile(mine.profileId))!.id).toBe(scan.id)
+        expect(await repository.latestReadyForProfile(second)).toBeNull()
+        expect(await repository.latestReadyForProfile(other.profileId)).toBeNull()
+      })
+    })
+
     describe('listForProfile', () => {
       // A profile's scans, latest first by time and then by the higher id, cut at the limit. Every state is listed: the app offers a retake, shows a failure.
       type EndState = 'ready' | 'failed' | 'needs-retake' | 'analysing'

@@ -18,17 +18,9 @@ export const CHANGE_VERSION = 1
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
 export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION}`
 
-/** A concern a goal can show. `hd_skin_type` is also asked for, but it is the skin type label and never a seen-words concern. */
-export type ShownConcern =
-  | 'hd_acne'
-  | 'hd_pore'
-  | 'hd_oiliness'
-  | 'hd_age_spot'
-  | 'hd_redness'
-  | 'hd_radiance'
-  | 'hd_texture'
-  | 'hd_dark_circle'
-  | 'hd_moisture'
+/** The concerns a goal can show. `hd_skin_type` is also asked for, but it is the skin type label and never a seen-words concern. */
+export const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
+export type ShownConcern = (typeof SHOWN_CONCERNS)[number]
 
 /** How much of a concern can be seen, from the faintest. A score that is not visible has no band. */
 export type Band = 'a-little' | 'some' | 'clear'
@@ -146,7 +138,8 @@ export const seenWords = (concern: ShownConcern, band: Band, region: string): st
   return (Object.hasOwn(regions, region) ? regions[region] : undefined) ?? regions.whole
 }
 
-export type SkinTypeLabel = 'oily' | 'dry' | 'combination' | 'normal'
+export const SKIN_TYPE_LABELS = ['oily', 'dry', 'combination', 'normal'] as const
+export type SkinTypeLabel = (typeof SKIN_TYPE_LABELS)[number]
 
 // Perfect Corp's own text for a region is the type, optionally with "Redness" added: "Dry", "Dry & Redness", "Oily and Redness", and plain
 // "Redness", which has no oil or dryness to name and so reads as normal. Anything else is a type this table does not know.

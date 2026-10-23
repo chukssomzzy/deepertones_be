@@ -3125,3 +3125,118 @@ describe('FaceScanService: push notifications', () => {
     })
   })
 })
+
+describe('FaceScanService.latestSkinType', () => {
+  const latestSkinType = (ctx: Ctx, profileId = PROFILE) => asUser(() => ctx.service.latestSkinType(), profileId)
+  /** What Perfect Corp reads for the whole face of a ready scan. */
+  const reading = (skinType: string) => analysed({ skinTypes: [{ region: 'whole', skinType }] })
+  /** A scan made ready the real way (uploaded, then fetched from a finished analysis) with this reading. */
+  const readyWith = async (ctx: Ctx, goal: Goal, result: SkinAnalysisResult) => {
+    const { id } = await uploaded(ctx, goal)
+    ctx.perfectCorp.script('getSkinAnalysis', result)
+    await fetchStep(ctx, id)
+    return id
+  }
+
+  it('is null for a profile that never made a face scan', async () => {
+    const ctx = setup()
+
+    expect(await latestSkinType(ctx)).toBeNull()
+  })
+
+  it('is the label of the latest scan once it is ready: Perfect Corp\'s "Dry" for the whole face is dry', async () => {
+    const ctx = setup()
+    await finished(ctx)
+
+    expect(await latestSkinType(ctx)).toBe('dry')
+  })
+
+  it.each([
+    ['Oily', 'oily'],
+    ['Combination', 'combination'],
+    ['Normal', 'normal'],
+  ])('reads a whole-face "%s" as %s', async (text, label) => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', reading(text))
+
+    expect(await latestSkinType(ctx)).toBe(label)
+  })
+
+  it('is null while the latest scan is still being analysed', async () => {
+    const ctx = setup()
+    await started(ctx)
+
+    expect(await latestSkinType(ctx)).toBeNull()
+  })
+
+  it('is null when the latest scan needs a retake: nothing was read from it', async () => {
+    const ctx = setup()
+    const id = await started(ctx)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    await upload(ctx, id)
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'needs-retake' })
+
+    expect(await latestSkinType(ctx)).toBeNull()
+  })
+
+  it('is null when the latest scan is ready but Perfect Corp sent no skin type for it', async () => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', analysed({ skinTypes: [], skinAge: null, all: null }))
+
+    expect(await latestSkinType(ctx)).toBeNull()
+  })
+
+  it('is the newest ready scan\'s label when there are several: a rescan under a new goal replaces the old reading', async () => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', reading('Dry'))
+    ctx.advanceClock(MINUTE)
+    await readyWith(ctx, 'clear-skin', reading('Oily'))
+
+    expect(await latestSkinType(ctx)).toBe('oily')
+  })
+
+  it('is the newest READY scan\'s label, so a newer scan still being analysed does not hide an older ready one', async () => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', reading('Dry'))
+    ctx.advanceClock(MINUTE)
+    const newer = await started(ctx, 'clear-skin')
+    expect(await rowOf(ctx, newer)).toMatchObject({ state: 'analysing' })
+
+    expect(await latestSkinType(ctx)).toBe('dry')
+  })
+
+  it('is the newest ready scan\'s label when a newer scan needs a retake', async () => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', reading('Dry'))
+    ctx.advanceClock(MINUTE)
+    const newer = await started(ctx, 'clear-skin')
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+    await upload(ctx, newer)
+    expect(await rowOf(ctx, newer)).toMatchObject({ state: 'needs-retake' })
+
+    expect(await latestSkinType(ctx)).toBe('dry')
+  })
+
+  it('is the newest ready scan\'s label, and a newer ready scan with no skin type does not fall back to an older reading: that scan is the newest ready one', async () => {
+    const ctx = setup()
+    await readyWith(ctx, 'glow', reading('Dry'))
+    ctx.advanceClock(MINUTE)
+    await readyWith(ctx, 'clear-skin', analysed({ skinTypes: [], skinAge: null, all: null }))
+
+    expect(await latestSkinType(ctx)).toBeNull()
+  })
+
+  it('is the label of the caller\'s own profile\'s scan only: another profile of the account has none, and has its own', async () => {
+    const ctx = setup()
+    await finished(ctx)
+
+    expect(await latestSkinType(ctx, OTHER_PROFILE)).toBeNull()
+    expect(await latestSkinType(ctx, PROFILE)).toBe('dry')
+  })
+
+  it('needs a user: a caller with no session is UnauthorizedError', async () => {
+    const ctx = setup()
+
+    expect(await errorOf(runAs({ kind: 'public' }, () => ctx.service.latestSkinType()))).toBeInstanceOf(UnauthorizedError)
+  })
+})

@@ -40,6 +40,7 @@ src/
     <feature>.service.test.ts     unit tests, next to the code
   modules/scans/           the product scan: scans and scan_items, ScanService, the advance-scan-item job (see "Scan module")
   modules/face-scans/      the face scan: pure rules (face-scans.tables.ts), consent, the scan records and their routes, FaceScanService (see "Face scans")
+  modules/recommendations/ where a profile shops and what it can spend, and the reviewed products it may be suggested: RecommendationService (see "Shopping facts and candidates")
   emails/                  email templates: html tag, brand, components/, templates/, registry (renderEmail)
   prompts/                 the Claude system prompts as Markdown, and prompts.generated.ts built from them (see "Prompts")
   jobs/                    the job system: job.ts (defineJob), dispatcher.ts (the Worker's queue
@@ -58,6 +59,7 @@ src/
     (scan-events/ is the port a scan's changes are published and watched through: ScanEvents, a memory fake, and the
      Durable Object adapter. See "Live updates".)
     (push/ sends push notifications: a PushSender port, the Expo adapter, a memory fake. See "Push notifications (Expo)".)
+    (workbook-archive/ keeps the .xlsx of each applied catalog upload in the private bucket: a WorkbookArchive port, an R2 adapter, a memory fake. See "Catalog workbook import".)
     (perfect-corp/ reaches Perfect Corp (YouCam) for the face scan: a PerfectCorpClient port with its error classes, the REST adapter, a memory
      fake, and the VendorSpendLedger port. See "Perfect Corp provider" and "Vendor spend ledger".)
 src/realtime/              Durable Object classes (ScanStream), exported from src/index.ts; reached only through a provider
@@ -290,11 +292,11 @@ columns cannot leak by accident, and `AppType` (the frontend's typed client) ref
 Every route is declared with `defineRoute()` on an `openapiApp()` (`lib/openapi.ts`, built on
 `@hono/zod-openapi`). The same zod schemas validate requests, generate the spec and type the
 handler, so the compiler rejects a handler that returns a status or body its route does not
-declare: the docs cannot drift from the code. `AppType`/`hc` keep working.
+declare: the docs cannot drift from the code. `AppType`/`hc` keep working. A route's `security` names how it is guarded: `bearerAuth` for a user's access token, `adminToken` (the `X-Admin-Token` header) for the `/api/v1/admin` routes, `[]` for a public one.
 
 ### API versioning
 Every API route is mounted under `/api/v1` (`API_V1_PREFIX` in `lib/api-version.ts`). `src/app.ts` builds one `v1` sub-app
-(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
+(`/auth`, `/me`, `/products`, `/onboarding`, `/scans/products`, `/scans/faces`, `/admin`) and mounts it in the same `app.route(...)` chain as `/health`, so the typed client (`hc<AppType>(...)`) reaches
 `client.api.v1.auth`, `client.api.v1.me`, `client.api.v1.products`, `client.api.v1.onboarding` and `client.api.v1.scans.products`. `/health`, `/docs` and `/openapi.json` stay at the root: they
 describe the service, not the API contract. The unversioned paths are gone (the app had not shipped), so they 404 with the
 usual `NOT_FOUND` envelope. A breaking change means a new `/api/v2` sub-app mounted next to v1, not an edit to v1.
@@ -489,6 +491,7 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
 | `PUT`/`DELETE /api/v1/me/push-token`, `GET`/`PATCH /api/v1/me/notification-settings` | bearer (guests included); see "Push tokens and notification settings" | none |
 | `PUT`/`GET /api/v1/me/goal`, `GET /api/v1/me/onboarding` | bearer (guests included); see "Goals (onboarding)" | none |
 | `PUT`/`GET /api/v1/me/safety` | bearer (guests included); see "Safety facts (onboarding)" | none |
+| `PUT`/`GET /api/v1/me/shopping` | bearer (guests included); see "Shopping facts and candidates" | PUT: 20 per IP and 10 per user; GET none |
 | `GET /api/v1/onboarding/content` | public: a token is ignored; see "Onboarding content" | none (cached) |
 
 - **Sessions** are `{ tokens: { accessToken, refreshToken, accessExpiresAt, refreshExpiresAt }, user }`; they do not carry the
@@ -901,6 +904,56 @@ two texts is the fourth.
   (`SAFETY_SET_IP_LIMITER` 20 a minute per address, then `signedIn()`, then `SAFETY_SET_USER_LIMITER` 10 a minute per user; 429 `RATE_LIMITED` with `Retry-After`; namespace ids 1022/1023, 2022/2023 and 3022/3023): a
   save can queue a parse that researches a product into the shared catalog, and a guest costs nothing to make. `GET /safety` is not limited. A save calls no model itself.
 
+### Shopping facts and candidates
+`modules/recommendations` holds `profile_shopping` (migration 0033), `D1RecommendationsRepository` (`append`, `current`, `history`) and `RecommendationService`
+(`setShopping`, `currentShopping`, `candidatesFor`). It is the fifth pull request of issue #115: the reviewed catalog of "Catalog workbook import" gets a reader,
+which answers one question, "which products may be suggested to this profile for this routine step", by fixed rules and no model. It reads the goal, the safety answers,
+the face scan, the catalog and the workbook through their services, never their repositories.
+
+- **History, as for goals and safety.** `profile_shopping` is keyed by `profile_id` (cascade) and append-only: every change adds a row and the newest by `created_at` is the
+  current one (ties by `rowid`, so the one appended later wins), read through the `(profile_id, created_at)` index. `country` is a code of the Countries tab and has no foreign
+  key (that table is the catalog's, and a country is retired, never deleted, so a stored code keeps its meaning). `budget_band` is `low`, `mid`, `high` or null, and the newest row
+  decides, so a band is taken back by saving the country alone. A guest has a fact as much as a verified user and keeps it on signing up; a second profile has its own. No
+  cleaner: rows cascade from the profile.
+- **Setting it.** `setShopping({ country, budgetBand? })` refuses a country that is not an **active** row of `CatalogWorkbookService.countries()` (a retired one is no longer served) with
+  400 `UNKNOWN_COUNTRY`, then a band outside `BUDGET_BANDS` with 400 `UNKNOWN_BUDGET_BAND`, and stores nothing for either. Both are plain text on the wire, so these say which of the two it was;
+  a body that is not text, or has no country, is the schema's 400 `VALIDATION_FAILED`. `GET` is 404 `SHOPPING_NOT_SET` until a country is saved.
+- **Rate limits on `PUT /shopping`.** `SHOPPING_SET_IP_LIMITER` (20 a minute per address, namespace ids 1030 / 2030 / 3030) then `signedIn()` then `SHOPPING_SET_USER_LIMITER` (10 a minute per user,
+  1031 / 2031 / 3031), in the order of the goal route; 429 `RATE_LIMITED` with `Retry-After`. `GET` is not limited. Routes are bearer, under `/api/v1/me`, tagged "Recommendations".
+- **`candidatesFor({ step })` has no route yet**; the routine stage will call it. It needs, in this order, a goal (409 `GOAL_REQUIRED`), safety answers ("none of these" is one: 409
+  `SAFETY_ANSWERS_REQUIRED`) and a shopping fact (409 `SHOPPING_REQUIRED`). A stored country that has since been retired, or no row passing, is `[]`: a normal answer, which the routine
+  meets with "use what you have".
+- **The rules**, all fixed, applied to `approvedFor({ country, step })` (the approved rows sold in the country that fill the step, each pinned to the formulation the workbook reviewed;
+  `latestFormulation` is never read for a row):
+  - **Concern:** the row works on at least one of the goal's concerns (`concernsForGoal`, the face scan's table).
+  - **Skin type:** `FaceScanService.latestSkinType()`, the label of the newest **ready** scan of the profile (a newer scan still analysing, or needing a retake, does not hide an older ready
+    one; a newer ready scan with no label is the answer, null). A known type keeps rows that list it or say `all`; an unknown one keeps only `all`, and a type is never assumed.
+  - **Budget:** the row's **lowest** price is at most the band's top in the country's own money (`low_max`, `mid_max`; `high` has no cap; no band, no check).
+  - **Ingredient rules:** the facts of a row are `flagFacts(row.ingredients, liveRules.entries)` (the live approved rules, matched as the analysis matches them: a strength, a bracket
+    or a slash is no way round) plus the cautions the row lists itself, which can only add. A `banned-substance` fact always leaves the row out, and a `pregnancy-caution` fact does when
+    `SafetyView.excludesPregnancyCaution` (pregnant or breastfeeding). Other kinds (allergen, irritation) are for the verdict and never take a row out of this list. A row that claims
+    "pregnancy safe" but lists retinol is still flagged by the rule.
+  - **What the user named** (`SafetyService.currentMentions()`, the newest answer only): a product mention whose `productId` is the row's leaves it out, **whatever its resolution and whichever
+    text it came from** (the user named that exact product, and a product the parse could not research keeps its catalog id); a product with no id (named with no maker) leaves out nothing.
+    A row whose ingredient list is the same list (`ingredientsKey`: case, spacing and order) as the latest list of any **resolved** product named, as a reaction or a prescription, is also left out: the
+    same product entered under another spelling has another product id. An ingredient mention leaves out any row that lists it, matched whole through `ingredientParts` ("alcohol" takes out "Alcohol" and
+    not "Cetearyl Alcohol"), **and through the live rules' labels**: the named parts are expanded with every label (name and aliases) of each rule that lists one of them, so "fragrance" and "Parfum", or
+    "retinoic acid" and "tretinoin", stand for each other whichever the user or the row wrote. The expansion is one step, never a chain through rules that share a label, so it does not depend on rule
+    order, and a name no rule lists is matched as written: never fuzzy. Words not parsed yet name nothing, so the ticked boxes alone apply: unparsed words never relax anything.
+- **The answer** is `[{ code, product, passed, sharedWithReaction, origin, frequency, priceMin, priceMax, whereSold }]`, sorted by lowest price then code, so **origin never decides a place**
+  (a brand-submitted row passed the same evidence bar and gets no help). `product` is the summary of the pinned formulation's product (one batched `productSummaries`); a row whose product
+  cannot be found is left out and logged as `candidate-product-missing` with its code only, so one bad row cannot fail the list. `passed` names the rules the row passed, in the fixed order
+  `country, step, skin-concern, skin-type, budget, ingredient-rules, reactions`: `budget` only when a band was given, `reactions` only when the user named something that could be checked
+  (an ingredient, or a product with an id).
+- **`sharedWithReaction` is information, not a filter.** For each product the user named in the **reaction** text that the parse resolved, in the order they named them, it lists the candidate's
+  ingredients, spelled as the candidate has them, that the product's latest list also holds (compared through `ingredientParts`, expanded through the live rules' labels as above). A product with no list, or one not resolved, has no entry, and so
+  does one that shares nothing. `ProductCatalogService.latestIngredients(productId)` reads the list: the latest formulation's ingredients or null (also for an unknown product), never throws for
+  a missing one, researches nothing and writes nothing.
+- **Reads.** After the guards (in order, so the error names what is missing first), the countries, the mentions, the skin type, the live rules and the approved rows for the stored country are read
+  together; the named products' latest lists (at most three products, in parallel) and the summaries of the rows kept follow. `flagFacts` builds its label map once per rules array (a `WeakMap`
+  keyed by the array, which is one per rules version), not once per row.
+- **Wiring.** The container builds `RecommendationService` over `D1RecommendationsRepository` and the goals, safety, catalogWorkbook, faceScans and catalog services, exposed as `recommendations`.
+
 ### Onboarding content
 `GET /api/v1/onboarding/content` (`modules/onboarding`, operation `getOnboardingContent`, tag "Onboarding", mounted at `/api/v1/onboarding`) serves the text of onboarding screens 1.2 to 1.5
 (goal, answer, safety), the fifth pull request of issue #82, so a copy change, a new chip or a new choice is a deploy and not an app release. The app fetches it first and renders from it.
@@ -932,7 +985,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`. The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -1124,11 +1177,16 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   shows these.
   Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`), set by `ANTHROPIC_MODEL_RESEARCH`, `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
+- **`AnthropicCatalogDrafter`** (`draft-catalog-row`, port `CatalogDrafter`, in `providers/catalog-drafting/`; `MemoryCatalogDrafter` is the fake, with `calls`, `respondWith` and
+  `failNextWith`) drafts the empty catalog cells of one product for `npm run catalog:draft`: `draft({ product, columns, countries })` (each country with its currency) answers the values of `skin_concerns`, `skin_types`, `steps` and
+  `frequency`, each with the page it came from, and a price range for each country. It searches the web (2 searches and one per country, to a most of 6; 16000 `max_tokens`, because Haiku's adaptive thinking and the search rounds count against it as well as the answer, and only the tokens used are billed; an answer cut off or refused throws `AnthropicRequestError` or `AnthropicRefusalError`, as `structured()` does) and the prompt tells the model to use only the pages it
+  found, never memory, and to ignore instructions in them. `checkedDraft`, in the port file, keeps only what the workbook can take: the columns and countries asked for, values
+  in the vocabularies, whole-number prices of at least 1, and a source that is a public https page the search returned (the script runs it again without the search check). A price row is for one pack size (the prompt says so; sizes, bundles and multipacks are never combined), and `checkedDraft` drops a row whose highest price is over 2.5 times its lowest, since that is not one product's price. `isUsableSource` also refuses a short denylist of classified-ad and auction sites (`ebay`, `jiji`, `craigslist`, `gumtree`, `olx`, on any TLD and subdomain); general retailers and marketplaces are not on it. It runs on Haiku through `ANTHROPIC_MODEL_RESEARCH`.
 - **Haiku and web search.** Research runs on Haiku by default; that it supports the `web_search` server tool is checked
   by the eval's research mode (`npm run eval:catalog -- --mode research`), and the Models API field
   `capabilities.server_tools.web_search.supported` is the authority. If it is false, set `ANTHROPIC_MODEL_RESEARCH` to
@@ -1281,6 +1339,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
   is read once per list).
+- **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
+  then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
+  does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").
 - **The queue.** `analyse-face-scan` is alone on the `face-scans` queue (`deepertones-face-scans-<env>` and `deepertones-face-scans-dlq-<env>`),
   bound as `FACE_SCANS_QUEUE` in all three `wrangler.jsonc` blocks. The consumer takes one message at a time (`max_batch_size` 1, 4 retries): a
   message is one exchange with Perfect Corp. Create the queue and its dead-letter queue in each environment before the deploy. The two limiters
@@ -1487,7 +1548,8 @@ user, and no limit behind it refuses anyone (owner's decision, 2026-10-18, issue
 - **One private bucket for every environment.** `deepertones-private`, bound as `PRIVATE_PHOTOS` in all three
   `wrangler.jsonc` blocks, next to the public `CATALOG_IMAGES`, never in its place. It has no public domain and r2.dev
   is off, so the only way out is a signed photo link. Environments are told apart by key prefix, as in the public
-  bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket.
+  bucket. The local binding is a simulation: `wrangler dev` and the tests use a local bucket. **It also holds the catalog workbook archive**, `workbooks/<environment>/<version>-<uuid>.xlsx` (see "Catalog workbook import"): those files are kept for good,
+  so no bucket-wide lifecycle rule (expiry or deletion) may be set on the bucket, and the photo sweeps never reach them (they delete by `photos/` and `faces/` key only).
 - **Key layout.** Product photos are `photos/<environment>/<user id>/<scan id>/<item id>.<jpg|webp>`. Face photos are
   `faces/<environment>/<user id>/<profile id>/<scan id>/<name>`: `<name>` is `front.jpg`, `right.jpg` or `left.jpg`, or `mask-<concern>.png` for an
   overlay mask, and exactly three id segments sit between the environment and the name. The profile is in the key so a photo link can be checked
@@ -1647,14 +1709,39 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   `db.batch`: delete the old traits, delete the old concerns, insert each concern (one statement per concern, under
   D1's 100-parameter limit), insert the traits (de-duplicated per concern), and set the versions on the formulation.
   A reader sees the old analysis or the new one, never half of either.
-- **The seed reference list** (`catalog.reference.ts`, `REFERENCE_VERSION`) is the deterministic safety net: the rule
-  checks (`flagFacts`) match each ingredient exactly against hand-compiled names and aliases, including the parts of
-  `Aqua (Water)`, `Parfum/Fragrance` and `Hydroquinone 4%`. **It is a seed, not the full CosIng annexes**, and
-  `REFERENCE_COVERAGE` is `'partial'`: the catalog service must carry that to users so a clean result never reads as
-  an all-clear. Banned substances and the named fragrance allergens carry an https regulation URL as their `source`;
-  commonly cited concerns (pore-clogging, sun sensitivity, irritation, pregnancy caution, undisclosed fragrance) have
-  a `null` source and say so in their rule, so a regulation is never shown as backing something no regulation says.
-  A `null` source is left out of the analyst's prompt.
+- **The ingredient rules are data in D1**, not code. `ingredient_rules` holds one row per rule: a stable `code`, the normalised `name` and
+  `aliases` (JSON), a `kind`, the `statement` the analyst is shown, an https `source_url` (or `null`), the skin concerns it `helps`, a `status` of
+  `draft`, `approved` or `retired`, who approved and audited it, and `updated_in_version`. **Only an approved rule is matched**: a draft applies to
+  nothing, and a retired row stays so its code is never reused. `catalog_versions` has one row per applied upload: an integer `version` that goes up by 1,
+  the `rules_version`, the `contract_version` it was written to, who uploaded it and the archive key (`null` for the seed). The **live rules version**
+  is the `rules_version` of the latest row. It is a string that changes only when the set of approved rules does, and it is what
+  `formulations.reference_version` and `analysis_attempts.reference_version` record; the column names are older than the table, and were not renamed.
+- **The seed** is the migration that created both tables (`0031_*`, from `npm run db:generate`, with the seed appended). It inserts one approved rule
+  for each entry of `REFERENCE` (`catalog.reference.ts`), signed `reference seed`, and catalog version 1 under the rules version `seed-2026-10`, which is
+  what `REFERENCE_VERSION` was when the rules lived in code, so no formulation analysed before the migration is analysed again. The SQL is written by
+  `scripts/catalog/seed-rules-sql.ts` and a test fails if the migration ends with anything else. A rule's code is `seedRuleCode(entry)`
+  (`catalog.workbook.seed.ts`): `ING-<NAME>-<KIND>`, in capitals, cut to 40. **`REFERENCE` is frozen**: it is the seed and the eval's fixture, never edited
+  to change a rule. The workbook is where a rule changes.
+- **`liveRules()`** (`CatalogWorkbookRepository`, in the catalog module) returns `{ version, entries }`: the latest rules version, and the approved rules
+  in the shape the matcher reads, in code order. It reads the latest version on every call, and keeps the entries per isolate, **keyed by that version**
+  (a version names one set of rules, so they are read again only when it moves). When the version has moved, it reads the version and the rule rows in ONE
+  `db.batch`, so an upload cannot land between them and leave new rules stored under the old version. `ProductCatalogService` reads it only where it needs
+  it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
+  formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
+  one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
+- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: four tabs, their columns, accepted values and
+  length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
+  value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
+  empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
+  pure and named `.schema.ts` because dependency-cruiser treats `*.contract.ts` as test-only. It has a `CONTRACT_VERSION` and a fingerprint of its
+  definitions; a test pins the released fingerprint, so a change to what a workbook may hold cannot go unversioned. **`docs/catalog-workbook-contract.md` is
+  generated** from it by `npm run catalog:contract-doc`, for the people who fill the workbook in, and a scripts test fails when it is stale.
+- **The reference coverage is still partial.** The seed is **not the full CosIng annexes**, and `REFERENCE_COVERAGE` is `'partial'`: the catalog service
+  must carry that to users so a clean result never reads as an all-clear. The `flagFacts` rule checks match each ingredient exactly against names and
+  aliases, including the parts of `Aqua (Water)`, `Parfum/Fragrance` and `Hydroquinone 4%`. Banned substances and the named fragrance allergens carry
+  an https regulation URL as their `source`; commonly cited concerns (pore-clogging, sun sensitivity, irritation, pregnancy caution, undisclosed
+  fragrance) have a `null` source and say so in their rule, so a regulation is never shown as backing something no regulation says. A `null` source is
+  left out of the analyst's prompt.
 - **Follow-ups:** a proper import of the public CosIng export; the expanded labelled-allergen list from Regulation
   (EU) 2023/1545 (about 80 substances, where the seed has the original 26); restricted substances with their limits
   and conditions of use; alias coverage, which is hand-built.
@@ -1676,7 +1763,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   finds it (a near miss goes to the model; a label with no category compares with the brand's products of every category, and a new product is
   filed under `other`), the product's own formulation for the list is used if it has one, else an unnamed product's is adopted, else a new label
   formulation is stored; if the adoption loses to another call, the product's own formulation is used or stored, never the other's. Without
-  both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and `REFERENCE_VERSION`) so the scan can
+  both it is the unnamed product's formulation. It returns `analysed` (current `ANALYSIS_VERSION` and live rules version) so the scan can
   skip the analyse step. Callers (the scan jobs) run one of these per step.
 - **search, namedProduct and choose** serve a user who names a product by hand (see "Product search" and `identifyByName`).
   `search(q)` normalises the query with `normaliseText` and returns at most 10 `{ id, brand, name, variant, category, imageUrl }`, or `[]` for a
@@ -1688,7 +1775,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   written. An id the catalog does not hold, and an unnamed product, are `NotFoundError('PRODUCT_NOT_FOUND')` for both.
 - **Idempotence.** A job may run twice, so each step is safe to repeat. `research` returns the product's latest
   formulation as `found` when it is fresh, without calling the researcher or recording an attempt. `analyse` returns at
-  once when the formulation is already analysed by the current `ANALYSIS_VERSION` and `REFERENCE_VERSION`.
+  once when the formulation is already analysed by the current `ANALYSIS_VERSION` and live rules version.
 - **Concurrency converges through unique keys, not locks.** `createProduct` is insert-or-ignore on the identity key,
   `addAlias` on the alias key, and `createFormulation` on `(product_id, ingredients_key)` (a unique index, migration
   0007); each returns the stored row, so two writers of the same thing carry on with the same row. `storeFormulation`
@@ -1701,7 +1788,7 @@ stays dumb; every decision below lives in the service (or `catalog.analysis.ts`,
   taken as lost to a crash and no longer shields the work. The check reads the last attempt and the started write
   follows it, so two calls in the same instant can still both pass; the window narrows the double spend, it is not a lock.
 - **Lazy re-analysis, not background re-analysis.** The issue asks for formulations to be re-analysed in the
-  background when `ANALYSIS_VERSION` (or `REFERENCE_VERSION`) is bumped. That is a deliberate deviation: a version
+  background when `ANALYSIS_VERSION` (or the live rules version) changes. That is a deliberate deviation: a version
   bump only makes `resolve` answer `needs-analysis` the next time that product is scanned, and the same goes for a
   formulation found more than `FRESH_FOR_DAYS` ago, which answers `needs-research` (a formulation of exactly
   `FRESH_FOR_DAYS` is still fresh). It is cheaper (products nobody scans again cost nothing, and a bump does not
@@ -2320,7 +2407,7 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
   `checkAnalysis`, exactly as the service does, and scores what would be stored: every flagged fact is covered by a
   concern of its kind naming its ingredient, and a banned substance is judged high. A case's expected facts are
-  checked against `flagFacts` in `cases.test.ts`, so a case cannot drift from the reference data.
+  checked against `flagFacts` over `REFERENCE` in `cases.test.ts`, so a case cannot drift from the seed rules.
 - **Research mode** runs `AnthropicProductResearcher` on real products sold in Nigeria and checks the product is found
   and the list holds the ingredients we expect. These check retrieval quality, not ground truth: a brand can
   reformulate, so a failing research case may need its data updated.
@@ -2410,6 +2497,82 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 - **Adding by search (typed scans).** `POST /api/v1/me/shelf { productId }` (`addShelfProduct`; limiters `SHELF_ADD_IP_LIMITER` then `SHELF_ADD_USER_LIMITER`, as the scan routes order them) puts a named catalog product picked from `GET /api/v1/products/search` on the shelf. `ShelfService.add` first asks `D1ShelfRepository.activeForProduct(profileId, productId)` (non-removed `product` rows only): a product already on the shelf is **200** with its entry, in the view `GET /me/shelf` returns, and nothing else happens (no scan, nothing counted, no model, no push). A removed entry is not active, so it goes on and the scan restores it as the same entry (Latest wins). Otherwise `ScanService.createTyped({ productId, clientIp })` runs as the session and answers **202** `{ scanId, itemId }`: it resolves the product first (`catalog.choose` + `namedProduct`, PRODUCT_NOT_FOUND before anything is written), and only if the catalog says the product needs a model (`needs-research` or `needs-analysis`) takes the daily allowance (user and address, adding 1, SCAN_DAILY_LIMIT as a photo scan does). It then writes a scan of **`kind = 'typed'`** with no photos and one item at position 0 with no `photo_id` or `photo_key`, created in **`needs-identification`** (not `recognising`: with no photo the reaper would requeue a recognise that can only fail as photo-missing, and `needs-identification` is a waiting state it leaves alone, which the app can still identify by hand), and moves it on with the same `identifyByChoice` a user's pick uses: `ready` (on the shelf in the same batch), `analysing`, `researching` or `failed` as `analysis-failed`. If that throws, the item stays in `needs-identification`. The app follows the scan (`GET /api/v1/scans/products/{scanId}` or its events) and reads the shelf once the item is final.
 - **The `counted` flag.** `scan_items.counted` (integer boolean, NOT NULL, default true; migration 0027, a plain `ALTER TABLE ... ADD`) says whether an item counts toward the daily photo quotas. `photoCounts`, so both `photosSince` and `photosSinceIp`, count only counted items. Every item that existed before the column, and every photo or shelf item, is counted; only a typed item created with `counted = false` is not, and that is a product that needed no model (`ready` or `analysis-failed`), so adding one is never refused for the allowance and does not use any of it. A typed item that needs a model is counted, as one photo.
 - **The push rule.** A typed scan sends "your scan is ready" only if it waited for a model: `notifyFinished` skips the push for a typed scan none of whose items is counted (it finished inside the request, in front of the user), and sends it, with the usual notification settings, for a counted one (which finishes later, possibly after the user left). The `done` event is published either way.
+
+### Admin access
+The `/api/v1/admin` routes change shared data (today the catalog workbook, see below), so they are not a user's to call. A user's token, guest or
+signed-in, never opens them: they have a door of their own.
+
+- **`X-Admin-Token`**, compared with the `ADMIN_API_TOKEN` secret by the `adminToken()` middleware (`src/middleware/admin-token.ts`). It is the only place
+  read: an `Authorization: Bearer` header, whatever it holds, is ignored, and a missing, wrong or empty header is 401 `ADMIN_TOKEN_INVALID`.
+- **Constant time.** Both sides are HMAC-SHA-256'd under a key made fresh for the call, and the two digests (always the same length) are compared with
+  `timingSafeEqual`, so how long a refusal takes says nothing about how much of the token was right.
+- **An unset secret locks the door.** An empty or missing `ADMIN_API_TOKEN` refuses everyone, including the caller who sends nothing, so a Worker deployed
+  without the secret exposes nothing. It is in `secrets.required` in all three blocks, so a deploy fails until it is set, and in `scripts/secrets/plan.ts`,
+  so `secrets:push` sends it. Generate one per environment with `openssl rand -hex 32`.
+- **Rate limited per address, before the token is checked.** `ADMIN_IP_LIMITER` (10 a minute, namespace ids 1029 / 2029 / 3029) comes first in the
+  route's `middleware`, then `adminToken()`, then the body limit, so every guess at the token uses an attempt, a flood of wrong ones is answered 429
+  before it is compared, and the right token is turned away once the allowance is gone. The token is checked before the body is read.
+- **No actor.** The routes carry `security: [{ adminToken: [] }]` and call a service that needs no signed-in user; `requireUser` is never involved.
+  An admin is a holder of the secret, not an account, and the upload records a label (`uploadedBy`) because nothing else says who it was.
+
+### Catalog workbook import
+`CatalogWorkbookService` (`catalog.workbook.service.ts`, built by the container as `catalogWorkbook`) serves and changes the catalog workbook: the
+Products, Availability, Ingredients and Countries tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
+(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, and the `ingredient_rules` and
+`catalog_versions` of "Product catalog data". The routes are `GET /api/v1/admin/catalog/export` and `POST /api/v1/admin/catalog/import`
+(`catalog.workbook.routes.ts`), behind "Admin access".
+
+- **Export** gives `{ catalogVersion, contractVersion, workbook }`: every tab with its full header row, retired rows included, in the shape the import
+  takes (lists joined with `; `, dates `YYYY-MM-DD`, an empty cell `null`; `catalog.workbook.raw.ts`). Importing an export unchanged is an empty diff.
+- **Import** is multipart: `workbook` (the JSON text), `file` (the `.xlsx`, up to 10 MB), `baseVersion`, `dryRun` (**default `true`**) and `uploadedBy`
+  (1 to 80 characters). In order:
+  1. `validateWorkbook` runs on the server whatever the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
+  2. `baseVersion` must be the live catalog version: 409 `CATALOG_STALE`, for a dry run too, so a stale copy is told before anyone applies it.
+  3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
+     `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
+     reused, and a retired code put back is reactivated. A product's availability that is gone is listed under `retired` and the row is removed.
+  4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
+     `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
+     spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
+     `source_kind` `'workbook'` and the row pins it; if the product already has that exact list, that formulation is the one pinned and nothing is added,
+     and any other list the product had is left as it was.
+  5. A dry run stops here and writes nothing. An apply without a file is 400 `CATALOG_FILE_REQUIRED`; a file over 10 MB is 400 `CATALOG_FILE_TOO_LARGE`; one that does not start with the zip bytes `PK\x03\x04` (an .xlsx is a zip; the server never opens it) is 400 `CATALOG_FILE_NOT_XLSX`. The whole body is capped at 16 MB (413), after the token is checked. `uploadedBy` is trimmed before its 1 to 80 characters are checked. A file that cannot be archived is 503 `CATALOG_ARCHIVE_FAILED`, and nothing is applied.
+  6. **The archive** is put first, through the `WorkbookArchive` port (`providers/workbook-archive`: an R2 adapter and a memory fake, locked to the
+     environment like the photo store). It lives in the private bucket under `workbooks/<environment>/<version>-<uuid>.xlsx`, as an `.xlsx`, never cached.
+     The key is made for the attempt, so a batch that fails or loses leaves an orphan object and never overwrites another upload's file; the key that
+     counts is the one on the version's `catalog_versions.archive_key`.
+  7. **`applyWorkbook(plan)`** is one repository method and one `db.batch`. Only the rows the diff names are written. It upserts countries, creates the new
+     products (`on conflict (identity_key) do nothing`), stores the workbook formulations (`on conflict (product_id, ingredients_key) do nothing`),
+     upserts the Products rows with their pinned formulation found by a subquery, replaces availability when it changed, upserts the rules, and marks the
+     codes the upload left out retired.
+- **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
+  since the service read it, the insert violates `catalog_versions.version` and D1 rolls the WHOLE batch back, so the loser writes nothing: no product, no
+  formulation, no row, no version. The repository then sees that the live version moved past `baseVersion` and reports it, and the service answers
+  409 `CATALOG_STALE`. If the batch throws, the repository reads the row of version `baseVersion + 1`: it carries this upload's own archive key (the batch committed and only its answer was lost, so the upload stands and is reported as applied), another upload's key (a lost race), or there is none (a real failure, which surfaces as one). No later statement needs its own guard, because none can apply alone.
+- **The rules version names a set.** An upload's approved rules, in code order, are hashed, each rule's aliases sorted first because they are a set (`catalog.workbook.rules-version.ts`): `rules-<first 16 hex of
+  the sha256 of the stable JSON of the entries the matcher reads>`. If the set is the one in force, **the current version is kept**, so a Products-only
+  upload, or an edit to a draft, moves nothing and no product is analysed again. The seed's set is always `seed-2026-10`, so restoring it is not a new
+  version, and restoring any other set gives back exactly the version it had. An edit that changes what the matcher reads (name, aliases, kind, statement,
+  source, or a rule approved, drafted or retired) is a new version, and each product is analysed again on its next scan.
+- **Size, and what Cloudflare documents.**
+  - Every table is written with **multi-row** statements, chunked so none binds more than D1's 100 parameters (`STATEMENT_ROWS` in the repository: for
+    example 3 Products rows, 12 formulations, 15 availability rows or 6 rules to a statement, and 90 codes to a retire). A test reads the parameters off
+    the built statements. The batch is still ONE `db.batch`, with the version insert first.
+  - A 500-product, 1500-availability, 200-rule workbook applied against local D1 as **409 statements** (it was about 1,200 with a statement for each row)
+    in about 0.66 s for the whole request (0.46 s as a dry run); a one-cell change is 2 statements. This is local, a simulation.
+  - What the docs say (https://developers.cloudflare.com/d1/platform/limits/): 1,000 queries per Worker invocation on the paid plan (50 on free); 100 bound
+    parameters and 100 KB of SQL a statement, and the limits for individual queries "apply to each individual statement contained within a batch"; 30 seconds
+    for a batch call as a whole; no stated cap on the number of statements in a batch. The batch API page
+    (https://developers.cloudflare.com/d1/worker-api/d1-database/) says a batch is a SQL transaction that rolls back whole when a statement fails, and **does
+    not say whether the statements of a batch count one by one toward the per-invocation query limit**. So the service assumes they do:
+    `CatalogWorkbookService` refuses a plan of more than 900 statements (`MAX_BATCH_STATEMENTS`, under 1,000 with room for the request's other reads)
+    with 400 `CATALOG_TOO_LARGE`, for a dry run too and before anything is archived. A batch is never split, because a split could not be atomic; a change
+    that big is made in several uploads, each from the version the last one made.
+  - **Remote behaviour has not been confirmed.** Nothing above was run against a remote D1. Before relying on it, apply a catalog-sized upload on
+    staging (a few hundred products with availability) and check that it commits and how long it takes; the 900 limit is a guess at the safe side, to be
+    set from that run.
+- **Logs** carry the catalog version, the per-tab counts and the outcome (`catalog-import-applied`, `-dry-run`, `-invalid`, `-stale`, `-lost-race`, `-too-large`, and `catalog-archive-failed`, which carries the version only), never a
+  brand, a name, an ingredient, a rule or a place of sale.
 
 ### OTP over channels (email now, WhatsApp later)
 A sign-in code goes to a **recipient**: a channel plus an address on it. Today that is email, sent

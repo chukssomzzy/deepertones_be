@@ -7,6 +7,7 @@ import { createDb } from '../../src/lib/db'
 import { signPhotoLink } from '../../src/lib/photo-link'
 import { TokenService } from '../../src/modules/auth/tokens.service'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
+import { D1CatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { garbagePhoto, jpegPhoto, markedJpeg, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
@@ -222,6 +223,7 @@ const itemNow = async (guest: Guest, scanId: string, itemId: string) =>
 const catalogViewOf = (formulationId: string) =>
   new ProductCatalogService({
     repository: new D1CatalogRepository(createDb(env.DB)),
+    workbook: new D1CatalogWorkbookRepository(createDb(env.DB)),
     researcher: new MemoryProductResearcher(),
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),
@@ -287,6 +289,7 @@ const cataloguedProduct = async (brand: string, name: string, { analysed = true,
   researcher.respondWith(() => ({ found: true, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], sourceUrl: 'https://shop.example/product' }))
   const catalog = new ProductCatalogService({
     repository: new D1CatalogRepository(createDb(env.DB)),
+    workbook: new D1CatalogWorkbookRepository(createDb(env.DB)),
     researcher,
     analyst: new MemoryProductAnalyst(),
     images: new MemoryCatalogImageStore(),

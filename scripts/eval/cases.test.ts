@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { normaliseIngredient } from '../../src/modules/catalog/catalog.ingredients'
+import { REFERENCE } from '../../src/modules/catalog/catalog.reference'
 import { flagFacts } from '../../src/modules/catalog/catalog.rules'
 import { GOALS } from '../../src/modules/goals/goals.vocabulary'
 import { normaliseText } from '../../src/lib/normalise-text'
@@ -8,7 +9,7 @@ import { ANALYSIS_CASES, GOAL_CASES, MENTION_CASES, RESEARCH_CASES } from './cas
 // The eval's fixed cases are data, but data that must stay true: an analysis case may only expect what the
 // rule checks really flag, or a "failure" in the eval would be the case's fault and not the model's.
 
-const flaggedKinds = (ingredients: string[]) => flagFacts(ingredients).map((f) => f.kind)
+const flaggedKinds = (ingredients: string[]) => flagFacts(ingredients, REFERENCE).map((f) => f.kind)
 
 describe('ANALYSIS_CASES', () => {
   it('has a unique, non-empty id per case', () => {
@@ -26,7 +27,7 @@ describe('ANALYSIS_CASES', () => {
   it.each(ANALYSIS_CASES.map((c) => [c.id, c] as const))(
     'expects exactly the facts the rule checks flag, in the same order (%s)',
     (_id, c) => {
-      const actual = flagFacts(c.ingredients).map(({ kind, ingredient }) => ({ kind, ingredient }))
+      const actual = flagFacts(c.ingredients, REFERENCE).map(({ kind, ingredient }) => ({ kind, ingredient }))
 
       expect(c.expect.flagged).toEqual(actual)
     },
@@ -65,7 +66,7 @@ describe('ANALYSIS_CASES', () => {
     const clean = ANALYSIS_CASES.filter((c) => c.expect.flagged.length === 0)
 
     expect(clean.length).toBeGreaterThan(0)
-    for (const c of clean) expect(flagFacts(c.ingredients), c.id).toEqual([])
+    for (const c of clean) expect(flagFacts(c.ingredients, REFERENCE), c.id).toEqual([])
   })
 
   it('requires a banned substance to be judged high severity where the case checks severity', () => {

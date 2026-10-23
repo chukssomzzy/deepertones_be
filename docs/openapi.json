@@ -22,6 +22,12 @@
         "scheme": "bearer",
         "bearerFormat": "JWT",
         "description": "The access token from /api/v1/auth/anonymous, /api/v1/auth/otp/verify or /api/v1/auth/refresh."
+      },
+      "adminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-Admin-Token",
+        "description": "The shared admin secret (ADMIN_API_TOKEN) for /api/v1/admin. A user access token never opens these routes."
       }
     },
     "schemas": {
@@ -732,6 +738,63 @@
         },
         "required": [
           "choices"
+        ],
+        "additionalProperties": false
+      },
+      "Shopping": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8,
+            "example": "NG"
+          },
+          "budgetBand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "low",
+              "mid",
+              "high",
+              null
+            ],
+            "description": "Null when the user gave none."
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the country and band were last saved."
+          }
+        },
+        "required": [
+          "country",
+          "budgetBand",
+          "updatedAt"
+        ]
+      },
+      "SetShoppingBody": {
+        "type": "object",
+        "properties": {
+          "country": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 8,
+            "description": "The country the user shops in, as its two-letter code in the catalog's Countries tab. A code that is not there, or is retired, is 400 `UNKNOWN_COUNTRY`.",
+            "example": "NG"
+          },
+          "budgetBand": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 16,
+            "description": "How much the user is happy to spend on a product: `low`, `mid`, `high`. The bands are per country, each in its own money. Leave it out to have no budget band, which also takes back a band saved earlier. Anything else is 400 `UNKNOWN_BUDGET_BAND`.",
+            "example": "mid"
+          }
+        },
+        "required": [
+          "country"
         ],
         "additionalProperties": false
       },
@@ -2352,6 +2415,203 @@
         "required": [
           "received"
         ]
+      },
+      "CatalogExport": {
+        "type": "object",
+        "properties": {
+          "catalogVersion": {
+            "type": "integer",
+            "description": "The live catalog version: send it back as `baseVersion` when importing the edited workbook."
+          },
+          "contractVersion": {
+            "type": "string",
+            "example": "1.0.0"
+          },
+          "workbook": {
+            "$ref": "#/components/schemas/CatalogWorkbook"
+          }
+        },
+        "required": [
+          "catalogVersion",
+          "contractVersion",
+          "workbook"
+        ]
+      },
+      "CatalogWorkbook": {
+        "type": "object",
+        "properties": {
+          "products": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
+          },
+          "availability": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
+          },
+          "ingredients": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
+          },
+          "countries": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
+          }
+        },
+        "required": [
+          "products",
+          "availability",
+          "ingredients",
+          "countries"
+        ],
+        "description": "The four tabs of the catalog workbook, in the shape the export gives them and the import takes them. The contract is in docs/catalog-workbook-contract.md."
+      },
+      "CatalogWorkbookTab": {
+        "type": "object",
+        "properties": {
+          "headers": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "rows": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "boolean"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "required": [
+          "headers",
+          "rows"
+        ]
+      },
+      "CatalogImport": {
+        "type": "object",
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "False for a dry run."
+          },
+          "catalogVersion": {
+            "type": "integer",
+            "description": "The new catalog version when applied, the live one otherwise."
+          },
+          "diff": {
+            "type": "object",
+            "properties": {
+              "products": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
+              "availability": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
+              "ingredients": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
+              "countries": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
+              "newProducts": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "brand": {
+                      "type": "string"
+                    },
+                    "name": {
+                      "type": "string"
+                    },
+                    "variant": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "form": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "brand",
+                    "name",
+                    "variant",
+                    "form"
+                  ]
+                },
+                "description": "Product rows no catalog product has the identity of (exact identity key or alias): applying would create them."
+              }
+            },
+            "required": [
+              "products",
+              "availability",
+              "ingredients",
+              "countries",
+              "newProducts"
+            ]
+          }
+        },
+        "required": [
+          "applied",
+          "catalogVersion",
+          "diff"
+        ]
+      },
+      "CatalogTabDiff": {
+        "type": "object",
+        "properties": {
+          "added": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "updated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "retired": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Codes the upload leaves out (or marks retired). For availability, a removed row, keyed `<product code>:<country>`."
+          },
+          "reactivated": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "added",
+          "updated",
+          "retired",
+          "reactivated"
+        ]
       }
     },
     "parameters": {}
@@ -3833,6 +4093,200 @@
                     },
                     "data": {
                       "$ref": "#/components/schemas/Safety"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/shopping": {
+      "put": {
+        "operationId": "setShopping",
+        "tags": [
+          "Recommendations"
+        ],
+        "summary": "Say which country you shop in and what you can spend",
+        "description": "Guests included. Send `{ country, budgetBand? }`: the country is a two-letter code from the catalog's Countries tab (400 `UNKNOWN_COUNTRY` for one that is not there or is retired), and the band is `low`, `mid` or `high` (400 `UNKNOWN_BUDGET_BAND` for anything else), each band set per country in that country's own money. Leave the band out to have none. Every change is kept with its date and the newest is the current one, so saving the country alone takes a band back. Each change counts against a per-address and a per-user limit: 429 `RATE_LIMITED` with `Retry-After`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetShoppingBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The country and band as they are now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Shopping"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "getShopping",
+        "tags": [
+          "Recommendations"
+        ],
+        "summary": "The country and budget band this profile shops with",
+        "description": "The same view PUT answers. 404 `SHOPPING_NOT_SET` until the profile has saved a country: the app then suggests the phone's region and asks once.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The current shopping country and band",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Shopping"
                     }
                   },
                   "required": [
@@ -6629,6 +7083,268 @@
           },
           "413": {
             "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/catalog/export": {
+      "get": {
+        "operationId": "exportCatalog",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "The catalog workbook as it is now",
+        "description": "Every tab with its full header row, retired rows included, in the form the import takes: lists joined with `; `, dates as `YYYY-MM-DD`, an empty cell `null`. Importing an export unchanged changes nothing. Send the `X-Admin-Token` header; a user token never opens this.",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The live workbook",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CatalogExport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/admin/catalog/import": {
+      "post": {
+        "operationId": "importCatalog",
+        "tags": [
+          "Admin"
+        ],
+        "summary": "Check, and optionally apply, an edited catalog workbook",
+        "description": "Multipart. The whole workbook is the upload: a product, rule or country code it leaves out is retired, never deleted. The server checks the workbook against the contract itself, refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and `CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). 503 `CATALOG_ARCHIVE_FAILED` means the file could not be archived and nothing was applied; try again.",
+        "security": [
+          {
+            "adminToken": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "workbook": {
+                    "type": "string",
+                    "description": "The JSON text of the workbook (the `workbook` of an export, edited)."
+                  },
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The .xlsx the workbook was read from, up to 10 MB. Archived when the upload is applied; required when `dryRun` is `false`."
+                  },
+                  "baseVersion": {
+                    "type": "string",
+                    "description": "The `catalogVersion` of the export the workbook was edited from.",
+                    "example": "1"
+                  },
+                  "dryRun": {
+                    "type": "string",
+                    "enum": [
+                      "true",
+                      "false"
+                    ],
+                    "default": "true",
+                    "description": "Only `false` applies the upload. The default reports what it would change and writes nothing."
+                  },
+                  "uploadedBy": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 80,
+                    "description": "Who is uploading, as a label for the catalog version (1 to 80 characters, after trimming)."
+                  }
+                },
+                "required": [
+                  "workbook",
+                  "baseVersion",
+                  "uploadedBy"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The diff, and whether it was applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CatalogImport"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
             "content": {
               "application/json": {
                 "schema": {

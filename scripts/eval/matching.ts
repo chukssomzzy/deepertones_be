@@ -30,6 +30,7 @@ import { brandKey, identityKey, normaliseText } from '../../src/modules/catalog/
 import { FakeCatalogRepository } from '../../src/modules/catalog/catalog.repository.fake'
 import type { NewProduct, Product } from '../../src/modules/catalog/catalog.types'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
+import { FakeCatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository.fake'
 import type { OpsAlertsService } from '../../src/modules/ops-alerts/ops-alerts.service'
 import { SCAN_POLICY } from '../../src/modules/scans/scans.service'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
@@ -231,6 +232,7 @@ const runOrder = async (seed: number, recognised: Recognised[], analyst: Product
   let n = 0
   const service = new ProductCatalogService({
     repository,
+    workbook: new FakeCatalogWorkbookRepository(),
     researcher: { research: async () => { throw new Error('the matching part must not research') } },
     analyst: observedAnalyst(analyst, repository),
     images: undefined as never,
@@ -345,6 +347,7 @@ const runImages = async (products: SetProduct[], realAnalyst: ProductAnalyst, re
     const bucket = new MemoryBucket()
     const service = new ProductCatalogService({
       repository,
+      workbook: new FakeCatalogWorkbookRepository(),
       researcher,
       analyst,
       images: new R2CatalogImageStore({ bucket: bucket as unknown as R2Bucket, publicBaseUrl: '' }),
@@ -539,6 +542,7 @@ const runShelfPhoto = async (photo: ShelfPhoto, seeds: ShelfSeed[], recognizer: 
   let n = 0
   const service = new ProductCatalogService({
     repository,
+    workbook: new FakeCatalogWorkbookRepository(),
     researcher: { research: async () => { throw new Error('the shelf part must not research') } },
     analyst: observedAnalyst(analyst, repository),
     images: undefined as never,

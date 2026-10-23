@@ -3,6 +3,7 @@
  * for reading a reply. It lives in a *.provider.ts file so product adapters can import it as values
  * without importing the client class, which only the container may do.
  */
+import type { z } from 'zod'
 import type { AiJob, AiUsage } from './ai-spend.provider'
 
 /** A content block as the API returns it (text, thinking, server_tool_use, web_search_tool_result...). Passed back unchanged. */
@@ -71,6 +72,46 @@ export class AnthropicRefusalError extends Error {
 /** The text of every text block, joined; thinking and tool blocks are left out. */
 export const textOf = (message: Pick<Message, 'content'>): string =>
   message.content.flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : [])).join('')
+
+/**
+ * The last JSON object in the text that fits `schema`: the final answer comes after any chatter. Walks back from the last "}" to its
+ * matching "{", so the work is linear in the text. Stray braces after the answer end the search with nothing found rather than risk a
+ * quadratic scan.
+ */
+export const lastJsonObjectIn = <S extends z.ZodType>(text: string, schema: S): z.infer<S> | undefined => {
+  for (let end = text.lastIndexOf('}'); end !== -1; ) {
+    const start = balancedStart(text, end)
+    if (start === -1) return undefined
+    try {
+      const parsed = schema.safeParse(JSON.parse(text.slice(start, end + 1)))
+      if (parsed.success) return parsed.data
+    } catch {
+      // not JSON; try the object before it
+    }
+    end = text.lastIndexOf('}', start - 1)
+  }
+  return undefined
+}
+
+/** Index of the brace opening the object that closes at `end`, or -1. Braces inside strings do not count. */
+const balancedStart = (text: string, end: number): number => {
+  let depth = 0
+  let inString = false
+  for (let i = end; i >= 0; i--) {
+    const char = text[i]
+    if (char === '"' && !isEscaped(text, i)) inString = !inString
+    else if (inString) continue
+    else if (char === '}') depth++
+    else if (char === '{' && --depth === 0) return i
+  }
+  return -1
+}
+
+const isEscaped = (text: string, quote: number): boolean => {
+  let backslashes = 0
+  while (text[quote - 1 - backslashes] === '\\') backslashes++
+  return backslashes % 2 === 1
+}
 
 /** Every URL the web search returned or the answer cites. A failed search returns an error object, not a list, and adds none. */
 export const sourceUrlsOf = (message: Pick<Message, 'content'>): Set<string> => {
