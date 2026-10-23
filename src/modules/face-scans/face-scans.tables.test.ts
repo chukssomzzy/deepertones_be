@@ -1,10 +1,12 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
-import { GOALS } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import {
   CHANGE_VERSION,
+  CHASE_VERSION,
   CONCERN_IDS,
   GOAL_CONCERNS_VERSION,
   NOTHING_STANDS_OUT,
+  RESUME_DAYS,
   SKIN_TYPE_VERSION,
   TABLES_VERSION,
   VISIBILITY_VERSION,
@@ -14,6 +16,7 @@ import {
   type SkinTypeLabel,
   bandFor,
   changeWords,
+  chaseStartFor,
   concernChange,
   concernsForGoal,
   hdActionsForGoal,
@@ -101,13 +104,16 @@ describe('the version constants', () => {
     ['WORDING_VERSION', WORDING_VERSION, 2],
     ['SKIN_TYPE_VERSION', SKIN_TYPE_VERSION, 1],
     ['CHANGE_VERSION', CHANGE_VERSION, 1],
+    ['CHASE_VERSION', CHASE_VERSION, 1],
   ])('%s is %s, the number a result carries so a client can tell which rules wrote what it shows', (_name, version, expected) => {
     expect(version).toBe(expected)
   })
 
   // Visibility v3 gives each concern its own cut-offs (v2 showed every goal concern with one shared set) and wording v2 adds the faint words.
-  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2', () => {
-    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1')
+  // Concerns v2 measures the core set on every scan. The chase rule (issue #145) joins the others, so a stored result says which resume
+  // window worked out its day one.
+  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2 and the chase rule last', () => {
+    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1')
   })
 })
 
@@ -1212,5 +1218,118 @@ describe('resultView: change since day one', () => {
     const text = JSON.stringify(result!.concerns)
     expect(text).not.toMatch(LIGHTNESS)
     expect(text).not.toMatch(/\d/)
+  })
+})
+
+// A chase is one continuous run of working on a goal, read from the profile's goal history alone and never from scan dates. Leaving a goal
+// and taking it up again within RESUME_DAYS of leaving continues the same chase; coming back later starts a new one. The chase start is when
+// the goal first became current in that chain. Every expectation below is a literal written from issue #145 ("Chases and day one"), never
+// read from the module: the history is the rows the goals service appends, oldest first.
+describe('chaseStartFor: which chase of a goal a time falls in', () => {
+  const CHASE_T0 = new Date('2030-06-15T12:00:00.000Z')
+  const DAY = 24 * 60 * 60 * 1000
+  const on = (offsetMs: number) => new Date(CHASE_T0.getTime() + offsetMs)
+  /** The profile's goal history, oldest first: each row is the goal that became current at that offset from CHASE_T0. */
+  const history = (...rows: [Goal | null, number][]) => rows.map(([goal, offset]) => ({ goal, createdAt: on(offset) }))
+  // The window is 90 days, from the spec; RESUME_DAYS is pinned to it separately, so these fixtures never read it.
+  const WINDOW = 90 * DAY
+
+  it('resumes a goal left no more than 90 days ago', () => {
+    expect(RESUME_DAYS).toBe(90)
+  })
+
+  it('starts the chase when the goal became current, and the goal is current from that moment on', () => {
+    const rows = history(['glow', 0])
+
+    expect(chaseStartFor(rows, 'glow', on(0))).toEqual(on(0))
+    expect(chaseStartFor(rows, 'glow', on(30 * DAY))).toEqual(on(0))
+  })
+
+  it('has no chase for a time a millisecond before the goal became current', () => {
+    expect(chaseStartFor(history(['glow', 10 * DAY]), 'glow', on(10 * DAY - 1))).toBeNull()
+  })
+
+  it('has no chase for a goal the profile never had, nor for a profile with no history at all', () => {
+    expect(chaseStartFor(history(['glow', 0], ['brighter', DAY]), 'even-tone', on(5 * DAY))).toBeNull()
+    expect(chaseStartFor([], 'glow', on(0))).toBeNull()
+  })
+
+  it('merges a run of the same goal: picking it again does not restart the chase', () => {
+    const rows = history(['glow', 0], ['glow', 3 * DAY], ['glow', 9 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(10 * DAY))).toEqual(on(0))
+    expect(chaseStartFor(rows, 'glow', on(5 * DAY))).toEqual(on(0))
+  })
+
+  it('has no chase for a goal while another one is current, however short the detour', () => {
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', 12 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(11 * DAY))).toBeNull()
+    expect(chaseStartFor(rows, 'brighter', on(11 * DAY))).toEqual(on(10 * DAY))
+  })
+
+  it('continues the chase across a detour, so a short break keeps the first day one', () => {
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', 12 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(12 * DAY))).toEqual(on(0))
+    expect(chaseStartFor(rows, 'glow', on(40 * DAY))).toEqual(on(0))
+  })
+
+  it('continues the chase for a return exactly 90 days after leaving, the last moment of the window', () => {
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', 10 * DAY + WINDOW])
+
+    expect(chaseStartFor(rows, 'glow', on(10 * DAY + WINDOW))).toEqual(on(0))
+  })
+
+  it('starts a new chase for a return a millisecond after the window closes', () => {
+    const back = 10 * DAY + WINDOW + 1
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', back])
+
+    expect(chaseStartFor(rows, 'glow', on(back))).toEqual(on(back))
+    expect(chaseStartFor(rows, 'glow', on(back + 50 * DAY))).toEqual(on(back))
+  })
+
+  it('measures the window from when the goal was left, not from when the chase started', () => {
+    // Glow was current for 200 days, left, and taken up again 90 days later: one chase, still starting on day 0.
+    const rows = history(['glow', 0], ['brighter', 200 * DAY], ['glow', 200 * DAY + WINDOW])
+
+    expect(chaseStartFor(rows, 'glow', on(200 * DAY + WINDOW))).toEqual(on(0))
+  })
+
+  it('counts a row with no goal as leaving the goal: words nobody sorted into a goal are not the goal', () => {
+    const rows = history(['glow', 0], [null, 10 * DAY], ['glow', 12 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(11 * DAY))).toBeNull()
+    expect(chaseStartFor(rows, 'glow', on(12 * DAY))).toEqual(on(0))
+  })
+
+  it('starts a new chase when a row with no goal stood for longer than the window', () => {
+    const back = 10 * DAY + WINDOW + 1
+    const rows = history(['glow', 0], [null, 10 * DAY], ['glow', back])
+
+    expect(chaseStartFor(rows, 'glow', on(back))).toEqual(on(back))
+  })
+
+  it('chains across several short detours and keeps the start of the first', () => {
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', 12 * DAY], [null, 20 * DAY], ['glow', 40 * DAY], ['clear-skin', 50 * DAY], ['glow', 100 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(100 * DAY))).toEqual(on(0))
+  })
+
+  it('keeps only the detours since the last gap too long to resume', () => {
+    const fresh = 10 * DAY + WINDOW + 1
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', fresh], ['even-tone', fresh + DAY], ['glow', fresh + 3 * DAY])
+
+    expect(chaseStartFor(rows, 'glow', on(fresh + 3 * DAY))).toEqual(on(fresh))
+    // The older chase is still the answer for a time inside it.
+    expect(chaseStartFor(rows, 'glow', on(5 * DAY))).toEqual(on(0))
+  })
+
+  it('answers for the chase that holds the time asked about, not for the newest chase', () => {
+    const fresh = 10 * DAY + WINDOW + 1
+    const rows = history(['glow', 0], ['brighter', 10 * DAY], ['glow', fresh])
+
+    expect(chaseStartFor(rows, 'glow', on(DAY))).toEqual(on(0))
+    expect(chaseStartFor(rows, 'glow', on(fresh + DAY))).toEqual(on(fresh))
   })
 })

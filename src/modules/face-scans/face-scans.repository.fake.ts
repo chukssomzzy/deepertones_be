@@ -98,11 +98,16 @@ export class FakeFaceScansRepository implements FaceScansRepository {
       .map((scan) => ({ ...scan }))
   }
 
-  async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
-    const ready = [...this.scans.values()].filter((scan) => scan.profileId === profileId && scan.state === 'ready')
-    const cutOff = Math.max(-1, ...ready.filter((scan) => scan.goalAtScan !== goal && scan.createdAt.getTime() < at.getTime()).map((scan) => scan.createdAt.getTime()))
-    const [first] = ready
-      .filter((scan) => scan.goalAtScan === goal && scan.createdAt.getTime() <= at.getTime() && scan.createdAt.getTime() > cutOff)
+  async dayOneFor({ profileId, goal, at, since }: { profileId: string; goal: Goal; at: Date; since: Date; scanId: string }): Promise<FaceScan | null> {
+    const [first] = [...this.scans.values()]
+      .filter(
+        (scan) =>
+          scan.profileId === profileId &&
+          scan.state === 'ready' &&
+          scan.goalAtScan === goal &&
+          scan.createdAt.getTime() >= since.getTime() &&
+          scan.createdAt.getTime() <= at.getTime(),
+      )
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     return first ? { ...first } : null
   }

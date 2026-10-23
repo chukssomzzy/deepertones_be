@@ -15,9 +15,13 @@ export const VISIBILITY_VERSION = 3
 export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
+export const CHASE_VERSION = 1
 
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
-export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION}`
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION}`
+
+/** A goal left and taken up again within this many days of leaving continues its chase; any longer and the goal starts fresh (issue #145). */
+export const RESUME_DAYS = 90
 
 /** The concerns a goal can show. `hd_skin_type` is also asked for, but it is the skin type label and never a seen-words concern. */
 export const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
@@ -364,5 +368,37 @@ export const resultView = (input: {
     skinAge: skinAge === null ? null : { years: Math.round(skinAge), words: skinAgeWords(skinAge) },
     sinceDayOne,
     tablesVersion: TABLES_VERSION,
+  }
+}
+
+const RESUME_WINDOW_MS = RESUME_DAYS * 24 * 60 * 60 * 1000
+
+/**
+ * The start of the chase of `goal` that `at` falls in, read from the profile's goal history alone (oldest first), or null when `goal` was not
+ * current at `at`. A row is current from its `createdAt`, inclusive; a run of consecutive rows of the same goal is one chase so far, and a row
+ * of any other goal, or a null goal (typed words nobody sorted yet), counts as leaving. Walking back from the chase that holds `at`: each time
+ * the chase's start is reached, the detour just before it (every row back to the last row of `goal`, however many different goals it crossed)
+ * is one step away, and the chase swallows it when the return is no more than RESUME_DAYS after the detour began; a longer gap stops the walk
+ * with the chase as found so far. Exactly RESUME_DAYS continues it; a millisecond more starts a new chase.
+ */
+export const chaseStartFor = (history: readonly { goal: Goal | null; createdAt: Date }[], goal: Goal, at: Date): Date | null => {
+  const atMs = at.getTime()
+  let i = -1
+  for (let row = 0; row < history.length; row++) {
+    if (history[row]!.createdAt.getTime() > atMs) break
+    i = row
+  }
+  if (i === -1 || history[i]!.goal !== goal) return null
+
+  for (;;) {
+    while (i > 0 && history[i - 1]!.goal === goal) i--
+    const chaseStart = history[i]!.createdAt
+    if (i === 0) return chaseStart
+    // The detour right before this run: every row back to (but not including) the last time `goal` was current, whatever goals it crossed.
+    let detourStart = i - 1
+    while (detourStart > 0 && history[detourStart - 1]!.goal !== goal) detourStart--
+    if (detourStart === 0) return chaseStart // nothing of `goal` earlier than the detour to merge with
+    if (chaseStart.getTime() - history[detourStart]!.createdAt.getTime() > RESUME_WINDOW_MS) return chaseStart
+    i = detourStart - 1
   }
 }

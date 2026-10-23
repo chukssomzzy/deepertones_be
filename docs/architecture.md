@@ -1252,7 +1252,8 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `hd_skin_type`, 5 to 8 actions, the 16-unit HD tier. Why every goal measures the core four: the routine stage needs the whole picture (a glow user with spots needs
   products that do not clog pores; on darker skin dark marks are the most common concern), and a concern not measured on day one can never show change since
   day one; the goals come from `goals.vocabulary.ts` and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
-  `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`) and `CHASE_VERSION` (`chaseStartFor`, the 90-day
+  resume rule, `RESUME_DAYS`; issue #145). Change a table, bump its version.
 - **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
   three cut-offs (a score at or below one is in that band): `visible` (the `a-little` band's top), `some` and `clear`. Above `visible` is `faint` (`bandFor`
   returns it; `isVisible` means "not faint"). The values are in `THRESHOLDS` in `face-scans.tables.ts` (`face-scans.tables.test.ts` pins every boundary and
@@ -1278,7 +1279,7 @@ pipeline**: the job that sends the front photo to Perfect Corp and copies the re
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
 notifications** (see "Pushes" below).
 Face scans split by what a guest may do. A guest may **run the scan flow**: give consent (`PUT /me/face-consent`), start a scan, retake it and follow it live; those four routes use `signedIn()` as their early exit and their `FaceScanService` methods (`giveConsent`, `create`, `retake`, `watch`) need only `requireUser()`. Everything that shows or manages what the scan found is for **verified users**: reading and withdrawing the consent, the list, reading a scan and deleting one. Those five routes use `verifiedUser()` as their early exit (403 `VERIFICATION_REQUIRED` for a guest, 401 with no token) and their methods (`consent`, `withdrawConsent`, `listFaceScans`, `getFaceScan`, `deleteFaceScan`) start with `requireVerified()`, before the ownership check, so a guest gets 403 for any id, never 404. The live stream carries **status only**: every `face` frame is exactly `{ id, state, reason }` (plus `done`), for every state including `ready`, and never a result, score, skin age or type, overlay or photo link, or goal and rescan information, so a guest learns the next step (analysing, needs a retake and why, failed and why, ready) and must verify and `GET /scans/faces/{id}` to see the result. The create and retake `202` answers show no result either. `latestSkinType()` (read by the recommendations) stays `requireUser`. The photo link and the Perfect Corp webhook are credential-gated (a signed link, a signature), and the job-driven methods run as the system.
-`FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
+`FaceScanService` takes the goals service (`requireGoal`, `current` and `history`, as a type-only `Pick`; services may depend on services), the photo
 store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
@@ -1339,13 +1340,19 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     were measured has no rows for them, so its `alsoNoticed` is `[]`; it is `[]` too when no extra is visible. The never-rules hold for it as for `seen`.
   - **Overlays.** The mask key of every concern in `seen`, faint ones included, and of every concern in `alsoNoticed`, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
     photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` and `alsoNoticed` (a faint extra, or one not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
-  - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
-    another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
-    day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
-    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`; the
-    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`. The
-    cut-off and the upper bound are by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a
-    millisecond in practice, and `scanId` is kept for the tie-break should one be needed.
+  - **Day one.** A goal's *chase* is a continuous run of working on it, read from the profile's own goal history, never from scan dates (issue #145).
+    Leaving a goal and taking it up again within `RESUME_DAYS` (90) of leaving continues its chase; a longer gap starts a new one. Day one is the first
+    `ready` scan of the chase that contains the scan's own time: a short detour to another goal is a break in the chase, not the end of it, so the
+    progress a user had on a goal they come back to within the window still counts, and a goal left for longer starts a fresh chase with its own
+    day one. (Whether that also makes a scan due is "The policy" below, unchanged by this rule.)
+    `chaseStartFor(history, goal, at)` (`face-scans.tables.ts`) is the pure rule: `history` is the profile's goal rows, oldest first (`GoalsService.history()`),
+    a row is current from its `createdAt` inclusive, consecutive rows of the same goal merge into one run, and a row of another goal or a null goal (typed
+    words nobody sorted yet) counts as leaving. `FaceScansRepository.dayOneFor({ profileId, goal, at, since, scanId })` then answers the earliest `ready`
+    scan under `goal` with `createdAt` between `since` (the chase start) and `at`, and S itself when S is its own day one (the service turns that into
+    `sinceDayOne: null`). A scan under another goal inside the window is no cut-off here: the chase already decided that. `since` and the upper bound are
+    by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a millisecond in practice, and
+    `scanId` is kept for the tie-break should one be needed. Deleting the day-one scan makes the next one in the chase the day one: nothing is stored.
+    Scans that failed, need a retake or are analysing neither count nor cut.
   - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
     worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
@@ -1359,7 +1366,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
-  is read once per list).
+  is read once per list) and the goal history every ready scan's chase is read from (fetched once, only when the list holds a ready scan).
 - **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
   then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
   does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").

@@ -2596,7 +2596,8 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
 })
 
 describe('FaceScanService.getFaceScan: the change since day one', () => {
-  // Day one is the profile's earliest READY scan under the scan's goal, with no ready scan under another goal between it and this one.
+  // Day one is the profile's earliest READY scan under the scan's goal within the chase the scan's own time falls in: the chase comes from the goal
+  // history (a goal left and taken up again within 90 days is the same chase), and a scan under another goal never ends one.
 
   it('has no change for the first ready scan, and has one for a later scan under the same goal, worked out against the first', async () => {
     const ctx = setup()
@@ -2717,31 +2718,50 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
     expect((await resultOf(ctx, ready)).sinceDayOne).toBeNull()
   })
 
-  it('starts a new day one when the goal changes: a scan under the new goal has none to compare with, and nor has one after going back', async () => {
+  // The chase, not the scans, decides the day one (issue #145): a short detour to another goal is a break in the chase, not the end of it, so the
+  // progress the user had on the goal they come back to still counts. The goal history says when the goal was left and taken up again.
+  it('keeps the day one across a short detour: the scan under the new goal has none of its own, and one taken after going back still compares with the first', async () => {
     const ctx = setup()
     const glowFirst = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     const brighter = await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
     const glowAgain = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
 
     expect((await resultOf(ctx, glowFirst)).sinceDayOne).toBeNull()
+    // Brighter's own chase starts with this scan, so it has nothing to compare with.
     expect((await resultOf(ctx, brighter)).sinceDayOne).toBeNull()
-    // A ready scan under another goal came between, so the first glow scan is not this one's day one: it is its own.
-    expect((await resultOf(ctx, glowAgain)).sinceDayOne).toBeNull()
+    // Glow was left for a day, far inside the 90-day window, so its chase never ended and its first scan is still day one.
+    expect((await resultOf(ctx, glowAgain)).sinceDayOne).toMatchObject({ dayOneScanId: glowFirst })
   })
 
-  it('compares a scan taken after going back to an earlier goal with the first scan of that second run, not with the first run', async () => {
+  it('starts a fresh day one for a goal taken up again more than 90 days after it was left, and leaves the older chase as it was', async () => {
     const ctx = setup()
-    // The first run under glow is far from the later ones, so a comparison with it would read differently.
-    await readyUnder(ctx, 'glow', analysisOf(glowScores(90, 90, 90)))
+    const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
-    const secondRun = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const second = await readyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)))
+    // Glow is left for brighter, and comes back 91 days later: the first chase is over and a new one begins with nothing to compare with.
+    await takenUnder(ctx, 'brighter')
+    ctx.advanceClock(90 * DAY)
+    const freshStart = await readyUnder(ctx, 'glow', analysisOf(glowScores(50, 50, 55)))
+
+    expect((await resultOf(ctx, freshStart)).sinceDayOne).toBeNull()
+    // A scan is read against the chase its own time falls in, whatever chase the profile is in now.
+    expect((await resultOf(ctx, second)).sinceDayOne).toMatchObject({ dayOneScanId: first })
+  })
+
+  it('compares a scan taken after going back to a goal with the first scan of the whole chase, not with the one just before it', async () => {
+    const ctx = setup()
+    // The chase's first scan reads differently from the one just before the latest, so which of them is day one shows in the words.
+    const chaseStart = await readyUnder(ctx, 'glow', analysisOf(glowScores(90, 90, 90)))
+    await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
     await takenUnder(ctx, 'brighter')
     const latest = await readyUnder(ctx, 'glow', analysisOf(glowScores(50, 50, 55)))
 
     const { sinceDayOne } = await resultOf(ctx, latest)
 
-    expect(sinceDayOne.dayOneScanId).toBe(secondRun)
-    expect(sinceDayOne.concerns[0]).toEqual({ concern: 'glow', change: 'fainter', words: 'More glow than on day one' })
+    expect(sinceDayOne.dayOneScanId).toBe(chaseStart)
+    // Radiance 90 on day one against 50 now is a fall, not the rise it would be against the 40 of the scan just before.
+    expect(sinceDayOne.concerns[0]).toEqual({ concern: 'glow', change: 'more-visible', words: 'Less glow than on day one' })
   })
 
   it('makes the next scan under the goal the day one when the day-one scan is deleted, and none at all when none is left before it', async () => {
