@@ -28,7 +28,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { concernsForGoal, hdActionsForGoal, measuredConcernsForGoal, noticedConcerns, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -93,7 +93,7 @@ export type FaceScanServiceDeps = {
 
 const POSITIONS: readonly FacePhotoPosition[] = ['front', 'right', 'left']
 
-/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). */
+/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). Every goal asks for 5 to 8. */
 const unitsForActions = (actions: number): number => (actions <= 4 ? 12 : actions <= 8 ? 16 : actions <= 12 ? 20 : 22)
 /** What a Fitzpatrick read costs. */
 const FITZPATRICK_UNITS = 10
@@ -269,7 +269,7 @@ export class FaceScanService {
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
     // The rows are gone, so a failure here cannot be retried by the user (the next delete is a 404): log it and finish.
-    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...concernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
+    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...measuredConcernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
     await this.photos.deleteMany(fixedKeys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: id, error: describeUnexpectedError(cleanup) }))
     await this.deleteTasks(scan)
   }
@@ -502,7 +502,7 @@ export class FaceScanService {
     const masks: FaceMask[] = []
     await this.logFrontPhotoSize(scan)
     try {
-      for (const concern of concernsForGoal(scan.goalAtScan)) {
+      for (const concern of measuredConcernsForGoal(scan.goalAtScan)) {
         const url = FaceScanService.maskUrlOf(analysis.concerns, concern)
         if (!url) continue
         const maskKey = this.objectKey(scan, FaceScanService.maskName(concern))
@@ -777,8 +777,11 @@ export class FaceScanService {
       this.repository.masksOf(scan.id),
       this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
     ])
-    // Only the concerns that are shown (faint ones too) get a link: a signature per mask that is then dropped is work for nothing.
-    const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
+    // Only the concerns that are shown get a link (the goal's own, faint ones too, and the extras that can be seen): a signature per mask that is then dropped is work for nothing.
+    const shown = new Set<string>([
+      ...shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
+      ...noticedConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
+    ])
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null

@@ -80,6 +80,7 @@ type FaceScanView = {
 }
 type FaceScanResultView = {
   seen: { concern: string; region: string; level: 'faint' | 'a-little' | 'some' | 'clear'; words: string; overlay: { url: string } | null }[]
+  alsoNoticed: { concern: string; region: string; level: 'faint' | 'a-little' | 'some' | 'clear'; words: string; overlay: { url: string } | null }[]
   nothingStandsOut: string | null
   skinType: string | null
   skinAge: { years: number; words: string } | null
@@ -950,12 +951,39 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
         { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
         { concern: 'texture', region: 'whole', level: 'faint', words: 'Skin looks smooth', overlay: null },
       ],
+      alsoNoticed: [],
       nothingStandsOut: null,
       skinType: 'dry',
       skinAge: { years: 31, words: 'Your skin looks about 31' },
       sinceDayOne: null,
       tablesVersion: TABLES_VERSION,
     })
+  })
+
+  it('shows the visible core extras as also noticed, in core order with a working overlay link each, and leaves out a faint one', async () => {
+    const guest = await readyGuest('glow')
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    await runFaceJob(queued.at(-1))
+    // The upload asked for everything measured for glow: its own three, the four core concerns it lacks, and the skin type.
+    const asked = (stub.callsTo('POST', '/s2s/v2.0/task/skin-analysis')[0]!.body as { dst_actions: string[] }).dst_actions
+    expect(asked).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type'])
+    // age_spot 84 (a little), acne 58 (some), pore 70 (faint), oiliness 70 (some).
+    const extra = (type: string, score: number) => ({ type, region: 'whole', raw_score: score, ui_score: score + 10, mask_urls: [maskUrl(type.replace('hd_', ''))] })
+    stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess([...glowOutput(), extra('hd_age_spot', 84), extra('hd_acne', 58), extra('hd_pore', 70), extra('hd_oiliness', 70)]))
+    await runFaceJob(stepOf(view.id, 'fetch'))
+
+    const { result } = await dataOf<FaceScanView>(await getFace(guest, view.id))
+
+    expect(result!.alsoNoticed).toEqual([
+      { concern: 'marks', region: 'whole', level: 'a-little', words: 'A few faint dark marks', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+      { concern: 'spots', region: 'whole', level: 'some', words: 'Some spots and breakouts across the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+      { concern: 'shine', region: 'whole', level: 'some', words: 'Some shine across the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+    ])
+    expect(result!.seen.map((item) => item.concern)).toEqual(['glow', 'dryness', 'texture'])
+    const opened = await openPhoto(tokenOf(result!.alsoNoticed[0]!.overlay!.url))
+    expect(opened.status).toBe(200)
+    expect(opened.headers.get('content-type')).toBe('image/png')
   })
 
   it('opens an overlay link to the mask PNG that was stored for the concern', async () => {
@@ -979,13 +1007,14 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
 // A second scan under the same goal is not due until the goal has changed, so a profile gets there as a person does: scan under glow, change the goal and
 // scan again (that scan is not finished here, so it neither counts nor cuts), change the goal back and scan under glow once more.
 describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
-  const glowAnalysis = ({ radiance, moisture, texture, skinAge }: { radiance: number; moisture: number; texture: number; skinAge: number }) => [
+  const glowAnalysis = ({ radiance, moisture, texture, skinAge, extras = [] }: { radiance: number; moisture: number; texture: number; skinAge: number; extras?: unknown[] }) => [
     { type: 'hd_radiance', region: 'whole', raw_score: radiance, ui_score: radiance + 10, mask_urls: [maskUrl('radiance')] },
     { type: 'hd_moisture', region: 'whole', raw_score: moisture, ui_score: moisture + 10, mask_urls: [maskUrl('moisture')] },
     { type: 'hd_texture', region: 'whole', raw_score: texture, ui_score: texture + 10, mask_urls: [] },
     { type: 'hd_skin_type', region: 'whole', skin_type: 'Dry' },
     { type: 'skin_age', score: skinAge },
     { type: 'all', score: 66 },
+    ...extras,
   ]
   const messageFor = (scanId: string) => queued.find((body) => (body as { faceScanId: string }).faceScanId === scanId)
   /** Scans under `glow`, one after the other, with a scan under another goal still analysing between. Resolves to the first, the one between and the second. */
@@ -1049,7 +1078,10 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
     await setGoal(guest, 'glow')
     const later = await createdFace(guest)
     await runFaceJob(messageFor(later.id))
-    stub.answerSkin((await rowOf(later.id))!.task!, () => skinSuccess(glowAnalysis({ radiance: 50, moisture: 55, texture: 57, skinAge: 34 })))
+    // The core extras: age spot, acne and oiliness are visible and listed in alsoNoticed, which the never-rules below cover too.
+    const extra = (type: string, score: number) => ({ type, region: 'whole', raw_score: score, ui_score: score + 10, mask_urls: [maskUrl(type.replace('hd_', ''))] })
+    const extras = [extra('hd_age_spot', 80), extra('hd_acne', 50), extra('hd_oiliness', 70)]
+    stub.answerSkin((await rowOf(later.id))!.task!, () => skinSuccess(glowAnalysis({ radiance: 50, moisture: 55, texture: 57, skinAge: 34, extras })))
     await runFaceJob(stepOf(later.id, 'fetch'))
 
     const res = await getFace(guest, later.id)
@@ -1058,6 +1090,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
 
     const { result } = (JSON.parse(body) as { data: FaceScanView }).data
     expect(result!.sinceDayOne).not.toBeNull()
+    expect(result!.alsoNoticed.map((item) => item.concern)).toEqual(['marks', 'spots', 'shine'])
     expect(body).not.toMatch(/hd_|raw_?score|ui_?score|fitzpatrick/i)
     expect(body).not.toMatch(/"all"/)
     expect(body).not.toMatch(/"(?:I|II|III|IV|V|VI)"/)
@@ -1065,7 +1098,7 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
     const numbers = (value: unknown, path = ''): string[] =>
       typeof value === 'number' ? [path] : value !== null && typeof value === 'object' ? Object.entries(value).flatMap(([key, inner]) => numbers(inner, `${path}.${key}`)) : []
     expect(numbers(result)).toEqual(['.skinAge.years'])
-    for (const text of [...result!.seen.map((seen) => seen.words), ...result!.sinceDayOne!.concerns.map((concern) => concern.words)]) expect(text).not.toMatch(/\d/)
+    for (const text of [...result!.seen.map((seen) => seen.words), ...result!.alsoNoticed.map((noticed) => noticed.words), ...result!.sinceDayOne!.concerns.map((concern) => concern.words)]) expect(text).not.toMatch(/\d/)
   })
 })
 
