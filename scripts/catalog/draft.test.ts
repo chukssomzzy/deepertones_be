@@ -8,7 +8,8 @@ import type { CatalogDrafter, DraftRequest, DraftResult } from '../../src/provid
 import { MemoryCatalogDrafter } from '../../src/providers/catalog-drafting/memory.catalog-drafter'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
 import type { ProductIdentity, ProductResearcher } from '../../src/providers/product-research/product-researcher.provider'
-import { draftWorkbook, formatReport, runDraft } from './draft'
+import { draftWorkbook, formatReport, NOTHING_TO_DRAFT, NO_ACTIVE_COUNTRIES, runDraft } from './draft'
+import { DraftInputError } from './draft-input-error'
 
 // `catalog:draft`, minus the file and the network: a workbook in, the same workbook with its empty draft cells filled out, with the researcher and the
 // drafter faked. What is pinned: it fills only EMPTY cells of DRAFT rows, never adds or removes a product, marks each cell it filled in draft_cells with
@@ -1261,5 +1262,205 @@ describe('runDraft', () => {
     await expect(runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: files })).rejects.toBe(failure)
 
     expect(files.writes).toEqual([])
+  })
+})
+
+// --- a mistake in the person's own input -------------------------------------------------------------------------------------------------------
+
+describe('draftWorkbook: --countries that cannot be drafted', () => {
+  const refusal = async (input: RawWorkbook, countries: string[]) => {
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+    const error = await draftWorkbook(input, { researcher: made.researcher, drafter: made.drafter, ledger, countries }).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    )
+    return { error, ...made }
+  }
+
+  it('throws a DraftInputError that names the code and lists the active countries, before any call', async () => {
+    const { error, researcher, drafter } = await refusal(workbook(), ['FR'])
+
+    expect(error).toBeInstanceOf(DraftInputError)
+    expect((error as Error).message).toBe('Not an active country in the Countries tab: FR. Active countries: NG, GB.')
+    expect(researcher.calls).toEqual([])
+    expect(drafter.calls).toEqual([])
+  })
+
+  it('names every code that is not active, and does not list a retired country as active', async () => {
+    const { error } = await refusal(workbook(), ['NG', 'FR', 'GH'])
+
+    expect((error as Error).message).toBe('Not an active country in the Countries tab: FR, GH. Active countries: NG, GB.')
+  })
+
+  it.each([
+    ['an empty Countries tab', []],
+    ['a Countries tab with only a retired country', [GH_RETIRED]],
+  ])('says the Countries tab has no active country, and which cells to add, for %s', async (_label, rows) => {
+    const { error } = await refusal(workbook({ countries: rows }), ['NG'])
+
+    expect(error).toBeInstanceOf(DraftInputError)
+    expect((error as Error).message).toBe('Not an active country in the Countries tab: NG. The Countries tab has no active country: add a row with code, currency, low_max, mid_max, status active, and run again.')
+  })
+})
+
+describe('draftWorkbook: an active country with no currency', () => {
+  const NO_CURRENCY = { code: 'NG', currency: null, low_max: 5000, mid_max: 15000, status: 'active' }
+
+  it('says the named country was skipped because its row has no currency, not just that it is not active', async () => {
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    const error = await draftWorkbook(workbook({ countries: [NO_CURRENCY, GB] }), { researcher: made.researcher, drafter: made.drafter, ledger, countries: ['NG'] }).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    )
+
+    expect(error).toBeInstanceOf(DraftInputError)
+    expect((error as Error).message).toBe('Not an active country in the Countries tab: NG. Countries row NG was skipped because it has no currency. Active countries: GB.')
+  })
+
+  it('does not blame a currency for a code that is simply not in the tab', async () => {
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    const error = await draftWorkbook(workbook({ countries: [NO_CURRENCY, GB] }), { researcher: made.researcher, drafter: made.drafter, ledger, countries: ['FR'] }).then(
+      () => undefined,
+      (failure: unknown) => failure,
+    )
+
+    expect((error as Error).message).toBe('Not an active country in the Countries tab: FR. Active countries: GB.')
+  })
+
+  it('says so before drafting when --countries is not given, naming the code, and carries on with the countries that have a currency', async () => {
+    const lines: string[] = []
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook({ countries: [NO_CURRENCY, GB] })), notify: (line) => void lines.push(line) })
+
+    expect(lines).toEqual(['Countries row NG was skipped because it has no currency.'])
+    expect(made.drafter.calls[0]!.countries).toEqual([{ code: 'GB', currency: 'GBP' }])
+  })
+
+  it('names every such row, and still says there is no active country when that leaves none', async () => {
+    const lines: string[] = []
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook({ countries: [NO_CURRENCY, { ...NO_CURRENCY, code: 'GB', currency: '' }] })), notify: (line) => void lines.push(line) })
+
+    expect(lines).toEqual([NO_ACTIVE_COUNTRIES, 'Countries rows NG, GB were skipped because they have no currency.'])
+  })
+})
+
+describe('runDraft: a workbook with nothing to draft', () => {
+  const notices = () => {
+    const lines: string[] = []
+    return { lines, notify: (line: string) => void lines.push(line) }
+  }
+  const runWith = async (input: RawWorkbook, args = ARGS) => {
+    const files = io(input)
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+    const { lines, notify } = notices()
+    const outcome = await runDraft(args, { researcher: made.researcher, drafter: made.drafter, ledger, io: files, notify })
+    return { outcome, files, lines, ...made }
+  }
+
+  it('says so plainly, and spends and writes nothing, for an empty Products tab', async () => {
+    const { outcome, files, lines, researcher, drafter } = await runWith(workbook({ products: [], countries: [] }))
+
+    expect(lines).toEqual([NOTHING_TO_DRAFT])
+    expect(NOTHING_TO_DRAFT).toBe('No draft rows to fill: add products to the Products tab with status draft (brand, name, category, origin) and run again. No file was written.')
+    expect(files.writes).toEqual([])
+    expect(researcher.calls).toEqual([])
+    expect(drafter.calls).toEqual([])
+    expect(outcome.draftRows).toBe(0)
+    expect(outcome.spentMicros).toBe(0)
+  })
+
+  it('says so when the products are all approved or retired', async () => {
+    const { lines, files } = await runWith(workbook({ products: [APPROVED, RETIRED] }))
+
+    expect(lines).toEqual([NOTHING_TO_DRAFT])
+    expect(files.writes).toEqual([])
+  })
+
+  it('still reads the input file, and does so once', async () => {
+    const { files } = await runWith(workbook({ products: [] }))
+
+    expect(files.reads).toEqual(['catalog-v7.xlsx'])
+  })
+
+  it('still refuses a --countries code that is not active first, as an input error', async () => {
+    await expect(runWith(workbook({ products: [], countries: [] }), { ...ARGS, countries: ['NG'] })).rejects.toBeInstanceOf(DraftInputError)
+  })
+
+  it('does not say it when there are draft rows, and counts them', async () => {
+    const { outcome, lines, files } = await runWith(workbook({ products: [CERAVE, APPROVED, VANICREAM] }))
+
+    expect(lines).not.toContain(NOTHING_TO_DRAFT)
+    expect(outcome.draftRows).toBe(2)
+    expect(files.writes).toHaveLength(1)
+  })
+
+  it('writes the file when every draft row was skipped, and lists them: that is a report, not an empty workbook', async () => {
+    const nameless = blank('PRD-NAMELESS', 'Brand', 'x', { name: '' })
+    const { outcome, lines, files } = await runWith(workbook({ products: [nameless] }))
+
+    expect(lines).not.toContain(NOTHING_TO_DRAFT)
+    expect(outcome.draftRows).toBe(1)
+    expect(outcome.skipped).toEqual(['PRD-NAMELESS'])
+    expect(files.writes).toHaveLength(1)
+    expect(formatReport(outcome)).toContain('PRD-NAMELESS')
+  })
+})
+
+describe('runDraft: no active country', () => {
+  it('says there are no active countries and that only product cells will be drafted, then carries on without prices', async () => {
+    const lines: string[] = []
+    const files = io(workbook({ countries: [GH_RETIRED] }))
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    const outcome = await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: files, notify: (line) => void lines.push(line) })
+
+    expect(lines).toEqual([NO_ACTIVE_COUNTRIES])
+    expect(NO_ACTIVE_COUNTRIES).toMatch(/no active countries/i)
+    expect(NO_ACTIVE_COUNTRIES).toMatch(/product cells/i)
+    expect(NO_ACTIVE_COUNTRIES).toMatch(/not prices/i)
+    expect(made.drafter.calls[0]!.countries).toEqual([])
+    expect(files.writes).toHaveLength(1)
+    expect(availabilityOf(files.writes[0]!.workbook, 'PRD-CERAVE')).toEqual([])
+    expect(productOf(files.writes[0]!.workbook, 'PRD-CERAVE').frequency).toBe('am-pm')
+    expect(outcome.draftRows).toBe(1)
+  })
+
+  it('says nothing about countries when some are active', async () => {
+    const lines: string[] = []
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook()), notify: (line) => void lines.push(line) })
+
+    expect(lines).toEqual([])
+  })
+
+  it('says nothing about it when there is nothing to draft either: one plain message, not two', async () => {
+    const lines: string[] = []
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook({ products: [], countries: [] })), notify: (line) => void lines.push(line) })
+
+    expect(lines).toEqual([NOTHING_TO_DRAFT])
+  })
+
+  it('works without a notify, as every earlier caller does', async () => {
+    const made = fakes()
+    const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
+
+    await expect(runDraft(ARGS, { researcher: made.researcher, drafter: made.drafter, ledger, io: io(workbook({ countries: [] })) })).resolves.toBeDefined()
   })
 })

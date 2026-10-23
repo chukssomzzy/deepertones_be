@@ -262,7 +262,9 @@ page, skin concerns, skin types, steps and frequency) and adds an Availability r
 and never writing to the input file. Every cell it fills is listed in `draft_cells` with the page it came from, and a row stays `draft` with no approval, so a
 person must check each cell against its page, clear its `draft_cells` entry and approve the row. It makes real, billed Claude calls (key from `.dev.vars`) and
 stops at `--max-usd` (2 dollars by default), keeping what it has. The report lists what is still wrong, by tab, row and column; the output file is a normal
-workbook to finish and upload as above. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
+workbook to finish and upload as above. A fresh export has an empty Countries tab and no draft products, so prepare it first: add a Countries row
+(code, currency, low_max, mid_max, status `active`) for each country to draft prices for, and the draft Products rows; with no draft rows the command says so and writes
+nothing, and with no active country it drafts the product cells only. A mistake in the file or the flags is printed in words, exit 2. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
 contract version), so it uploads to the environment it was exported from, and a file with no stamp stays refused by the upload.
 
 ## Face scan setup (Perfect Corp)

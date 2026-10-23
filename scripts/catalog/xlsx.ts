@@ -41,6 +41,12 @@ export async function writeWorkbookFile(path: string, workbook: RawWorkbook, cat
   await book.xlsx.writeFile(path)
 }
 
+/**
+ * A mistake in the file that the person can fix (a missing tab, a repeated or missing header, a formula with no saved result). The message holds only
+ * a tab, a column, a row and fixed words, so a caller that hides every other error's message may print this one.
+ */
+export class WorkbookFileError extends Error {}
+
 /** A formula saved without a result (written by a tool that never calculated it): there is no value to read, and guessing "empty" would hide it. */
 class FormulaWithoutResult extends Error {}
 
@@ -78,7 +84,7 @@ function readTab(sheet: ExcelJS.Worksheet): RawTab {
       return plainValue(sheet.getRow(rowNumber).getCell(column).value)
     } catch (error) {
       if (!(error instanceof FormulaWithoutResult)) throw error
-      throw new Error(`${tab} row ${rowNumber}, column ${header ?? letter(column)} holds a formula with no saved result. Open the file in Excel, save it, and upload that copy.`, { cause: error })
+      throw new WorkbookFileError(`${tab} row ${rowNumber}, column ${header ?? letter(column)} holds a formula with no saved result. Open the file in Excel, save it, and upload that copy.`, { cause: error })
     }
   }
 
@@ -91,7 +97,7 @@ function readTab(sheet: ExcelJS.Worksheet): RawTab {
   headers.forEach((header, index) => {
     if (header === '') return
     const first = firstAt.get(header)
-    if (first !== undefined) throw new Error(`The ${tab} tab has the header "${header}" twice, in columns ${letter(first + 1)} and ${letter(index + 1)}. Each column name may appear once.`)
+    if (first !== undefined) throw new WorkbookFileError(`The ${tab} tab has the header "${header}" twice, in columns ${letter(first + 1)} and ${letter(index + 1)}. Each column name may appear once.`)
     firstAt.set(header, index)
   })
 
@@ -102,7 +108,7 @@ function readTab(sheet: ExcelJS.Worksheet): RawTab {
       const header = all[column - 1]!
       const value = read(number, column, header === '' ? null : header)
       if (header === '') {
-        if (value !== null) throw new Error(`The ${tab} tab has data in column ${letter(column)} (row ${number}), which has no header. Give the column a header or clear it.`)
+        if (value !== null) throw new WorkbookFileError(`The ${tab} tab has data in column ${letter(column)} (row ${number}), which has no header. Give the column a header or clear it.`)
       } else {
         row[header] = value
       }
@@ -136,19 +142,20 @@ function catalogVersionOf(meta: ExcelJS.Worksheet | undefined): number | null {
 
 const textOf = (value: Cell): string | null => (typeof value === 'string' ? value : null)
 
-/** The workbook from the bytes of a file already read, so a caller that also sends the file sends exactly what it checked. */
-export async function readWorkbookBytes(bytes: Uint8Array): Promise<WorkbookFile> {
+/** The workbook from the bytes of a file already read, so a caller that also sends the file sends exactly what it checked. `name` is how the file is called in a message. */
+export async function readWorkbookBytes(bytes: Uint8Array, name = 'The file'): Promise<WorkbookFile> {
   const book = new ExcelJS.Workbook()
   try {
     // exceljs types `load` against an older, non-generic Buffer.
     await book.xlsx.load(Buffer.from(bytes) as unknown as Parameters<typeof book.xlsx.load>[0])
   } catch (error) {
-    throw new Error(`The file is not an .xlsx workbook that can be read: ${(error as Error).message}`, { cause: error })
+    // The library's own message is not repeated: it is not ours to vouch for.
+    throw new WorkbookFileError(`${name} could not be read as an .xlsx workbook (not one, or damaged): save it from Excel or LibreOffice as .xlsx.`, { cause: error })
   }
   // Names are matched exactly: a renamed or re-cased tab is a missing one, never a guess.
   const sheets = new Map(book.worksheets.map((sheet) => [sheet.name, sheet]))
   const missing = TAB_KEYS.filter((key) => !sheets.has(TAB_NAMES[key])).map((key) => TAB_NAMES[key])
-  if (missing.length > 0) throw new Error(`The workbook is missing the ${missing.join(', ')} tab${missing.length > 1 ? 's' : ''}, named exactly so.`)
+  if (missing.length > 0) throw new WorkbookFileError(`The workbook is missing the ${missing.join(', ')} tab${missing.length > 1 ? 's' : ''}, named exactly so.`)
 
   const [products, availability, ingredients, countries] = TAB_KEYS.map((key) => readTab(sheets.get(TAB_NAMES[key])!))
   const meta = sheets.get(META)
@@ -160,6 +167,16 @@ export async function readWorkbookBytes(bytes: Uint8Array): Promise<WorkbookFile
   }
 }
 
+/** The bytes of the file at `path`. A path with no file is the person's typing, so it is told, as typed; any other failure is left as it came. */
+export async function readFileBytes(path: string): Promise<Uint8Array> {
+  try {
+    return new Uint8Array(await readFile(path))
+  } catch (error) {
+    if ((error as { code?: unknown } | null)?.code === 'ENOENT') throw new WorkbookFileError(`No file at ${path}`, { cause: error })
+    throw error
+  }
+}
+
 export async function readWorkbookFile(path: string): Promise<WorkbookFile> {
-  return readWorkbookBytes(new Uint8Array(await readFile(path)))
+  return readWorkbookBytes(await readFileBytes(path), path)
 }

@@ -241,6 +241,9 @@ export type EnvInput = {
  * The key: the environment first, then `.dev.vars` (the same file `wrangler dev` reads). A blank value is no value.
  * The error names the variable and carries no value from either place. Models are per job, not read from here.
  */
+/** No ANTHROPIC_API_KEY in the environment or .dev.vars: the person's setup to fix, and the message says how. */
+export class MissingApiKeyError extends Error {}
+
 export const loadEnv = async ({
   env = process.env,
   readFile = (path) => readFileSync(path, 'utf8'),
@@ -255,6 +258,6 @@ export const loadEnv = async ({
     }
     apiKey = file?.get('ANTHROPIC_API_KEY') || undefined
   }
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set: export it, or put it in .dev.vars.')
+  if (!apiKey) throw new MissingApiKeyError('ANTHROPIC_API_KEY is not set: export it, or put it in .dev.vars.')
   return { apiKey }
 }

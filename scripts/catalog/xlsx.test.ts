@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import ExcelJS from 'exceljs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
-import { readWorkbookBytes, readWorkbookFile, writeWorkbookFile } from './xlsx'
+import { readFileBytes, readWorkbookBytes, readWorkbookFile, WorkbookFileError, writeWorkbookFile } from './xlsx'
 import { readFile } from 'node:fs/promises'
 import { availability, country, day, dayAsDate, HEADERS, ingredient, product, TAB_NAMES, validWorkbook } from './workbook.fixture'
 
@@ -485,5 +485,76 @@ describe('readWorkbookFile: a tab that is not there', () => {
     await writeFile(path, 'this is not a zip file')
 
     await expect(readWorkbookFile(path)).rejects.toThrow(/\S/)
+  })
+})
+
+// A caller that prints only the messages it can vouch for (catalog:draft) tells these apart from every other Error by their class.
+describe('readWorkbookFile: mistakes in the file are WorkbookFileErrors', () => {
+  it('throws one for a formula with no saved result', async () => {
+    const path = await buildFile({ tabs: { availability: [[...HEADERS.availability], ['PRD-A', 'NG', { formula: '2000+2000' }, 6500, null]] } })
+
+    await expect(readWorkbookFile(path)).rejects.toBeInstanceOf(WorkbookFileError)
+  })
+
+  it('throws one for a header written twice', async () => {
+    const twice = [...HEADERS.products]
+    twice[3] = 'code'
+    const path = await buildFile({ tabs: { products: [twice, ['PRD-A']] } })
+
+    await expect(readWorkbookFile(path)).rejects.toBeInstanceOf(WorkbookFileError)
+  })
+
+  it('throws one for data under a blank header', async () => {
+    const gap: string[] = [...HEADERS.products]
+    gap[2] = ''
+    const cells: unknown[] = HEADERS.products.map(() => null)
+    cells[2] = 'orphan'
+    const path = await buildFile({ tabs: { products: [gap, cells] } })
+
+    await expect(readWorkbookFile(path)).rejects.toBeInstanceOf(WorkbookFileError)
+  })
+
+  it('throws one for a missing tab', async () => {
+    const path = await buildFile({ names: { products: 'products' } })
+
+    await expect(readWorkbookFile(path)).rejects.toBeInstanceOf(WorkbookFileError)
+  })
+
+  it('throws one, in fixed words and never the library\'s, for a file that is not a workbook, naming the path as given', async () => {
+    const path = newPath()
+    await writeFile(path, 'this is not a zip file')
+
+    const error = await readWorkbookFile(path).then(() => undefined, (failure: unknown) => failure)
+
+    expect(error).toBeInstanceOf(WorkbookFileError)
+    expect((error as Error).message).toBe(`${path} could not be read as an .xlsx workbook (not one, or damaged): save it from Excel or LibreOffice as .xlsx.`)
+  })
+
+  it('says "The file" for bytes that are not a workbook when it is not told a name', async () => {
+    const error = await readWorkbookBytes(new TextEncoder().encode('this is not a zip file')).then(() => undefined, (failure: unknown) => failure)
+
+    expect(error).toBeInstanceOf(WorkbookFileError)
+    expect((error as Error).message).toBe('The file could not be read as an .xlsx workbook (not one, or damaged): save it from Excel or LibreOffice as .xlsx.')
+  })
+
+  it('uses the name it is told for bytes that are not a workbook', async () => {
+    await expect(readWorkbookBytes(new TextEncoder().encode('nope'), 'edited.xlsx')).rejects.toThrow(/^edited\.xlsx could not be read as an \.xlsx workbook/)
+  })
+
+  it('throws one for a path with no file, naming the path as typed', async () => {
+    const path = join(dir, 'typed-wrong.xlsx')
+
+    for (const read of [readWorkbookFile, readFileBytes]) {
+      const error = await read(path).then(() => undefined, (failure: unknown) => failure)
+      expect(error).toBeInstanceOf(WorkbookFileError)
+      expect((error as Error).message).toBe(`No file at ${path}`)
+    }
+  })
+
+  it('leaves any other failure to read a file (a folder, no permission) as it was, for the caller to hide', async () => {
+    const error = await readFileBytes(dir).then(() => undefined, (failure: unknown) => failure)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(WorkbookFileError)
   })
 })

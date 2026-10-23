@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { parseArgs } from './draft-args'
+import { DraftInputError } from './draft-input-error'
 
 // `npm run catalog:draft -- in.xlsx --out out.xlsx --max-usd 2 [--countries NG,GB]`. Strict on purpose, like the eval's: a misspelt flag must stop the
 // run before it spends money, and a draft never overwrites the file it was made from, so there is no default for --out.
@@ -52,5 +53,10 @@ describe('catalog:draft parseArgs', () => {
     ['--countries without a value', ['in.xlsx', '--out', 'out.xlsx', '--countries']],
   ])('throws a usage message for %s', (_label, argv) => {
     expect(() => parseArgs(argv)).toThrow(USAGE)
+  })
+
+  it('throws a DraftInputError, so the shell may print its message', () => {
+    expect(() => parseArgs(['in.xlsx'])).toThrow(DraftInputError)
+    expect(() => parseArgs(['in.xlsx', '--out', 'out.xlsx', '--force'])).toThrow(DraftInputError)
   })
 })

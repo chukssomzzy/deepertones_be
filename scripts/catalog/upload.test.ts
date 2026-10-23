@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { HttpNetworkError, HttpTimeoutError } from '../../src/lib/http'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { runUpload } from './upload'
+import { WorkbookFileError } from './xlsx'
 import { errorReply, fakeOutput, fakeReadText, fakeRequest, okReply, OTHER_SECRET, TOKEN, VARS, type Reply, type Sent } from './script.fixture'
 import { availability, country, ingredient, product, validWorkbook } from './workbook.fixture'
 
@@ -112,6 +113,34 @@ describe('runUpload: checking the file before asking the server', () => {
     expect(reads.bytes).toEqual(['exports/edited.xlsx'])
     expect(reads.parsed).toHaveLength(1)
     expect(reads.parsed[0]).toBe(XLSX_BYTES)
+  })
+
+  it('tells the workbook reader the file name, so its message can name the file', async () => {
+    const { deps } = setup()
+    const names: (string | undefined)[] = []
+    const read = deps.readWorkbook
+    deps.readWorkbook = async (bytes: Uint8Array, name?: string) => {
+      names.push(name)
+      return read(bytes)
+    }
+
+    await runUpload(args({ file: 'exports/edited.xlsx' }), deps)
+
+    expect(names).toEqual(['exports/edited.xlsx'])
+  })
+
+  it('shows the message of a file that is not there or not a workbook, as the reader words it', async () => {
+    for (const message of ['No file at nope.xlsx', 'nope.xlsx could not be read as an .xlsx workbook (not one, or damaged): save it from Excel or LibreOffice as .xlsx.']) {
+      const { deps, http, out } = setup()
+      deps.readBytes = async () => {
+        throw new WorkbookFileError(message)
+      }
+
+      expect(await runUpload(args({ file: 'nope.xlsx' }), deps)).toBe(1)
+
+      expect(http.sent).toEqual([])
+      expect(out.stderr()).toBe(`Upload failed: ${message}`)
+    }
   })
 
   it('says the file cannot be read, and sends nothing, when it is not there', async () => {
