@@ -98,7 +98,7 @@ export const fetchCall = (id: string, url: string): Block => ({
   input: { url },
 })
 
-/** A page the web fetch tool read: the shape of the tool's documentation (the url is the one fetched, after redirects). */
+/** A page the web fetch tool read: the shape of the tool's documentation (the url is the one fetched; the docs do not say whether that is before or after a redirect). */
 export const fetchedPage = (toolUseId: string, url: string): Block => ({
   type: 'web_fetch_tool_result',
   tool_use_id: toolUseId,
