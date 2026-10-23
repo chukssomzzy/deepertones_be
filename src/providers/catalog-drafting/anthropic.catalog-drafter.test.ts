@@ -548,6 +548,148 @@ describe('AnthropicCatalogDrafter.draft', () => {
     })
   })
 
+  describe('price rows sourced from a page that is not one product\'s', () => {
+    // The NG row cites `page`; the GB row is good. A refused page drops the NG row and only that row.
+    const draftWithNgOn = (page: string) =>
+      draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page }), row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: RETAILER_PAGE })), REQUEST, [page, RETAILER_PAGE])
+
+    it.each([
+      'https://www.pricespy.co.uk/product/acme-gentle-wash/123',
+      'https://pricespy.com/p/acme-gentle-wash-123.html',
+      'https://www.pricerunner.com/pl/acme-gentle-wash',
+      'https://uk.pricerunner.com/product/acme-gentle-wash/123',
+      'https://www.idealo.de/preisvergleich/OffersOfProduct/123.html',
+      'https://www.idealo.co.uk/compare/123/acme-gentle-wash.html',
+      'https://www.kelkoo.co.uk/ctl/do/search/acme-gentle-wash',
+      'https://www.kelkoo.com/products/acme-gentle-wash',
+      'https://www.trolley.co.uk/product/acme-gentle-wash/ABC123',
+      'https://TROLLEY.CO.UK/product/acme-gentle-wash/ABC123',
+      'https://shopping.google.com/product/acme-gentle-wash',
+      'https://shopping.google.co.uk/product/acme-gentle-wash',
+      'https://www.google.com/shopping/product/123',
+      'https://www.google.co.uk/shopping/product/123',
+      'https://google.com.ng/shopping/product/123',
+    ])('drops a price row sourced from the price-comparison site %s, even with a product-shaped path, and keeps the other country', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+    })
+
+    it.each([
+      'https://shop.example/search/acme-gentle-wash',
+      'https://shop.example/Search/acme-gentle-wash',
+      'https://shop.example/en/search/results/acme-gentle-wash',
+      'https://shop.example/catalogsearch/result/',
+      'https://shop.example/CatalogSearch/result/',
+      'https://shop.example/slp/acme-gentle-wash',
+      'https://beauty.example.ng/SLP/acme-gentle-wash/',
+      'https://beauty.example.ng/search',
+      'https://shop.example/p/acme-gentle-wash/123?q=acme',
+      'https://shop.example/p/acme-gentle-wash/123?query=acme',
+      'https://shop.example/p/acme-gentle-wash/123?search=acme',
+      'https://shop.example/p/acme-gentle-wash/123?s=acme',
+      'https://shop.example/p/acme-gentle-wash/123?k=acme',
+      'https://shop.example/p/acme-gentle-wash/123?keyword=acme',
+      'https://shop.example/p/acme-gentle-wash/123?searchterm=acme',
+      'https://shop.example/p/acme-gentle-wash/123?Q=acme',
+      'https://shop.example/p/acme-gentle-wash/123?SearchTerm=acme',
+      'https://shop.example/p/acme-gentle-wash/123?affil=x&q=acme',
+      'https://shop.example/?s=acme+gentle+wash',
+    ])('drops a price row sourced from the search page %s, and keeps the other country', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+    })
+
+    it.each([
+      'https://shop.example/mlp-skincare',
+      'https://shop.example/mlp-skincare/',
+      'https://shop.example/en/MLP-face-washes/',
+      'https://shop.example/brands/acme',
+      'https://shop.example/brands/acme/',
+      'https://shop.example/Brands/Acme',
+      'https://shop.example/brand/acme',
+      'https://shop.example/category/cleansers',
+      'https://shop.example/categories/cleansers',
+      'https://shop.example/collections/cleansers',
+      'https://shop.example/COLLECTIONS/cleansers',
+      'https://shop.example/brands',
+      'https://shop.example/en/collections/',
+      'https://shop.example/shop/category',
+    ])('drops a price row sourced from the listing page %s, and keeps the other country', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+    })
+
+    it.each([
+      'https://shop.example/p/acme-gentle-wash/12345/',
+      'https://shop.example/acme-gentle-wash-12345.html',
+      'https://shop.example/products/acme-gentle-wash',
+      'https://shop.example/shop/acme-gentle-wash/',
+      'https://shop.example/product/acme-gentle-wash',
+      'https://shop.example/collections/face/products/acme-gentle-wash',
+      'https://shop.example/brands/acme/gentle-wash-200ml',
+      'https://shop.example/category/cleansers/acme-gentle-wash-200ml',
+      'https://shop.example/p/acme-gentle-wash/12345?variant=123',
+      'https://shop.example/p/acme-gentle-wash/12345?affil=x',
+      'https://shop.example/p/acme-gentle-wash/12345?sku=1&size=200ml',
+    ])('keeps a price row sourced from the product page %s', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => [r.country, r.sourceUrl])).toEqual([
+        ['NG', page],
+        ['GB', RETAILER_PAGE],
+      ])
+    })
+
+    it.each([
+      // A word in the rules inside a longer segment, or in a place the rules do not look, is not a search or listing page.
+      'https://shop.example/p/research-serum/123',
+      'https://shop.example/products/search-and-rescue-balm',
+      'https://shop.example/p/acme-mlp-wash/123',
+      'https://shop.example/products/brands-acme-gentle-wash',
+      'https://shop.example/p/acme-gentle-wash/123?squeeze=1&queries=2',
+      // Host names that only contain a comparison site's name, or have it away from the registrable label.
+      'https://pricespy.shop.example/p/acme-gentle-wash/123',
+      'https://trolley.shop.example/p/acme-gentle-wash/123',
+      'https://notidealo.example/p/acme-gentle-wash/123',
+      'https://shop.example/idealo/acme-gentle-wash',
+      'https://www.example.com/shopping/acme-gentle-wash',
+    ])('keeps a price row sourced from %s, which only looks like a refused page', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['NG', 'GB'])
+    })
+
+    it('falls back to the next row for a country when the first row\'s page is refused', async () => {
+      const result = await draftFrom(
+        rowsOf(
+          row({ country: 'NG', sourceUrl: 'https://shop.example/search?q=acme' }),
+          row({ country: 'NG', priceMin: 4100, priceMax: 5000, sourceUrl: 'https://shop.example/products/acme-gentle-wash' }),
+        ),
+        REQUEST,
+        ['https://shop.example/search?q=acme', 'https://shop.example/products/acme-gentle-wash'],
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin])).toEqual([['NG', 4100]])
+    })
+
+    it.each([
+      'https://shop.example/brands/acme',
+      'https://shop.example/collections/cleansers',
+      'https://shop.example/mlp-skincare',
+      'https://shop.example/search?q=acme',
+      'https://shop.example/catalogsearch/result/',
+      'https://www.pricespy.co.uk/product/acme-gentle-wash/123',
+      'https://shopping.google.com/product/acme-gentle-wash',
+    ])('still keeps a cell whose source is %s, since only price rows need a single product\'s page', async (page) => {
+      const result = await draftFrom(cellsOf({ frequency: { value: 'pm', sourceUrl: page } }), REQUEST, [page])
+
+      expect(result.cells.frequency).toEqual({ value: 'pm', sourceUrl: page })
+    })
+  })
+
   describe('answers that cannot be used', () => {
     const EMPTY = { cells: {}, availability: [] }
 
