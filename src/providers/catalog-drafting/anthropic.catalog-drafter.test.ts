@@ -560,7 +560,7 @@ describe('AnthropicCatalogDrafter.draft', () => {
       'https://uk.pricerunner.com/product/acme-gentle-wash/123',
       'https://www.idealo.de/preisvergleich/OffersOfProduct/123.html',
       'https://www.idealo.co.uk/compare/123/acme-gentle-wash.html',
-      'https://www.kelkoo.co.uk/ctl/do/search/acme-gentle-wash',
+      'https://www.kelkoo.co.uk/p/acme-gentle-wash-123',
       'https://www.kelkoo.com/products/acme-gentle-wash',
       'https://www.trolley.co.uk/product/acme-gentle-wash/ABC123',
       'https://TROLLEY.CO.UK/product/acme-gentle-wash/ABC123',
@@ -569,10 +569,10 @@ describe('AnthropicCatalogDrafter.draft', () => {
       'https://www.google.com/shopping/product/123',
       'https://www.google.co.uk/shopping/product/123',
       'https://google.com.ng/shopping/product/123',
-    ])('drops a price row sourced from the price-comparison site %s, even with a product-shaped path, and keeps the other country', async (page) => {
+    ])('keeps a price row sourced from the price-comparison site %s: a price is an estimate for a budget band, and a comparison site\'s range is a fair one', async (page) => {
       const result = await draftWithNgOn(page)
 
-      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+      expect(result.availability.map((r) => r.country)).toEqual(['NG', 'GB'])
     })
 
     it.each([
