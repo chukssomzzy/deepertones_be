@@ -4,7 +4,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { TokenService } from '../../src/modules/auth/tokens.service'
-import { D1FaceScansRepository } from '../../src/modules/face-scans/face-scans.repository'
 import { TABLES_VERSION } from '../../src/modules/face-scans/face-scans.tables'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
 import { garbagePhoto, jpegPhoto, pngPhoto, webpPhoto } from '../../src/modules/scans/scans.photos.fake'
@@ -129,8 +128,8 @@ const newGuest = async () => {
     headers: (from: string = ip): Record<string, string> => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${token}` }),
   }
 }
-// Everything below calls a caller an `Account` or (by habit) a `guest`: it is a guest only where the test says `newGuest`. The face scan is for verified users, so
-// the tests of its behaviour use `newVerified`.
+// Everything below calls a caller an `Account` or (by habit) a `guest`: it is a guest only where the test says `newGuest`. A guest may give the consent, scan, retake
+// and watch; reading a result, the list and the consent, withdrawing and deleting are for verified users, so the tests of those use `newVerified`.
 type Account = Awaited<ReturnType<typeof newGuest>>
 
 /** Delivers the queued code email through the Worker's queue handler and reads the code from it. */
@@ -154,8 +153,7 @@ const codeFor = async (): Promise<string> => {
 }
 
 /** A guest who verifies their email the way a person does (send a code, read it from the delivered email, verify): the same account and profile, now verified. */
-const newVerified = async (): Promise<Account> => {
-  const guest = await newGuest()
+const verify = async (guest: Account): Promise<Account> => {
   const address = `Face-${runSalt}-${next()}@Example.com`
   const post = (path: string, body: unknown) =>
     fetchWorker(path, { method: 'POST', headers: { ...guest.headers(), 'content-type': 'application/json' }, body: JSON.stringify(body) })
@@ -166,6 +164,7 @@ const newVerified = async (): Promise<Account> => {
   const token = session.tokens.accessToken
   return { ...guest, token, status: 'verified', headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${token}` }) }
 }
+const newVerified = async (): Promise<Account> => verify(await newGuest())
 
 const profiles = new D1ProfilesRepository(createDb(env.DB))
 const tokenService = new TokenService({ secret: env.JWT_SECRET })
@@ -175,6 +174,12 @@ const asSecondProfile = async (guest: Account): Promise<Account> => {
   await profiles.insert(profile)
   const { accessToken } = await tokenService.issue({ id: guest.userId, status: guest.status, tokenVersion: 0 }, profile.id)
   return { ...guest, profileId: profile.id, token: accessToken, headers: (from: string = guest.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${accessToken}` }) }
+}
+
+/** The same account and profile with an `anonymous` token, as a guest of that account holds. */
+const asGuestAgain = async (account: Account): Promise<Account> => {
+  const { accessToken } = await tokenService.issue({ id: account.userId, status: 'anonymous', tokenVersion: 0 }, account.profileId)
+  return { ...account, status: 'anonymous', token: accessToken, headers: (from: string = account.ip) => ({ 'cf-connecting-ip': from, Authorization: `Bearer ${accessToken}` }) }
 }
 
 const json = (guest: Account | undefined, method: string, path: string, body?: unknown, from?: string) =>
@@ -1543,108 +1548,241 @@ describe('GET /api/v1/scans/faces', () => {
   })
 })
 
-describe('the face scan is for verified users: a guest is turned away with 403 VERIFICATION_REQUIRED', () => {
-  const faceScansOf = new D1FaceScansRepository(createDb(env.DB))
-  const SOMEONES_SCAN = crypto.randomUUID()
-
-  /** Every route a guest is refused on. The multipart ones are sent with an empty form: the refusal must not need the body. */
-  const refused: [string, (guest: Account, id: string) => Response | Promise<Response>][] = [
-    ['PUT /me/face-consent', (guest) => putConsent(guest)],
-    ['PUT /me/face-consent with a body that would be a 400', (guest) => putConsent(guest, {})],
-    ['GET /me/face-consent', (guest) => getConsent(guest)],
-    ['POST /scans/faces with a photo', (guest) => createFace(guest)],
-    ['POST /scans/faces with an empty form', (guest) => createFace(guest, {})],
-    ['GET /scans/faces', (guest) => json(guest, 'GET', FACES)],
-    ['GET /scans/faces/{id} of an id nobody has', (guest) => getFace(guest, crypto.randomUUID())],
-    ['GET /scans/faces/{id} of a verified user\'s scan', (guest, id) => getFace(guest, id)],
-    ['GET /scans/faces/{id}/events of an id nobody has', (guest) => json(guest, 'GET', `${FACES}/${crypto.randomUUID()}/events`)],
-    ['GET /scans/faces/{id}/events of a verified user\'s scan', (guest, id) => json(guest, 'GET', `${FACES}/${id}/events`)],
-    ['POST /scans/faces/{id}/retake with a photo', (guest, id) => retakeFace(guest, id)],
-    ['POST /scans/faces/{id}/retake with an empty form', (guest, id) => retakeFace(guest, id, {})],
-    ['POST /scans/faces/{id}/retake of an id nobody has', (guest) => retakeFace(guest, crypto.randomUUID())],
-  ]
-
-  it.each(refused)('%s: 403 VERIFICATION_REQUIRED', async (_route, call) => {
-    const owner = await readyUser()
-    const theirs = await createdFace(owner)
+describe('guests: the scan flow is open to them, the rest is for verified users', () => {
+  // A guest (a token whose account is `anonymous`) may give the face consent, start a scan, retake it and follow it live. Reading the consent, withdrawing it, listing,
+  // reading a scan's result and deleting a scan are for verified users: they answer 403 VERIFICATION_REQUIRED before they look at which scan the id names, so a
+  // guest's own scan, another user's and an id nobody has all get the same answer. A scan a guest started is made through the API, as in life.
+  const opened: SseReader[] = []
+  afterEach(async () => {
+    await Promise.all(opened.splice(0).map((stream) => stream.cancel()))
+    await abortAllDurableObjects()
+  })
+  const readyGuest = async (goal = 'glow') => {
     const guest = await newGuest()
+    expect((await putConsent(guest)).status).toBe(200)
+    await setGoal(guest, goal)
+    return guest
+  }
+  const eventsOf = (guest: Account | undefined, id: string) => json(guest, 'GET', `${FACES}/${id}/events`)
+  const watch = async (guest: Account, id: string) => {
+    const res = await eventsOf(guest, id)
+    expect(res.status).toBe(200)
+    const stream = sseReader(res)
+    opened.push(stream)
+    return stream
+  }
+  /** A scan analysed to the end: the route made it, its upload step ran, and its task answered with a finished glow analysis. */
+  const finishedScan = async (guest: Account) => {
+    const stub = stubPerfectCorp()
+    const view = await createdFace(guest)
+    expect((await runFaceJob(queued.splice(0)[0])).explicitAcks).toEqual(['m'])
+    stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess(glowOutput()))
+    expect((await runFaceJob(stepOf(view.id, 'fetch'))).explicitAcks).toEqual(['m'])
+    expect(await rowOf(view.id)).toMatchObject({ state: 'ready' })
+    return view
+  }
 
-    const res = await call(guest, theirs.id)
+  describe('what a guest may do', () => {
+    it('PUT /me/face-consent: records the consent and answers 200 with the version and when it was given', async () => {
+      const guest = await newGuest()
 
-    expect(res.status).toBe(403)
-    expect(await errorCodeOf(res)).toBe('VERIFICATION_REQUIRED')
+      const res = await putConsent(guest)
+
+      expect(res.status).toBe(200)
+      const data = await dataOf<{ version: number; givenAt: string }>(res)
+      expect(data.version).toBe(CONSENT_VERSION)
+      expect(Object.keys(data).sort()).toEqual(['givenAt', 'version'])
+      expect(await countOf('face_consents', guest.userId)).toBe(1)
+    })
+
+    it('PUT /me/face-consent: still checks the version, 400 FACE_CONSENT_VERSION_MISMATCH for a wrong one', async () => {
+      const guest = await newGuest()
+
+      const res = await putConsent(guest, { version: CONSENT_VERSION + 1 })
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('FACE_CONSENT_VERSION_MISMATCH')
+      expect(await countOf('face_consents', guest.userId)).toBe(0)
+    })
+
+    it('POST /scans/faces: stores the photos, queues the analysis, and answers 202 with the scan analysing and no result', async () => {
+      const guest = await readyGuest()
+
+      const res = await createFace(guest, threeFiles())
+
+      expect(res.status).toBe(202)
+      const view = await dataOf<FaceScanView>(res)
+      expect(view).toMatchObject({ state: 'analysing', reason: null, goal: 'glow', result: null })
+      expect(Object.keys(view.photos).sort()).toEqual(['front', 'left', 'right'])
+      const prefix = `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${view.id}`
+      expect((await bucketKeysOf(guest.userId)).sort()).toEqual([`${prefix}/front.jpg`, `${prefix}/left.jpg`, `${prefix}/right.jpg`])
+      expect(await countOf('face_scans', guest.userId)).toBe(1)
+      expect(queued).toEqual([{ faceScanId: view.id, step: 'upload', at: expect.any(Number) }])
+    })
+
+    it('POST /scans/faces: still needs the consent first, 409 FACE_CONSENT_REQUIRED, and keeps nothing', async () => {
+      const guest = await newGuest()
+      await setGoal(guest, 'glow')
+
+      const res = await createFace(guest)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('FACE_CONSENT_REQUIRED')
+      await nothingKept(guest)
+    })
+
+    it('POST /scans/faces: still answers 413 on a body one byte over the limit, so the upload limits apply to a guest', async () => {
+      const guest = await readyGuest()
+
+      const res = await fetchWorker(FACES, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
+
+      expect(res.status).toBe(413)
+      expect(await errorCodeOf(res)).toBe('HTTP_413')
+    })
+
+    it('POST /scans/faces/{id}/retake: replaces the front photo of its scan that needs a retake, and answers 202 with the scan analysing again', async () => {
+      const guest = await readyGuest()
+      const { view } = await needingRetake(guest)
+
+      const res = await retakeFace(guest, view.id, { front: fileOf(face({}, 9), 'front') })
+
+      expect(res.status).toBe(202)
+      expect(await dataOf<FaceScanView>(res)).toMatchObject({ id: view.id, state: 'analysing', reason: null, result: null })
+      expect(await bytesOfStored(frontKeyOf(guest, view.id))).toEqual(face({}, 9).bytes)
+      expect(await rowOf(view.id)).toMatchObject({ state: 'analysing', reason: null, task: null })
+      expect(queued).toEqual([{ faceScanId: view.id, step: 'upload', at: expect.any(Number) }])
+    })
+
+    it('GET /scans/faces/{id}/events: opens the stream for a guest\'s own scan, and 404 FACE_SCAN_NOT_FOUND for another user\'s or none', async () => {
+      const owner = await readyUser()
+      const theirs = await createdFace(owner)
+      const guest = await readyGuest()
+      const mine = await createdFace(guest)
+
+      const res = await eventsOf(guest, mine.id)
+      opened.push(sseReader(res))
+      expect(res.status).toBe(200)
+      expect(res.headers.get('Content-Type')).toBe('text/event-stream; charset=utf-8')
+      for (const id of [theirs.id, crypto.randomUUID()]) {
+        const other = await eventsOf(guest, id)
+        expect(other.status).toBe(404)
+        expect(await errorCodeOf(other)).toBe('FACE_SCAN_NOT_FOUND')
+      }
+    })
+
+    // Whoever follows a scan, the snapshot and every face frame are exactly { id, state, reason }: the result is for GET /scans/faces/{id}, which needs a verified user.
+    it.each([
+      ['a guest', async () => readyGuest()],
+      ['a verified user', async () => readyUser()],
+    ])('GET /scans/faces/{id}/events: tells %s the scan is ready with exactly id, state and reason, and nothing of the result', async (_who, make) => {
+      const guest = await make()
+      const stub = stubPerfectCorp()
+      const view = await createdFace(guest)
+      await runFaceJob(queued.splice(0)[0])
+      stub.answerSkin((await rowOf(view.id))!.task!, () => skinSuccess(glowOutput()))
+      const stream = await watch(guest, view.id)
+      const snapshot = parseFrame((await stream.read(1)).frames[0]!)
+
+      await runFaceJob(stepOf(view.id, 'fetch'))
+
+      const [ready, done] = (await stream.read(2)).frames.map(parseFrame)
+      expect(snapshot).toEqual({ event: 'snapshot', data: { id: view.id, state: 'analysing', reason: null }, comment: null })
+      expect(ready).toEqual({ event: 'face', data: { id: view.id, state: 'ready', reason: null }, comment: null })
+      expect(done!.event).toBe('done')
+    })
+
+    it.each([
+      ['a guest', async () => readyGuest()],
+      ['a verified user', async () => readyUser()],
+    ])('GET /scans/faces/{id}/events: tells %s the scan needs a retake with exactly id, state and the reason', async (_who, make) => {
+      const guest = await make()
+      const stub = stubPerfectCorp()
+      const view = await createdFace(guest)
+      await runFaceJob(queued.splice(0)[0])
+      stub.answerSkin((await rowOf(view.id))!.task!, () => taskError('error_src_face_too_small'))
+      const stream = await watch(guest, view.id)
+      await stream.read(1)
+
+      await runFaceJob(stepOf(view.id, 'fetch'))
+
+      const [frame] = (await stream.read(2)).frames.map(parseFrame)
+      expect(frame).toEqual({ event: 'face', data: { id: view.id, state: 'needs-retake', reason: 'move-closer' }, comment: null })
+    })
+
+    it('GET /scans/faces/{id}/events: a guest who follows a scan that is already ready gets only the status snapshot and done, not the result', async () => {
+      const guest = await readyGuest()
+      const view = await finishedScan(guest)
+
+      const stream = await watch(guest, view.id)
+
+      const { frames, ended } = await stream.read(3)
+      const parsed = frames.map(parseFrame)
+      expect(parsed[0]).toEqual({ event: 'snapshot', data: { id: view.id, state: 'ready', reason: null }, comment: null })
+      expect(parsed[1]!.event).toBe('done')
+      expect(frames).toHaveLength(2)
+      expect(ended).toBe(true)
+    })
   })
 
-  it('stores, queues and charges nothing for a guest who tries to scan, and records no consent', async () => {
-    const guest = await newGuest()
-    await setGoal(guest, 'glow')
-    const spendBefore = await perfectCorpSpendRows()
+  describe('what needs a verified user', () => {
+    // Called for the guest's own scan, another user's scan and an id nobody has: all 403, never 404.
+    const verifiedOnly: [string, (guest: Account, id: string) => Response | Promise<Response>][] = [
+      ['GET /me/face-consent', (guest) => getConsent(guest)],
+      ['DELETE /me/face-consent', (guest) => deleteConsent(guest)],
+      ['GET /scans/faces', (guest) => listFaces(guest)],
+      ['GET /scans/faces/{id}', (guest, id) => getFace(guest, id)],
+      ['DELETE /scans/faces/{id}', (guest, id) => deleteFace(guest, id)],
+    ]
 
-    await putConsent(guest)
-    await createFace(guest, threeFiles())
-    await retakeFace(guest, crypto.randomUUID())
+    it.each(verifiedOnly)('%s: 403 VERIFICATION_REQUIRED for a guest, whichever scan the id names, and nothing is deleted or withdrawn', async (_route, call) => {
+      const owner = await readyUser()
+      const theirs = await createdFace(owner)
+      // The guest's own scan is made by the account while verified, and the guest is the same account with a guest token, so what is refused here is the
+      // status and nothing else (the scan a guest starts itself is in the last test of this block).
+      const verifiedAccount = await readyUser()
+      const mine = await createdFace(verifiedAccount)
+      const guest = await asGuestAgain(verifiedAccount)
 
-    await nothingKept(guest)
-    expect(await countOf('face_consents', guest.userId)).toBe(0)
-    expect(queued).toEqual([])
-    expect(await perfectCorpSpendRows()).toBe(spendBefore)
-  })
+      for (const id of [mine.id, theirs.id, crypto.randomUUID()]) {
+        const res = await call(guest, id)
+        expect(res.status).toBe(403)
+        expect(await errorCodeOf(res)).toBe('VERIFICATION_REQUIRED')
+      }
 
-  it('answers a guest\'s upload with 403 before the size of the body matters, as for the empty form', async () => {
-    const guest = await newGuest()
+      expect(await bucketKeysOf(guest.userId)).toHaveLength(1)
+      expect(await countOf('face_scans', guest.userId)).toBe(1)
+      expect(await countOf('face_scans', owner.userId)).toBe(1)
+      expect(await bucketKeysOf(owner.userId)).toHaveLength(1)
+      // The consent was not withdrawn either: once the account verifies it is still current.
+      expect(await dataOf<ConsentView>(await getConsent(verifiedAccount))).toMatchObject({ withdrawnAt: null, current: true })
+      expect((await getFace(verifiedAccount, mine.id)).status).toBe(200)
+    })
 
-    const create = await fetchWorker(FACES, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
-    const retake = await fetchWorker(`${FACES}/${SOMEONES_SCAN}/retake`, { method: 'POST', body: new FormData(), headers: { ...guest.headers(), 'Content-Length': String(OVER_FACE_BODY_BYTES) } })
+    it('leaves a caller who is not signed in at 401 AUTH_REQUIRED on the same routes', async () => {
+      const id = crypto.randomUUID()
+      for (const res of [await getConsent(undefined), await deleteConsent(undefined), await listFaces(undefined), await getFace(undefined, id), await deleteFace(undefined, id)]) {
+        expect(res.status).toBe(401)
+        expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+      }
+    })
 
-    for (const res of [create, retake]) {
-      expect(res.status).toBe(403)
-      expect(await errorCodeOf(res)).toBe('VERIFICATION_REQUIRED')
-    }
-  })
+    it('shows the result of a scan a guest started once the account verifies: the guest is refused it before, the verified user gets it in full', async () => {
+      const guest = await readyGuest()
+      const view = await finishedScan(guest)
+      const before = await getFace(guest, view.id)
+      expect(before.status).toBe(403)
+      expect(await errorCodeOf(before)).toBe('VERIFICATION_REQUIRED')
 
-  it('leaves a caller who is not signed in at 401 AUTH_REQUIRED on the same routes', async () => {
-    for (const res of [await putConsent(undefined), await getConsent(undefined), await createFace(undefined, {}), await json(undefined, 'GET', FACES), await retakeFace(undefined, SOMEONES_SCAN, {})]) {
-      expect(res.status).toBe(401)
-      expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
-    }
-  })
+      const verified = await verify(guest)
 
-  it('lets a guest withdraw the consent: 204, whoever holds it', async () => {
-    const guest = await newGuest()
-
-    const res = await deleteConsent(guest)
-
-    expect(res.status).toBe(204)
-    expect(await res.text()).toBe('')
-  })
-
-  it('lets a guest delete a face scan it owns: 204, with its photo and rows gone', async () => {
-    const guest = await newGuest()
-    // A guest cannot make a face scan any more, so the scan it owns is written the way the create route would have: the rows and the photo.
-    const id = crypto.randomUUID()
-    const key = `faces/${env.ENVIRONMENT}/${guest.userId}/${guest.profileId}/${id}/front.jpg`
-    const createdAt = new Date(STARTED)
-    await faceScansOf.createFaceScan({ id, userId: guest.userId, profileId: guest.profileId, goalAtScan: 'glow', createdAt }, [{ faceScanId: id, userId: guest.userId, position: 'front', photoKey: key, createdAt }])
-    await env.PRIVATE_PHOTOS.put(key, face().bytes)
-    expect(await bucketKeysOf(guest.userId)).toEqual([key])
-
-    const res = await deleteFace(guest, id)
-
-    expect(res.status).toBe(204)
-    expect(await res.text()).toBe('')
-    await nothingKept(guest)
-  })
-
-  it('answers a guest deleting a scan that is not theirs with 404 FACE_SCAN_NOT_FOUND, and deletes nothing', async () => {
-    const owner = await readyUser()
-    const theirs = await createdFace(owner)
-    const guest = await newGuest()
-
-    const res = await deleteFace(guest, theirs.id)
-
-    expect(res.status).toBe(404)
-    expect(await errorCodeOf(res)).toBe('FACE_SCAN_NOT_FOUND')
-    expect(await bucketKeysOf(owner.userId)).toHaveLength(1)
+      const shown = await dataOf<FaceScanView>(await getFace(verified, view.id))
+      expect(shown).toMatchObject({ id: view.id, state: 'ready', reason: null })
+      expect(shown.result?.seen.length).toBeGreaterThan(0)
+      expect(shown.result?.skinType).toBe('dry')
+      expect((await dataOf<FaceScanList>(await listFaces(verified))).faceScans.map((scan) => scan.id)).toEqual([view.id])
+      expect((await deleteFace(verified, view.id)).status).toBe(204)
+      await nothingKept(verified)
+    })
   })
 
   it('opens a face photo link for a caller with no token at all: the signed link is the credential', async () => {

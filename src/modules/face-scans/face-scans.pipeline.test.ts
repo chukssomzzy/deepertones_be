@@ -2084,6 +2084,133 @@ describe('FaceScanService.watch: the live stream', () => {
   })
 })
 
+describe('FaceScanService: a guest may run the scan flow, and the stream carries status only', () => {
+  // A guest (status 'anonymous') may give consent, start a scan, retake it and follow it live; a verified user may too. Whoever watches, every `face` frame
+  // and the snapshot is exactly { id, state, reason }: where the scan has got to and why, never the result, the scores, the skin type or age, the overlays,
+  // the photo links or the goal. The result is only for GET /scans/faces/{id}, which is for verified users.
+  const actors = [
+    ['a guest', 'anonymous'],
+    ['a verified user', 'verified'],
+  ] as const
+  const asStatus = (status: 'anonymous' | 'verified') => <T>(fn: () => Promise<T>) => runAs({ kind: 'user', userId: USER, status, profileId: PROFILE }, fn)
+  const STATUS_KEYS = ['id', 'reason', 'state']
+
+  /** Consent, a goal and the front photo, all as `run` would do them. Resolves to the scan's id. */
+  const startedBy = async (ctx: Ctx, run: ReturnType<typeof asStatus>, goal: Goal = 'glow'): Promise<string> => {
+    await run(() => ctx.service.giveConsent(CURRENT_FACE_CONSENT_VERSION))
+    await run(() => ctx.goals.set({ goal }))
+    return (await run(() => ctx.service.create({ front: face(1) }))).id
+  }
+  const faceFramesOf = (ctx: Ctx, id: string) => ctx.events.eventsFor(id).flatMap((event) => (event.type === 'face' ? [event.faceScan] : []))
+  const snapshotsOf = (ctx: Ctx, id: string) => ctx.events.subscribed.filter((s) => s.scanId === id).map((s) => s.snapshot)
+  const expectStatusOnly = (ctx: Ctx, id: string) => {
+    const frames = [...faceFramesOf(ctx, id), ...snapshotsOf(ctx, id)]
+    expect(frames.length).toBeGreaterThan(0)
+    for (const frame of frames) expect(Object.keys(frame).sort()).toEqual(STATUS_KEYS)
+  }
+
+  describe.each(actors)('%s', (_who, status) => {
+    const run = asStatus(status)
+
+    it('starts a scan, follows it to ready, and sees only id, state and reason in the snapshots and the frames, though the scan has a full result', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      await run(() => ctx.service.watch(id))
+      await upload(ctx, id)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+
+      await run(() => ctx.service.watch(id))
+
+      expect(snapshotsOf(ctx, id)).toStrictEqual([
+        { id, state: 'analysing', reason: null },
+        { id, state: 'ready', reason: null },
+      ])
+      expect(ctx.events.eventsFor(id)).toStrictEqual([
+        { type: 'face', faceScan: { id, state: 'analysing', reason: null } },
+        { type: 'face', faceScan: { id, state: 'ready', reason: null } },
+        { type: 'done' },
+        { type: 'done' },
+      ])
+      expectStatusOnly(ctx, id)
+      // The result exists, for a verified reader: it is the frames that leave it out.
+      expect((await getScan(ctx, id)).result).not.toBeNull()
+    })
+
+    it('sees only id, state and reason when the photo needs a retake, through the retake and on to ready', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
+      await upload(ctx, id)
+      await run(() => ctx.service.watch(id))
+
+      const retaken = await run(() => ctx.service.retake(id, { front: face(9) }))
+      await upload(ctx, id)
+      ctx.perfectCorp.script('getSkinAnalysis', analysed())
+      await fetchStep(ctx, id)
+
+      expect(retaken).toMatchObject({ id, state: 'analysing', reason: null })
+      expect(snapshotsOf(ctx, id)).toStrictEqual([{ id, state: 'needs-retake', reason: 'too-dark' }])
+      expect(ctx.events.eventsFor(id)).toStrictEqual([
+        { type: 'face', faceScan: { id, state: 'needs-retake', reason: 'too-dark' } },
+        { type: 'done' },
+        { type: 'done' },
+        { type: 'face', faceScan: { id, state: 'analysing', reason: null } },
+        { type: 'face', faceScan: { id, state: 'ready', reason: null } },
+        { type: 'done' },
+      ])
+      expectStatusOnly(ctx, id)
+    })
+
+    it('sees only id, state and reason when the scan fails, and when it follows a scan that has already failed', async () => {
+      const ctx = setup()
+      const id = await startedBy(ctx, run)
+      await upload(ctx, id)
+      await asSystem(() => ctx.service.markFailed(id))
+
+      await run(() => ctx.service.watch(id))
+
+      expect(snapshotsOf(ctx, id)).toStrictEqual([{ id, state: 'failed', reason: 'unavailable' }])
+      expect(faceFramesOf(ctx, id)).toStrictEqual([
+        { id, state: 'analysing', reason: null },
+        { id, state: 'failed', reason: 'unavailable' },
+      ])
+      expectStatusOnly(ctx, id)
+    })
+  })
+
+  it('moves a guest\'s scan that needed a retake to analysing, replaces the front photo and queues the upload again', async () => {
+    const ctx = setup()
+    const guest = asStatus('anonymous')
+    const id = await startedBy(ctx, guest)
+    ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('no-face'))
+    await upload(ctx, id)
+    clearQueue(ctx)
+
+    const view = await guest(() => ctx.service.retake(id, { front: face(9) }))
+
+    expect(view).toMatchObject({ id, state: 'analysing', reason: null })
+    expect(await rowOf(ctx, id)).toMatchObject({ state: 'analysing', reason: null, pcAnalysisTaskId: null })
+    expect(Array.from(ctx.photos.stored.get(frontKey(ctx, id))!.bytes)).toEqual(Array.from(face(9).bytes))
+    expect(queuedSteps(ctx)).toEqual([{ faceScanId: id, step: 'upload', at: ctx.now().getTime() }])
+  })
+
+  it('refuses a guest the result with 403 VERIFICATION_REQUIRED, though its scan is ready', async () => {
+    const ctx = setup()
+    const guest = asStatus('anonymous')
+    const id = await startedBy(ctx, asStatus('verified'))
+    await upload(ctx, id)
+    ctx.perfectCorp.script('getSkinAnalysis', analysed())
+    await fetchStep(ctx, id)
+
+    const error = await errorOf(guest(() => ctx.service.getFaceScan(id)))
+
+    expect(error.code).toBe('VERIFICATION_REQUIRED')
+    expect((await getScan(ctx, id)).result).not.toBeNull()
+  })
+})
+
+
 // --- PR 4: the result view ---
 //
 // A ready scan shows what the analysis stored: the goal's concerns that can be seen, with links to their masks, the skin type and skin age, and

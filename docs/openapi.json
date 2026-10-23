@@ -4653,7 +4653,7 @@
           "Face scans"
         ],
         "summary": "Say yes to keeping and analysing face photos",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. Consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_CONSENT_VERSION_MISMATCH` with `details.current`. Giving consent again, or after a withdrawal, is 200 and starts it afresh. A face scan is refused (409 `FACE_CONSENT_REQUIRED`) without a current consent.",
+        "description": "A guest may call this. Consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_CONSENT_VERSION_MISMATCH` with `details.current`. Giving consent again, or after a withdrawal, is 200 and starts it afresh. A face scan is refused (409 `FACE_CONSENT_REQUIRED`) without a current consent.",
         "security": [
           {
             "bearerAuth": []
@@ -4726,16 +4726,6 @@
               }
             }
           },
-          "403": {
-            "description": "Signed in, but not allowed to do this",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "415": {
             "description": "The Content-Type of the body is not supported by this route",
             "content": {
@@ -4764,7 +4754,7 @@
           "Face scans"
         ],
         "summary": "The face photo consent this profile gave",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_CONSENT_NOT_FOUND` until the profile has given one.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_CONSENT_NOT_FOUND` until the profile has given one.",
         "security": [
           {
             "bearerAuth": []
@@ -4855,7 +4845,7 @@
           "Face scans"
         ],
         "summary": "Take back the face photo consent",
-        "description": "Open to a guest too: anyone may take back a consent. Stamps the time and keeps the record; it deletes no photos (delete a face scan to do that). 204 again when already withdrawn, and 204 when there was never any consent.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Stamps the time and keeps the record; it deletes no photos (delete a face scan to do that). 204 again when already withdrawn, and 204 when there was never any consent.",
         "security": [
           {
             "bearerAuth": []
@@ -4867,6 +4857,16 @@
           },
           "401": {
             "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
             "content": {
               "application/json": {
                 "schema": {
@@ -6387,7 +6387,7 @@
           "Face scans"
         ],
         "summary": "Start a face scan from a front photo and optionally two side photos",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE` (`details.reason` is `already-scanned-for-goal`: the profile's latest scan was taken under its current goal), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "A guest may call this. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE` (`details.reason` is `already-scanned-for-goal`: the profile's latest scan was taken under its current goal), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
@@ -6460,16 +6460,6 @@
               }
             }
           },
-          "403": {
-            "description": "Signed in, but not allowed to do this",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "409": {
             "description": "Conflicts with the current state",
             "content": {
@@ -6528,7 +6518,7 @@
           "Face scans"
         ],
         "summary": "The profile's face scans, latest first",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. The current profile's scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. Another profile's scans, of this account or any other, are never listed.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. The current profile's scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. Another profile's scans, of this account or any other, are never listed.",
         "security": [
           {
             "bearerAuth": []
@@ -6611,7 +6601,7 @@
           "Face scans"
         ],
         "summary": "A face scan and where it has got to",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. Shows no result yet. `state` is `analysing`, `needs-retake`, `ready` or `failed`, and `reason` says why a scan needs a retake or failed: follow it live with `GET /api/v1/scans/faces/{id}/events` or poll this. Another profile's scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Shows no result yet. `state` is `analysing`, `needs-retake`, `ready` or `failed`, and `reason` says why a scan needs a retake or failed: follow it live with `GET /api/v1/scans/faces/{id}/events` or poll this. Another profile's scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
         "security": [
           {
             "bearerAuth": []
@@ -6722,7 +6712,7 @@
           "Face scans"
         ],
         "summary": "Delete a face scan and its photos",
-        "description": "Open to a guest too: anyone may remove face data they hold. Deletes the photos from storage, then the scan. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist or is already deleted. Consent is kept.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Deletes the photos from storage, then the scan. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist or is already deleted. Consent is kept.",
         "security": [
           {
             "bearerAuth": []
@@ -6741,84 +6731,6 @@
         "responses": {
           "204": {
             "description": "The scan and its photos are deleted"
-          },
-          "400": {
-            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "Sign-in required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "Not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "Unexpected server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/scans/faces/{id}/events": {
-      "get": {
-        "operationId": "watchFaceScan",
-        "tags": [
-          "Face scans"
-        ],
-        "summary": "Follow a face scan live, as server-sent events",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
-        "security": [
-          {
-            "bearerAuth": []
-          }
-        ],
-        "parameters": [
-          {
-            "schema": {
-              "type": "string"
-            },
-            "required": true,
-            "name": "id",
-            "in": "path"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The event stream",
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "type": "string",
-                  "description": "Frames of `event:` and `data:` lines."
-                }
-              }
-            }
           },
           "400": {
             "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
@@ -6873,6 +6785,84 @@
         }
       }
     },
+    "/api/v1/scans/faces/{id}/events": {
+      "get": {
+        "operationId": "watchFaceScan",
+        "tags": [
+          "Face scans"
+        ],
+        "summary": "Follow a face scan live, as server-sent events",
+        "description": "A guest may call this. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames carry only `id`, `state` and `reason`, never a result, scores or photo links, so a guest learns the next step and must verify and call `GET /api/v1/scans/faces/{id}` for the result. Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Frames of `event:` and `data:` lines."
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scans/faces/{id}/retake": {
       "post": {
         "operationId": "retakeFaceScan",
@@ -6880,7 +6870,7 @@
           "Face scans"
         ],
         "summary": "Send a new front photo for a scan that needs a retake",
-        "description": "A guest gets 403 `VERIFICATION_REQUIRED`: face scans are for verified users. Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: 404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "A guest may call this. Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: 404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
@@ -6955,16 +6945,6 @@
           },
           "401": {
             "description": "Sign-in required",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Signed in, but not allowed to do this",
             "content": {
               "application/json": {
                 "schema": {

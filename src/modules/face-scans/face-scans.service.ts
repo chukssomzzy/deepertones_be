@@ -145,7 +145,7 @@ export class FaceScanService {
 
   /** Records the caller's profile's consent for the current wording. Any other version is 400 FACE_CONSENT_VERSION_MISMATCH, which says which is current. */
   async giveConsent(version: number): Promise<FaceConsentGiven> {
-    const { userId, profileId } = requireVerified()
+    const { userId, profileId } = requireUser()
     if (version !== CURRENT_FACE_CONSENT_VERSION) {
       throw new ValidationError('FACE_CONSENT_VERSION_MISMATCH', 'That is not the current version of the face photo consent', { current: CURRENT_FACE_CONSENT_VERSION })
     }
@@ -156,7 +156,7 @@ export class FaceScanService {
 
   /** Withdraws the profile's consent, keeping the record. Nothing to withdraw is not an error. */
   async withdrawConsent(): Promise<void> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     await this.repository.withdrawConsent(profileId, this.now())
   }
 
@@ -174,7 +174,7 @@ export class FaceScanService {
    * the job cannot be queued the scan is marked failed as unavailable and still returned, so the user can see and delete it.
    */
   async create(photos: FacePhotos): Promise<FaceScanView> {
-    const { userId, profileId } = requireVerified()
+    const { userId, profileId } = requireUser()
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
@@ -266,6 +266,7 @@ export class FaceScanService {
    * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
    */
   async deleteFaceScan(id: string): Promise<void> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
@@ -345,7 +346,6 @@ export class FaceScanService {
    * Nothing changes until all pass. When the analysis cannot be queued the scan is marked failed as unavailable and still returned, as `create` does.
    */
   async retake(id: string, photos: { front: ProductImage }): Promise<RetakenFaceScanView> {
-    requireVerified()
     const scan = await this.ownedScan(id)
     await this.requireCurrentConsent(scan.profileId)
     if (scan.state !== 'needs-retake') throw FaceScanService.notAwaitingRetake()
@@ -414,7 +414,6 @@ export class FaceScanService {
    * scan is read again once it is open: a change stored in between is sent, and a scan that is over gets `done` straight away. A failure to send is logged.
    */
   async watch(id: string): Promise<Response> {
-    requireVerified()
     const scan = await this.ownedScan(id)
     const stream = await this.events.subscribe(id, FaceScanService.frameOf(scan))
     try {
