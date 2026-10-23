@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { DRAFT_CASES } from './draft-cases'
+import { DRAFT_DEV } from './draft-dev'
 import { DRAFT_HOLDOUT } from './draft-holdout'
 import { HUMAN_CHECKS } from './draft-human-checks'
 import { COLUMNS } from './draft-score'
@@ -7,9 +8,9 @@ import { COLUMNS } from './draft-score'
 // HUMAN_CHECKS is data a person wrote by hand, and a check that names a case or column that does not exist would silently do nothing.
 
 describe('HUMAN_CHECKS', () => {
-  const cases = [...DRAFT_CASES, ...DRAFT_HOLDOUT]
+  const cases = [...DRAFT_CASES, ...DRAFT_HOLDOUT, ...DRAFT_DEV]
 
-  it('names a case of one of the two sets, and a column or a price row of a country that case asks about', () => {
+  it('names a case of one of the three sets, and a column or a price row of a country that case asks about', () => {
     for (const check of HUMAN_CHECKS) {
       const found = cases.find((c) => c.id === check.caseId)
       expect(found, check.caseId).toBeDefined()

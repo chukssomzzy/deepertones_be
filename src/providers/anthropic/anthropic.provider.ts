@@ -127,6 +127,17 @@ export const sourceUrlsOf = (message: Pick<Message, 'content'>): Set<string> => 
   return urls
 }
 
+/** Every URL the web fetch tool read, as the tool gives it. A fetch that failed returns an error object, even one naming the URL, and adds none. */
+export const fetchedUrlsOf = (message: Pick<Message, 'content'>): Set<string> => {
+  const urls = new Set<string>()
+  for (const block of message.content) {
+    if (block.type !== 'web_fetch_tool_result') continue
+    const result = block.content as { type?: unknown; url?: unknown } | null | undefined
+    if (result?.type === 'web_fetch_result' && typeof result.url === 'string') urls.add(result.url)
+  }
+  return urls
+}
+
 /*
  * Prices. They live here and not in a file of their own because the client may import only *.provider.ts files from
  * its folder (concrete-classes-only-in-container), and it is the client that prices every call.
@@ -194,11 +205,16 @@ export const costMicros = (model: string, usage: AiUsage): number => {
 
 /**
  * The most a request can cost: all its input, the whole output allowance and every search it permits, each search also
- * adding SEARCH_INPUT_ALLOWANCE tokens of results to the prompt. That input is added BEFORE the tier is chosen, so a
- * Haiku call with searches is reserved at the long-prompt rates the real bill would use.
+ * adding SEARCH_INPUT_ALLOWANCE tokens of results to the prompt, and every page the fetch tool may read (`maxFetchedTokens`:
+ * its uses times the most one page may bring in; a fetch has no price of its own, only those input tokens). That input is
+ * added BEFORE the tier is chosen, so a Haiku call with searches or fetches is reserved at the long-prompt rates the real
+ * bill would use.
  */
-export const estimateMicros = (model: string, request: { inputTokens: number; maxOutputTokens: number; maxSearches: number }): number => {
-  const inputTokens = request.inputTokens + request.maxSearches * SEARCH_INPUT_ALLOWANCE
+export const estimateMicros = (
+  model: string,
+  request: { inputTokens: number; maxOutputTokens: number; maxSearches: number; maxFetchedTokens?: number },
+): number => {
+  const inputTokens = request.inputTokens + request.maxSearches * SEARCH_INPUT_ALLOWANCE + (request.maxFetchedTokens ?? 0)
   const rates = ratesFor(requirePrice(model), inputTokens)
   return Math.ceil((inputTokens * rates.input + request.maxOutputTokens * rates.output + request.maxSearches * SEARCH_RATE) / 1000)
 }

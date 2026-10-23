@@ -127,6 +127,7 @@ export class AnthropicClient {
       inputTokens: estimateInputTokens(payload),
       maxOutputTokens: payload.max_tokens,
       maxSearches: AnthropicClient.searchesIn(payload.tools),
+      maxFetchedTokens: AnthropicClient.fetchedTokensIn(payload.tools),
     })
     // AiBudgetExceededError reaches the caller as it is. Any other failure means spend we cannot count, so the call
     // fails closed: nothing is sent, and the error says nothing about the ledger (it can name the database).
@@ -196,6 +197,16 @@ export class AnthropicClient {
       // Without a limit the worst case is unbounded, so there would be nothing to reserve.
       if (typeof tool.max_uses !== 'number') throw new Error('A web_search tool must set max_uses')
       return sum + tool.max_uses
+    }, 0)
+  }
+
+  /** The most the request's web_fetch tools can read into the prompt: each tool's max_uses times its max_content_tokens. */
+  private static fetchedTokensIn(tools: MessageRequest['tools']): number {
+    return (tools ?? []).reduce((sum, tool) => {
+      if (tool.name !== 'web_fetch') return sum
+      // Without both limits the worst case is unbounded, so there would be nothing to reserve.
+      if (typeof tool.max_uses !== 'number' || typeof tool.max_content_tokens !== 'number') throw new Error('A web_fetch tool must set max_uses and max_content_tokens')
+      return sum + tool.max_uses * tool.max_content_tokens
     }, 0)
   }
 

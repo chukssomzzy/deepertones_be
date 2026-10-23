@@ -91,6 +91,32 @@ export const searchError = (toolUseId: string, errorCode = 'max_uses_exceeded'):
   content: { type: 'web_search_tool_result_error', error_code: errorCode },
 })
 
+export const fetchCall = (id: string, url: string): Block => ({
+  type: 'server_tool_use',
+  id,
+  name: 'web_fetch',
+  input: { url },
+})
+
+/** A page the web fetch tool read: the shape of the tool's documentation (the url is the one fetched; the docs do not say whether that is before or after a redirect). */
+export const fetchedPage = (toolUseId: string, url: string): Block => ({
+  type: 'web_fetch_tool_result',
+  tool_use_id: toolUseId,
+  content: {
+    type: 'web_fetch_result',
+    url,
+    retrieved_at: '2026-01-01T00:00:00Z',
+    content: { type: 'document', title: 'A page', source: { type: 'text', media_type: 'text/plain', data: 'Page text.' } },
+  },
+})
+
+/** A fetch that failed. It names the url it was asked for, which still does not make that page fetched. */
+export const fetchError = (toolUseId: string, url?: string, errorCode = 'url_not_accessible'): Block => ({
+  type: 'web_fetch_tool_result',
+  tool_use_id: toolUseId,
+  content: { type: 'web_fetch_tool_result_error', error_code: errorCode, ...(url !== undefined && { url }) },
+})
+
 /** The usage block of a response, in the API's own field names. Fields the API omits (cache counts, server_tool_use) are optional. */
 export type ApiUsage = {
   input_tokens?: number

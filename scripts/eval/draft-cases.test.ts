@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { CATEGORIES, FREQUENCIES, PRODUCT_FORMS, ROUTINE_STEPS } from '../../src/modules/catalog/catalog.vocabulary'
 import { SHOWN_CONCERNS, SKIN_TYPE_LABELS } from '../../src/modules/face-scans/face-scans.tables'
 import { DRAFT_CASES, type DraftCase } from './draft-cases'
+import { DRAFT_DEV } from './draft-dev'
 import { DRAFT_HOLDOUT } from './draft-holdout'
 
 // DRAFT_CASES is the measurement set for `npm run eval:catalog -- --mode draft`. It is data, but data that must stay valid: a case the drafter
@@ -21,11 +22,13 @@ const VOCABULARY = {
   frequencyPlausible: [...FREQUENCIES],
 } as const
 
-// Both sets are held to the same rules. The holdout checks a drafter fix on products the fix was not made against, so a product in both sets would
-// defeat it; that is asserted last.
+// All three sets are held to the same rules. The holdout checks a drafter fix on products the fix was not made against, so a product in it and in
+// another set would defeat it; the dev set is the one prompts are tuned on, so a product of it in the other two would make them tuned-on; both are
+// asserted last.
 describe.each([
   ['DRAFT_CASES', DRAFT_CASES],
   ['DRAFT_HOLDOUT', DRAFT_HOLDOUT],
+  ['DRAFT_DEV', DRAFT_DEV],
 ] as [string, DraftCase[]][])('%s', (_name, cases) => {
   it('gives every case a unique id that can become a product code', () => {
     const ids = cases.map((c) => c.id)
@@ -100,6 +103,28 @@ describe('DRAFT_CASES and DRAFT_HOLDOUT together', () => {
     for (const c of DRAFT_HOLDOUT) {
       expect(measured.has(identityOf(c)), `${c.id} is in both sets`).toBe(false)
       expect(measuredIds.has(c.id), `${c.id} id is in both sets`).toBe(false)
+    }
+  })
+})
+
+describe('DRAFT_DEV against the measurement and holdout sets', () => {
+  it.each([
+    ['DRAFT_CASES', DRAFT_CASES],
+    ['DRAFT_HOLDOUT', DRAFT_HOLDOUT],
+  ] as [string, DraftCase[]][])('shares no product (by brand and name, ignoring case) and no case id with %s', (_name, other) => {
+    const products = new Set(other.map(identityOf))
+    const ids = new Set(other.map((c) => c.id))
+
+    for (const c of DRAFT_DEV) {
+      expect(products.has(identityOf(c)), `${c.id} is in both sets`).toBe(false)
+      expect(ids.has(c.id), `${c.id} id is in both sets`).toBe(false)
+    }
+  })
+
+  it('is all ordinary cases with no expected values, since it is drafted and judged, not scored against plausible sets', () => {
+    for (const c of DRAFT_DEV) {
+      expect(c.kind, c.id).toBe('ordinary')
+      expect(c.expected, c.id).toBeUndefined()
     }
   })
 })

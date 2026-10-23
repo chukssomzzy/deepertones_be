@@ -3,9 +3,9 @@
 // of `npm test`, and never prints the key, a prompt or raw model output: only case ids, fixed problem codes and timings.
 //   --mode analysis|research|goals|mentions|draft|all   (default all, which is the first four; goals is about 40 Haiku calls and mentions about 22, a few cents each)    --limit N   cases per mode
 //   --max-usd N   stop spending at N dollars (default 2, and 5 for draft)    --model JOB=MODEL   run a job on another model (repeatable)
-//   --set main|holdout   draft only: the measurement set (default) or the holdout set a drafter fix is checked on
+//   --set main|holdout|dev   draft only: the measurement set (default), the holdout set a drafter fix is checked on, or the dev set a drafter change is tuned on
 //   --out-dir DIR   draft only: where report.json and draft.xlsx go (default .eval/draft-<timestamp>)
-// --mode draft is its own run: it drafts the DRAFT_CASES products (or DRAFT_HOLDOUT with --set holdout) through the real catalog drafter, has a judge check every drafted value against the page it
+// --mode draft is its own run: it drafts the DRAFT_CASES products (or DRAFT_HOLDOUT with --set holdout, DRAFT_DEV with --set dev) through the real catalog drafter, has a judge check every drafted value against the page it
 // cites, and gates on the result (see "Catalog eval" in docs/architecture.md). It is slow and costs real money, so it is never part of --mode all.
 // A --limit trial that covers no trap prints `Gate: PASS (no traps covered)`: it is a trial, not the gate.
 // Each job runs on the model wrangler.jsonc gives it (Haiku for research, vision and judging, Sonnet for the analysis)
@@ -28,7 +28,8 @@ import { AnthropicProductAnalyst } from '../src/providers/product-analysis/anthr
 import { AnthropicProductResearcher } from '../src/providers/product-research/anthropic.product-researcher'
 import { writeWorkbookFile } from './catalog/xlsx'
 import { ANALYSIS_CASES, GOAL_CASES, MENTION_CASES, RESEARCH_CASES } from './eval/cases'
-import { DRAFT_CASES } from './eval/draft-cases'
+import { DRAFT_CASES, type DraftCase } from './eval/draft-cases'
+import { DRAFT_DEV } from './eval/draft-dev'
 import { DRAFT_HOLDOUT } from './eval/draft-holdout'
 import { HUMAN_CHECKS } from './eval/draft-human-checks'
 import { AnthropicDraftJudge } from './eval/draft-judge'
@@ -37,6 +38,7 @@ import { DEFAULT_MODELS } from './eval/models'
 import {
   type AnalysisOutcome,
   type CaseResult,
+  type DraftSet,
   type GoalOutcome,
   loadEnv,
   type MentionOutcome,
@@ -48,6 +50,9 @@ import {
   scoreResearch,
   summarise,
 } from './eval/score'
+
+/** The cases `--set` picks; main when it is not given. */
+const DRAFT_SET_CASES: Record<DraftSet, DraftCase[]> = { main: DRAFT_CASES, holdout: DRAFT_HOLDOUT, dev: DRAFT_DEV }
 
 const usd = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
 
@@ -113,7 +118,7 @@ const main = async (): Promise<number> => {
     const draftModels = { research: models.research, 'draft-catalog-row': models['draft-catalog-row'], 'judge-draft': models['judge-draft'] }
     console.log(`Models: research ${draftModels.research}, draft-catalog-row ${draftModels['draft-catalog-row']}, judge-draft ${draftModels['judge-draft']}`)
     const { exitCode } = await runDraftEval({
-      cases: args.set === 'holdout' ? DRAFT_HOLDOUT : DRAFT_CASES,
+      cases: DRAFT_SET_CASES[args.set ?? 'main'],
       set: args.set,
       humanChecks: HUMAN_CHECKS,
       limit: args.limit,
