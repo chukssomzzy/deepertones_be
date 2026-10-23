@@ -10,6 +10,7 @@ import {
   AnthropicUnavailableError,
   estimateInputTokens,
   estimateMicros,
+  fetchedUrlsOf,
   sourceUrlsOf,
   textOf,
 } from './anthropic.provider'
@@ -23,6 +24,9 @@ import {
   citation,
   DEFAULT_API_URL,
   errorResponse,
+  fetchCall,
+  fetchedPage,
+  fetchError,
   hangingFetch,
   json,
   MODEL,
@@ -549,6 +553,61 @@ describe('sourceUrlsOf', () => {
     const message = { content: [searchCall('srvtoolu_1', 'q'), searchError('srvtoolu_1', 'unavailable'), textBlock('none')] }
 
     expect([...sourceUrlsOf(message as never)]).toEqual([])
+  })
+})
+
+describe('fetchedUrlsOf', () => {
+  const A = 'https://a.example/page'
+  const B = 'https://b.example/page'
+  const C = 'https://c.example/page'
+
+  it('collects the url of every page the fetch tool read, once', () => {
+    const message = {
+      content: [
+        fetchCall('srvtoolu_1', A),
+        fetchedPage('srvtoolu_1', A),
+        fetchCall('srvtoolu_2', B),
+        fetchedPage('srvtoolu_2', B),
+        fetchCall('srvtoolu_3', A),
+        fetchedPage('srvtoolu_3', A),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)].sort()).toEqual([A, B])
+  })
+
+  it('does not count a page the search returned or the answer cites, only one that was fetched', () => {
+    const message = {
+      content: [
+        searchCall('srvtoolu_1', 'q'),
+        searchResults('srvtoolu_1', [A, B]),
+        fetchCall('srvtoolu_2', B),
+        fetchedPage('srvtoolu_2', B),
+        textBlock('cited', [citation(C)]),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)]).toEqual([B])
+  })
+
+  it('does not count a fetch that failed, even when the error names the url', () => {
+    const message = {
+      content: [
+        fetchCall('srvtoolu_1', A),
+        fetchError('srvtoolu_1', A),
+        fetchCall('srvtoolu_2', B),
+        fetchError('srvtoolu_2'),
+        fetchCall('srvtoolu_3', C),
+        { type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_3', content: null },
+        textBlock('none'),
+      ],
+    }
+
+    expect([...fetchedUrlsOf(message as never)]).toEqual([])
+  })
+
+  it('returns nothing when nothing was fetched', () => {
+    expect([...fetchedUrlsOf({ content: [textBlock('hello')] } as never)]).toEqual([])
   })
 })
 

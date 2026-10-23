@@ -1,4 +1,4 @@
-import { isSafePublicHttpsUrl } from '../../lib/url-safety'
+import { comparableUrl, isSafePublicHttpsUrl } from '../../lib/url-safety'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { FREQUENCIES, ROUTINE_STEPS } from '../../modules/catalog/catalog.vocabulary'
 import { SHOWN_CONCERNS, SKIN_TYPE_LABELS } from '../../modules/face-scans/face-scans.tables'
@@ -115,17 +115,26 @@ const MAX_PRICE_SPREAD = 2.5
 // still takes 0 in a price typed by hand.)
 const isPrice = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
 
+/** The pages a drafter's model saw: those its search returned or cited, and those its fetch tool read. */
+export type DraftSources = { searched: ReadonlySet<string>; fetched: ReadonlySet<string> }
+
 /**
  * What of a drafter's answer the workbook can take: only the columns and countries asked for, only values in the vocabularies, prices as whole
- * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `searched`, when given, is also the only set of pages a source may be (the model can
- * name a page it never saw). A price row's page must also be one product's own: a price-comparison, Google Shopping, search or listing page drops the row,
+ * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `sources`, when given, limits where a source may come from (the model
+ * can name a page it never saw): a cell's page must be one the search returned or the model fetched, and a price row's page must be one the model fetched,
+ * since a search snippet is often stale or for another size. A fetched page is matched without regard to a trailing slash, a fragment or the case of
+ * its host. Without `sources` there is no such limit. A price row's page must also be one product's own: a price-comparison, Google Shopping, search or listing page drops the row,
  * though a cell may cite one. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
  */
-export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: ReadonlySet<string>): DraftResult => {
+export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: DraftSources): DraftResult => {
   const answer = asRecord(raw)
   const cells = asRecord(answer?.cells)
   const rows = answer?.availability
-  const sourceOf = (value: unknown): string | undefined => (isUsableSource(value) && (!searched || searched.has(value)) ? value : undefined)
+  const fetched = new Set([...(sources?.fetched ?? [])].flatMap((url) => comparableUrl(url) ?? []))
+  const wasFetched = (url: string): boolean => fetched.has(comparableUrl(url)!)
+  const sourceOf = (value: unknown): string | undefined =>
+    isUsableSource(value) && (!sources || sources.searched.has(value) || wasFetched(value)) ? value : undefined
+  const priceSourceOf = (value: unknown): string | undefined => (isUsableSource(value) && (!sources || wasFetched(value)) ? value : undefined)
   const result: DraftResult = { cells: {}, availability: [] }
   if (!cells || !Array.isArray(rows)) return result
 
@@ -142,7 +151,7 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, searched?: Rea
     const row = asRecord(item)
     if (!row) continue
     const { country, priceMin, priceMax, whereSold } = row
-    const sourceUrl = sourceOf(row.sourceUrl)
+    const sourceUrl = priceSourceOf(row.sourceUrl)
     if (typeof country !== 'string' || !request.countries.some((asked) => asked.code === country) || taken.has(country)) continue
     if (!isPrice(priceMin) || !isPrice(priceMax) || priceMin > priceMax || sourceUrl === undefined) continue
     if (priceMax > priceMin * MAX_PRICE_SPREAD || isListingOrComparisonPage(sourceUrl)) continue
