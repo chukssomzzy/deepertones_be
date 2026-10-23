@@ -20,6 +20,7 @@ import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/p
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
+import type { GoalRow } from '../goals/goals.types'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
@@ -28,7 +29,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { chaseStartFor, concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -71,7 +72,7 @@ export type RetakenFaceScanView = FaceScanView & { photos: { front: { url: strin
 
 export type FaceScanServiceDeps = {
   repository: FaceScansRepository
-  goals: Pick<GoalsService, 'requireGoal' | 'current'>
+  goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history'>
   photos: PhotoStore
   jobs: JobQueue
   perfectCorp: PerfectCorpClient
@@ -112,7 +113,7 @@ export class FaceScanService {
   private static readonly REAP_BATCH = 100
 
   private readonly repository: FaceScansRepository
-  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current'>
+  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history'>
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly perfectCorp: PerfectCorpClient
@@ -256,7 +257,10 @@ export class FaceScanService {
     const rescanSuggested = await this.rescanSuggested(profileId)
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
-    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults)))
+    // Every ready scan in the list reads its chase from the same goal history, so it is fetched once and shared; a list of scans still
+    // analysing, needing a retake or failed never needs it.
+    const history = scans.some((scan) => scan.state === 'ready') ? this.goals.history() : undefined
+    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
   }
 
   /**
@@ -751,8 +755,17 @@ export class FaceScanService {
     return { bytes: photo.bytes, mediaType: 'image/jpeg' }
   }
 
-  /** `rescanSuggested` and `dayOneResults` (the day-one scans' scores read so far, by scan id) are worked out here unless the caller, building many views for one profile, shares them. */
-  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean, dayOneResults?: Map<string, Promise<FaceResult[]>>): Promise<FaceScanView> {
+  /**
+   * `rescanSuggested`, `dayOneResults` (the day-one scans' scores read so far, by scan id) and `history` (the goal history the chase rule reads) are
+   * worked out here unless the caller, building many views for one profile, shares them.
+   */
+  private async view(
+    scan: FaceScan,
+    photos: FaceScanPhoto[],
+    rescanSuggested?: boolean,
+    dayOneResults?: Map<string, Promise<FaceResult[]>>,
+    history?: Promise<GoalRow[]>,
+  ): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
     const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
@@ -766,17 +779,21 @@ export class FaceScanService {
       createdAt: scan.createdAt,
       photos: links,
       rescanSuggested: rescanSuggested ?? (await this.rescanSuggested(scan.profileId)),
-      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map()) : null,
+      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map(), history ?? this.goals.history()) : null,
     }
   }
 
-  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest, which is no day one to compare with. */
-  private async result(scan: FaceScan, link: (key: string) => Promise<string>, dayOneResults: Map<string, Promise<FaceResult[]>>): Promise<ResultView> {
-    const [results, masks, found] = await Promise.all([
-      this.repository.resultsOf(scan.id),
-      this.repository.masksOf(scan.id),
-      this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
-    ])
+  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest in its chase, which is no day one to compare with. */
+  private async result(
+    scan: FaceScan,
+    link: (key: string) => Promise<string>,
+    dayOneResults: Map<string, Promise<FaceResult[]>>,
+    history: Promise<GoalRow[]>,
+  ): Promise<ResultView> {
+    const [results, masks, historyRows] = await Promise.all([this.repository.resultsOf(scan.id), this.repository.masksOf(scan.id), history])
+    // Through the product a scan is only ever taken under the current goal, so a chase always holds it; with none (unreachable) the scan is its own day one.
+    const since = chaseStartFor(historyRows, scan.goalAtScan, scan.createdAt) ?? scan.createdAt
+    const found = await this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, since, scanId: scan.id })
     // Only the concerns that are shown (faint ones too) get a link: a signature per mask that is then dropped is work for nothing.
     const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
     const overlays: Record<string, { url: string }> = {}

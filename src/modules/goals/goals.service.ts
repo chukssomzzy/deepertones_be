@@ -80,6 +80,16 @@ export class GoalsService {
   }
 
   /**
+   * The caller's whole goal history, oldest first: the order the chase rule reads it in (`chaseStartFor`, face-scans.tables.ts, issue #145).
+   * The repository answers newest first with a rowid tiebreak, so reversing it keeps rows made at the same time in the order they were
+   * appended. Empty for a profile that never set a goal.
+   */
+  async history(): Promise<GoalRow[]> {
+    const { profileId } = requireUser()
+    return [...(await this.repository.history(profileId))].reverse()
+  }
+
+  /**
    * The guard for what must not be built on a missing goal (the verdict, the routine): the current goal, or 409 `GOAL_REQUIRED`. Typed words
    * nobody sorted into a goal are not a goal. Not wired to a route yet.
    */

@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, max, ne, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -138,30 +138,22 @@ export class D1FaceScansRepository {
   }
 
   /**
-   * The day-one scan of the scan taken at `at` under `goal`: the profile's earliest ready scan under that goal, taken at or before `at`, with no ready scan
-   * under another goal between it and `at`. That is the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, found in one
-   * query (profile_id, created_at serves it). It is the scan itself when nothing earlier qualifies, and null when no ready scan does. Only ready scans count
-   * either way: one that failed, needs a retake or is analysing neither starts a day one nor ends one.
+   * The day-one scan of the chase that the scan taken at `at` belongs to: the profile's earliest `ready` scan under `goal`, taken no earlier
+   * than `since` (the start of that chase, worked out by the caller from the goal history) and no later than `at`. It is the scan itself when
+   * nothing earlier qualifies, and null when no ready scan does. Only ready scans count: one that failed, needs a retake or is analysing is
+   * never a day one. A scan under another goal inside the window is no cut-off here: the chase already decided that for the caller, by way
+   * of `since`.
    *
-   * The cut-off and the upper bound (`at`) are by timestamp alone, and candidates that share a timestamp go to the lower id. Two scans of one profile cannot share
-   * a millisecond in practice (each is a person's upload), so no scan is ever ordered against itself by id. `scanId` is kept for that tie-break, should one be needed.
+   * `since` and the upper bound (`at`) are by timestamp alone, and candidates that share a timestamp go to the lower id. Two scans of one
+   * profile cannot share a millisecond in practice (each is a person's upload), so no scan is ever ordered against itself by id. `scanId` is
+   * kept for that tie-break, should one be needed.
    */
-  async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
-    const cutOff = this.db
-      .select({ at: max(faceScans.createdAt) })
-      .from(faceScans)
-      .where(and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready'), ne(faceScans.goalAtScan, goal), lt(faceScans.createdAt, at)))
+  async dayOneFor({ profileId, goal, at, since }: { profileId: string; goal: Goal; at: Date; since: Date; scanId: string }): Promise<FaceScan | null> {
     const [row] = await this.db
       .select()
       .from(faceScans)
       .where(
-        and(
-          eq(faceScans.profileId, profileId),
-          eq(faceScans.state, 'ready'),
-          eq(faceScans.goalAtScan, goal),
-          lte(faceScans.createdAt, at),
-          gt(faceScans.createdAt, sql`coalesce((${cutOff}), -1)`),
-        ),
+        and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready'), eq(faceScans.goalAtScan, goal), gte(faceScans.createdAt, since), lte(faceScans.createdAt, at)),
       )
       .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
       .limit(1)

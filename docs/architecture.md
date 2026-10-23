@@ -1249,7 +1249,8 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
 - **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `VISIBILITY_VERSION` and `WORDING_VERSION`, which are `2`: `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
   three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
   and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
-  `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`) and `CHASE_VERSION` (`chaseStartFor`, the 90-day
+  resume rule, `RESUME_DAYS`; issue #145). Change a table, bump its version.
 - **The thresholds are placeholders to calibrate** against real staging results, and the overlays and skin age have not been checked on
   darker skin (see CONTEXT.md). A concern is visible at a `raw_score` of 60 or less; bands are `a-little` (above 45), `some` (above 30) and
   `clear` (30 or less), and above 60 is `faint` (`bandFor` returns it; `isVisible` means "not faint"). A change counts only when it is bigger than 5 points for a concern or 2 years for skin age; exactly that much is noise.
@@ -1268,7 +1269,7 @@ provider, the second the **records** (consent, the scan and its photos, the rout
 pipeline**: the job that sends the front photo to Perfect Corp and copies the results back, the webhook that wakes it, the retake, the reaper's one
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
 notifications** (see "Pushes" below).
-`FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
+`FaceScanService` takes the goals service (`requireGoal`, `current` and `history`, as a type-only `Pick`; services may depend on services), the photo
 store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
@@ -1325,13 +1326,19 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     `faint` or `seen` is empty, and null otherwise.
   - **Overlays.** The mask key of every concern in `seen`, faint ones included, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
     photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` (not in the goal, or not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
-  - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
-    another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
-    day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
-    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`; the
-    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`. The
-    cut-off and the upper bound are by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a
-    millisecond in practice, and `scanId` is kept for the tie-break should one be needed.
+  - **Day one.** A goal's *chase* is a continuous run of working on it, read from the profile's own goal history, never from scan dates (issue #145).
+    Leaving a goal and taking it up again within `RESUME_DAYS` (90) of leaving continues its chase; a longer gap starts a new one. Day one is the first
+    `ready` scan of the chase that contains the scan's own time: a short detour to another goal is a break in the chase, not the end of it, so the
+    progress a user had on a goal they come back to within the window still counts, and a goal left for longer starts a fresh chase with its own
+    day one. (Whether that also makes a scan due is "The policy" below, unchanged by this rule.)
+    `chaseStartFor(history, goal, at)` (`face-scans.tables.ts`) is the pure rule: `history` is the profile's goal rows, oldest first (`GoalsService.history()`),
+    a row is current from its `createdAt` inclusive, consecutive rows of the same goal merge into one run, and a row of another goal or a null goal (typed
+    words nobody sorted yet) counts as leaving. `FaceScansRepository.dayOneFor({ profileId, goal, at, since, scanId })` then answers the earliest `ready`
+    scan under `goal` with `createdAt` between `since` (the chase start) and `at`, and S itself when S is its own day one (the service turns that into
+    `sinceDayOne: null`). A scan under another goal inside the window is no cut-off here: the chase already decided that. `since` and the upper bound are
+    by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a millisecond in practice, and
+    `scanId` is kept for the tie-break should one be needed. Deleting the day-one scan makes the next one in the chase the day one: nothing is stored.
+    Scans that failed, need a retake or are analysing neither count nor cut.
   - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
     worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
