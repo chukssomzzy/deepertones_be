@@ -985,7 +985,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`. The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`, `draft-judge.judge-draft.md` (the eval's own). The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -1177,7 +1177,7 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   shows these.
   Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal and read-mentions), `_VISION`
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`, `judge-draft`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal, read-mentions and judge-draft, the eval's own job), `_VISION`
   (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
@@ -2402,7 +2402,8 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
 
 ### Catalog eval
 `npm run eval:catalog` (`scripts/eval-catalog.ts`) measures the model-backed catalog steps, and the goal and mention readers, against fixed cases in
-`scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested.
+`scripts/eval/cases.ts`; the pure parts (scoring, arguments, key lookup) are in `scripts/eval/score.ts` and are tested. `--mode draft` measures the catalog drafter against its own
+cases and a judge (see "Draft mode"); the other modes' exit code and report below do not apply to it.
 
 - **Analysis mode** runs each synthetic ingredient list through `flagFacts`, the real `AnthropicProductAnalyst` and
   `checkAnalysis`, exactly as the service does, and scores what would be stored: every flagged fact is covered by a
@@ -2422,6 +2423,39 @@ A scan's progress reaches the app as server-sent events from one Durable Object 
   that invents a mention, or lists a product's ingredients from memory, fails as much as one that misses: problem codes are `missing-product:<name>`,
   `missing-ingredient:<name>`, `extra-products:<n>`, `extra-ingredients:<n>` (counted, never named, so no model word is in a problem) and `error:<name>`. A product with no brand
   that a case does not expect is not counted. It is part of `--mode all`; `--mode mentions` runs it alone (about 22 Haiku calls, a few cents).
+- **Draft mode** (`--mode draft`, never part of `--mode all`) measures `npm run catalog:draft`, the catalog drafter, on `DRAFT_CASES` (`scripts/eval/draft-cases.ts`, 20 products: ordinary ones
+  and traps of three kinds; the type has a fourth, foreign-currency, with no case today: see Scoring) or, with `--set holdout`, on `DRAFT_HOLDOUT` (`scripts/eval/draft-holdout.ts`, 8 products, none of them in `DRAFT_CASES`). It builds one workbook with a draft Products row per case and the Countries tab NG (NGN) and GB (GBP), runs each case through the real
+  `draftWorkbook` on its own (the researcher for the ingredient list, `AnthropicCatalogDrafter` for the other four columns and the prices of the countries the case names), and then has a **judge**
+  check every value that was drafted, once: the ingredient list, each cell and each price row. The judge (`AnthropicDraftJudge`, `scripts/eval/draft-judge.ts`, the `judge-draft` job on
+  Haiku, prompt `src/prompts/draft-judge.judge-draft.md`) reads the page the drafter cited, with the web fetch tool (the newest type the SDK has, at most 2 fetches, `max_content_tokens` 20,000, `allowed_callers: ['direct']` so a fetch is one plain call whose result is a top-level block, not dynamic filtering through code execution, no web
+  search, `max_tokens` 4096 for Haiku's adaptive thinking) and answers `fetched`, `exactProduct` (yes, no, unclear), `supports` (yes, no, unclear) and, for a price, `currencyShown`. It can read only the cited page:
+  the tool is restricted (`allowed_domains`) to the host of the cited address, and `fetched` is true only when a successful `web_fetch_result` came back whose address is the cited one (scheme and host in lower
+  case, no fragment, no trailing slash, the query kept) and the judge said so. A page fetched at another address, on the same host after a redirect or on another host, does not count. Anything the judge cannot
+  vouch for is an "unverifiable" verdict, never an error, with a fixed `reason`: `not-fetched` (no page, or not the cited one, or the judge said it could not read it), `fetch-failed` (only failed fetches),
+  `cut-off` (the reply ran out of tokens; also what a value gets that was never asked about because the run had already stopped), `refused`, `unreadable-answer` or `api-error` (a 4xx or 5xx other than a rejected key).
+  The reason is in `report.json` and the console totals line counts the unverifiable values by reason (and "unclear" for a page that was fetched but did not settle the value). The drafted value is data to the judge, as the page is.
+  A rejected key, account or permission (401, 402, 403) and the spend cap are thrown: the run stops, writes what it has and exits 2 (key) or 1 (cap). Pages are data, and only the four verdict
+  fields leave the judge.
+  - **What the cap does not reserve.** The spend cap reserves a call's payload and its `max_tokens` before it is made; the text of a page the judge fetches is not in the payload, so it is settled afterwards at its real
+    cost and can take a run a little past the cap's reservations. The Anthropic docs say `max_content_tokens` "limits the amount of content included in the context" and truncates a fetched page over it, and do not say
+    whether that is per fetch or per request, so the bound on one judge call's page text is 20,000 tokens if it is per request and 2 x 20,000 (the 2 fetches) if it is per fetch, approximate either way.
+  - **Scoring** (`scripts/eval/draft-score.ts`). A value is *grounded* (page fetched, exact product, supports it), *contradicted* (the page says no, or is about a different product) or *unverifiable* (anything
+    else). A price row whose page showed another currency than its country's is also counted as *wrong-currency*. That is what the judge read on the page, and a shop that localises its prices by the visitor's location (a Nigerian shop served from a UK or US address) can show another currency than the one it sells in, so a wrong-currency failure needs a person to open the page before it is believed. Whether a value is inside the case's `...Plausible` set, and whether a price is for a country the
+    case says the product is sold in, is reported as agree or disagree and never gates: the sets are what a reader could defend, not ground truth. The traps are `trap-sibling` (no value may come from a page the judge says is
+    a different product), `trap-foreign-currency` (no price row for a country the case says has no local price, and no wrong-currency row; no case of this kind is in the main set today, because the two that were turned out to be sold in Nigeria, so the main set has no live foreign-currency trap, and the scorer's support for it is exercised by the tests only), `trap-unbranded` (nothing at all may be drafted, an ingredient list included) and
+    `trap-not-skincare` (no skincare cell may be drafted: concerns, skin types, steps or frequency; its ingredient list and prices are judged like any value).
+  - **Gate.** It holds only when all of these hold: contradicted values are at most 5% of the drafted values (price rows count as values), unverifiable values are at most 35% of them (a judge that cannot read the pages
+    must not pass the run), no price row is in the wrong currency, every trap case ran and passed, every case completed (none failed, was skipped or was cut off by the cap), and at least one value was drafted
+    (`no-values`: both rates divide by the values drafted, so a drafter that returned nothing would otherwise pass). It is checked in whole percents, so
+    1 contradicted in 20 passes and 1 in 19 fails, and the percentages are printed with one decimal (5.3%) so the number shown does not seem to contradict the gate. The gate line is the last thing printed:
+    `Gate: PASS (<n> cases, <t> traps)` or `Gate: FAIL (<rules>; <n> cases, <t> traps)`. A run with no trap in it, such as a `--limit` trial that stopped before the first trap, prints `Gate: PASS (no traps covered)`
+    and still exits 0: it is a trial, not the gate, and only a full run of a set is one.
+  - **Run.** `npm run eval:catalog -- --mode draft [--set main|holdout] [--limit N] [--max-usd N] [--out-dir DIR] [--model JOB=MODEL]`. `--set` picks the case set (main by default; only with `--mode draft`), and `report.json` and the first console line name it. It costs about the drafter's 20 web-search turns plus up to one page fetch per drafted value, so its cap is
+    5 dollars by default, not 2. It writes `report.json` (every case with its state, cost, counts, trap result and each value with the full address of the page it cites and the judge's verdict; a failed case also has the class name of the error behind it, never its message) and `draft.xlsx` (the drafted workbook,
+    which can be opened and reviewed like any `catalog:draft` output) to `--out-dir`, `.eval/draft-<timestamp>` by default. The console shows ids, kinds, counts, costs, trap results and, for a value the page
+    contradicts or a price in the wrong currency, the column, the value (never an ingredient list) and the page's host: never a full address, a model's words or an error message (a failed case shows the class name of its error, such as `AnthropicRequestError`, beside `drafter-error` or `researcher-error`). Exit 0 when the gate holds, 1 when it does
+    not (or the cap was reached), 2 when the run could not start or Claude rejected the key.
+  - **The set is for measuring, not tuning.** A prompt change for the drafter is checked on products outside `DRAFT_CASES`, which is what `--set holdout` runs (`DRAFT_HOLDOUT`: no product in both sets, which `draft-cases.test.ts` asserts); a change written to fit its cases would only make the eval agree with itself.
 - **Cost.** One analysis call per analysis case (6), one web-search research turn per research case (7, up to 5
   searches each) and one Haiku call per goal case and per mention case, run one at a time. `--limit N` caps the cases per mode, `--mode` picks one; both keep a trial cheap.
   The run is capped in dollars too: the client gets a `MemoryAiSpendLedger` capped at `--max-usd` (default 2), so it

@@ -122,6 +122,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'read-goal': env.ANTHROPIC_MODEL_JUDGE,
         'read-mentions': env.ANTHROPIC_MODEL_JUDGE,
         'draft-catalog-row': env.ANTHROPIC_MODEL_RESEARCH,
+        'judge-draft': env.ANTHROPIC_MODEL_JUDGE,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })

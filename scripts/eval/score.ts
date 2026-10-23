@@ -150,27 +150,44 @@ export const summarise = (results: CaseResult[]): { total: number; passed: numbe
   return { total, passed, failed: total - passed, passRate: total === 0 ? 0 : passed / total, costMicros }
 }
 
-export type Mode = 'analysis' | 'research' | 'goals' | 'mentions' | 'all'
-export type Args = { mode: Mode; limit: number | undefined; maxUsd: number; models: Partial<Record<AiJob, string>> }
+/** `all` runs the four steps before `draft`; `draft` is its own run (it drafts a whole workbook and judges every value) and is never part of `all`. */
+export type Mode = 'analysis' | 'research' | 'goals' | 'mentions' | 'draft' | 'all'
+/** The two case sets of the draft mode: `main` measures the drafter, `holdout` checks a drafter fix on products the fix was not made against. */
+export const DRAFT_SETS = ['main', 'holdout'] as const
+export type DraftSet = (typeof DRAFT_SETS)[number]
+export type Args = {
+  mode: Mode
+  limit: number | undefined
+  maxUsd: number
+  models: Partial<Record<AiJob, string>>
+  /** `--mode draft` only; main when not given. */
+  set?: DraftSet
+  /** `--mode draft` only. */
+  outDir?: string
+}
 
-const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'mentions', 'all']
+const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'mentions', 'draft', 'all']
 export const JOBS: readonly AiJob[] = AI_JOBS
 const DEFAULT_MAX_USD = 2
+// A draft run drafts every case with web search and then fetches a page for each value it drafted.
+const DEFAULT_DRAFT_MAX_USD = 5
 export const USAGE =
-  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... ' +
+  'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|draft|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--set main|holdout (draft only)] [--out-dir DIR (draft only)] ' +
   `(JOB is one of ${JOBS.join(', ')})`
 
 /** Strict on purpose: a misspelt flag must stop the run before it spends money. Accepts `--flag value` and `--flag=value`. */
 export const parseArgs = (argv: string[], usage: string = USAGE): Args => {
   let mode: Mode = 'all'
   let limit: number | undefined
-  let maxUsd = DEFAULT_MAX_USD
+  let maxUsd: number | undefined
+  let outDir: string | undefined
+  let set: DraftSet | undefined
   const models: Args['models'] = {}
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i]!
     const equals = arg.startsWith('--') ? arg.indexOf('=') : -1
     const flag = equals === -1 ? arg : arg.slice(0, equals)
-    if (flag !== '--mode' && flag !== '--limit' && flag !== '--model' && flag !== '--max-usd') {
+    if (flag !== '--mode' && flag !== '--limit' && flag !== '--model' && flag !== '--max-usd' && flag !== '--out-dir' && flag !== '--set') {
       throw new Error(`Unrecognised argument "${arg}". ${usage}`)
     }
 
@@ -188,6 +205,11 @@ export const parseArgs = (argv: string[], usage: string = USAGE): Args => {
         throw new Error(`--max-usd must be a number of dollars above 0. ${usage}`)
       }
       maxUsd = Number(value)
+    } else if (flag === '--out-dir') {
+      outDir = value
+    } else if (flag === '--set') {
+      if (!DRAFT_SETS.includes(value as DraftSet)) throw new Error(`Unknown set "${value}" (${DRAFT_SETS.join(' or ')}). ${usage}`)
+      set = value as DraftSet
     } else {
       const split = value.indexOf('=')
       const job = value.slice(0, split)
@@ -196,7 +218,17 @@ export const parseArgs = (argv: string[], usage: string = USAGE): Args => {
       models[job as AiJob] = model
     }
   }
-  return { mode, limit, maxUsd, models }
+  // Checked once the whole line is read, so the order of the flags does not matter.
+  if (outDir !== undefined && mode !== 'draft') throw new Error(`--out-dir is only for --mode draft. ${usage}`)
+  if (set !== undefined && mode !== 'draft') throw new Error(`--set is only for --mode draft. ${usage}`)
+  return {
+    mode,
+    limit,
+    maxUsd: maxUsd ?? (mode === 'draft' ? DEFAULT_DRAFT_MAX_USD : DEFAULT_MAX_USD),
+    models,
+    ...(mode === 'draft' ? { set: set ?? 'main' } : {}),
+    ...(outDir === undefined ? {} : { outDir }),
+  }
 }
 
 export type EnvInput = {
