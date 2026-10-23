@@ -2130,12 +2130,12 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
 
     const view = await getScan(ctx, id)
 
-    // analysed(): radiance 41.5 is "some", moisture 62 is faint (above the cut-off, still shown), texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
+    // analysed(): radiance 41.5 is "clear", moisture 62 and texture 55 are faint (above their cut-offs, still shown); a mask for radiance and moisture, none for texture.
     expect(view.result).toEqual({
       seen: [
-        { concern: 'glow', region: 'whole', level: 'some', words: 'Less glow across the face', overlay: { url: expect.stringMatching(LINK) } },
+        { concern: 'glow', region: 'whole', level: 'clear', words: 'Less glow across most of the face', overlay: { url: expect.stringMatching(LINK) } },
         { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(LINK) } },
-        { concern: 'texture', region: 'whole', level: 'a-little', words: 'A little roughness in places', overlay: null },
+        { concern: 'texture', region: 'whole', level: 'faint', words: 'Skin looks smooth', overlay: null },
       ],
       nothingStandsOut: null,
       skinType: 'dry',
@@ -2184,9 +2184,9 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
     expect(opened).not.toContain(maskUrl('acne'))
   })
 
-  it('shows texture as faint, in "Skin looks smooth", with a link that opens its mask, when it scored above 60', async () => {
+  it('shows texture as faint, in "Skin looks smooth", with a link that opens its mask, when it scored above its cut-off of 40', async () => {
     const ctx = setup()
-    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(41.5, 55, 88)))
+    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(65, 32, 88)))
 
     const { seen } = await resultOf(ctx, id)
 
@@ -2199,9 +2199,9 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
     expect(await bytesBehind(ctx, seen[2].overlay.url)).toBe(maskUrl('texture'))
   })
 
-  it('shows all three as faint and says nothing stands out, with a link to each mask, when every concern of the goal scored above 60', async () => {
+  it('shows all three as faint and says nothing stands out, with a link to each mask, when every concern of the goal scored above its cut-off', async () => {
     const ctx = setup()
-    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(61, 90, 100)))
+    const id = await readyUnder(ctx, 'glow', analysisOf(glowScores(76, 90, 100)))
 
     const result = await resultOf(ctx, id)
 
@@ -2252,7 +2252,7 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
       analysed({
         concerns: [
           { concern: 'hd_radiance', region: 'left_cheek', rawScore: 20, uiScore: 25, maskUrls: [] },
-          { concern: 'hd_radiance', region: 'whole', rawScore: 55, uiScore: 60, maskUrls: [maskUrl('radiance')] },
+          { concern: 'hd_radiance', region: 'whole', rawScore: 70, uiScore: 75, maskUrls: [maskUrl('radiance')] },
         ],
       }),
     )

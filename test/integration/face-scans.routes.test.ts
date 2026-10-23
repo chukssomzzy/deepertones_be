@@ -943,12 +943,12 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
 
     expect(shown).toMatchObject({ id: view.id, state: 'ready', reason: null })
     expect(Object.keys(shown).sort()).toEqual(['createdAt', 'goal', 'id', 'photos', 'reason', 'rescanSuggested', 'result', 'state'])
-    // glowOutput(): radiance 41.5 is "some", moisture 62 is faint (above the cut-off, still shown), texture 55 is "a-little"; a mask for radiance and moisture, none for texture.
+    // glowOutput(): radiance 41.5 is "clear", moisture 62 and texture 55 are faint (above their cut-offs, still shown); a mask for radiance and moisture, none for texture.
     expect(shown.result).toEqual({
       seen: [
-        { concern: 'glow', region: 'whole', level: 'some', words: 'Less glow across the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
+        { concern: 'glow', region: 'whole', level: 'clear', words: 'Less glow across most of the face', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
         { concern: 'dryness', region: 'whole', level: 'faint', words: 'Hardly any dry patches', overlay: { url: expect.stringMatching(new RegExp(`^${FACES}/photos/[A-Za-z0-9_-]+$`)) } },
-        { concern: 'texture', region: 'whole', level: 'a-little', words: 'A little roughness in places', overlay: null },
+        { concern: 'texture', region: 'whole', level: 'faint', words: 'Skin looks smooth', overlay: null },
       ],
       nothingStandsOut: null,
       skinType: 'dry',
