@@ -59,6 +59,10 @@ const ConcernIdEnum = z.enum(Object.values(CONCERN_IDS) as [string, ...string[]]
 const FaceScanSeen = z.object({
   concern: ConcernIdEnum,
   region: z.string().openapi({ description: 'The region that was read: `whole` for the whole face.' }),
+  level: z.enum(['faint', 'a-little', 'some', 'clear']).openapi({
+    description:
+      'A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped.',
+  }),
   words: z.string().openapi({ description: 'What can be seen, in plain words. Show it as it is; it is never a diagnosis.' }),
   overlay: z
     .object({ url: z.string() })
@@ -86,8 +90,10 @@ const FaceScanSinceDayOne = z.object({
 
 const FaceScanResult = z
   .object({
-    seen: z.array(FaceScanSeen).openapi({ description: 'The goal\'s concerns that can be seen now, in goal order, at most 3. Empty when nothing stands out.' }),
-    nothingStandsOut: z.string().nullable().openapi({ description: 'A calm sentence to show when `seen` is empty; null otherwise.' }),
+    seen: z
+      .array(FaceScanSeen)
+      .openapi({ description: 'Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back.' }),
+    nothingStandsOut: z.string().nullable().openapi({ description: 'A calm sentence to show when every item in `seen` is `faint`, or `seen` is empty; null otherwise.' }),
     skinType: z.enum(['oily', 'dry', 'combination', 'normal']).nullable().openapi({ description: 'The skin type; null when it could not be read.' }),
     skinAge: z
       .object({ years: z.number().int(), words: z.string() })

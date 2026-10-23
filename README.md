@@ -287,8 +287,9 @@ Corp: they stub `fetch`.
 ### Showing a face scan result (for the app)
 
 `GET /api/v1/scans/faces/{id}` (and the create and retake answers) carry `result`: null until `state` is `ready`. Render it as it is: `result.seen` is the
-goal's concerns that can be seen now (at most 3, goal order; `words` is the text to show, `concern` an id such as `glow` or `spots`), or show
-`result.nothingStandsOut` when `seen` is empty. `skinType` and `skinAge.words` are plain facts, and `sinceDayOne` (null for the first scan under a goal)
+goal's concerns Perfect Corp measured (at most 3, goal order; `words` is the text to show, `concern` an id such as `glow` or `spots`). Render every item.
+`level` (`faint`, `a-little`, `some`, `clear`) is a word for how much can be seen, never a score: a `faint` item reads as reassurance ("Hardly any spots"), so show it
+subdued, with its overlay hidden until tapped. Show `result.nothingStandsOut` when every item is `faint` or `seen` is empty. `skinType` and `skinAge.words` are plain facts, and `sinceDayOne` (null for the first scan under a goal)
 has the `words` for how each concern moved. Never show a number or invent wording of your own: there is no score, diagnosis or Fitzpatrick type in the
 result by design. `overlay.url` is a signed link to a PNG mask of where the concern shows and **expires after 5 minutes**: when it has, fetch the scan
 again for fresh links. Field details are in `docs/openapi.json` (`FaceScanResult`).

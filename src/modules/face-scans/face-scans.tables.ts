@@ -10,8 +10,8 @@ import type { Goal } from '../goals/goals.vocabulary'
 // (see CONTEXT.md). Changing one means bumping that table's version.
 
 export const GOAL_CONCERNS_VERSION = 1
-export const VISIBILITY_VERSION = 1
-export const WORDING_VERSION = 1
+export const VISIBILITY_VERSION = 2
+export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
 
@@ -22,8 +22,11 @@ export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VI
 export const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
 export type ShownConcern = (typeof SHOWN_CONCERNS)[number]
 
-/** How much of a concern can be seen, from the faintest. A score that is not visible has no band. */
-export type Band = 'a-little' | 'some' | 'clear'
+/**
+ * How much of a concern can be seen, from the faintest. `faint` is a score above the visible cut-off: it is shown (visibility v2 shows every goal
+ * concern Perfect Corp measured, because the cut-offs are not calibrated yet) but worded as hardly there, never claimed to be clearly seen.
+ */
+export type Band = 'faint' | 'a-little' | 'some' | 'clear'
 
 const HD_SKIN_TYPE = 'hd_skin_type'
 
@@ -52,7 +55,7 @@ export const concernsForGoal = (goal: Goal): ShownConcern[] => {
 export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...concernsForGoal(goal), HD_SKIN_TYPE]
 
 // A concern is visible at or below `visible`, and the band is how far below: (some, visible] is a-little, (clear, some] is some, and
-// clear or less is clear.
+// clear or less is clear. Above `visible` is faint.
 type Thresholds = { visible: number; some: number; clear: number }
 const SAME: Thresholds = { visible: 60, some: 45, clear: 30 }
 const THRESHOLDS: ReadonlyMap<string, Thresholds> = new Map<ShownConcern, Thresholds>([
@@ -67,16 +70,17 @@ const THRESHOLDS: ReadonlyMap<string, Thresholds> = new Map<ShownConcern, Thresh
   ['hd_moisture', SAME],
 ])
 
-/** Which band a raw_score is in for a concern, or null when it is not clearly enough visible to show. */
-export const bandFor = (concern: ShownConcern, rawScore: number): Band | null => {
+/** Which band a raw_score is in for a concern: `faint` when it is above the visible cut-off. */
+export const bandFor = (concern: ShownConcern, rawScore: number): Band => {
   const thresholds = THRESHOLDS.get(concern)
   if (!thresholds) throw new Error(`Not a concern that is shown: ${JSON.stringify(concern)}`)
-  if (rawScore > thresholds.visible) return null
+  if (rawScore > thresholds.visible) return 'faint'
   if (rawScore <= thresholds.clear) return 'clear'
   return rawScore <= thresholds.some ? 'some' : 'a-little'
 }
 
-export const isVisible = (concern: ShownConcern, rawScore: number): boolean => bandFor(concern, rawScore) !== null
+/** Whether a score is visible, which is to say not faint. */
+export const isVisible = (concern: ShownConcern, rawScore: number): boolean => bandFor(concern, rawScore) !== 'faint'
 
 // What can be seen, in plain words, never what it is called. Each text is short and calm and describes the face, not the person: it names
 // no condition, never says "you have", never says "acne" (spots and breakouts are what show), carries no number, and never talks of
@@ -86,46 +90,55 @@ export const isVisible = (concern: ShownConcern, rawScore: number): boolean => b
 // once Perfect Corp's region names are confirmed against a real staging response.
 export const WORDING: Record<ShownConcern, Record<Band, { whole: string } & Partial<Record<string, string>>>> = {
   hd_acne: {
+    faint: { whole: 'Hardly any spots' },
     'a-little': { whole: 'A few small spots here and there' },
     some: { whole: 'Some spots and breakouts across the face' },
     clear: { whole: 'Many spots and breakouts across the face' },
   },
   hd_pore: {
+    faint: { whole: 'Hardly any open pores' },
     'a-little': { whole: 'Pores a little more open in places' },
     some: { whole: 'Open pores in several places' },
     clear: { whole: 'Open pores across much of the face' },
   },
   hd_oiliness: {
+    faint: { whole: 'Hardly any shine' },
     'a-little': { whole: 'A little shine on the skin' },
     some: { whole: 'Some shine across the face' },
     clear: { whole: 'Shine across much of the face' },
   },
   hd_age_spot: {
+    faint: { whole: 'Hardly any dark marks' },
     'a-little': { whole: 'A few faint dark marks' },
     some: { whole: 'Some dark marks across the face' },
     clear: { whole: 'Many dark marks across the face' },
   },
   hd_redness: {
+    faint: { whole: 'Hardly any redness' },
     'a-little': { whole: 'A little redness in places' },
     some: { whole: 'Some redness across the face' },
     clear: { whole: 'Redness across much of the face' },
   },
   hd_radiance: {
+    faint: { whole: 'An even glow across the face' },
     'a-little': { whole: 'A little less glow in places' },
     some: { whole: 'Less glow across the face' },
     clear: { whole: 'Less glow across most of the face' },
   },
   hd_texture: {
+    faint: { whole: 'Skin looks smooth' },
     'a-little': { whole: 'A little roughness in places' },
     some: { whole: 'Some rough, uneven patches' },
     clear: { whole: 'Rough, uneven skin across much of the face' },
   },
   hd_dark_circle: {
+    faint: { whole: 'Hardly any darkness under the eyes' },
     'a-little': { whole: 'A little darkness under the eyes' },
     some: { whole: 'Some darkness under the eyes' },
     clear: { whole: 'Darkness under the eyes that is easy to see' },
   },
   hd_moisture: {
+    faint: { whole: 'Hardly any dry patches' },
     'a-little': { whole: 'A little dryness in places' },
     some: { whole: 'Some dry patches' },
     clear: { whole: 'Dry patches across much of the face' },
@@ -231,7 +244,7 @@ type ViewConcernChange = 'fainter' | 'more-visible' | 'no-clear-change'
 type ViewSkinAgeChange = 'younger' | 'older' | 'no-clear-change'
 
 export type ResultView = {
-  seen: { concern: ConcernId; region: string; words: string; overlay: { url: string } | null }[]
+  seen: { concern: ConcernId; region: string; level: Band; words: string; overlay: { url: string } | null }[]
   nothingStandsOut: string | null
   skinType: SkinTypeLabel | null
   skinAge: { years: number; words: string } | null
@@ -254,21 +267,21 @@ const rowFor = (results: readonly ScoreRow[], concern: ShownConcern): ScoreRow |
   return rows.find((row) => row.region === 'whole') ?? rows.sort((a, b) => (a.region < b.region ? -1 : a.region > b.region ? 1 : 0))[0] ?? null
 }
 
-/** The goal's concerns that can be seen in these rows, in goal order, each with the row read and its band. The same rule `resultView` shows by. */
+/** The goal's concerns that have a row in these results, in goal order, each with the row read and its band (faint included). The same rule `resultView` shows by. */
 export const shownConcerns = (goal: Goal, results: readonly ScoreRow[]): { concern: ShownConcern; row: ScoreRow; band: Band }[] => {
   const shown: ReturnType<typeof shownConcerns> = []
   for (const concern of concernsForGoal(goal)) {
     const row = rowFor(results, concern)
-    const band = row ? bandFor(concern, row.rawScore) : null
-    if (row && band) shown.push({ concern, row, band })
+    if (row) shown.push({ concern, row, band: bandFor(concern, row.rawScore) })
   }
   return shown
 }
 
 /**
- * What the app shows for a ready scan, from the stored rows alone: the goal's concerns that can be seen, the skin reading, and how each concern has
- * moved since day one. The words are worked out here, when read, so a change to the tables reaches scans already stored. `overlays` are already signed
- * links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a Perfect Corp name or a condition.
+ * What the app shows for a ready scan, from the stored rows alone: every one of the goal's concerns Perfect Corp measured (a faint one is worded as hardly
+ * there), the skin reading, and how each concern has moved since day one. The words are worked out here, when read, so a change to the tables reaches scans
+ * already stored. `overlays` are already signed links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a Perfect
+ * Corp name or a condition.
  */
 export const resultView = (input: {
   goal: Goal
@@ -283,6 +296,7 @@ export const resultView = (input: {
   const seen: ResultView['seen'] = shownConcerns(goal, results).map(({ concern, row, band }) => ({
     concern: CONCERN_IDS[concern],
     region: row.region,
+    level: band,
     words: seenWords(concern, band, row.region),
     overlay: overlays[concern] ? { url: overlays[concern].url } : null,
   }))
@@ -308,7 +322,7 @@ export const resultView = (input: {
 
   return {
     seen,
-    nothingStandsOut: seen.length === 0 ? NOTHING_STANDS_OUT : null,
+    nothingStandsOut: seen.every(({ level }) => level === 'faint') ? NOTHING_STANDS_OUT : null,
     skinType,
     skinAge: skinAge === null ? null : { years: Math.round(skinAge), words: skinAgeWords(skinAge) },
     sinceDayOne,

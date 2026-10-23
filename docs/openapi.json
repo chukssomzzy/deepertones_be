@@ -2179,6 +2179,16 @@
                   "type": "string",
                   "description": "The region that was read: `whole` for the whole face."
                 },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "faint",
+                    "a-little",
+                    "some",
+                    "clear"
+                  ],
+                  "description": "A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped."
+                },
                 "words": {
                   "type": "string",
                   "description": "What can be seen, in plain words. Show it as it is; it is never a diagnosis."
@@ -2202,18 +2212,19 @@
               "required": [
                 "concern",
                 "region",
+                "level",
                 "words",
                 "overlay"
               ]
             },
-            "description": "The goal's concerns that can be seen now, in goal order, at most 3. Empty when nothing stands out."
+            "description": "Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back."
           },
           "nothingStandsOut": {
             "type": [
               "string",
               "null"
             ],
-            "description": "A calm sentence to show when `seen` is empty; null otherwise."
+            "description": "A calm sentence to show when every item in `seen` is `faint`, or `seen` is empty; null otherwise."
           },
           "skinType": {
             "type": [

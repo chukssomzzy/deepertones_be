@@ -777,7 +777,7 @@ export class FaceScanService {
       this.repository.masksOf(scan.id),
       this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
     ])
-    // Only the concerns that are shown get a link: a signature per mask that is then dropped is work for nothing.
+    // Only the concerns that are shown (faint ones too) get a link: a signature per mask that is then dropped is work for nothing.
     const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
