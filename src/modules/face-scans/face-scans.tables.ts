@@ -6,11 +6,12 @@ import type { Goal } from '../goals/goals.vocabulary'
 //
 // Perfect Corp scores run 1 to 100 and HIGHER IS HEALTHIER. Everything here reads `raw_score`, never `ui_score`.
 //
-// EVERY NUMBER BELOW IS A PLACEHOLDER to calibrate against real staging results before launch, and none has been checked on darker skin
-// (see CONTEXT.md). Changing one means bumping that table's version.
+// The visibility cut-offs were calibrated on 2026-10-23 (see below). The noise thresholds for a change since day one are still placeholders to calibrate
+// against real staging results, and the overlays and skin age have not been checked on darker skin (see CONTEXT.md). Changing a number means bumping that
+// table's version.
 
-export const GOAL_CONCERNS_VERSION = 1
-export const VISIBILITY_VERSION = 2
+export const GOAL_CONCERNS_VERSION = 2
+export const VISIBILITY_VERSION = 3
 export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
@@ -27,8 +28,8 @@ export const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot
 export type ShownConcern = (typeof SHOWN_CONCERNS)[number]
 
 /**
- * How much of a concern can be seen, from the faintest. `faint` is a score above the visible cut-off: it is shown (visibility v2 shows every goal
- * concern Perfect Corp measured, because the cut-offs are not calibrated yet) but worded as hardly there, never claimed to be clearly seen.
+ * How much of a concern can be seen, from the faintest. `faint` is a score above the visible cut-off: it is shown (every goal concern Perfect Corp
+ * measured is shown, because the cut-offs are a first calibration) but worded as hardly there, never claimed to be clearly seen.
  */
 export type Band = 'faint' | 'a-little' | 'some' | 'clear'
 
@@ -55,23 +56,38 @@ export const concernsForGoal = (goal: Goal): ShownConcern[] => {
   return [...concerns]
 }
 
-/** What to ask Perfect Corp for: the goal's three concerns and the skin type, which is four actions (the HD 1 to 4 tier). */
-export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...concernsForGoal(goal), HD_SKIN_TYPE]
+// Measured for every goal whatever it is: the routine stage needs the whole picture (a glow user with spots needs products that do not clog pores; on
+// darker skin dark marks are the most common concern of all), and a concern not measured on day one can never show change since day one.
+const CORE_CONCERNS: readonly ShownConcern[] = ['hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness']
+
+/** Everything measured for a goal: its own three in goal order, then the core concerns it lacks in core order. 4 to 7 concerns, a fresh list each time. */
+export const measuredConcernsForGoal = (goal: Goal): ShownConcern[] => {
+  const own = concernsForGoal(goal)
+  return [...own, ...CORE_CONCERNS.filter((concern) => !own.includes(concern))]
+}
+
+/** What to ask Perfect Corp for: everything measured for the goal and the skin type, which is 5 to 8 actions (the HD 5 to 8 tier, 16 units). */
+export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...measuredConcernsForGoal(goal), HD_SKIN_TYPE]
 
 // A concern is visible at or below `visible`, and the band is how far below: (some, visible] is a-little, (clear, some] is some, and
-// clear or less is clear. Above `visible` is faint.
+// clear or less is clear. Above `visible` is faint. Each concern has its own cut-offs because Perfect Corp's raw_score sits on a different range for each
+// (moisture 27 to 61, redness 61 to 100), so one shared set hid dark marks and redness always and called almost every face dry.
+//
+// Calibrated 2026-10-23 on 40 Chicago Face Database photos (mostly Black, some Indian and multiracial) against blind visual ratings by an AI rater. This
+// is a first calibration, to be re-checked by a human rater experienced with skin of colour and on real app selfies. Redness, texture and moisture are
+// low-confidence (redness was at chance on the darker half, texture and moisture barely tracked the ratings). Evidence:
+// .humanlayer/tasks/face-scan/research-visibility-thresholds.md.
 type Thresholds = { visible: number; some: number; clear: number }
-const SAME: Thresholds = { visible: 60, some: 45, clear: 30 }
 const THRESHOLDS: ReadonlyMap<string, Thresholds> = new Map<ShownConcern, Thresholds>([
-  ['hd_acne', SAME],
-  ['hd_pore', SAME],
-  ['hd_oiliness', SAME],
-  ['hd_age_spot', SAME],
-  ['hd_redness', SAME],
-  ['hd_radiance', SAME],
-  ['hd_texture', SAME],
-  ['hd_dark_circle', SAME],
-  ['hd_moisture', SAME],
+  ['hd_acne', { visible: 68, some: 60, clear: 55 }],
+  ['hd_age_spot', { visible: 86, some: 81, clear: 76 }],
+  ['hd_pore', { visible: 60, some: 43, clear: 25 }],
+  ['hd_oiliness', { visible: 82, some: 72, clear: 62 }],
+  ['hd_redness', { visible: 95, some: 80, clear: 65 }],
+  ['hd_radiance', { visible: 75, some: 68, clear: 62 }],
+  ['hd_texture', { visible: 40, some: 30, clear: 20 }],
+  ['hd_dark_circle', { visible: 60, some: 54, clear: 48 }],
+  ['hd_moisture', { visible: 33, some: 30, clear: 28 }],
 ])
 
 /** Which band a raw_score is in for a concern: `faint` when it is above the visible cut-off. */
@@ -247,8 +263,11 @@ type ScoreRow = { concern: string; region: string; rawScore: number }
 type ViewConcernChange = 'fainter' | 'more-visible' | 'no-clear-change'
 type ViewSkinAgeChange = 'younger' | 'older' | 'no-clear-change'
 
+type SeenItem = { concern: ConcernId; region: string; level: Band; words: string; overlay: { url: string } | null }
+
 export type ResultView = {
-  seen: { concern: ConcernId; region: string; level: Band; words: string; overlay: { url: string } | null }[]
+  seen: SeenItem[]
+  alsoNoticed: SeenItem[]
   nothingStandsOut: string | null
   skinType: SkinTypeLabel | null
   skinAge: { years: number; words: string } | null
@@ -281,11 +300,26 @@ export const shownConcerns = (goal: Goal, results: readonly ScoreRow[]): { conce
   return shown
 }
 
+/** The measured concerns outside the goal's own that have a row and can be seen (not faint), in core order, each with the row read and its band. The same rule `resultView` lists `alsoNoticed` by. */
+export const noticedConcerns = (goal: Goal, results: readonly ScoreRow[]): { concern: ShownConcern; row: ScoreRow; band: Band }[] => {
+  const own = concernsForGoal(goal)
+  const noticed: ReturnType<typeof noticedConcerns> = []
+  for (const concern of measuredConcernsForGoal(goal)) {
+    if (own.includes(concern)) continue
+    const row = rowFor(results, concern)
+    if (!row) continue
+    const band = bandFor(concern, row.rawScore)
+    if (band !== 'faint') noticed.push({ concern, row, band })
+  }
+  return noticed
+}
+
 /**
  * What the app shows for a ready scan, from the stored rows alone: every one of the goal's concerns Perfect Corp measured (a faint one is worded as hardly
  * there), the skin reading, and how each concern has moved since day one. The words are worked out here, when read, so a change to the tables reaches scans
- * already stored. `overlays` are already signed links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a Perfect
- * Corp name or a condition.
+ * already stored. `alsoNoticed` is the other measured concerns that can be seen (not faint), in core order; a faint one stays stored for the routine
+ * stage and is not shown. `overlays` are already signed links by Perfect Corp concern; only a concern that is shown keeps its link. Never holds a score, a
+ * Perfect Corp name or a condition.
  */
 export const resultView = (input: {
   goal: Goal
@@ -297,13 +331,15 @@ export const resultView = (input: {
 }): ResultView => {
   const { goal, results, overlays, skinType, skinAge, dayOne } = input
   const concerns = concernsForGoal(goal)
-  const seen: ResultView['seen'] = shownConcerns(goal, results).map(({ concern, row, band }) => ({
+  const item = ({ concern, row, band }: { concern: ShownConcern; row: ScoreRow; band: Band }): SeenItem => ({
     concern: CONCERN_IDS[concern],
     region: row.region,
     level: band,
     words: seenWords(concern, band, row.region),
     overlay: overlays[concern] ? { url: overlays[concern].url } : null,
-  }))
+  })
+  const seen = shownConcerns(goal, results).map(item)
+  const alsoNoticed = noticedConcerns(goal, results).map(item)
 
   let sinceDayOne: ResultView['sinceDayOne'] = null
   if (dayOne) {
@@ -326,6 +362,7 @@ export const resultView = (input: {
 
   return {
     seen,
+    alsoNoticed,
     nothingStandsOut: seen.every(({ level }) => level === 'faint') ? NOTHING_STANDS_OUT : null,
     skinType,
     skinAge: skinAge === null ? null : { years: Math.round(skinAge), words: skinAgeWords(skinAge) },

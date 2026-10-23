@@ -93,6 +93,9 @@ const FaceScanResult = z
     seen: z
       .array(FaceScanSeen)
       .openapi({ description: 'Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back.' }),
+    alsoNoticed: z
+      .array(FaceScanSeen)
+      .openapi({ description: 'Other concerns that can be seen, beyond the goal\'s; never a diagnosis. Only those that are not `faint`, in a fixed order; empty when there are none (always, for a scan taken before these were measured). Show them under the goal\'s concerns as "Also noticed". They are not part of `sinceDayOne` or `nothingStandsOut`.' }),
     nothingStandsOut: z.string().nullable().openapi({ description: 'A calm sentence to show when every item in `seen` is `faint`, or `seen` is empty; null otherwise.' }),
     skinType: z.enum(['oily', 'dry', 'combination', 'normal']).nullable().openapi({ description: 'The skin type; null when it could not be read.' }),
     skinAge: z

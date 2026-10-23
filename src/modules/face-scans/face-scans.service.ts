@@ -1,5 +1,5 @@
 import { PermanentJobError } from '../../jobs/job'
-import { requireUser } from '../../lib/context'
+import { requireUser, requireVerified } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -29,7 +29,7 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { chaseStartFor, concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import { chaseStartFor, concernsForGoal, hdActionsForGoal, measuredConcernsForGoal, noticedConcerns, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -94,7 +94,7 @@ export type FaceScanServiceDeps = {
 
 const POSITIONS: readonly FacePhotoPosition[] = ['front', 'right', 'left']
 
-/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). */
+/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). Every goal asks for 5 to 8. */
 const unitsForActions = (actions: number): number => (actions <= 4 ? 12 : actions <= 8 ? 16 : actions <= 12 ? 20 : 22)
 /** What a Fitzpatrick read costs. */
 const FITZPATRICK_UNITS = 10
@@ -157,12 +157,12 @@ export class FaceScanService {
 
   /** Withdraws the profile's consent, keeping the record. Nothing to withdraw is not an error. */
   async withdrawConsent(): Promise<void> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     await this.repository.withdrawConsent(profileId, this.now())
   }
 
   async consent(): Promise<FaceConsentView> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const found = await this.repository.consentOf(profileId)
     if (!found) throw new NotFoundError('FACE_CONSENT_NOT_FOUND', 'No face photo consent has been given')
     return { version: found.version, givenAt: found.givenAt, withdrawnAt: found.withdrawnAt, current: FaceScanService.isCurrent(found) }
@@ -232,6 +232,7 @@ export class FaceScanService {
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is FACE_SCAN_NOT_FOUND, with no hint that it exists. */
   async getFaceScan(id: string): Promise<FaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
   }
@@ -251,7 +252,7 @@ export class FaceScanService {
    * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
    */
   async listFaceScans(): Promise<FaceScanView[]> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
     const rescanSuggested = await this.rescanSuggested(profileId)
@@ -260,6 +261,8 @@ export class FaceScanService {
     // Every ready scan in the list reads its chase from the same goal history, so it is fetched once and shared; a list of scans still
     // analysing, needing a retake or failed never needs it.
     const history = scans.some((scan) => scan.state === 'ready') ? this.goals.history() : undefined
+    // Its first reader awaits it only after that scan's photo links, so a failed read is caught here meanwhile; each reader still sees it fail.
+    history?.catch(() => undefined)
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
   }
 
@@ -269,11 +272,12 @@ export class FaceScanService {
    * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
    */
   async deleteFaceScan(id: string): Promise<void> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
     // The rows are gone, so a failure here cannot be retried by the user (the next delete is a 404): log it and finish.
-    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...concernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
+    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...measuredConcernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
     await this.photos.deleteMany(fixedKeys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: id, error: describeUnexpectedError(cleanup) }))
     await this.deleteTasks(scan)
   }
@@ -506,7 +510,7 @@ export class FaceScanService {
     const masks: FaceMask[] = []
     await this.logFrontPhotoSize(scan)
     try {
-      for (const concern of concernsForGoal(scan.goalAtScan)) {
+      for (const concern of measuredConcernsForGoal(scan.goalAtScan)) {
         const url = FaceScanService.maskUrlOf(analysis.concerns, concern)
         if (!url) continue
         const maskKey = this.objectKey(scan, FaceScanService.maskName(concern))
@@ -794,8 +798,11 @@ export class FaceScanService {
     // Through the product a scan is only ever taken under the current goal, so a chase always holds it; with none (unreachable) the scan is its own day one.
     const since = chaseStartFor(historyRows, scan.goalAtScan, scan.createdAt) ?? scan.createdAt
     const found = await this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, since, scanId: scan.id })
-    // Only the concerns that are shown (faint ones too) get a link: a signature per mask that is then dropped is work for nothing.
-    const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
+    // Only the concerns that are shown get a link (the goal's own, faint ones too, and the extras that can be seen): a signature per mask that is then dropped is work for nothing.
+    const shown = new Set<string>([
+      ...shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
+      ...noticedConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
+    ])
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null

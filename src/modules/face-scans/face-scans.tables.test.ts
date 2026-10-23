@@ -24,6 +24,7 @@ import {
   hdActionsForCheckIn,
   hdActionsForGoal,
   isVisible,
+  measuredConcernsForGoal,
   resultView,
   reviewPointFor,
   SHOWN_CONCERNS as EXPORTED_SHOWN_CONCERNS,
@@ -71,6 +72,16 @@ const GOAL_CONCERNS = {
   'calm-repair': ['hd_redness', 'hd_moisture', 'hd_texture'],
 } as const
 
+// Written out from the brief: the goal's own three, then the core concerns (age spot, acne, pore, oiliness) the goal lacks, in that order.
+const MEASURED = {
+  'clear-skin': ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot'],
+  'even-tone': ['hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  'fade-dark-marks': ['hd_age_spot', 'hd_acne', 'hd_texture', 'hd_pore', 'hd_oiliness'],
+  brighter: ['hd_radiance', 'hd_dark_circle', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  glow: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+  'calm-repair': ['hd_redness', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness'],
+} as const
+
 /** Every concern some goal can show (hd_skin_type is read for the skin type, never shown as a concern). */
 const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
 const BANDS = ['a-little', 'some', 'clear'] as const
@@ -92,8 +103,8 @@ const FAINT_WORDS = [
 
 describe('the version constants', () => {
   it.each([
-    ['GOAL_CONCERNS_VERSION', GOAL_CONCERNS_VERSION, 1],
-    ['VISIBILITY_VERSION', VISIBILITY_VERSION, 2],
+    ['GOAL_CONCERNS_VERSION', GOAL_CONCERNS_VERSION, 2],
+    ['VISIBILITY_VERSION', VISIBILITY_VERSION, 3],
     ['WORDING_VERSION', WORDING_VERSION, 2],
     ['SKIN_TYPE_VERSION', SKIN_TYPE_VERSION, 1],
     ['CHANGE_VERSION', CHANGE_VERSION, 1],
@@ -103,11 +114,11 @@ describe('the version constants', () => {
     expect(version).toBe(expected)
   })
 
-  // Visibility v2 shows every goal concern (a score above the cut-off is the faint band) and wording v2 adds the faint words. The chase
-  // rule and the review weeks (issue #145) join the others, so a stored result says which resume window worked out its day one and which
-  // review weeks were in force.
-  it('puts every version in TABLES_VERSION, with visibility:2 and wording:2 and the chase rule then the review weeks last', () => {
-    expect(TABLES_VERSION).toBe('concerns:1,visibility:2,wording:2,skin-type:1,change:1,chase:1,review:1')
+  // Visibility v3 gives each concern its own cut-offs (v2 showed every goal concern with one shared set) and wording v2 adds the faint words.
+  // Concerns v2 measures the core set on every scan. The chase rule and the review weeks (issue #145) join the others, so a stored result says
+  // which resume window worked out its day one and which review weeks were in force.
+  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2, then the chase rule and the review weeks last', () => {
+    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1,review:1')
   })
 })
 
@@ -126,11 +137,12 @@ describe('goal to concerns', () => {
     expect(table).toEqual(GOAL_CONCERNS)
   })
 
-  it.each([...GOALS])('asks Perfect Corp for %s as its three concerns plus hd_skin_type: four actions, the 1 to 4 tier', (goal) => {
+  it.each([...GOALS])('asks Perfect Corp for %s as everything measured plus hd_skin_type: 5 to 8 actions, the 16-unit tier', (goal) => {
     const actions = hdActionsForGoal(goal)
 
-    expect(actions).toEqual([...GOAL_CONCERNS[goal], 'hd_skin_type'])
-    expect(actions).toHaveLength(4)
+    expect(actions).toEqual([...MEASURED[goal], 'hd_skin_type'])
+    expect(actions.length).toBeGreaterThanOrEqual(5)
+    expect(actions.length).toBeLessThanOrEqual(8)
   })
 
   it.each([...GOALS])('uses only names on Perfect Corp\'s HD list for %s, every one prefixed hd_', (goal) => {
@@ -158,8 +170,10 @@ describe('goal to concerns', () => {
     first.push('hd_wrinkle')
     ;(concernsForGoal('glow') as string[]).length = 0
 
-    expect(hdActionsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type'])
+    expect(hdActionsForGoal('glow')).toEqual([...MEASURED.glow, 'hd_skin_type'])
     expect(concernsForGoal('glow')).toEqual(['hd_radiance', 'hd_moisture', 'hd_texture'])
+    ;(measuredConcernsForGoal('glow') as string[]).length = 0
+    expect(measuredConcernsForGoal('glow')).toEqual(MEASURED.glow)
   })
 })
 
@@ -203,55 +217,119 @@ describe('what a check-in scan asks Perfect Corp for', () => {
   })
 })
 
-// "To calibrate with real staging results": every threshold below is a starting value. A visible concern is one whose raw_score is AT
-// OR BELOW its threshold (higher is healthier). Bands: a-little is (45, 60], some is (30, 45], clear is 30 or less. Above 60 is `faint`:
-// still a band, so it is shown, but worded as hardly there and never claimed to be clearly seen.
+describe('the concerns measured for a goal', () => {
+  it.each([...GOALS])('measures %s as its own three, in goal order, then the core concerns it lacks, in core order', (goal) => {
+    expect(measuredConcernsForGoal(goal)).toEqual(MEASURED[goal])
+  })
+
+  it.each([...GOALS])('measures 4 to 7 concerns for %s, none twice, and starts with the goal\'s own', (goal) => {
+    const measured = measuredConcernsForGoal(goal)
+
+    expect(measured.length).toBeGreaterThanOrEqual(4)
+    expect(measured.length).toBeLessThanOrEqual(7)
+    expect(new Set(measured).size).toBe(measured.length)
+    expect(measured.slice(0, 3)).toEqual(GOAL_CONCERNS[goal])
+  })
+
+  it.each([...GOALS])('always measures the four core concerns for %s', (goal) => {
+    expect(measuredConcernsForGoal(goal)).toEqual(expect.arrayContaining(['hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness']))
+  })
+
+  it.each(['not-a-goal', '', 'toString', '__proto__'])('refuses "%s", which is not a goal', (name) => {
+    expect(() => measuredConcernsForGoal(name as never)).toThrow()
+  })
+})
+
+// Visibility v3: each concern has its own cut-offs (calibrated on 40 photos, a first pass; see face-scans.tables.ts). A visible concern is one whose
+// raw_score is AT OR BELOW its `visible` cut-off (higher is healthier). Bands: a-little is (some, visible], some is (clear, some], clear is `clear` or
+// less. Above `visible` is `faint`: still a band, so it is shown, but worded as hardly there and never claimed to be clearly seen.
+// Written out from the brief, not read from the table.
+const CUT_OFFS = {
+  hd_acne: { visible: 68, some: 60, clear: 55 },
+  hd_age_spot: { visible: 86, some: 81, clear: 76 },
+  hd_pore: { visible: 60, some: 43, clear: 25 },
+  hd_oiliness: { visible: 82, some: 72, clear: 62 },
+  hd_redness: { visible: 95, some: 80, clear: 65 },
+  hd_radiance: { visible: 75, some: 68, clear: 62 },
+  hd_texture: { visible: 40, some: 30, clear: 20 },
+  hd_dark_circle: { visible: 60, some: 54, clear: 48 },
+  hd_moisture: { visible: 33, some: 30, clear: 28 },
+} as const
+
 describe('when a concern is visible, and how much', () => {
-  it.each(SHOWN_CONCERNS)('treats %s as visible at exactly a raw_score of 60, the a-little band', (concern) => {
-    expect(isVisible(concern, 60)).toBe(true)
-    expect(bandFor(concern, 60)).toBe('a-little')
+  it('has cut-offs written out here for exactly the nine shown concerns', () => {
+    expect(Object.keys(CUT_OFFS).sort()).toEqual([...SHOWN_CONCERNS].sort())
   })
 
-  it.each(SHOWN_CONCERNS)('treats %s as faint, and not visible, just above 60', (concern) => {
-    expect(isVisible(concern, 60.1)).toBe(false)
-    expect(bandFor(concern, 60.1)).toBe(FAINT)
+  it.each(SHOWN_CONCERNS)('orders the cut-offs of %s strictly: visible above some above clear', (concern) => {
+    const { visible, some, clear } = CUT_OFFS[concern]
+    expect(visible).toBeGreaterThan(some)
+    expect(some).toBeGreaterThan(clear)
+    expect(clear).toBeGreaterThan(0)
   })
 
+  // Each cut-off is inclusive: a score equal to it is in that band, and 0.1 more is the next fainter band.
+  it.each(SHOWN_CONCERNS)('puts %s in the band of its own cut-offs at every boundary, and above visible in faint', (concern) => {
+    const { visible, some, clear } = CUT_OFFS[concern]
+
+    expect(bandFor(concern, clear)).toBe('clear')
+    expect(bandFor(concern, clear + 0.1)).toBe('some')
+    expect(bandFor(concern, some)).toBe('some')
+    expect(bandFor(concern, some + 0.1)).toBe('a-little')
+    expect(bandFor(concern, visible)).toBe('a-little')
+    expect(bandFor(concern, visible + 0.1)).toBe(FAINT)
+    expect(bandFor(concern, 100)).toBe(FAINT)
+    expect(bandFor(concern, 1)).toBe('clear')
+  })
+
+  it.each(SHOWN_CONCERNS)('treats %s as visible at exactly its visible cut-off, the a-little band', (concern) => {
+    const { visible } = CUT_OFFS[concern]
+    expect(isVisible(concern, visible)).toBe(true)
+    expect(bandFor(concern, visible)).toBe('a-little')
+  })
+
+  it.each(SHOWN_CONCERNS)('treats %s as faint, and not visible, just above its visible cut-off', (concern) => {
+    const { visible } = CUT_OFFS[concern]
+    expect(isVisible(concern, visible + 0.1)).toBe(false)
+    expect(bandFor(concern, visible + 0.1)).toBe(FAINT)
+  })
+
+  it('does not share one set of cut-offs: the same score is a different band for different concerns', () => {
+    expect(bandFor('hd_age_spot', 80)).toBe('some')
+    expect(bandFor('hd_moisture', 80)).toBe(FAINT)
+    expect(bandFor('hd_texture', 50)).toBe(FAINT)
+    expect(bandFor('hd_acne', 50)).toBe('clear')
+  })
+
+  // Scores that mean the same band for every concern: above the highest visible cut-off (95) and at or below the lowest clear cut-off (20).
   it.each([
     [100, FAINT],
-    [87.5, FAINT],
-    [60.1, FAINT],
-    [60, 'a-little'],
-    [57.33, 'a-little'],
-    [45.1, 'a-little'],
-    [45, 'some'],
-    [37.5, 'some'],
-    [30.1, 'some'],
-    [30, 'clear'],
-    [29.9, 'clear'],
+    [95.1, FAINT],
+    [20, 'clear'],
     [12, 'clear'],
     [1, 'clear'],
-  ])('puts a raw_score of %s in band %s', (score, band) => {
+  ])('puts a raw_score of %s in band %s, for every concern', (score, band) => {
     for (const concern of SHOWN_CONCERNS) {
       expect(bandFor(concern, score)).toBe(band)
       expect(isVisible(concern, score)).toBe(band !== FAINT)
     }
   })
 
-  it('gives every score exactly one band: one of the three visible ones up to 60, and faint above it', () => {
+  it.each(SHOWN_CONCERNS)('gives every score exactly one band for %s: one of the three visible ones up to its visible cut-off, and faint above it', (concern) => {
+    const { visible } = CUT_OFFS[concern]
     for (let score = 1; score <= 100; score += 0.5) {
-      const band = bandFor('hd_redness', score)
+      const band = bandFor(concern, score)
 
-      expect(band === FAINT ? score > 60 : BANDS.includes(band as (typeof BANDS)[number])).toBe(true)
-      expect(isVisible('hd_redness', score)).toBe(score <= 60)
+      expect(band === FAINT ? score > visible : BANDS.includes(band as (typeof BANDS)[number])).toBe(true)
+      expect(isVisible(concern, score)).toBe(score <= visible)
     }
   })
 
-  it('gives a clearer band as the score falls: a lower score never gives a fainter band', () => {
+  it.each(SHOWN_CONCERNS)('gives a clearer band as the score of %s falls: a lower score never gives a fainter band', (concern) => {
     const rank = (band: string) => (band === FAINT ? 0 : BANDS.indexOf(band as (typeof BANDS)[number]) + 1)
     let last = 0
     for (let score = 100; score >= 1; score -= 0.5) {
-      const now = rank(bandFor('hd_pore', score))
+      const now = rank(bandFor(concern, score))
       expect(now).toBeGreaterThanOrEqual(last)
       last = now
     }
@@ -798,7 +876,7 @@ describe('resultView: the seen concerns', () => {
   // glow shows hd_radiance (public id glow), hd_moisture (dryness), hd_texture (texture), in that order.
 
   it('shows every one of the goal\'s concerns that has a row, faint ones too, in the goal\'s order, each with its level', () => {
-    const result = build({ results: [row('hd_texture', 'whole', 55), row('hd_moisture', 'whole', 62), row('hd_radiance', 'whole', 41.5)] })
+    const result = build({ results: [row('hd_texture', 'whole', 35), row('hd_moisture', 'whole', 62), row('hd_radiance', 'whole', 65)] })
 
     expect(result.seen).toEqual([
       { concern: 'glow', region: 'whole', level: 'some', words: 'Less glow across the face', overlay: null },
@@ -821,21 +899,21 @@ describe('resultView: the seen concerns', () => {
   })
 
   it.each([
-    [30, 'clear'],
-    [30.1, 'some'],
-    [45, 'some'],
-    [45.1, 'a-little'],
-    [60, 'a-little'],
-    [60.1, 'faint'],
+    [62, 'clear'],
+    [62.1, 'some'],
+    [68, 'some'],
+    [68.1, 'a-little'],
+    [75, 'a-little'],
+    [75.1, 'faint'],
     [100, 'faint'],
-  ])('gives a raw_score of %s the level %s', (score, level) => {
+  ])('gives a raw_score of %s the level %s (hd_radiance: clear 62, some 68, visible 75)', (score, level) => {
     expect(build({ results: [row('hd_radiance', 'whole', score)] }).seen.map((seen) => seen.level)).toEqual([level])
   })
 
   it('words each concern\'s faint row as written, for every goal', () => {
     for (const goal of GOALS) {
       const concerns = concernsForGoal(goal)
-      const result = build({ goal, results: concerns.map((concern) => row(concern, 'whole', 90)) })
+      const result = build({ goal, results: concerns.map((concern) => row(concern, 'whole', 100)) })
 
       expect(result.seen.map((seen) => seen.words)).toEqual(concerns.map((concern) => FAINT_WORDS.find(([name]) => name === concern)![1]))
       expect(result.seen.every((seen) => seen.level === 'faint')).toBe(true)
@@ -843,20 +921,20 @@ describe('resultView: the seen concerns', () => {
   })
 
   it('words each of the three visible bands with the seen-words for that band', () => {
-    const result = build({ results: [row('hd_radiance', 'whole', 60), row('hd_moisture', 'whole', 45), row('hd_texture', 'whole', 30)] })
+    const result = build({ results: [row('hd_radiance', 'whole', 75), row('hd_moisture', 'whole', 30), row('hd_texture', 'whole', 20)] })
 
     expect(result.seen.map((seen) => seen.words)).toEqual(['A little less glow in places', 'Some dry patches', 'Rough, uneven skin across much of the face'])
     expect(result.seen.map((seen) => seen.concern)).toEqual(['glow', 'dryness', 'texture'])
   })
 
-  it('calls a score of exactly 60 a-little and one of 60.1 faint: the visible threshold is inclusive', () => {
-    expect(build({ results: [row('hd_radiance', 'whole', 60)] }).seen.map((seen) => seen.level)).toEqual(['a-little'])
-    expect(build({ results: [row('hd_radiance', 'whole', 60.1)] }).seen.map((seen) => seen.level)).toEqual(['faint'])
+  it('calls a score of exactly 75 a-little and one of 75.1 faint for radiance: the visible threshold is inclusive', () => {
+    expect(build({ results: [row('hd_radiance', 'whole', 75)] }).seen.map((seen) => seen.level)).toEqual(['a-little'])
+    expect(build({ results: [row('hd_radiance', 'whole', 75.1)] }).seen.map((seen) => seen.level)).toEqual(['faint'])
   })
 
   it('reads the whole-face row in preference to another region, whatever the order of the rows', () => {
-    // The left cheek is clear (20); the whole face is only a-little (55). The whole face is the one that is read.
-    const rows = [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'whole', 55)]
+    // The left cheek is clear (20); the whole face is only a-little (70). The whole face is the one that is read.
+    const rows = [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'whole', 70)]
 
     for (const results of [rows, [...rows].reverse()]) {
       expect(build({ results }).seen).toEqual([{ concern: 'glow', region: 'whole', level: 'a-little', words: 'A little less glow in places', overlay: null }])
@@ -872,7 +950,7 @@ describe('resultView: the seen concerns', () => {
 
   it('with no whole-face row, reads the first region by name and says which region it read', () => {
     // 'forehead' sorts before 'left_cheek'; the rows arrive the other way round.
-    const result = build({ results: [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'forehead', 40)] })
+    const result = build({ results: [row('hd_radiance', 'left_cheek', 20), row('hd_radiance', 'forehead', 65)] })
 
     expect(result.seen).toEqual([{ concern: 'glow', region: 'forehead', level: 'some', words: 'Less glow across the face', overlay: null }])
   })
@@ -891,7 +969,7 @@ describe('resultView: the seen concerns', () => {
   })
 
   it('says nothing stands out when all three concerns are faint, and still shows all three as faint', () => {
-    const result = build({ results: [row('hd_radiance', 'whole', 61), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 100)] })
+    const result = build({ results: [row('hd_radiance', 'whole', 76), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 100)] })
 
     expect(result.seen.map((seen) => seen.level)).toEqual(['faint', 'faint', 'faint'])
     expect(result.seen.map((seen) => seen.words)).toEqual(['An even glow across the face', 'Hardly any dry patches', 'Skin looks smooth'])
@@ -899,14 +977,14 @@ describe('resultView: the seen concerns', () => {
   })
 
   it('says nothing stands out when only some concerns came back and every one of them is faint', () => {
-    const result = build({ results: [row('hd_radiance', 'whole', 70)] })
+    const result = build({ results: [row('hd_radiance', 'whole', 80)] })
 
     expect(result.seen).toHaveLength(1)
     expect(result.nothingStandsOut).toBe(NOTHING_STANDS_OUT)
   })
 
   it('does not say nothing stands out when even one concern is not faint', () => {
-    const result = build({ results: [row('hd_radiance', 'whole', 61), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 60)] })
+    const result = build({ results: [row('hd_radiance', 'whole', 76), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 40)] })
 
     expect(result.seen.map((seen) => seen.level)).toEqual(['faint', 'faint', 'a-little'])
     expect(result.nothingStandsOut).toBeNull()
@@ -920,7 +998,7 @@ describe('resultView: the seen concerns', () => {
   })
 
   it('follows the goal: the same rows read under another goal show that goal\'s concerns', () => {
-    const result = build({ goal: 'clear-skin', results: [row('hd_acne', 'whole', 40), row('hd_radiance', 'whole', 40)] })
+    const result = build({ goal: 'clear-skin', results: [row('hd_acne', 'whole', 58), row('hd_radiance', 'whole', 58)] })
 
     expect(result.seen).toEqual([{ concern: 'spots', region: 'whole', level: 'some', words: 'Some spots and breakouts across the face', overlay: null }])
   })
@@ -928,7 +1006,7 @@ describe('resultView: the seen concerns', () => {
 
 describe('resultView: overlays', () => {
   const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
-  const results = [row('hd_radiance', 'whole', 41.5), row('hd_moisture', 'whole', 62), row('hd_texture', 'whole', 55)]
+  const results = [row('hd_radiance', 'whole', 65), row('hd_moisture', 'whole', 62), row('hd_texture', 'whole', 35)]
 
   it('gives a shown concern the link it was signed with, and null when there is none', () => {
     const result = resultView({ goal: 'glow', results, overlays: { hd_radiance: { url: '/link/radiance' } }, skinType: null, skinAge: null, dayOne: null })
@@ -961,6 +1039,91 @@ describe('resultView: overlays', () => {
   })
 })
 
+describe('resultView: also noticed', () => {
+  const row = (concern: string, region: string, rawScore: number) => ({ concern, region, rawScore })
+  const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
+  // glow measures radiance, moisture, texture, then the core extras age_spot (marks), acne (spots), pore (pores), oiliness (shine).
+  // Visible: age_spot <= 86, acne <= 68, pore <= 60, oiliness <= 82 (a-little above `some`, some above `clear`).
+
+  it('lists the visible extras in core order, whatever the order of the rows, each shaped like a seen item', () => {
+    const result = build({ results: [row('hd_oiliness', 'whole', 70), row('hd_pore', 'whole', 50), row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 84)] })
+
+    expect(result.alsoNoticed).toEqual([
+      { concern: 'marks', region: 'whole', level: 'a-little', words: 'A few faint dark marks', overlay: null },
+      { concern: 'spots', region: 'whole', level: 'clear', words: 'Many spots and breakouts across the face', overlay: null },
+      { concern: 'pores', region: 'whole', level: 'a-little', words: 'Pores a little more open in places', overlay: null },
+      { concern: 'shine', region: 'whole', level: 'some', words: 'Some shine across the face', overlay: null },
+    ])
+    expect(Object.keys(result.alsoNoticed[0]!).sort()).toEqual(['concern', 'level', 'overlay', 'region', 'words'])
+  })
+
+  it('leaves out a faint extra: it is stored for the routine stage but not shown', () => {
+    const result = build({ results: [row('hd_age_spot', 'whole', 90), row('hd_acne', 'whole', 58), row('hd_pore', 'whole', 70), row('hd_oiliness', 'whole', 95)] })
+
+    expect(result.alsoNoticed.map((item) => item.concern)).toEqual(['spots'])
+    expect(JSON.stringify(result.alsoNoticed)).not.toContain('faint')
+  })
+
+  it('counts an extra at exactly its visible cut-off as visible and just above it as faint', () => {
+    expect(build({ results: [row('hd_acne', 'whole', 68)] }).alsoNoticed.map((item) => item.level)).toEqual(['a-little'])
+    expect(build({ results: [row('hd_acne', 'whole', 68.1)] }).alsoNoticed).toEqual([])
+  })
+
+  it('never lists one of the goal\'s own concerns, visible or not, and never lists the skin type or the overall score', () => {
+    const result = build({
+      goal: 'clear-skin',
+      results: [row('hd_acne', 'whole', 50), row('hd_pore', 'whole', 20), row('hd_oiliness', 'whole', 50), row('hd_skin_type', 'whole', 10), row('all', 'whole', 5), row('hd_radiance', 'whole', 10)],
+    })
+
+    expect(result.seen.map((item) => item.concern)).toEqual(['spots', 'pores', 'shine'])
+    expect(result.alsoNoticed).toEqual([])
+  })
+
+  it('lists, under another goal, the extras of that goal: acne is a goal concern for clear-skin and an extra for glow', () => {
+    const results = [row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 70)]
+
+    expect(build({ goal: 'clear-skin', results }).alsoNoticed.map((item) => item.concern)).toEqual(['marks'])
+    expect(build({ goal: 'glow', results }).alsoNoticed.map((item) => item.concern)).toEqual(['marks', 'spots'])
+    expect(build({ goal: 'fade-dark-marks', results }).alsoNoticed.map((item) => item.concern)).toEqual([])
+  })
+
+  it('leaves out a measured extra that has no row, and is [] when there are no extras at all', () => {
+    expect(build({ results: [row('hd_acne', 'whole', 50)] }).alsoNoticed.map((item) => item.concern)).toEqual(['spots'])
+    expect(build({ results: [] }).alsoNoticed).toEqual([])
+    expect(build({ results: [row('hd_radiance', 'whole', 41.5), row('hd_moisture', 'whole', 20), row('hd_texture', 'whole', 10)] }).alsoNoticed).toEqual([])
+  })
+
+  it('does not list a concern that is not measured for the goal, even when it has a row (a non-core concern outside the goal)', () => {
+    const result = build({ goal: 'clear-skin', results: [row('hd_redness', 'whole', 10), row('hd_texture', 'whole', 5), row('hd_dark_circle', 'whole', 5)] })
+
+    expect(result.alsoNoticed).toEqual([])
+  })
+
+  it('gives a listed extra the link it was signed with, and null when there is none; a faint extra gets no link', () => {
+    const result = build({
+      results: [row('hd_age_spot', 'whole', 84), row('hd_acne', 'whole', 58), row('hd_pore', 'whole', 70), row('hd_oiliness', 'whole', 70)],
+      overlays: { hd_age_spot: { url: '/link/age-spot' }, hd_pore: { url: '/link/pore' }, hd_radiance: { url: '/link/radiance' } },
+    })
+
+    expect(result.alsoNoticed.map((item) => [item.concern, item.overlay])).toEqual([
+      ['marks', { url: '/link/age-spot' }],
+      ['spots', null],
+      ['shine', null],
+    ])
+    expect(JSON.stringify(result.alsoNoticed)).not.toContain('/link/pore')
+  })
+
+  it('takes no part in nothingStandsOut or sinceDayOne', () => {
+    const faintGoal = [row('hd_radiance', 'whole', 90), row('hd_moisture', 'whole', 90), row('hd_texture', 'whole', 90)]
+    const extras = [row('hd_acne', 'whole', 50), row('hd_age_spot', 'whole', 70)]
+    const result = build({ results: [...faintGoal, ...extras], dayOne: { id: 'd', createdAt: new Date('2030-06-15T12:00:00.000Z'), results: [...faintGoal, row('hd_acne', 'whole', 20), row('hd_age_spot', 'whole', 20)], skinAge: null } })
+
+    expect(result.alsoNoticed).toHaveLength(2)
+    expect(result.nothingStandsOut).toBe(NOTHING_STANDS_OUT)
+    expect(result.sinceDayOne!.concerns.map((change) => change.concern)).toEqual(['glow', 'dryness', 'texture'])
+  })
+})
+
 describe('resultView: skin type, skin age and the rest of the shape', () => {
   const build = (over: Partial<Parameters<typeof resultView>[0]> = {}) => resultView({ goal: 'glow', results: [], overlays: {}, skinType: null, skinAge: null, dayOne: null, ...over })
 
@@ -986,7 +1149,7 @@ describe('resultView: skin type, skin age and the rest of the shape', () => {
     const result = build({ results: [{ concern: 'hd_radiance', region: 'whole', rawScore: 41.5 }] })
 
     expect(result.tablesVersion).toBe(TABLES_VERSION)
-    expect(Object.keys(result).sort()).toEqual(['nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
+    expect(Object.keys(result).sort()).toEqual(['alsoNoticed', 'nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
     expect(Object.keys(result.seen[0]!).sort()).toEqual(['concern', 'level', 'overlay', 'region', 'words'])
   })
 
