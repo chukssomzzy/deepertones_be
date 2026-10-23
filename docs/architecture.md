@@ -1246,9 +1246,12 @@ The API key and webhook secret are `#` fields so they stay out of `JSON.stringif
 `modules/face-scans/face-scans.tables.ts` holds the face-scan rules as pure, versioned tables: no I/O, no clock, no model, so the same
 results always give the same words. Everything reads `raw_score` (1 to 100, HIGHER IS HEALTHIER), never `ui_score`.
 
-- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `VISIBILITY_VERSION` (`3`) and `WORDING_VERSION` (`2`): `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
-  three concerns per goal, and `hdActionsForGoal`, those plus `hd_skin_type`, the four-action HD tier; the goals come from `goals.vocabulary.ts`
-  and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
+- **Tables and versions.** Each has a constant that a stored result will carry, all `1` today except `GOAL_CONCERNS_VERSION` (`2`), `VISIBILITY_VERSION` (`3`) and `WORDING_VERSION` (`2`): `GOAL_CONCERNS_VERSION` (`concernsForGoal`,
+  the goal's own three concerns, which drive `seen`, `sinceDayOne` and `nothingStandsOut`; `measuredConcernsForGoal`, those three in goal order and then the core
+  concerns the goal lacks, in core order (`hd_age_spot`, `hd_acne`, `hd_pore`, `hd_oiliness`), 4 to 7 per goal; and `hdActionsForGoal`, the measured concerns plus
+  `hd_skin_type`, 5 to 8 actions, the 16-unit HD tier. Why every goal measures the core four: the routine stage needs the whole picture (a glow user with spots needs
+  products that do not clog pores; on darker skin dark marks are the most common concern), and a concern not measured on day one can never show change since
+  day one; the goals come from `goals.vocabulary.ts` and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
   `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
 - **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
   three cut-offs (a score at or below one is in that band): `visible` (the `a-little` band's top), `some` and `clear`. Above `visible` is `faint` (`bandFor`
@@ -1316,7 +1319,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
   a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
   service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
-  `mask-<concern>.png` of its goal's concerns) once more, so a mask written by an analysis that committed between the key read and the row delete does not
+  `mask-<concern>.png` of every concern measured for its goal, the core extras too) once more, so a mask written by an analysis that committed between the key read and the row delete does not
   stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
 - **The result view.** `view()` fills `result` only when `state` is `ready` (create and retake answers always have `result: null`). It is built when the
@@ -1330,8 +1333,12 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     until they are re-checked, hiding a concern on a doubtful number is worse than showing it as faint. Concerns go out by `CONCERN_IDS` (`spots`, `pores`, `shine`,
     `marks`, `redness`, `glow`, `texture`, `under-eyes`, `dryness`), never Perfect Corp's `hd_*` names. `nothingStandsOut` is `NOTHING_STANDS_OUT` when every item is
     `faint` or `seen` is empty, and null otherwise.
-  - **Overlays.** The mask key of every concern in `seen`, faint ones included, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
-    photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` (not in the goal, or not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
+  - **Also noticed.** `alsoNoticed` lists the measured concerns that are not the goal's own three (`measuredConcernsForGoal` minus `concernsForGoal`: the core extras)
+    whose band is visible (`a-little`, `some` or `clear`), in core order, each shaped like a `seen` item. A faint extra is not listed (it stays stored for the
+    routine stage), nor is one Perfect Corp did not return. Extras are never part of `sinceDayOne` or `nothingStandsOut`. A scan taken before the core extras
+    were measured has no rows for them, so its `alsoNoticed` is `[]`; it is `[]` too when no extra is visible. The never-rules hold for it as for `seen`.
+  - **Overlays.** The mask key of every concern in `seen`, faint ones included, and of every concern in `alsoNoticed`, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
+    photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` and `alsoNoticed` (a faint extra, or one not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
   - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
     another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
     day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
@@ -1371,15 +1378,15 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
     A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
     never fails the scan.
-  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each of the goal's
-    three concerns that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
+  - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each concern measured for the goal (its own three and the core extras)
+    that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
     `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
     region, plus the overall score as concern `all`, region `whole`), the `face_masks` rows, `skin_type` (`skinTypeLabel`), `skin_age`, `tables_version`
     (`TABLES_VERSION`) and `state = 'ready'` as one batch that holds only while the scan exists and is `analysing`. When it does not (deleted, or moved on,
     while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
     recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
     scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
-    5 to 8: 16, 9 to 12: 20, 13 to 16: 22), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; every goal asks for 5 to 8 actions, so every scan is 16 units), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
     the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
     The step also logs, to learn what Perfect Corp really sends (no address, score or pixel): `{ outcome: 'front-photo-read', faceScanId, width, height }` once

@@ -15,8 +15,11 @@ export const toFaceConsentResponse = ({ version, givenAt, withdrawnAt, current }
   current,
 })
 
-const toFaceScanResultResponse = ({ seen, nothingStandsOut, skinType, skinAge, sinceDayOne, tablesVersion }: ResultView): NonNullable<z.infer<typeof FaceScanResponse>['result']> => ({
-  seen: seen.map(({ concern, region, level, words, overlay }) => ({ concern, region, level, words, overlay: overlay ? { url: overlay.url } : null })),
+const toSeenItem = ({ concern, region, level, words, overlay }: ResultView['seen'][number]) => ({ concern, region, level, words, overlay: overlay ? { url: overlay.url } : null })
+
+const toFaceScanResultResponse = ({ seen, alsoNoticed, nothingStandsOut, skinType, skinAge, sinceDayOne, tablesVersion }: ResultView): NonNullable<z.infer<typeof FaceScanResponse>['result']> => ({
+  seen: seen.map(toSeenItem),
+  alsoNoticed: alsoNoticed.map(toSeenItem),
   nothingStandsOut,
   skinType,
   skinAge: skinAge ? { years: skinAge.years, words: skinAge.words } : null,

@@ -2219,6 +2219,70 @@
             },
             "description": "Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back."
           },
+          "alsoNoticed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "concern": {
+                  "type": "string",
+                  "enum": [
+                    "spots",
+                    "pores",
+                    "shine",
+                    "marks",
+                    "redness",
+                    "glow",
+                    "texture",
+                    "under-eyes",
+                    "dryness"
+                  ],
+                  "description": "The concern, by the app's own id. Never a Perfect Corp name."
+                },
+                "region": {
+                  "type": "string",
+                  "description": "The region that was read: `whole` for the whole face."
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "faint",
+                    "a-little",
+                    "some",
+                    "clear"
+                  ],
+                  "description": "A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped."
+                },
+                "words": {
+                  "type": "string",
+                  "description": "What can be seen, in plain words. Show it as it is; it is never a diagnosis."
+                },
+                "overlay": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "description": "A signed link to the PNG mask of where the concern shows, good for 5 minutes (fetch the scan again for a new one); null when there is no mask."
+                }
+              },
+              "required": [
+                "concern",
+                "region",
+                "level",
+                "words",
+                "overlay"
+              ]
+            },
+            "description": "Other concerns that can be seen, beyond the goal's; never a diagnosis. Only those that are not `faint`, in a fixed order; empty when there are none (always, for a scan taken before these were measured). Show them under the goal's concerns as \"Also noticed\". They are not part of `sinceDayOne` or `nothingStandsOut`."
+          },
           "nothingStandsOut": {
             "type": [
               "string",
@@ -2354,6 +2418,7 @@
         },
         "required": [
           "seen",
+          "alsoNoticed",
           "nothingStandsOut",
           "skinType",
           "skinAge",
