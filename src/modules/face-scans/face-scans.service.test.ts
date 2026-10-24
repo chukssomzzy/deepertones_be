@@ -12,7 +12,7 @@ import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { FakeGoalsRepository } from '../goals/goals.repository.fake'
 import { GoalsService } from '../goals/goals.service'
-import type { Goal } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { FakeSafetyRepository } from '../safety/safety.repository.fake'
@@ -34,6 +34,8 @@ const DAY = 24 * HOUR
 const RESUME_WINDOW = 90 * DAY
 /** A goal's review point, when its wider check-in scan becomes due: six weeks after the chase's day one (issue #145, written out here). */
 const REVIEW_POINT = 42 * DAY
+/** A new chase's day-one scan is allowed once the profile's last day-one scan, under any goal, is this far back (issue #145, written out here). */
+const SCAN_SPACING = 30 * DAY
 
 const PHOTO_SECRET = 'photo-link-secret-for-tests'
 const USER = 'user-1'
@@ -425,7 +427,7 @@ describe('FaceScanService.create: when a profile may scan', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     await create(ctx)
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
 
     const second = await create(ctx, { front: face({}, 9) })
@@ -440,7 +442,7 @@ describe('FaceScanService.create: when a profile may scan', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     await create(ctx)
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     await create(ctx, { front: face({}, 2) })
     ctx.advance(MINUTE)
@@ -533,6 +535,146 @@ describe('FaceScanService.create: when a profile may scan', () => {
     const again = await create(ctx, { front: face({}, 2) })
 
     expect(again.state).toBe('analysing')
+  })
+})
+
+// Goals can change at any time; the limit is on paid scans (issue #145). A new chase's day-one scan needs the profile's last day-one scan, under ANY goal,
+// to be at least 30 days back. A check-in is not a day one: it neither counts towards the 30 days nor is limited by them.
+describe('FaceScanService.create: the spacing between day-one scans', () => {
+  /** A profile whose glow day one was taken at T0, whose goal moved to brighter a minute later, with the clock there. */
+  const switchedAfterDayOne = async (ctx: Ctx) => {
+    await ready(ctx, 'glow')
+    const dayOne = await create(ctx)
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'brighter')
+    return dayOne
+  }
+
+  it('refuses a switch to a new goal inside 30 days of the last day one: 429 FACE_SCAN_NOT_DUE, scan-limit, with the date it opens, and nothing more stored or queued', async () => {
+    const ctx = setup()
+    const dayOne = await switchedAfterDayOne(ctx)
+    ctx.advance(10 * DAY)
+    const storedBefore = ctx.photos.stored.size
+
+    const error = await errorOf(create(ctx, { front: face({}, 9) }))
+
+    expect(error).toBeInstanceOf(RateLimitedError)
+    expect(error.code).toBe('FACE_SCAN_NOT_DUE')
+    expect(error.details).toEqual({ reason: 'scan-limit', nextScanAt: new Date(T0.getTime() + SCAN_SPACING).toISOString() })
+    expect(ctx.photos.stored.size).toBe(storedBefore)
+    expect(ctx.jobs.enqueued).toHaveLength(1)
+    expect((await ctx.repository.latestForProfile(PROFILE))!.id).toBe(dayOne.id)
+  })
+
+  it('refuses a millisecond short of 30 days after the last day one, and allows it at exactly 30 days', async () => {
+    const ctx = setup()
+    await switchedAfterDayOne(ctx)
+    ctx.advance(SCAN_SPACING - MINUTE - 1)
+
+    const early = await errorOf(create(ctx, { front: face({}, 9) }))
+    expect(early.code).toBe('FACE_SCAN_NOT_DUE')
+    expect(early.details).toMatchObject({ reason: 'scan-limit' })
+    ctx.advance(1)
+
+    const onTime = await create(ctx, { front: face({}, 9) })
+
+    expect(onTime.goal).toBe('brighter')
+    expect((await ctx.repository.findFaceScan(onTime.id))!.checkIn).toBe(false)
+    expect(ctx.jobs.enqueued).toHaveLength(2)
+  })
+
+  it('counts a last day one that is still being analysed: the limit does not wait for a scan to become ready', async () => {
+    const ctx = setup()
+    await switchedAfterDayOne(ctx)
+
+    const error = await errorOf(create(ctx, { front: face({}, 9) }))
+
+    expect(error.details).toMatchObject({ reason: 'scan-limit' })
+  })
+
+  it('does not count a day one that failed: the profile may start a new goal\'s chase straight away', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    ctx.jobs.failNextWith(new Error('queue is down'))
+    const failed = await create(ctx)
+    expect(failed.state).toBe('failed')
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'brighter')
+
+    const next = await create(ctx, { front: face({}, 2) })
+
+    expect(next.goal).toBe('brighter')
+  })
+
+  it('allows the first scan a profile ever takes', async () => {
+    const ctx = setup()
+    await ready(ctx, 'brighter')
+
+    const first = await create(ctx)
+
+    expect(first.state).toBe('analysing')
+  })
+
+  // Day one at T0 under glow; the user stays on glow to the week-6 check-in, takes it, accepts the suggested next goal, and scans under it. The day one is 42
+  // days old, past the 30, and the check-in just taken does not push the next day one out again.
+  it('allows the next goal\'s day one straight after the week-6 check-in: the check-in does not count towards the 30 days', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx, 'glow')
+    const checkIn = await create(ctx, { front: face({}, 2) })
+    expect((await ctx.repository.findFaceScan(checkIn.id))!.checkIn).toBe(true)
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'brighter')
+
+    const next = await create(ctx, { front: face({}, 3) })
+
+    expect(next.goal).toBe('brighter')
+    expect((await ctx.repository.findFaceScan(next.id))!.checkIn).toBe(false)
+    expect(ctx.jobs.enqueued).toHaveLength(3)
+  })
+
+  it('does not limit the check-in at the review point, when the profile\'s last day one was under another goal only days ago', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    const glowDayOne = await create(ctx)
+    await becomeReady(ctx, glowDayOne.id)
+    // Glow's review point is T0 + 42 days. Brighter's day one lands at day 30 (exactly 30 days on, so allowed); back on glow inside the resume
+    // window, the check-in falls due at day 42, twelve days after that last day one.
+    ctx.advance(SCAN_SPACING - HOUR)
+    await setGoal(ctx, 'brighter')
+    const other = await create(ctx, { front: face({}, 2) })
+    expect(other.goal).toBe('brighter')
+    ctx.advance(DAY)
+    await setGoal(ctx, 'glow')
+    ctx.advance(REVIEW_POINT - SCAN_SPACING - DAY)
+
+    const checkIn = await create(ctx, { front: face({}, 3) })
+
+    expect((await ctx.repository.findFaceScan(checkIn.id))!.checkIn).toBe(true)
+  })
+
+  it('reads the profile\'s latest scan first, before anything else the due rule needs: the double-submit guard\'s target must be the earliest read', async () => {
+    const calls: string[] = []
+    class Recording extends FakeFaceScansRepository {
+      override async latestForProfile(...args: Parameters<FakeFaceScansRepository['latestForProfile']>) {
+        calls.push('latestForProfile')
+        return super.latestForProfile(...args)
+      }
+      override async scansUnderGoalSince(...args: Parameters<FakeFaceScansRepository['scansUnderGoalSince']>) {
+        calls.push('scansUnderGoalSince')
+        return super.scansUnderGoalSince(...args)
+      }
+      override async latestDayOneForProfile(...args: Parameters<FakeFaceScansRepository['latestDayOneForProfile']>) {
+        calls.push('latestDayOneForProfile')
+        return super.latestDayOneForProfile(...args)
+      }
+    }
+    const ctx = setup({ repository: new Recording() })
+    await ready(ctx, 'glow')
+
+    await create(ctx)
+
+    expect(calls[0]).toBe('latestForProfile')
+    expect(calls).toContain('latestDayOneForProfile')
   })
 })
 
@@ -942,7 +1084,7 @@ describe('FaceScanService: rescanSuggested', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     const made = await create(ctx)
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     expect((await getScan(ctx, made.id)).rescanSuggested).toBe(true)
     ctx.advance(MINUTE)
@@ -967,7 +1109,7 @@ describe('FaceScanService: rescanSuggested', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     const older = await create(ctx)
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     expect((await getScan(ctx, older.id)).rescanSuggested).toBe(true)
     await create(ctx, { front: face({}, 2) })
@@ -990,7 +1132,7 @@ describe('FaceScanService: rescanSuggested', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     const made = await create(ctx)
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     await create(ctx, { front: face({}, 2) })
     ctx.advance(MINUTE)
@@ -1026,6 +1168,20 @@ describe('FaceScanService: rescanSuggested', () => {
     expect((await getScan(ctx, dayOne.id)).rescanSuggested).toBe(false)
   })
 
+  // Goal switched, so a new chase would be due, but the 30 days between day ones decide: the app must not offer a scan that `create` would refuse.
+  it('is false for a new goal while the last day one is under 30 days back, and true at exactly 30 days', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    const made = await create(ctx)
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'brighter')
+    ctx.advance(SCAN_SPACING - MINUTE - 1)
+    expect((await getScan(ctx, made.id)).rescanSuggested).toBe(false)
+    ctx.advance(1)
+
+    expect((await getScan(ctx, made.id)).rescanSuggested).toBe(true)
+  })
+
   it('is worked out when it is read: nothing about it is stored on the scan', async () => {
     const ctx = setup()
     await ready(ctx, 'glow')
@@ -1057,7 +1213,7 @@ describe('FaceScanService.deleteFaceScan', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     const first = await create(ctx, three())
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     const second = await create(ctx, { front: face({}, 5) })
 
@@ -1436,7 +1592,7 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     const ctx = setup({ repository: gatedRepository(2) })
     await ready(ctx, 'glow')
     await Promise.allSettled([create(ctx, { front: face({}, 1) }), create(ctx, { front: face({}, 2) })])
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
 
     const next = await create(ctx, { front: face({}, 3) })
@@ -1450,7 +1606,7 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     const ctx = setup()
     await ready(ctx, 'glow')
     await create(ctx, { front: face({}, 1) })
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     await create(ctx, { front: face({}, 2) })
     ctx.advance(RESUME_WINDOW + 1)
@@ -1508,7 +1664,7 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     const ctx = setup({ repository: new Recording() })
     await ready(ctx, 'glow')
     const first = await create(ctx, { front: face({}, 1) })
-    ctx.advance(MINUTE)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
 
     await create(ctx, { front: face({}, 2) })
@@ -1644,7 +1800,7 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
     const ctx = setup()
     const glowDayOne = await dayOneUnder(ctx, 'glow')
     const glowTakenAt = new Date(T0.getTime())
-    ctx.advance(DAY)
+    ctx.advance(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     const brighterDayOne = await create(ctx, { front: face({}, 2) })
     const brighterTakenAt = ctx.now()
@@ -1828,6 +1984,143 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
 
       expect(ctx.checkInPushes).toEqual([])
     })
+  })
+})
+
+// The switch preview (issue #145, PR 3): what `GET /me/goal/switch-preview?goal=` tells the user before they switch. It lives here, not on the
+// goals service, because its day one comes from the face-scan tables. Switching is never blocked, so this reads only: no goal row is written and no
+// scan is made. The chase is read from the goal history alone, as if the goal were picked now, so it agrees with the day-one rule by construction.
+//
+// A goal is "left" at the moment the row that followed it was saved, not when it was picked, and the 90-day window runs from there. Every fixture
+// below holds its goal for a while first, so a reading that measured from the wrong row shows.
+
+const previewOf = (ctx: Ctx, goal: Goal, who: Who = {}) => asUser(() => ctx.service.switchPreview(goal), as(who).userId, as(who).profileId)
+const typedWords = (ctx: Ctx, text: string, who: Who = {}) => asUser(() => ctx.goals.set({ text }), as(who).userId, as(who).profileId)
+
+describe('FaceScanService.switchPreview', () => {
+  it('says a goal left inside the 90 days would resume, with the day the window closes', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(30 * DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    // No scan was ever taken under glow, so the chase has no day one to show, and the window closes 90 days after glow was left for brighter.
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('still resumes a goal taken up again exactly 90 days after it was left: the last day of the window counts', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(RESUME_WINDOW)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('starts fresh one millisecond past the 90 days, with nothing to resume', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    await setGoal(ctx, 'brighter')
+    ctx.advance(RESUME_WINDOW + 1)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('starts fresh for a goal the profile never had', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'brighter')
+
+    expect(preview).toEqual({ goal: 'brighter', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('refuses the goal the profile is already on with 400 GOAL_ALREADY_CURRENT', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+
+    const error = await errorOf(previewOf(ctx, 'glow'))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('GOAL_ALREADY_CURRENT')
+  })
+
+  it.each(GOALS.map((goal: Goal): [Goal] => [goal]))('starts %s fresh for a profile with no goal yet, rather than refusing it', async (goal: Goal) => {
+    const ctx = setup()
+
+    const preview = await previewOf(ctx, goal)
+
+    expect(preview).toEqual({ goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('counts words nobody sorted into a goal as leaving, and measures the window from them', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    // The reader finds no goal in these words, so the row saved has none: the glow chase is left as surely as by another chip.
+    await typedWords(ctx, 'something about my skin')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('shows no day one for a chase whose only scan is still being analysed', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    await create(ctx)
+    ctx.advance(DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('changes nothing: the goal stays as it was and no scan is made', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    ctx.advance(DAY)
+    await setGoal(ctx, 'brighter')
+    const historyBefore = await asUser(() => ctx.goals.history())
+    const currentBefore = await asUser(() => ctx.goals.current())
+
+    await previewOf(ctx, 'glow')
+    await previewOf(ctx, 'clear-skin')
+
+    expect(await asUser(() => ctx.goals.history())).toEqual(historyBefore)
+    expect(await asUser(() => ctx.goals.current())).toEqual(currentBefore)
+    expect(await asUser(() => ctx.service.listFaceScans())).toEqual([])
+    nothingStored(ctx)
+  })
+
+  it('answers a guest, who sets goals like anyone else', async () => {
+    const ctx = setup()
+    await asGuest(() => ctx.goals.set({ goal: 'glow' }))
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await asGuest(() => ctx.goals.set({ goal: 'brighter' }))
+    ctx.advance(DAY)
+
+    const preview = await asGuest(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
   })
 })
 

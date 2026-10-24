@@ -1,4 +1,4 @@
-import type { Goal } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 
 // The face-scan rules: pure, versioned tables over what Perfect Corp measures. No I/O, no clock, no model, so the same results always give
 // the same words, and a change to any of them is a reviewed change to this file. Each table has a version that a stored result carries,
@@ -17,9 +17,13 @@ export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
 export const CHASE_VERSION = 1
 export const REVIEW_VERSION = 1
+export const SPACING_VERSION = 1
+export const NEXT_GOAL_VERSION = 1
+/** A new chase's first scan waits this many days after the profile's last day-one scan, under any goal. */
+export const SCAN_SPACING_DAYS = 30
 
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
-export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION}`
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION},spacing:${SPACING_VERSION},next-goal:${NEXT_GOAL_VERSION}`
 
 /** A goal left and taken up again within this many days of leaving continues its chase; any longer and the goal starts fresh (issue #145). */
 export const RESUME_DAYS = 90
@@ -409,6 +413,51 @@ export const chaseStartFor = (history: readonly { goal: Goal | null; createdAt: 
     if (chaseStart.getTime() - history[detourStart]!.createdAt.getTime() > RESUME_WINDOW_MS) return chaseStart
     i = detourStart - 1
   }
+}
+
+// What a visible concern adds to a candidate goal's score: the plainer it is in the check-in, the more it counts. Faint and missing add nothing.
+const NEXT_GOAL_WEIGHTS: Record<Band, number> = { clear: 3, some: 2, 'a-little': 1, faint: 0 }
+
+/**
+ * The goal to suggest at a chase's check-in, or null for none. Nothing is suggested until at least one of the goal's own concerns is fainter than on day
+ * one (the same `concernChange` and noise as the result view; a concern read from different regions on the two scans, or missing on either, does not count,
+ * as `sinceDayOne` skips it). Then every other goal is scored by the concerns it has that the current goal does not, each weighted by its band in the check-in
+ * (clear 3, some 2, a-little 1, faint or missing 0), and the highest wins; a tie goes to the earlier goal in GOALS, and if every score is 0 there is
+ * none. `brighter` is a candidate only when the profile ever wanted lighter: it is never offered unasked. Pure: the inputs are only read.
+ */
+export const nextGoalFor = (input: {
+  goal: Goal
+  results: readonly ScoreRow[]
+  dayOneResults: readonly ScoreRow[]
+  everWantedLighter: boolean
+}): Goal | null => {
+  const { goal, results, dayOneResults, everWantedLighter } = input
+  const own = concernsForGoal(goal)
+
+  const fainter = own.some((concern) => {
+    const now = rowFor(results, concern)
+    const before = rowFor(dayOneResults, concern)
+    return now !== null && before !== null && now.region === before.region && concernChange(before.rawScore, now.rawScore) === 'fainter'
+  })
+  if (!fainter) return null
+
+  let best: Goal | null = null
+  let bestScore = 0
+  for (const candidate of GOALS) {
+    if (candidate === goal || (candidate === 'brighter' && !everWantedLighter)) continue
+    let score = 0
+    for (const concern of concernsForGoal(candidate)) {
+      if (own.includes(concern)) continue
+      const row = rowFor(results, concern)
+      if (row) score += NEXT_GOAL_WEIGHTS[bandFor(concern, row.rawScore)]
+    }
+    // Strictly greater, so an equal score keeps the earlier goal.
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+  return best
 }
 
 /**

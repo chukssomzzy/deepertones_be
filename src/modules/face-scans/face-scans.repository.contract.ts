@@ -470,6 +470,109 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
       })
     })
 
+    // The scan spacing (issue #145) reads the profile's last DAY-ONE scan, under any goal: the newest scan that has not failed and is not a check-in.
+    describe('latestDayOneForProfile: the scan a new chase\'s day one is spaced from', () => {
+      /** A scan written the way the pipeline writes one: created analysing (a check-in or not), then ended by the write that ends it. */
+      const written = async (
+        repository: FaceScansContractSetup['repository'],
+        account: Account,
+        over: Partial<NewFaceScan> = {},
+        state: 'analysing' | 'needs-retake' | 'ready' | 'failed' = 'analysing',
+      ) => {
+        const scan = newScan(account, over)
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        const updatedAt = new Date(scan.createdAt.getTime() + MINUTE)
+        if (state === 'ready') await repository.completeFaceScan(scan.id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt })
+        if (state === 'failed') await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt })
+        if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'no-face', updatedAt })
+        return scan
+      }
+
+      it('has none for a profile with no face scan', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.latestDayOneForProfile(profileId)).toBeNull()
+      })
+
+      it('is the newest scan of the profile that is not a check-in, under whichever goal it was taken', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await written(repository, account, { createdAt: at(DAY), goalAtScan: 'glow' })
+        const newest = await written(repository, account, { createdAt: at(50 * DAY), goalAtScan: 'brighter' })
+        await written(repository, account, { createdAt: at(10 * DAY), goalAtScan: 'clear-skin' })
+
+        const found = await repository.latestDayOneForProfile(account.profileId)
+
+        expect(found!.id).toBe(newest.id)
+        expect(found!.createdAt.getTime()).toBe(at(50 * DAY).getTime())
+      })
+
+      it('passes over a newer check-in to the day one before it: a check-in does not count towards the spacing', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const dayOne = await written(repository, account, { createdAt: at(DAY), goalAtScan: 'glow' }, 'ready')
+        await written(repository, account, { createdAt: at(43 * DAY), goalAtScan: 'glow', checkIn: true }, 'ready')
+
+        expect((await repository.latestDayOneForProfile(account.profileId))!.id).toBe(dayOne.id)
+      })
+
+      it('has none for a profile whose only scan is a check-in', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await written(repository, account, { checkIn: true }, 'ready')
+
+        expect(await repository.latestDayOneForProfile(account.profileId)).toBeNull()
+      })
+
+      it('passes over a scan that failed, to the newest day one that has not', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const good = await written(repository, account, { createdAt: at(DAY), goalAtScan: 'glow' }, 'ready')
+        await written(repository, account, { createdAt: at(20 * DAY), goalAtScan: 'brighter' }, 'failed')
+
+        expect((await repository.latestDayOneForProfile(account.profileId))!.id).toBe(good.id)
+      })
+
+      it('has none for a profile whose only scan failed', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await written(repository, account, {}, 'failed')
+
+        expect(await repository.latestDayOneForProfile(account.profileId)).toBeNull()
+      })
+
+      it.each(['analysing', 'needs-retake', 'ready'] as const)('counts a day one that is %s', async (state) => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        const scan = await written(repository, account, {}, state)
+
+        expect((await repository.latestDayOneForProfile(account.profileId))!.id).toBe(scan.id)
+      })
+
+      it('goes to the scan written last when two share a time, the same way every time', async () => {
+        const { repository, newAccount } = await make()
+        const account = await newAccount()
+        await written(repository, account, { createdAt: at(MINUTE) })
+        const second = await written(repository, account, { createdAt: at(MINUTE) })
+
+        expect((await repository.latestDayOneForProfile(account.profileId))!.id).toBe(second.id)
+        expect((await repository.latestDayOneForProfile(account.profileId))!.id).toBe(second.id)
+      })
+
+      it('belongs to the profile: the account\'s other profile, and other accounts, do not see it', async () => {
+        const { repository, newAccount, newProfile } = await make()
+        const mine = await newAccount()
+        const other = await newAccount()
+        const second = await newProfile(mine.userId)
+        const scan = await written(repository, mine)
+
+        expect((await repository.latestDayOneForProfile(mine.profileId))!.id).toBe(scan.id)
+        expect(await repository.latestDayOneForProfile(second)).toBeNull()
+        expect(await repository.latestDayOneForProfile(other.profileId)).toBeNull()
+      })
+    })
+
     describe('latestReadyForProfile', () => {
       const ready = async (repository: FaceScansRepository, scan: NewFaceScan, skinType: FaceScanCompletion['skinType'] = 'dry') => {
         await repository.createFaceScan(scan, [newPhoto(scan, 'front')])

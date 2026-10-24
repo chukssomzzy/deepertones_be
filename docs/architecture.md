@@ -828,6 +828,11 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
+- **Switch preview.** `GET /goal/switch-preview?goal=` (bearer, guests included, no middleware) answers `{ goal, outcome, dayOneAt, resumeUntil }` from `FaceScanService.switchPreview`, which lives
+  there because the day one comes from the face-scan tables. `outcome` is `resume` iff `chaseStartFor([...history, { goal, createdAt: now }], goal, now)` is before now, else `fresh`. `resumeUntil` is the
+  `createdAt` of the row that followed the goal's latest run plus `RESUME_DAYS` (90); `dayOneAt` is the chase's first ready scan (`dayOneFor`), null when it has none; both are null for `fresh`.
+  The goal the profile is on is 400 `GOAL_ALREADY_CURRENT`; a profile with no goal yet (the `NotFoundError` from `goals.current()`) starts every goal fresh. It only reads. The app's wording is
+  `switchScreen[outcome]` in the onboarding content (DRAFT copy).
 - **Not part of the goal.** The words typed beside the safety choices (a product that gave a reaction, a prescription) are read in the background by the parse job; see "Safety facts (onboarding)".
 
 ### Safety facts (onboarding)
@@ -1344,15 +1349,18 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     goal)`, and the chase has no non-failed check-in yet;
   - otherwise refused: `already-scanned-for-goal` when the chase has a non-failed scan but no ready day one yet (the first scan is still analysing or
     needs a retake); `check-in-not-due` (carrying `due`, the review point) before the review point; `check-in-taken` once the chase has had its check-in
-    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again).
-  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then the history and the scans, and takes `now` only after those
+    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again);
+  - `{ allowed: false, reason: 'scan-limit', nextScanAt }` when the chase has no non-failed scan but the profile's last **day-one** scan (`lastDayOneAt`: its newest
+    non-failed, non-check-in scan under any goal, from `latestDayOneForProfile`) was less than 30 days before `at` (`SCAN_SPACING_DAYS`); `nextScanAt` is `lastDayOneAt` + 30 days,
+    and exactly 30 days is allowed. So changing goal never unlocks a paid scan. Check-ins do not count towards the 30 days and are not limited by it; a profile's first scan is always allowed.
+  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then `latestDayOneForProfile`, then the history and the scans, and takes `now` only after those
   reads, so a rival scan stored in the middle is stamped no later than `now`; that `now` is also the time the scan is stored at and `checkInDueAt` is worked out from. It calls the policy with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
   repository.scansUnderGoalSince(profileId, goal, since)` (every scan under the goal since the chase start, whatever state, read without judging it:
-  the policy alone decides what it means). The 429's `details.reason` is one of the three above; `check-in-not-due` alone also carries
+  the policy alone decides what it means). The 429's `details.reason` is one of the four above (`scan-limit` carries `details.nextScanAt`, an ISO string, instead); `check-in-not-due` alone also carries
   `details.checkInDueAt`, the ISO date of `reviewPointFor(dayOne.createdAt, goal)` (`createdAt`, never `updatedAt`).
 - **`rescanSuggested`** is the due rule itself, reused: `mayScanNow(...).allowed` for the profile's current goal, worked out once per list (no
   goal, or typed words nobody sorted into one, suggests nothing). It is **derived when read**, never stored, and so is true exactly when `create`
-  would allow a scan now, whether a first scan or the chase's check-in.
+  would allow a scan now, whether a first scan or the chase's check-in. It passes `lastDayOneAt` too, so inside the 30-day limit after another goal's day-one scan it is false.
   It has no upper-bound filter of its own: it is the same policy call.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
   per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. The stored `check_in` flag (below) is read by the policy
@@ -1393,6 +1401,12 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
     worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
+  - **Next goal.** Every ready result carries `nextGoal`, a goal or null, added by `FaceScanService.result()` on top of `resultView`'s output (the view's own keys
+    stay as they are). Only a check-in scan (`scan.checkIn`) can have one; every other scan has null, in the list and in `getFaceScan` alike. `nextGoalFor`
+    suggests nothing unless at least one of the scan's own goal's concerns got `fainter` since the chase's day one (read from the same region on both scans). It
+    then scores each other goal by the bands of its concerns that are not the current goal's (clear 3, some 2, a little 1, faint or missing 0), the highest
+    wins, a tie goes to the earlier goal in `GOALS`, and all zeros means none. `brighter` is a candidate only when the profile ever wanted lighter
+    (`history.some((row) => row.wantsLighter)`): it is never offered unasked. With no day one, `nextGoal` is null.
   - **Never** in the view: a score (`raw_score`, `ui_score` or the overall `all`), a Perfect Corp concern name, a condition name, the Fitzpatrick type, or a
     word about lightness. The tables test scans every string, and the pipeline and route tests scan the serialised view.
 - **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET

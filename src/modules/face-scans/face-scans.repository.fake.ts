@@ -85,6 +85,15 @@ export class FakeFaceScansRepository implements FaceScansRepository {
     return latest ? { ...latest } : null
   }
 
+  async latestDayOneForProfile(profileId: string): Promise<FaceScan | null> {
+    let latest: FaceScan | null = null
+    for (const scan of this.scans.values()) {
+      if (scan.profileId !== profileId || scan.state === 'failed' || scan.checkIn) continue
+      if (!latest || scan.createdAt.getTime() >= latest.createdAt.getTime()) latest = scan
+    }
+    return latest ? { ...latest } : null
+  }
+
   async latestReadyForProfile(profileId: string): Promise<FaceScan | null> {
     let latest: FaceScan | null = null
     for (const scan of this.scans.values()) {

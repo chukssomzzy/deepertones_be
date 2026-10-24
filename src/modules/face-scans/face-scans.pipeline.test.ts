@@ -191,6 +191,7 @@ const setup = (options: SetupOptions = {}) => {
     service,
     repository,
     goals,
+    goalReader,
     photos,
     jobs,
     pushJobs,
@@ -388,6 +389,7 @@ describe('FaceScanService.advance: the upload step', () => {
     const first = await uploaded(ctx, 'glow')
     ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'V' })
     await fitzpatrickStep(ctx, first.id)
+    ctx.advanceClock(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     const second = (await asUser(() => ctx.service.create({ front: face(2) }))).id
     const before = callsOf(ctx, 'createFitzpatrick').length
@@ -2304,6 +2306,8 @@ describe('FaceScanService: a guest may run the scan flow, and the stream carries
 //   - leave the goal for longer than the resume window, which starts it fresh with a new day one (`FRESH_GAP`).
 
 const DAY = 24 * HOUR
+/** A new chase's day-one scan needs the profile's last day-one scan, under any goal, 30 days back (issue #145, written out here). */
+const SCAN_SPACING = 30 * DAY
 const PHOTO_LINK_LIFETIME = 5 * MINUTE
 const LINK = /\/photos\/([A-Za-z0-9_-]+)$/
 
@@ -2318,12 +2322,12 @@ const glowScores = (radiance: number, moisture: number, texture: number) => ({ h
 const coreScores = (ageSpot: number, acne: number, pore: number, oiliness: number) => ({ hd_age_spot: ageSpot, hd_acne: acne, hd_pore: pore, hd_oiliness: oiliness })
 const brighterScores = (radiance: number, darkCircle: number, ageSpot: number) => ({ hd_radiance: radiance, hd_dark_circle: darkCircle, hd_age_spot: ageSpot })
 
-/** A scan under `goal` taken a day after the last, and sent to Perfect Corp: analysing, with its task. */
+/** A scan under `goal` taken a scan spacing (30 days) after the last, and sent to Perfect Corp: analysing, with its task. */
 const takenUnder = async (ctx: Ctx, goal: Goal): Promise<string> => {
-  ctx.advanceClock(DAY)
+  ctx.advanceClock(SCAN_SPACING)
   return (await uploaded(ctx, goal)).id
 }
-/** A scan under `goal` taken a day after the last, and made ready from `analysis`. */
+/** A scan under `goal` taken a scan spacing after the last, and made ready from `analysis`. */
 const readyUnder = async (ctx: Ctx, goal: Goal, analysis: SkinAnalysisResult): Promise<string> => {
   const id = await takenUnder(ctx, goal)
   ctx.perfectCorp.script('getSkinAnalysis', analysis)
@@ -2344,14 +2348,14 @@ const reviewPointOf = async (ctx: Ctx, dayOne: string) => new Date((await rowOf(
  * ready scan in a chase: the clock moves to the review point, so the scan the service takes there is the check-in.
  */
 const checkInReadyUnder = async (ctx: Ctx, goal: Goal, analysis: SkinAnalysisResult, dayOne: string): Promise<string> => {
-  // `readyUnder` moves the clock on a day of its own before it takes the scan.
-  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - DAY))
+  // `readyUnder` moves the clock on a scan spacing of its own before it takes the scan.
+  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - SCAN_SPACING))
   return readyUnder(ctx, goal, analysis)
 }
 /** The check-in scan of the chase `dayOne` started, taken at its review point and sent to Perfect Corp: analysing, with its tasks. */
 const checkInTakenUnder = async (ctx: Ctx, goal: Goal, dayOne: string) => {
-  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - DAY))
-  ctx.advanceClock(DAY)
+  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - SCAN_SPACING))
+  ctx.advanceClock(SCAN_SPACING)
   return uploaded(ctx, goal)
 }
 const failScan = (ctx: Ctx, id: string) => asSystem(() => ctx.service.markFailed(id))
@@ -2458,6 +2462,7 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
       skinAge: { years: 31, words: 'Your skin looks about 31' },
       sinceDayOne: null,
       tablesVersion: TABLES_VERSION,
+      nextGoal: null,
     })
   })
 
@@ -2630,8 +2635,8 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
   it('has no change for the first ready scan, and has one for the chase\'s check-in, worked out against the first', async () => {
     const ctx = setup()
     const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
-    // readyUnder moves the clock on a day before it makes the scan.
-    const firstAt = new Date(T0.getTime() + DAY)
+    // readyUnder moves the clock on a scan spacing before it makes the scan.
+    const firstAt = new Date(T0.getTime() + SCAN_SPACING)
     await takenUnder(ctx, 'brighter')
     const second = await checkInReadyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }), first)
 
@@ -2824,6 +2829,41 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
   })
 })
 
+// The switch preview's `dayOneAt` (issue #145, PR 3) is the day one of the chase the goal would resume into, so it is tested here, beside the
+// day-one rule, where a scan can be made ready the real way; the rest of the preview is in face-scans.service.test.ts. The window is 90 days
+// from the moment the goal was left (RESUME_DAYS in face-scans.tables.ts).
+const RESUME_WINDOW = 90 * DAY
+
+describe('FaceScanService.switchPreview: the day one a goal would resume into', () => {
+  it('answers the first ready scan of the chase, not the latest scan under the goal', async () => {
+    const ctx = setup()
+    const glowDayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const dayOneAt = ctx.now()
+    await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+    // A later scan in the same glow chase (back within 90 days, its check-in at the review point): the preview must still point at the first one.
+    await checkInReadyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)), glowDayOne)
+    await takenUnder(ctx, 'brighter')
+    const left = ctx.now()
+    ctx.advanceClock(10 * DAY)
+
+    const preview = await asUser(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('shows no day one for a goal left too long ago, though a ready scan under it is still stored', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    await takenUnder(ctx, 'brighter')
+    // A millisecond past the window: the old chase is over, so its day one is not this switch's day one.
+    ctx.advanceClock(RESUME_WINDOW + 1)
+
+    const preview = await asUser(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+})
+
 // The check-in scan at a chase's review point looks wider than a normal scan: it asks Perfect Corp for every concern the app can show plus the skin
 // type (10 actions, 20 units, against the 5 to 8 actions and 16 units of a normal scan), whatever the goal, and every score it reads is stored. What
 // it SHOWS is unchanged (issue #145): the goal's own three concerns as `seen`, the measured core extras that can be seen as `alsoNoticed`, and the
@@ -2946,6 +2986,111 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     expect(rows.map((row) => row.concern).sort()).toEqual([...Object.keys(checkInScores), 'all'].sort())
     expect(rows.find((row) => row.concern === 'hd_redness')).toMatchObject({ region: 'whole', rawScore: 48 })
     expect(rows.find((row) => row.concern === 'hd_dark_circle')).toMatchObject({ region: 'whole', rawScore: 36 })
+  })
+})
+
+// The next-goal suggestion (issue #145): a check-in's result carries the id of the goal to look at next, worked out by the pure rule over the check-in's
+// nine concerns and day one's, and whether the profile ever wanted lighter skin. Only the id: the view never says what was seen to suggest it.
+describe('FaceScanService.getFaceScan: the next goal after a check-in', () => {
+  /** Glow's own three at day one; a check-in that lifts radiance 6 points (46 against 40) has got fainter for glow. */
+  const DAY_ONE = glowScores(40, 50, 55)
+  /** A check-in's nine concerns: glow's radiance fainter, every other concern faint (above its visible cut-off) except those given. */
+  const checkInOf = (over: Record<string, number> = {}) =>
+    analysisOf({ hd_radiance: 46, hd_moisture: 50, hd_texture: 55, hd_age_spot: 95, hd_acne: 90, hd_pore: 90, hd_oiliness: 95, hd_redness: 99, hd_dark_circle: 80, ...over })
+
+  it('carries the goal whose own concerns score highest on a check-in where the goal\'s concerns have got fainter', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    // Pores at 20 are clear (3), which only clear-skin has among glow's other goals.
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    expect((await resultOf(ctx, checkIn)).nextGoal).toBe('clear-skin')
+  })
+
+  it('carries null on a check-in where nothing else can be seen, and when the goal\'s concerns have not got fainter', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const nothingElse = await checkInReadyUnder(ctx, 'glow', checkInOf(), dayOne)
+
+    const ctx2 = setup()
+    const dayOne2 = await readyUnder(ctx2, 'glow', analysisOf(DAY_ONE))
+    const notFainter = await checkInReadyUnder(ctx2, 'glow', checkInOf({ hd_pore: 20, hd_radiance: 40 }), dayOne2)
+
+    expect((await resultOf(ctx, nothingElse)).nextGoal).toBeNull()
+    expect((await resultOf(ctx2, notFainter)).nextGoal).toBeNull()
+  })
+
+  it('carries null on a normal scan, even one whose concerns outside the goal could be seen', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf({ ...DAY_ONE, hd_pore: 20 }))
+
+    const result = await resultOf(ctx, dayOne)
+
+    expect(result).toHaveProperty('nextGoal', null)
+  })
+
+  it('carries null on a scan under another goal, which is the first of its own chase', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const brighter = await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+
+    expect(await resultOf(ctx, brighter)).toHaveProperty('nextGoal', null)
+  })
+
+  it('is the same when the scan is read from the list as when it is read on its own', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    const listed = (await listScans(ctx)).find((scan) => scan.id === checkIn)
+
+    expect(listed.result.nextGoal).toBe('clear-skin')
+  })
+
+  // Dark circles at 45 are clear (3); pores at 55 are a-little (1). Brighter has the dark circles, clear-skin the pores, so only the wish decides.
+  describe('the wish to be lighter, read from the goal history', () => {
+    const lighterOrNot = async (wantsLighter: boolean) => {
+      const ctx = setup()
+      ctx.goalReader.respondWith(() => ({ goal: 'brighter', wantsLighter }))
+      const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+      ctx.advanceClock(MINUTE)
+      await asUser(() => ctx.goals.set({ text: 'I want my skin lighter' }))
+      ctx.advanceClock(MINUTE)
+      const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_dark_circle: 45, hd_pore: 55 }), dayOne)
+      return (await resultOf(ctx, checkIn)).nextGoal
+    }
+
+    it('suggests brighter when any goal the profile set was read as wanting lighter', async () => {
+      expect(await lighterOrNot(true)).toBe('brighter')
+    })
+
+    it('never suggests brighter when no goal the profile set wanted lighter', async () => {
+      expect(await lighterOrNot(false)).toBe('clear-skin')
+    })
+
+    it('still counts the wish after the profile moved on to another goal', async () => {
+      const ctx = setup()
+      ctx.goalReader.respondWith(() => ({ goal: 'brighter', wantsLighter: true }))
+      const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+      ctx.advanceClock(MINUTE)
+      await asUser(() => ctx.goals.set({ text: 'I want my skin lighter' }))
+      ctx.advanceClock(MINUTE)
+      await setGoal(ctx, 'calm-repair')
+      const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_dark_circle: 45, hd_pore: 55 }), dayOne)
+
+      expect((await resultOf(ctx, checkIn)).nextGoal).toBe('brighter')
+    })
+  })
+
+  it('names only the goal: the value is one of the goals and the view says nothing of why', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    const result = await resultOf(ctx, checkIn)
+
+    expect(GOALS).toContain(result.nextGoal)
+    expect(Object.keys(result).sort()).toEqual(['alsoNoticed', 'nextGoal', 'nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
   })
 })
 
@@ -3125,6 +3270,7 @@ describe('FaceScanService.listFaceScans', () => {
     const ctx = setup()
     await oneInEachState(ctx)
     // The profile moves on to a goal none of its scans were taken under, so every view says a rescan is worth it.
+    ctx.advanceClock(SCAN_SPACING)
     await setGoal(ctx, 'calm-repair')
 
     const listed = await listScans(ctx)
@@ -3684,7 +3830,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label when there are several: a rescan under a new goal replaces the old reading', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     await readyWith(ctx, 'clear-skin', reading('Oily'))
 
     expect(await latestSkinType(ctx)).toBe('oily')
@@ -3693,7 +3839,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest READY scan\'s label, so a newer scan still being analysed does not hide an older ready one', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     const newer = await started(ctx, 'clear-skin')
     expect(await rowOf(ctx, newer)).toMatchObject({ state: 'analysing' })
 
@@ -3703,7 +3849,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label when a newer scan needs a retake', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     const newer = await started(ctx, 'clear-skin')
     ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
     await upload(ctx, newer)
@@ -3715,7 +3861,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label, and a newer ready scan with no skin type does not fall back to an older reading: that scan is the newest ready one', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     await readyWith(ctx, 'clear-skin', analysed({ skinTypes: [], skinAge: null, all: null }))
 
     expect(await latestSkinType(ctx)).toBeNull()

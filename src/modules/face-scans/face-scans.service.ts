@@ -20,7 +20,7 @@ import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/p
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
-import type { GoalRow } from '../goals/goals.types'
+import type { GoalRow, SwitchPreviewView } from '../goals/goals.types'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
@@ -35,8 +35,10 @@ import {
   hdActionsForCheckIn,
   hdActionsForGoal,
   measuredConcernsForGoal,
+  nextGoalFor,
   noticedConcerns,
   type ResultView,
+  RESUME_DAYS,
   resultView,
   REVIEW_WEEKS,
   reviewPointFor,
@@ -80,7 +82,7 @@ export type FaceScanView = {
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
   /** True when the due rule would allow a scan now, under the profile's current goal (issue #145). Worked out when read, never stored. */
   rescanSuggested: boolean
-  result: ResultView | null
+  result: (ResultView & { nextGoal: Goal | null }) | null
 }
 
 /** The view of a scan that was retaken: it always has its front photo. */
@@ -118,7 +120,7 @@ const FITZPATRICK_UNITS = 10
 export class FaceScanService {
   private static faceScanNotFound = () => new NotFoundError('FACE_SCAN_NOT_FOUND', 'Face scan not found')
   /** `checkInDueAt` is set only for `check-in-not-due`, the one reason that carries a date the app can show. */
-  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken', checkInDueAt?: string) =>
+  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken' | 'scan-limit', checkInDueAt?: string) =>
     new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', checkInDueAt ? { reason, checkInDueAt } : { reason })
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static notAwaitingRetake = () => new ConflictError('FACE_SCAN_NOT_AWAITING_RETAKE', 'This face scan is not waiting for a retake')
@@ -205,14 +207,18 @@ export class FaceScanService {
     // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote. `now` comes after the reads, so a
     // rival scan stored in the middle of them is stamped no later than `now` and still counts (the policy has no upper bound either).
     const latest = await this.repository.latestForProfile(profileId)
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
     const history = await this.goals.history()
     // The chase start only needs a time to measure the resume window from; the verdict and the stored scan use the later `now`.
     const readAt = this.now()
     const since = chaseStartFor(history, goal, readAt) ?? readAt
     const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
     const now = this.now()
-    const verdict = mayScanNow({ goal, history, scans, at: now })
-    if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
+    const verdict = mayScanNow({ goal, history, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null })
+    if (!verdict.allowed) {
+      if (verdict.reason === 'scan-limit') throw new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', { reason: 'scan-limit', nextScanAt: verdict.nextScanAt.toISOString() })
+      throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
+    }
 
     const valid = POSITIONS.flatMap((position) => {
       const photo = photos[position]
@@ -299,6 +305,33 @@ export class FaceScanService {
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
+  }
+
+  /**
+   * What switching to `goal` would do, as if it were picked now: `resume` when the chase rule reaches back into an earlier run of the goal,
+   * else `fresh`. Reads only. The goal the profile is on is 400 GOAL_ALREADY_CURRENT; a profile with no goal yet starts every goal fresh.
+   */
+  async switchPreview(goal: Goal): Promise<SwitchPreviewView> {
+    const { profileId } = requireUser()
+    const current = await this.goals.current().then(
+      (view) => view.goal,
+      (error: unknown) => {
+        if (error instanceof NotFoundError) return null
+        throw error
+      },
+    )
+    if (current === goal) throw new ValidationError('GOAL_ALREADY_CURRENT', 'That is already your goal')
+    const now = this.now()
+    const fresh: SwitchPreviewView = { goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null }
+    const history = await this.goals.history()
+    const chaseStart = chaseStartFor([...history, { goal, createdAt: now }], goal, now)
+    if (chaseStart === null || chaseStart.getTime() >= now.getTime()) return fresh
+    // The goal was left when the row after its latest run was saved. A run of the goal that is not the last row always has one after it.
+    const lastRun = history.map((row) => row.goal).lastIndexOf(goal)
+    const left = history[lastRun + 1]!.createdAt
+    // dayOneFor ignores `scanId`; no scan is being asked about here.
+    const dayOne = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: '' })
+    return { goal, outcome: 'resume', dayOneAt: dayOne?.createdAt ?? null, resumeUntil: new Date(left.getTime() + RESUME_DAYS * 24 * 60 * 60 * 1000) }
   }
 
   /**
@@ -881,7 +914,7 @@ export class FaceScanService {
     link: (key: string) => Promise<string>,
     dayOneResults: Map<string, Promise<FaceResult[]>>,
     history: Promise<GoalRow[]>,
-  ): Promise<ResultView> {
+  ): Promise<ResultView & { nextGoal: Goal | null }> {
     const [results, masks, historyRows] = await Promise.all([this.repository.resultsOf(scan.id), this.repository.masksOf(scan.id), history])
     // Through the product a scan is only ever taken under the current goal, so a chase always holds it; with none (unreachable) the scan is its own day one.
     const since = chaseStartFor(historyRows, scan.goalAtScan, scan.createdAt) ?? scan.createdAt
@@ -894,14 +927,21 @@ export class FaceScanService {
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null
-    return resultView({
+    const dayOneResultRows = dayOne ? await this.dayOneResultsOf(dayOne.id, dayOneResults) : null
+    const view = resultView({
       goal: scan.goalAtScan,
       results,
       overlays,
       skinType: scan.skinType,
       skinAge: scan.skinAge,
-      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.dayOneResultsOf(dayOne.id, dayOneResults), skinAge: dayOne.skinAge },
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: dayOneResultRows ?? [], skinAge: dayOne.skinAge },
     })
+    // Only a check-in suggests a next goal; the list and a single get both land here, so they agree.
+    const nextGoal =
+      scan.checkIn && dayOneResultRows
+        ? nextGoalFor({ goal: scan.goalAtScan, results, dayOneResults: dayOneResultRows, everWantedLighter: historyRows.some((row) => row.wantsLighter) })
+        : null
+    return { ...view, nextGoal }
   }
 
   private dayOneResultsOf(id: string, cache: Map<string, Promise<FaceResult[]>>): Promise<FaceResult[]> {
@@ -934,6 +974,7 @@ export class FaceScanService {
     const now = this.now()
     const since = chaseStartFor(rows, goal, now) ?? now
     const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
-    return mayScanNow({ goal, history: rows, scans, at: now }).allowed
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
+    return mayScanNow({ goal, history: rows, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null }).allowed
   }
 }

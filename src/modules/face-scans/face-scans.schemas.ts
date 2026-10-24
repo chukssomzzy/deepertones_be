@@ -103,6 +103,7 @@ const FaceScanResult = z
       .nullable()
       .openapi({ description: 'The skin age as a plain fact in whole years. It is never compared with a real age. Null when it could not be read.' }),
     sinceDayOne: FaceScanSinceDayOne.nullable().openapi({ description: 'The change since day one; null when this scan is its own day one.' }),
+    nextGoal: z.enum(GOALS).nullable().openapi({ description: 'The goal to suggest working on next, from this check-in scan. Null on every other scan.' }),
     tablesVersion: z.string().openapi({ description: 'The version of the rules that worded this result. The words are worked out each time the scan is read.' }),
   })
   .openapi('FaceScanResult', {

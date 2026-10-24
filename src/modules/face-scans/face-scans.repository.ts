@@ -123,6 +123,20 @@ export class D1FaceScansRepository {
   }
 
   /**
+   * The profile's newest scan that has not failed and is not a check-in, under any goal: its last day-one scan, or null. Scans made at the same
+   * time go to the one written last, the same as `latestForProfile`.
+   */
+  async latestDayOneForProfile(profileId: string): Promise<FaceScan | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceScans)
+      .where(and(eq(faceScans.profileId, profileId), ne(faceScans.state, 'failed'), eq(faceScans.checkIn, false)))
+      .orderBy(desc(faceScans.createdAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
+  /**
    * The profile's newest scan that is `ready`, or null. Unlike `latestForProfile`, a newer scan that is analysing or needs a retake does not hide it: a
    * reader of what a scan found (the skin type) wants the last scan that found something. Scans made at the same time go to the one written last.
    */
