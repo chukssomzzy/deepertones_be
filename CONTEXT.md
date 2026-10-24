@@ -65,8 +65,9 @@ About 21 fixed rules bind the product. The ones that shape behaviour:
   recommended), so the routine stage and later reviews should treat both as unproven for the skin we design for.
 - **The AI decides nothing safety-relevant.** Whether a product is _stop with a plan_, _reduce and monitor_ or _fine to
   continue_ comes from fixed rules over a reviewed knowledge base. The AI only phrases the result.
-- Every claim about an ingredient or product traces to a **cited source** the user can open. Every verdict has a reason, and
-  there are no unexplained scores.
+- Every claim about an ingredient or product traces to a reviewed source we hold (catalog evidence or an ingredient rule's
+  source). Sources are context for the AI and for the team's review, and are not shown in the app. Every verdict has a reason,
+  and there are no unexplained scores.
 - **Pregnancy and breastfeeding** are asked about early. They hard-exclude certain actives everywhere, including free
   conversation.
 - **Red-flag symptoms** (signs of infection, a severe reaction, anything near the eyes, a mole that has changed) route to a
@@ -184,6 +185,18 @@ A rough, optional answer to how much a user can spend on one new product, in ban
 Candidates above it are not suggested; with no answer, cheaper candidates come first. Never shown as judging what they can
 afford.
 _Avoid_: Income, price limit, affordability
+
+**Routine skeleton**:
+What the fixed rules hand the AI that writes a routine. It holds the goal's routine steps, each shelf product's verdict, the
+gaps, the safe candidates for each gap, the approved taper for anything being stopped, and the limits. The AI chooses within
+it and never outside it.
+_Avoid_: Draft routine, template
+
+**Outcome hint**:
+What real results add when choosing between candidates. It is the share of similar users (same goal, skin type and shopping
+country) whose goal concerns read fainter at the review point, minus the share who flared on or stopped the product. It counts
+only once at least 30 such users exist. It is never a filter, and it never overrides caution.
+_Avoid_: Rating, popularity, score
 
 ### Skin and products
 

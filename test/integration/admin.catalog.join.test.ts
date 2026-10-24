@@ -307,7 +307,7 @@ describe('CatalogWorkbookService', () => {
       expect(await approvedFor('ZZ', 'cleanse')).toEqual([])
     })
 
-    it('gives each row as { code, productId, formulationId, ingredients, skinConcerns, skinTypes, steps, frequency, ownCautions, origin, priceMin, priceMax, whereSold }', async () => {
+    it('gives each row as { code, productId, formulationId, ingredients, skinConcerns, skinTypes, steps, frequency, ownCautions, evidenceUrls, ingredientsSourceUrl, origin, priceMin, priceMax, whereSold }', async () => {
       const [rec] = (await approvedFor('NG', 'treat')).filter((r) => r.code === cheap.code)
       const found = await catalog.resolve({ brand: cheap.brand as string, name: cheap.name as string, category: 'skin' })
 
@@ -321,6 +321,8 @@ describe('CatalogWorkbookService', () => {
         steps: ['cleanse', 'treat'],
         frequency: 'pm',
         ownCautions: [],
+        evidenceUrls: [],
+        ingredientsSourceUrl: 'https://example.com/hydrating-cleanser',
         origin: 'sourced',
         priceMin: 3000,
         priceMax: 4500,

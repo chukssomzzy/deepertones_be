@@ -165,6 +165,10 @@ export class RecommendationService {
       candidates.push({
         code: row.code,
         product,
+        skinConcerns: [...row.skinConcerns],
+        ingredients: [...row.ingredients],
+        evidenceUrls: [...row.evidenceUrls],
+        ingredientsSourceUrl: row.ingredientsSourceUrl,
         passed: [...passed],
         sharedWithReaction: reacted.flatMap(({ productId, parts }) => {
           const shared = row.ingredients.filter((ingredient) => RecommendationService.anyIn(ingredientParts(ingredient), parts))

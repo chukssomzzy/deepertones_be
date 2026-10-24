@@ -406,6 +406,29 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
           expect(byCode.get(fixtures.approved!.row.code)?.skinTypes).toBe('all')
           expect((await repo.approvedFor({ country: where, step: 'treat' }))[0]?.skinTypes).toEqual(['dry', 'combination'])
         })
+
+        // The links are context for the AI and the team, not for a screen. They are read here so a candidate can carry them; nothing returns them to the app.
+        it('gives the evidence links, in the order written, and the ingredient list\'s source link, as they were uploaded', async () => {
+          const { repo } = await make()
+          const where = fresh('N')
+          const one = workbookProduct({ steps: ['cleanse'], evidenceUrls: ['https://example.com/study-b', 'https://example.com/study-a'], ingredientsSourceUrl: 'https://example.com/the-label' })
+          await repo.applyWorkbook(await planOf(repo, { countries: [country(where)], newProducts: [one.newProduct], products: [one.planned], availability: [sale(one.row.code, where)] }))
+
+          const [recommendation] = await repo.approvedFor({ country: where, step: 'cleanse' })
+
+          expect(recommendation).toMatchObject({ code: one.row.code, evidenceUrls: ['https://example.com/study-b', 'https://example.com/study-a'], ingredientsSourceUrl: 'https://example.com/the-label' })
+        })
+
+        it('gives a row with no evidence links an empty list, and a row with no source link for its ingredients a null, and still returns the row', async () => {
+          const { repo } = await make()
+          const where = fresh('N')
+          const one = workbookProduct({ steps: ['cleanse'], evidenceUrls: [], ingredientsSourceUrl: null })
+          await repo.applyWorkbook(await planOf(repo, { countries: [country(where)], newProducts: [one.newProduct], products: [one.planned], availability: [sale(one.row.code, where)] }))
+
+          const [recommendation] = await repo.approvedFor({ country: where, step: 'cleanse' })
+
+          expect(recommendation).toMatchObject({ code: one.row.code, evidenceUrls: [], ingredientsSourceUrl: null })
+        })
       })
 
       it('reads every row in code order, retired and draft ones included, with lists, dates and draft cells as they were written', async () => {
