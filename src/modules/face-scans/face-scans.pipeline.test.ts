@@ -388,6 +388,7 @@ describe('FaceScanService.advance: the upload step', () => {
     const first = await uploaded(ctx, 'glow')
     ctx.perfectCorp.script('getFitzpatrick', { status: 'success', fitzpatrick: 'V' })
     await fitzpatrickStep(ctx, first.id)
+    ctx.advanceClock(SCAN_SPACING)
     await setGoal(ctx, 'brighter')
     const second = (await asUser(() => ctx.service.create({ front: face(2) }))).id
     const before = callsOf(ctx, 'createFitzpatrick').length
@@ -2304,6 +2305,8 @@ describe('FaceScanService: a guest may run the scan flow, and the stream carries
 //   - leave the goal for longer than the resume window, which starts it fresh with a new day one (`FRESH_GAP`).
 
 const DAY = 24 * HOUR
+/** A new chase's day-one scan needs the profile's last day-one scan, under any goal, 30 days back (issue #145, written out here). */
+const SCAN_SPACING = 30 * DAY
 const PHOTO_LINK_LIFETIME = 5 * MINUTE
 const LINK = /\/photos\/([A-Za-z0-9_-]+)$/
 
@@ -2318,12 +2321,12 @@ const glowScores = (radiance: number, moisture: number, texture: number) => ({ h
 const coreScores = (ageSpot: number, acne: number, pore: number, oiliness: number) => ({ hd_age_spot: ageSpot, hd_acne: acne, hd_pore: pore, hd_oiliness: oiliness })
 const brighterScores = (radiance: number, darkCircle: number, ageSpot: number) => ({ hd_radiance: radiance, hd_dark_circle: darkCircle, hd_age_spot: ageSpot })
 
-/** A scan under `goal` taken a day after the last, and sent to Perfect Corp: analysing, with its task. */
+/** A scan under `goal` taken a scan spacing (30 days) after the last, and sent to Perfect Corp: analysing, with its task. */
 const takenUnder = async (ctx: Ctx, goal: Goal): Promise<string> => {
-  ctx.advanceClock(DAY)
+  ctx.advanceClock(SCAN_SPACING)
   return (await uploaded(ctx, goal)).id
 }
-/** A scan under `goal` taken a day after the last, and made ready from `analysis`. */
+/** A scan under `goal` taken a scan spacing after the last, and made ready from `analysis`. */
 const readyUnder = async (ctx: Ctx, goal: Goal, analysis: SkinAnalysisResult): Promise<string> => {
   const id = await takenUnder(ctx, goal)
   ctx.perfectCorp.script('getSkinAnalysis', analysis)
@@ -2344,14 +2347,14 @@ const reviewPointOf = async (ctx: Ctx, dayOne: string) => new Date((await rowOf(
  * ready scan in a chase: the clock moves to the review point, so the scan the service takes there is the check-in.
  */
 const checkInReadyUnder = async (ctx: Ctx, goal: Goal, analysis: SkinAnalysisResult, dayOne: string): Promise<string> => {
-  // `readyUnder` moves the clock on a day of its own before it takes the scan.
-  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - DAY))
+  // `readyUnder` moves the clock on a scan spacing of its own before it takes the scan.
+  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - SCAN_SPACING))
   return readyUnder(ctx, goal, analysis)
 }
 /** The check-in scan of the chase `dayOne` started, taken at its review point and sent to Perfect Corp: analysing, with its tasks. */
 const checkInTakenUnder = async (ctx: Ctx, goal: Goal, dayOne: string) => {
-  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - DAY))
-  ctx.advanceClock(DAY)
+  advanceTo(ctx, new Date((await reviewPointOf(ctx, dayOne)).getTime() - SCAN_SPACING))
+  ctx.advanceClock(SCAN_SPACING)
   return uploaded(ctx, goal)
 }
 const failScan = (ctx: Ctx, id: string) => asSystem(() => ctx.service.markFailed(id))
@@ -2630,8 +2633,8 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
   it('has no change for the first ready scan, and has one for the chase\'s check-in, worked out against the first', async () => {
     const ctx = setup()
     const first = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55), { skinAge: 31 }))
-    // readyUnder moves the clock on a day before it makes the scan.
-    const firstAt = new Date(T0.getTime() + DAY)
+    // readyUnder moves the clock on a scan spacing before it makes the scan.
+    const firstAt = new Date(T0.getTime() + SCAN_SPACING)
     await takenUnder(ctx, 'brighter')
     const second = await checkInReadyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55), { skinAge: 34 }), first)
 
@@ -3160,6 +3163,7 @@ describe('FaceScanService.listFaceScans', () => {
     const ctx = setup()
     await oneInEachState(ctx)
     // The profile moves on to a goal none of its scans were taken under, so every view says a rescan is worth it.
+    ctx.advanceClock(SCAN_SPACING)
     await setGoal(ctx, 'calm-repair')
 
     const listed = await listScans(ctx)
@@ -3719,7 +3723,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label when there are several: a rescan under a new goal replaces the old reading', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     await readyWith(ctx, 'clear-skin', reading('Oily'))
 
     expect(await latestSkinType(ctx)).toBe('oily')
@@ -3728,7 +3732,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest READY scan\'s label, so a newer scan still being analysed does not hide an older ready one', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     const newer = await started(ctx, 'clear-skin')
     expect(await rowOf(ctx, newer)).toMatchObject({ state: 'analysing' })
 
@@ -3738,7 +3742,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label when a newer scan needs a retake', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     const newer = await started(ctx, 'clear-skin')
     ctx.perfectCorp.script('createSkinAnalysis', new PerfectCorpRejectedPhotoError('too-dark'))
     await upload(ctx, newer)
@@ -3750,7 +3754,7 @@ describe('FaceScanService.latestSkinType', () => {
   it('is the newest ready scan\'s label, and a newer ready scan with no skin type does not fall back to an older reading: that scan is the newest ready one', async () => {
     const ctx = setup()
     await readyWith(ctx, 'glow', reading('Dry'))
-    ctx.advanceClock(MINUTE)
+    ctx.advanceClock(SCAN_SPACING)
     await readyWith(ctx, 'clear-skin', analysed({ skinTypes: [], skinAge: null, all: null }))
 
     expect(await latestSkinType(ctx)).toBeNull()

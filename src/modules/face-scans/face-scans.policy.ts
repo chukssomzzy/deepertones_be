@@ -1,5 +1,5 @@
 import type { Goal } from '../goals/goals.vocabulary'
-import { chaseStartFor, reviewPointFor } from './face-scans.tables'
+import { SCAN_SPACING_DAYS, chaseStartFor, reviewPointFor } from './face-scans.tables'
 
 export type ScanState = 'analysing' | 'needs-retake' | 'ready' | 'failed'
 
@@ -8,6 +8,8 @@ export type ScanVerdict =
   | { allowed: false; reason: 'already-scanned-for-goal' | 'check-in-taken' }
   // `due` is the chase's review point, for the service to show as `checkInDueAt`.
   | { allowed: false; reason: 'check-in-not-due'; due: Date }
+  // `nextScanAt` is the profile's last day-one scan plus the spacing, for the service to show.
+  | { allowed: false; reason: 'scan-limit'; nextScanAt: Date }
 
 /**
  * Whether a profile may start a face scan now (issue #145). Pure: the service reads the profile's goal, its goal history and its scans, and
@@ -25,18 +27,28 @@ export const mayScanNow = ({
   history,
   scans,
   at,
+  lastDayOneAt,
 }: {
   goal: Goal
   history: readonly { goal: Goal | null; createdAt: Date }[]
   scans: readonly { goalAtScan: Goal; createdAt: Date; state: ScanState; checkIn: boolean }[]
   at: Date
+  lastDayOneAt: Date | null
 }): ScanVerdict => {
   const chaseStart = chaseStartFor(history, goal, at)
   const chaseScans = chaseStart
     ? scans.filter((scan) => scan.goalAtScan === goal && scan.createdAt.getTime() >= chaseStart.getTime())
     : []
   const notFailed = chaseScans.filter((scan) => scan.state !== 'failed')
-  if (notFailed.length === 0) return { allowed: true, checkIn: false }
+  if (notFailed.length === 0) {
+    // A new chase's first scan waits SCAN_SPACING_DAYS after the profile's last day-one scan under any goal, so changing goal never unlocks a paid
+    // scan. Check-ins are not day ones and neither count towards it nor are limited by it (they take the branches below).
+    if (lastDayOneAt) {
+      const nextScanAt = new Date(lastDayOneAt.getTime() + SCAN_SPACING_DAYS * 24 * 60 * 60 * 1000)
+      if (at.getTime() < nextScanAt.getTime()) return { allowed: false, reason: 'scan-limit', nextScanAt }
+    }
+    return { allowed: true, checkIn: false }
+  }
 
   const dayOne = notFailed.filter((scan) => scan.state === 'ready').sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())[0]
   if (!dayOne) return { allowed: false, reason: 'already-scanned-for-goal' }
