@@ -463,17 +463,26 @@ export class FaceScanService {
     for (const dayOne of candidates) {
       try {
         const { profileId, userId, goalAtScan: goal } = dayOne
-        const chaseStart = chaseStartFor(await this.goals.historyFor(profileId), goal, now)
+        const history = await this.goals.historyFor(profileId)
+        // No goal history at all: nothing can ever make this day one due, so it is recorded without a push and leaves the candidate set (it would otherwise starve the cap).
+        if (history.length === 0) {
+          await this.repository.recordCheckInPush({ profileId, userId, goal, dayOneScanId: dayOne.id, sentAt: now })
+          continue
+        }
+        const chaseStart = chaseStartFor(history, goal, now)
         // The goal was left since the candidate was read: it counts again if the goal is taken up again.
         if (chaseStart === null) continue
         const first = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: dayOne.id })
         const isDayOne = first?.id === dayOne.id
+        // The SQL cutoff uses the shortest review week, so it is exact while every goal is 6 weeks. If review weeks are tuned per goal, rows on a longer goal can
+        // briefly take places in the cap before they are due: transient, not permanent.
         if (isDayOne && now.getTime() < reviewPointFor(dayOne.createdAt, goal).getTime()) continue
         if (!(await this.repository.recordCheckInPush({ profileId, userId, goal, dayOneScanId: dayOne.id, sentAt: now }))) continue
         if (!isDayOne) continue
         await this.notifications.faceCheckInDue({ userId, profileId, dayOneScanId: dayOne.id })
         queued++
       } catch (error) {
+        // Logged and swallowed per candidate: a D1 outage partway through reports 0 sent, and the next day's run retries because nothing was recorded.
         console.error({ outcome: 'check-in-push-failed', profileId: dayOne.profileId, dayOneScanId: dayOne.id, error: describeUnexpectedError(error) })
       }
     }

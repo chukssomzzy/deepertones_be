@@ -1308,7 +1308,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   failed, and, when the profile has a goal history, only those taken under its current goal (so goals it left cannot fill the limit; they count again on return). The
   repository joins `profile_goals` for that. Each candidate is then confirmed by the pure rule with `GoalsService.historyFor(profileId)` (the session-free twin of
   `history`): `chaseStartFor` must find the goal current now, and the candidate must be the first ready scan of that chase (`dayOneFor`) with `now` at its
-  `reviewPointFor`. A candidate that is a day one of an earlier chase of the goal is recorded without a push so it leaves the list. `recordCheckInPush` is written BEFORE
+  `reviewPointFor`. A candidate that is a day one of an earlier chase of the goal is recorded without a push so it leaves the list; so is one whose profile has an empty goal history (a switched-away goal, with history, is skipped unrecorded). `recordCheckInPush` is written BEFORE
   `faceCheckInDue` is called and only a write that landed calls it, so a chase is told at most once; a queue that is down is logged `{ outcome: 'check-in-push-failed',
   profileId, dayOneScanId }` and that chase is not tried again. The `scanNeedsYou` switch is read when the push is sent, not by the sweep: with it off the push is dropped there
   and the chase stays recorded.
