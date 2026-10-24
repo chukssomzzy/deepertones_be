@@ -111,9 +111,10 @@ exist to undo.
 1. **Goal entry**: a free-text goal and an honest answer about what it takes. No signup, no photo, no good network needed.
 2. **Shelf entry**: photograph the shelf or each product. The app identifies them and the user confirms with a tap. Anything
    unreadable gets one follow-up, a photo of the back. Typing is the last resort.
-   - 2a. **Face photo**: a guided front, left and right capture, skippable.
-   - 2b. **Shelf verdict**: helping, redundant, blocking the goal, likely the problem, or conflicting, each with a one-line
-     reason. Then a one-screen signup. This is the moment we film for TikTok.
+   - 2a. **Signup**: one screen, before the face photo, because every face scan is paid for and a guest would get no result.
+   - 2b. **Face photo**: a guided front, left and right capture, skippable.
+   - 2c. **Shelf verdict**: helping, redundant, blocking the goal, likely the problem, or conflicting, each with a one-line
+     reason. This is the moment we film for TikTok.
 3. **Routine and taper schedule**: steps in order, with frequency and a reason each, and a dated step-down with what to
    expect.
 4. **Daily loop** (weeks 1 to 4): native reminders with tick-off actions, taper-day alarms, flare-up logging, a widget and
