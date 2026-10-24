@@ -1,7 +1,7 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 import type { Frequency, RoutineStep } from '../catalog/catalog.vocabulary'
 import { checkRoutine, FREQUENCY_RANK } from './routines.gates'
-import type { GateCode, GateFailure, Routine, RoutineEntry, RoutineProduct, RoutineSkeleton, SkeletonCandidate, SkeletonShelfProduct } from './routines.types'
+import type { GateCode, GateFailure, Routine, RoutineEntry, RoutineProduct, RoutineSkeleton, ShelfVerdict, SkeletonCandidate, SkeletonShelfProduct } from './routines.types'
 
 // ---- builders: one valid skeleton and one valid routine for it, so each failing case changes one thing ----
 
@@ -32,7 +32,8 @@ const shelfProduct = (id: string, overrides: Partial<SkeletonShelfProduct> = {})
   ...overrides,
 })
 
-// Shelf: two kept cleansers, a serum to cut back to alternate days, and a retinoid to stop (its taper is tpl-retinoid).
+// Shelf: a kept cleanser, a serum to cut back to alternate days, and a retinoid to stop (its taper is tpl-retinoid). The valid routine
+// uses every kept product, because a kept product that is left out fails the unused-shelf gate.
 // Gaps: moisturise (two candidates) and protect (one). So a valid routine uses two new products.
 const skeleton = (overrides: Partial<RoutineSkeleton> = {}): RoutineSkeleton => ({
   goal: 'even-tone',
@@ -40,7 +41,6 @@ const skeleton = (overrides: Partial<RoutineSkeleton> = {}): RoutineSkeleton => 
   steps: ['cleanse', 'treat', 'moisturise', 'protect'],
   shelf: [
     shelfProduct('cleanser-1'),
-    shelfProduct('cleanser-2'),
     shelfProduct('serum-1', { step: 'treat', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' } }),
     shelfProduct('retinol-1', { step: 'treat', verdict: { kind: 'stop', taperTemplateId: 'tpl-retinoid' } }),
   ],
@@ -95,6 +95,12 @@ const withExtraEntries = (...extra: RoutineEntry[]): Routine => {
   return routine({ steps })
 }
 
+/** The default skeleton with a second kept cleanser on the shelf: for cases where two kept products fill one step. */
+const skeletonWithSecondCleanser = (): RoutineSkeleton => skeleton({ shelf: [...skeleton().shelf, shelfProduct('cleanser-2')] })
+
+/** The default skeleton with extra shelf products added after the default ones. */
+const skeletonWithShelf = (...extra: SkeletonShelfProduct[]): RoutineSkeleton => skeleton({ shelf: [...skeleton().shelf, ...extra] })
+
 const gatesOf = (failures: GateFailure[]): GateCode[] => failures.map((f) => f.gate)
 
 describe('checkRoutine', () => {
@@ -141,7 +147,7 @@ describe('checkRoutine', () => {
     })
 
     it('passes a second shelf entry naming another kept product', () => {
-      expect(checkRoutine(skeleton(), withExtraEntries(shelfEntry('cleanse', 'cleanser-2', 'pm')))).toEqual([])
+      expect(checkRoutine(skeletonWithSecondCleanser(), withExtraEntries(shelfEntry('cleanse', 'cleanser-2', 'pm')))).toEqual([])
     })
 
     it('fails a candidate entry whose code is in no gap', () => {
@@ -180,6 +186,40 @@ describe('checkRoutine', () => {
 
     it('passes when the product to stop is left out and tapered instead', () => {
       expect(checkRoutine(skeleton(), routine())).toEqual([])
+    })
+  })
+
+  describe('dropped-product', () => {
+    // A drop product fills the cleanse step on the shelf, so only its verdict is wrong when it is used there.
+    const dropProduct = () => shelfProduct('cleanser-drop', { verdict: { kind: 'drop' } })
+
+    it('reports a dropped product used as a shelf entry as unknown-product and dropped-product at its step, and nothing else', () => {
+      const failures = checkRoutine(skeletonWithShelf(dropProduct()), withExtraEntries(shelfEntry('cleanse', 'cleanser-drop', 'pm')))
+
+      expect(failures).toEqual([
+        { gate: 'unknown-product', step: 'cleanse' },
+        { gate: 'dropped-product', step: 'cleanse' },
+      ])
+    })
+
+    it('names the step of the entry that used the dropped product', () => {
+      const treatDrop = shelfProduct('serum-drop', { step: 'treat', verdict: { kind: 'drop' } })
+      const failures = checkRoutine(skeletonWithShelf(treatDrop), withExtraEntries(shelfEntry('treat', 'serum-drop', 'pm')))
+
+      expect(failures).toEqual([
+        { gate: 'unknown-product', step: 'treat' },
+        { gate: 'dropped-product', step: 'treat' },
+      ])
+    })
+
+    it('passes when the dropped product is left out, with no taper for it', () => {
+      expect(checkRoutine(skeletonWithShelf(dropProduct()), routine())).toEqual([])
+    })
+
+    it('fails a taper naming a dropped product, because a drop needs no taper', () => {
+      const tapers = [...routine().tapers, { shelfProductId: 'cleanser-drop', templateId: 'tpl-retinoid' }]
+
+      expect(checkRoutine(skeletonWithShelf(dropProduct()), routine({ tapers }))).toEqual([{ gate: 'taper', step: null }])
     })
   })
 
@@ -354,14 +394,14 @@ describe('checkRoutine', () => {
       const steps = validSteps()
       steps.splice(1, 0, shelfEntry('cleanse', 'cleanser-2', 'pm'))
 
-      expect(checkRoutine(skeleton(), routine({ steps }))).toEqual([])
+      expect(checkRoutine(skeletonWithSecondCleanser(), routine({ steps }))).toEqual([])
     })
 
     it('fails going back to a step after leaving it', () => {
       const steps = validSteps()
       steps.splice(2, 0, shelfEntry('cleanse', 'cleanser-2', 'pm'))
 
-      expect(gatesOf(checkRoutine(skeleton(), routine({ steps })))).toEqual(['order'])
+      expect(gatesOf(checkRoutine(skeletonWithSecondCleanser(), routine({ steps })))).toEqual(['order'])
     })
   })
 
@@ -418,6 +458,65 @@ describe('checkRoutine', () => {
 
       expect(failures.length).toBeGreaterThan(0)
       expect(failures.every((f) => f.step === 'cleanse')).toBe(true)
+    })
+  })
+
+  describe('unused-shelf', () => {
+    const withoutProduct = (id: string): RoutineEntry[] => validSteps().filter((e) => !(e.product.kind === 'shelf' && e.product.id === id))
+
+    it('fails a kept product that is left out, at its own step', () => {
+      expect(checkRoutine(skeleton(), routine({ steps: withoutProduct('cleanser-1') }))).toEqual([{ gate: 'unused-shelf', step: 'cleanse' }])
+    })
+
+    it('fails a reduced product that is left out, at its own step', () => {
+      expect(checkRoutine(skeleton(), routine({ steps: withoutProduct('serum-1') }))).toEqual([{ gate: 'unused-shelf', step: 'treat' }])
+    })
+
+    it('fails the unused one of two kept products for the same step when only the other is used', () => {
+      expect(checkRoutine(skeletonWithSecondCleanser(), routine())).toEqual([{ gate: 'unused-shelf', step: 'cleanse' }])
+    })
+
+    it('passes when both kept products for the same step are used', () => {
+      const steps = validSteps()
+      steps.splice(1, 0, shelfEntry('cleanse', 'cleanser-2', 'pm'))
+
+      expect(checkRoutine(skeletonWithSecondCleanser(), routine({ steps }))).toEqual([])
+    })
+
+    it('gives one failure per unused product, in shelf order', () => {
+      const steps = withoutProduct('serum-1').filter((e) => e.step !== 'cleanse')
+
+      // cleanser-1, serum-1 and cleanser-2 (the shelf's order) are all unused: cleanse, treat, then cleanse again.
+      expect(checkRoutine(skeletonWithSecondCleanser(), routine({ steps }))).toEqual([
+        { gate: 'unused-shelf', step: 'cleanse' },
+        { gate: 'unused-shelf', step: 'treat' },
+        { gate: 'unused-shelf', step: 'cleanse' },
+      ])
+    })
+
+    it('counts a kept product as unused when it only appears at another step', () => {
+      // cleanser-1 as the moisturiser entry is an unknown product there, and it leaves its own step cleanse without it.
+      const steps = [...withoutProduct('cleanser-1').slice(0, 1), shelfEntry('moisturise', 'cleanser-1', 'am-pm'), ...validSteps().slice(3)]
+
+      expect(checkRoutine(skeleton(), routine({ steps }))).toContainEqual({ gate: 'unused-shelf', step: 'cleanse' })
+    })
+
+    it('never fails a kept product that fills no step', () => {
+      const noStep = skeletonWithShelf(shelfProduct('stray-1', { step: null }), shelfProduct('stray-2', { step: null, verdict: { kind: 'reduce', maxFrequency: 'weekly' } }))
+
+      expect(checkRoutine(noStep, routine())).toEqual([])
+    })
+
+    it('never fails a stopped or dropped product that is left out', () => {
+      // retinol-1 (stop) is already on the default shelf and left out; add a dropped one that is left out too.
+      const withDrop = skeletonWithShelf(shelfProduct('cleanser-drop', { verdict: { kind: 'drop' } }))
+
+      expect(gatesOf(checkRoutine(withDrop, routine()))).not.toContain('unused-shelf')
+      expect(checkRoutine(withDrop, routine())).toEqual([])
+    })
+
+    it('passes the valid routine, which uses every kept product', () => {
+      expect(checkRoutine(skeleton(), routine())).toEqual([])
     })
   })
 
@@ -554,6 +653,15 @@ describe('checkRoutine', () => {
       expect(gatesOf(first)).toEqual(['unknown-product', 'over-reduced', 'taper', 'frequency', 'wording'])
     })
 
+    it('reports dropped-product, taper, gap, unused-shelf and grounding in the order the rules are numbered', () => {
+      // A dropped product in use, no taper for the stopped retinoid, no moisturiser, serum-1 left out, and a foreign link on the cleanser.
+      const withDrop = skeletonWithShelf(shelfProduct('cleanser-drop', { verdict: { kind: 'drop' } }))
+      const [cleanse, , , protect] = validSteps()
+      const steps = [{ ...cleanse!, grounding: ['https://made-up.example/'] }, shelfEntry('cleanse', 'cleanser-drop', 'pm'), protect!]
+
+      expect(gatesOf(checkRoutine(withDrop, routine({ steps, tapers: [] })))).toEqual(['unknown-product', 'dropped-product', 'taper', 'gap', 'unused-shelf', 'grounding'])
+    })
+
     it('reports the same gate on several entries in routine order', () => {
       const steps = validSteps()
       steps[0] = shelfEntry('cleanse', 'cleanser-1', 'weekly')
@@ -570,5 +678,24 @@ describe('checkRoutine', () => {
 describe('SkeletonCandidate', () => {
   it('has no origin field, so who paid for a review can never reach a choice', () => {
     expectTypeOf<SkeletonCandidate>().not.toHaveProperty('origin')
+  })
+})
+
+describe('ShelfVerdict', () => {
+  it('includes drop: leave a product out of the routine with no taper', () => {
+    expectTypeOf<{ kind: 'drop' }>().toExtend<ShelfVerdict>()
+  })
+
+  it('still includes keep, reduce and stop', () => {
+    expectTypeOf<{ kind: 'keep' }>().toExtend<ShelfVerdict>()
+    expectTypeOf<{ kind: 'reduce'; maxFrequency: Frequency }>().toExtend<ShelfVerdict>()
+    expectTypeOf<{ kind: 'stop'; taperTemplateId: string }>().toExtend<ShelfVerdict>()
+  })
+})
+
+describe('GateCode', () => {
+  it('includes dropped-product and unused-shelf', () => {
+    expectTypeOf<'dropped-product'>().toExtend<GateCode>()
+    expectTypeOf<'unused-shelf'>().toExtend<GateCode>()
   })
 })

@@ -45,6 +45,17 @@ export type SkeletonCandidate = {
   } | null
 }
 
+/**
+ * What the rules decided for a shelf product. The verdict screen sorts products into five groups; each maps to a routine verdict:
+ *
+ * | Verdict group      | Routine verdict |
+ * | ------------------ | --------------- |
+ * | helping            | keep            |
+ * | conflicting        | reduce or drop  |
+ * | blocking the goal  | stop or drop    |
+ * | redundant          | drop            |
+ * | likely the problem | stop            |
+ */
 export type ShelfVerdict =
   /** Use it as it is. */
   | { kind: 'keep' }
@@ -52,6 +63,8 @@ export type ShelfVerdict =
   | { kind: 'reduce'; maxFrequency: Frequency }
   /** Stop it, tapering off as the approved template says. */
   | { kind: 'stop'; taperTemplateId: string }
+  /** Leave it out of the routine with no taper: it is redundant, or it holds the goal back but is safe to stop at once. */
+  | { kind: 'drop' }
 
 export type SkeletonShelfProduct = {
   /** The shelf entry's id; a routine entry names it to keep using the product. */
@@ -152,12 +165,14 @@ export type GateCode =
   | 'parse'
   | 'unknown-product'
   | 'stopped-product'
+  | 'dropped-product'
   | 'over-reduced'
   | 'taper'
   | 'too-many-new'
   | 'frequency'
   | 'order'
   | 'gap'
+  | 'unused-shelf'
   | 'grounding'
   | 'wording'
 
