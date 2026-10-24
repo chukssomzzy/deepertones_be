@@ -52,6 +52,7 @@ export class FakeFaceScansRepository implements FaceScansRepository {
     if (options && (this.latest(scan.profileId)?.id ?? null) !== options.expectLatestId) return false
     this.scans.set(scan.id, {
       ...scan,
+      checkIn: scan.checkIn ?? false,
       state: 'analysing',
       reason: null,
       pcAnalysisTaskId: null,
@@ -110,6 +111,12 @@ export class FakeFaceScansRepository implements FaceScansRepository {
       )
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
     return first ? { ...first } : null
+  }
+
+  async scansUnderGoalSince(profileId: string, goal: Goal, since: Date): Promise<FaceScan[]> {
+    return [...this.scans.values()]
+      .filter((scan) => scan.profileId === profileId && scan.goalAtScan === goal && scan.createdAt.getTime() >= since.getTime())
+      .map((scan) => ({ ...scan }))
   }
 
   async updateFaceScan(id: string, expected: FaceScanState, patch: FaceScanPatch, options?: { onlyIfNoAnalysisTask?: true }): Promise<boolean> {

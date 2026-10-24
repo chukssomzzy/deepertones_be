@@ -1252,8 +1252,13 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `hd_skin_type`, 5 to 8 actions, the 16-unit HD tier. Why every goal measures the core four: the routine stage needs the whole picture (a glow user with spots needs
   products that do not clog pores; on darker skin dark marks are the most common concern), and a concern not measured on day one can never show change since
   day one; the goals come from `goals.vocabulary.ts` and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
-  `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`) and `CHASE_VERSION` (`chaseStartFor`, the 90-day
-  resume rule, `RESUME_DAYS`; issue #145). Change a table, bump its version.
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`), `CHASE_VERSION` (`chaseStartFor`, the 90-day
+  resume rule, `RESUME_DAYS`; issue #145) and `REVIEW_VERSION` (`REVIEW_WEEKS`, `reviewPointFor`, below; issue #145). Change a table, bump its version.
+- **The review table and the check-in scan's actions (issue #145).** `REVIEW_WEEKS: Record<Goal, number>` gives each goal its review week, 6 for
+  every goal today and every number a placeholder to tune later as a reviewed change. `reviewPointFor(dayOneAt, goal)` is day one plus that many
+  weeks, to the millisecond, keeping day one's time of day and never mutating it. `hdActionsForCheckIn()` is what the chase's wider check-in scan
+  asks Perfect Corp for: all nine `SHOWN_CONCERNS` plus `hd_skin_type`, ten actions, the HD 9-to-12 tier (20 units), against the 5 to 8 actions (16
+  units) of a normal scan.
 - **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
   three cut-offs (a score at or below one is in that band): `visible` (the `a-little` band's top), `some` and `clear`. Above `visible` is `faint` (`bandFor`
   returns it; `isVisible` means "not faint"). The values are in `THRESHOLDS` in `face-scans.tables.ts` (`face-scans.tables.test.ts` pins every boundary and
@@ -1287,7 +1292,8 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   from `face_scans`. `face_consents` (one row per profile: version, given and withdrawn times), `face_scans` (`state` `analysing` |
   `needs-retake` | `ready` | `failed`, `reason`, `goal_at_scan`, the Perfect Corp task ids and environment, `skin_age`, `skin_type`, `tables_version`,
   timestamps; indexed on `(profile_id, created_at)`; migration 0030 adds `reaper_checked_at` and indexes on both task-id columns and on
-  `(state, updated_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
+  `(state, updated_at)`; migration 0034 adds `check_in`, last, because the conditional `createFaceScan`'s `INSERT ... SELECT` lists columns by
+  position), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
   and, filled by the analysis, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
   `profile_fitzpatrick` (`I` to `VI` and the task id). The view shows the scores' words and the mask links, never the scores, and never the Fitzpatrick type. `reason` is `unavailable` or `consent-withdrawn` for a
   failed scan, and for a scan that needs a retake one of `REJECTED_PHOTO_REASONS` (`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`,
@@ -1311,15 +1317,29 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   non-failed scan (ordered as `latestForProfile` is, `created_at` then `rowid`) is still `expectLatestId` (null for none), and answers true or false. On D1
   that is one `db.batch` whose first statement is `INSERT ... SELECT ... WHERE (latest) IS ?` and whose photo inserts are `WHERE EXISTS` that scan row; the
   answer is the first statement's `meta.changes`. Writes in a batch are serialised, so exactly one of any number of simultaneous requests lands. The service
-  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` (`already-scanned-for-goal`). Without the
+  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` with the reason that fits the
+  verdict it already had (`check-in-taken` for a lost check-in, else `already-scanned-for-goal`). Without the
   option the write is unconditional. There is deliberately no unique index on (profile, goal): going back to an earlier goal is allowed once another scan came between.
-- **The policy** (`face-scans.policy.ts`, pure): `mayScanNow({ goal, latest })` allows a profile with no scan, or whose latest scan was
-  taken under another goal, and otherwise refuses with `already-scanned-for-goal`. The latest scan is the newest that has **not failed** (a
-  failed scan gave the profile nothing to look at), and ties go to the one written last. A later check-in schedule adds a third reason.
+- **The policy** (`face-scans.policy.ts`, pure; issue #145): `mayScanNow({ goal, history, scans, at })` is the due rule. A goal's chase (`chaseStartFor`,
+  read from `history`, the profile's goal rows oldest first) gets **one scan**, plus **one wider check-in scan** once it reaches its review point;
+  switching away and back inside the resume window can never unlock another. Only `scans` inside the current chase count (filtered by `goalAtScan`
+  and the chase start); a scan that **failed** counts as nothing (not the chase's scan, not its day one, not its check-in). It answers:
+  - `{ allowed: true, checkIn: false }` when the chase has no non-failed scan yet (a first chase, or a fresh restart after the 90-day window);
+  - `{ allowed: true, checkIn: true }` when the chase has a day one (its first **ready** scan) and `at` is at or past `reviewPointFor(dayOne.createdAt,
+    goal)`, and the chase has no non-failed check-in yet;
+  - otherwise refused: `already-scanned-for-goal` when the chase has a non-failed scan but no ready day one yet (the first scan is still analysing or
+    needs a retake); `check-in-not-due` (carrying `due`, the review point) before the review point; `check-in-taken` once the chase has had its check-in
+    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again).
+  `FaceScanService.create` calls it with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
+  repository.scansUnderGoalSince(profileId, goal, since)` (every scan under the goal since the chase start, whatever state, read without judging it:
+  the policy alone decides what it means). The 429's `details.reason` is one of the three above; `check-in-not-due` alone also carries
+  `details.checkInDueAt`, the ISO date of `reviewPointFor(dayOne.createdAt, goal)` (`createdAt`, never `updatedAt`).
+- **`rescanSuggested`** is the due rule itself, reused: `mayScanNow(...).allowed` for the profile's current goal, worked out once per list (no
+  goal, or typed words nobody sorted into one, suggests nothing). It is **derived when read**, never stored, and so is true exactly when `create`
+  would allow a scan now, whether a first scan or the chase's check-in.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
-  per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
-  a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
-  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
+  per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. The stored `check_in` flag (below) is read by the policy
+  alone and never appears in the view. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
   `mask-<concern>.png` of every concern measured for its goal, the core extras too) once more, so a mask written by an analysis that committed between the key read and the row delete does not
   stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
@@ -1366,7 +1386,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
-  is read once per list) and the goal history every ready scan's chase is read from (fetched once, only when the list holds a ready scan).
+  is read once per list) and the goal history (fetched once and shared: `rescanSuggested`'s own due check now needs it too, not only a ready scan's day one).
 - **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
   then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
   does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").
@@ -1382,9 +1402,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   `job_runs` claim acks the repeat; there is no table of webhook ids).
   - `upload`: does nothing for a scan that is gone, not `analysing`, or that already has its analysis task (a message taken over after its lease must not
     pay twice). It re-checks consent (no current consent fails the scan as `consent-withdrawn` with no Perfect Corp call), reads the front photo (missing:
-    `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
-    A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
-    never fails the scan.
+    `failed` / `unavailable`), uploads it, creates the skin analysis for `hdActionsForGoal` (a normal scan) or `hdActionsForCheckIn` (`scan.checkIn`) and
+    stores the task id and `pc_environment` at once. A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a
+    Fitzpatrick task; an error there is logged by name and never fails the scan.
   - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each concern measured for the goal (its own three and the core extras)
     that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
     `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
@@ -1393,7 +1413,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
     recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
     scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
-    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; every goal asks for 5 to 8 actions, so every scan is 16 units), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; a normal scan asks 5 to 8, so 16 units, and a check-in asks 10, so 20), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
     the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
     The step also logs, to learn what Perfect Corp really sends (no address, score or pixel): `{ outcome: 'front-photo-read', faceScanId, width, height }` once

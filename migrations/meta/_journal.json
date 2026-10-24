@@ -239,6 +239,13 @@
       "when": 1792611974999,
       "tag": "0033_shocking_paper_doll",
       "breakpoints": true
+    },
+    {
+      "idx": 34,
+      "version": "6",
+      "when": 1792778978901,
+      "tag": "0034_sudden_bromley",
+      "breakpoints": true
     }
   ]
 }
