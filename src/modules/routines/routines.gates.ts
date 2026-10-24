@@ -52,7 +52,8 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     const match = known[i]
     // A shelf product only fills the step it was matched to: a cleanser cannot be the moisturiser.
     const wrongStep = match?.kind === 'shelf' && match.product.step !== entry.step
-    if (!match || wrongStep || (match.kind === 'shelf' && match.product.verdict.kind === 'stop')) fail('unknown-product', entry.step)
+    const leftOut = match?.kind === 'shelf' && (match.product.verdict.kind === 'stop' || match.product.verdict.kind === 'drop')
+    if (!match || wrongStep || leftOut) fail('unknown-product', entry.step)
   })
 
   // 3. stopped-product
@@ -61,7 +62,13 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     if (match?.kind === 'shelf' && match.product.verdict.kind === 'stop') fail('stopped-product', entry.step)
   })
 
-  // 4. over-reduced
+  // 4. dropped-product
+  entries.forEach((entry, i) => {
+    const match = known[i]
+    if (match?.kind === 'shelf' && match.product.verdict.kind === 'drop') fail('dropped-product', entry.step)
+  })
+
+  // 5. over-reduced
   entries.forEach((entry, i) => {
     const match = known[i]
     if (match?.kind !== 'shelf' || match.product.verdict.kind !== 'reduce') return
@@ -71,7 +78,7 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     if (rank === undefined || max === undefined || rank > max) fail('over-reduced', entry.step)
   })
 
-  // 5. taper: exactly one per stopped product, each naming that product's own template.
+  // 6. taper: exactly one per stopped product, each naming that product's own template. A drop product has no taper, so one for it is an extra.
   const expectedTapers = new Map<string, string>()
   for (const p of skeleton.shelf) if (p.verdict.kind === 'stop') expectedTapers.set(p.id, p.verdict.taperTemplateId)
   const taperIds = new Set(tapers.map((t) => t.shelfProductId))
@@ -79,26 +86,26 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     tapers.length === expectedTapers.size && taperIds.size === tapers.length && tapers.every((t) => expectedTapers.get(t.shelfProductId) === t.templateId)
   if (!tapersMatch) fail('taper', null)
 
-  // 6. too-many-new. Only candidates the skeleton knows count: an invented code is already an unknown-product failure.
+  // 7. too-many-new. Only candidates the skeleton knows count: an invented code is already an unknown-product failure.
   const newCodes = new Set<string>()
   entries.forEach((entry, i) => {
     if (entry.product.kind === 'candidate' && known[i]) newCodes.add(entry.product.code)
   })
   if (newCodes.size > skeleton.limits.maxNewProducts) fail('too-many-new', null)
 
-  // 7. frequency
+  // 8. frequency
   for (const entry of entries) {
     const allowed = skeleton.limits.allowed[entry.step].includes(entry.frequency)
     if (!allowed || (entry.step === 'protect' && entry.frequency !== 'am')) fail('frequency', entry.step)
   }
 
-  // 8. order: each entry against the one before it, so one misplaced entry is one failure.
+  // 9. order: each entry against the one before it, so one misplaced entry is one failure.
   entries.forEach((entry, i) => {
     const previous = entries[i - 1]
     if (previous && ROUTINE_STEPS.indexOf(entry.step) < ROUTINE_STEPS.indexOf(previous.step)) fail('order', entry.step)
   })
 
-  // 9. gap: one failure per step, however it went wrong.
+  // 10. gap: one failure per step, however it went wrong.
   const gapFailed = new Set<RoutineStep>()
   for (const gap of skeleton.gaps) {
     const own = entries.filter((e) => e.step === gap.step)
@@ -120,7 +127,14 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     }
   }
 
-  // 10. grounding: only the product's own links, compared exactly. An unknown product has no links to compare with (already failed).
+  // 11. unused-shelf: a kept or reduced product that fills a step must be used at that step. One failure per product, in shelf order.
+  for (const product of skeleton.shelf) {
+    if (product.step === null || (product.verdict.kind !== 'keep' && product.verdict.kind !== 'reduce')) continue
+    const used = entries.some((e) => e.step === product.step && e.product.kind === 'shelf' && e.product.id === product.id)
+    if (!used) fail('unused-shelf', product.step)
+  }
+
+  // 12. grounding: only the product's own links, compared exactly. An unknown product has no links to compare with (already failed).
   entries.forEach((entry, i) => {
     const match = known[i]
     if (entry.product.kind === 'none') {
@@ -135,7 +149,7 @@ export const checkRoutine = (skeleton: RoutineSkeleton, routine: unknown): GateF
     if (!entry.grounding.every((link) => own.includes(link))) fail('grounding', entry.step)
   })
 
-  // 11. wording
+  // 13. wording
   for (const entry of entries) if (hasForbiddenWording(entry.reason)) fail('wording', entry.step)
   if (hasForbiddenWording(expectation)) fail('wording', null)
 
