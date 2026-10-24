@@ -101,6 +101,7 @@ type FaceScanResultView = {
     concerns: { concern: string; change: string; words: string }[]
     skinAge: { change: string; words: string } | null
   }
+  nextGoal: string | null
   tablesVersion: string
 }
 type ConsentView = { version: number; givenAt: string; withdrawnAt: string | null; current: boolean }
@@ -1013,6 +1014,7 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
       skinType: 'dry',
       skinAge: { years: 31, words: 'Your skin looks about 31' },
       sinceDayOne: null,
+      nextGoal: null,
       tablesVersion: TABLES_VERSION,
     })
   })

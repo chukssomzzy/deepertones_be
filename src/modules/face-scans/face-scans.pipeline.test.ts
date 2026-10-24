@@ -191,6 +191,7 @@ const setup = (options: SetupOptions = {}) => {
     service,
     repository,
     goals,
+    goalReader,
     photos,
     jobs,
     pushJobs,
@@ -2946,6 +2947,111 @@ describe('FaceScanService: the check-in scan at the review point', () => {
     expect(rows.map((row) => row.concern).sort()).toEqual([...Object.keys(checkInScores), 'all'].sort())
     expect(rows.find((row) => row.concern === 'hd_redness')).toMatchObject({ region: 'whole', rawScore: 48 })
     expect(rows.find((row) => row.concern === 'hd_dark_circle')).toMatchObject({ region: 'whole', rawScore: 36 })
+  })
+})
+
+// The next-goal suggestion (issue #145): a check-in's result carries the id of the goal to look at next, worked out by the pure rule over the check-in's
+// nine concerns and day one's, and whether the profile ever wanted lighter skin. Only the id: the view never says what was seen to suggest it.
+describe('FaceScanService.getFaceScan: the next goal after a check-in', () => {
+  /** Glow's own three at day one; a check-in that lifts radiance 6 points (46 against 40) has got fainter for glow. */
+  const DAY_ONE = glowScores(40, 50, 55)
+  /** A check-in's nine concerns: glow's radiance fainter, every other concern faint (above its visible cut-off) except those given. */
+  const checkInOf = (over: Record<string, number> = {}) =>
+    analysisOf({ hd_radiance: 46, hd_moisture: 50, hd_texture: 55, hd_age_spot: 95, hd_acne: 90, hd_pore: 90, hd_oiliness: 95, hd_redness: 99, hd_dark_circle: 80, ...over })
+
+  it('carries the goal whose own concerns score highest on a check-in where the goal\'s concerns have got fainter', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    // Pores at 20 are clear (3), which only clear-skin has among glow's other goals.
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    expect((await resultOf(ctx, checkIn)).nextGoal).toBe('clear-skin')
+  })
+
+  it('carries null on a check-in where nothing else can be seen, and when the goal\'s concerns have not got fainter', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const nothingElse = await checkInReadyUnder(ctx, 'glow', checkInOf(), dayOne)
+
+    const ctx2 = setup()
+    const dayOne2 = await readyUnder(ctx2, 'glow', analysisOf(DAY_ONE))
+    const notFainter = await checkInReadyUnder(ctx2, 'glow', checkInOf({ hd_pore: 20, hd_radiance: 40 }), dayOne2)
+
+    expect((await resultOf(ctx, nothingElse)).nextGoal).toBeNull()
+    expect((await resultOf(ctx2, notFainter)).nextGoal).toBeNull()
+  })
+
+  it('carries null on a normal scan, even one whose concerns outside the goal could be seen', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf({ ...DAY_ONE, hd_pore: 20 }))
+
+    const result = await resultOf(ctx, dayOne)
+
+    expect(result).toHaveProperty('nextGoal', null)
+  })
+
+  it('carries null on a scan under another goal, which is the first of its own chase', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const brighter = await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+
+    expect(await resultOf(ctx, brighter)).toHaveProperty('nextGoal', null)
+  })
+
+  it('is the same when the scan is read from the list as when it is read on its own', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    const listed = (await listScans(ctx)).find((scan) => scan.id === checkIn)
+
+    expect(listed.result.nextGoal).toBe('clear-skin')
+  })
+
+  // Dark circles at 45 are clear (3); pores at 55 are a-little (1). Brighter has the dark circles, clear-skin the pores, so only the wish decides.
+  describe('the wish to be lighter, read from the goal history', () => {
+    const lighterOrNot = async (wantsLighter: boolean) => {
+      const ctx = setup()
+      ctx.goalReader.respondWith(() => ({ goal: 'brighter', wantsLighter }))
+      const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+      ctx.advanceClock(MINUTE)
+      await asUser(() => ctx.goals.set({ text: 'I want my skin lighter' }))
+      ctx.advanceClock(MINUTE)
+      const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_dark_circle: 45, hd_pore: 55 }), dayOne)
+      return (await resultOf(ctx, checkIn)).nextGoal
+    }
+
+    it('suggests brighter when any goal the profile set was read as wanting lighter', async () => {
+      expect(await lighterOrNot(true)).toBe('brighter')
+    })
+
+    it('never suggests brighter when no goal the profile set wanted lighter', async () => {
+      expect(await lighterOrNot(false)).toBe('clear-skin')
+    })
+
+    it('still counts the wish after the profile moved on to another goal', async () => {
+      const ctx = setup()
+      ctx.goalReader.respondWith(() => ({ goal: 'brighter', wantsLighter: true }))
+      const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+      ctx.advanceClock(MINUTE)
+      await asUser(() => ctx.goals.set({ text: 'I want my skin lighter' }))
+      ctx.advanceClock(MINUTE)
+      await setGoal(ctx, 'calm-repair')
+      const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_dark_circle: 45, hd_pore: 55 }), dayOne)
+
+      expect((await resultOf(ctx, checkIn)).nextGoal).toBe('brighter')
+    })
+  })
+
+  it('names only the goal: the value is one of the goals and the view says nothing of why', async () => {
+    const ctx = setup()
+    const dayOne = await readyUnder(ctx, 'glow', analysisOf(DAY_ONE))
+    const checkIn = await checkInReadyUnder(ctx, 'glow', checkInOf({ hd_pore: 20 }), dayOne)
+
+    const result = await resultOf(ctx, checkIn)
+
+    expect(GOALS).toContain(result.nextGoal)
+    expect(Object.keys(result).sort()).toEqual(['alsoNoticed', 'nextGoal', 'nothingStandsOut', 'seen', 'sinceDayOne', 'skinAge', 'skinType', 'tablesVersion'])
   })
 })
 

@@ -5,6 +5,7 @@ import {
   CHASE_VERSION,
   CONCERN_IDS,
   GOAL_CONCERNS_VERSION,
+  NEXT_GOAL_VERSION,
   NOTHING_STANDS_OUT,
   RESUME_DAYS,
   REVIEW_VERSION,
@@ -25,6 +26,7 @@ import {
   hdActionsForGoal,
   isVisible,
   measuredConcernsForGoal,
+  nextGoalFor,
   resultView,
   reviewPointFor,
   SHOWN_CONCERNS as EXPORTED_SHOWN_CONCERNS,
@@ -110,6 +112,7 @@ describe('the version constants', () => {
     ['CHANGE_VERSION', CHANGE_VERSION, 1],
     ['CHASE_VERSION', CHASE_VERSION, 1],
     ['REVIEW_VERSION', REVIEW_VERSION, 1],
+    ['NEXT_GOAL_VERSION', NEXT_GOAL_VERSION, 1],
   ])('%s is %s, the number a result carries so a client can tell which rules wrote what it shows', (_name, version, expected) => {
     expect(version).toBe(expected)
   })
@@ -117,8 +120,8 @@ describe('the version constants', () => {
   // Visibility v3 gives each concern its own cut-offs (v2 showed every goal concern with one shared set) and wording v2 adds the faint words.
   // Concerns v2 measures the core set on every scan. The chase rule and the review weeks (issue #145) join the others, so a stored result says
   // which resume window worked out its day one and which review weeks were in force.
-  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2, then the chase rule and the review weeks last', () => {
-    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1,review:1')
+  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2, then the chase rule, the review weeks and the next-goal rule last', () => {
+    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1,review:1,next-goal:1')
   })
 })
 
@@ -1426,5 +1429,248 @@ describe('reviewPointFor: when a goal\'s chase is looked at again', () => {
 
   it('is well inside the 90-day resume window, so a chase cannot lapse before its own review point', () => {
     expect(reviewPointFor(DAY_ONE, 'glow').getTime() - DAY_ONE.getTime()).toBeLessThan(RESUME_DAYS * DAY)
+  })
+})
+
+// The next-goal rule (issue #145): at a chase's check-in, once the goal's own concerns have got fainter, which other goal would the face most plausibly
+// want next. Pure and without a model: the same rows always give the same goal. Every expectation is a literal written from the brief.
+describe('nextGoalFor: which goal to suggest after a check-in', () => {
+  type Row = { concern: string; region: string; rawScore: number }
+  type Input = Parameters<typeof nextGoalFor>[0]
+
+  /** A raw_score in each band, per concern, written out from the cut-offs above (faint is above `visible`). */
+  const AT: Record<ShownConcern, Record<'faint' | 'a-little' | 'some' | 'clear', number>> = {
+    hd_acne: { faint: 90, 'a-little': 65, some: 58, clear: 50 },
+    hd_age_spot: { faint: 95, 'a-little': 85, some: 80, clear: 70 },
+    hd_pore: { faint: 90, 'a-little': 55, some: 40, clear: 20 },
+    hd_oiliness: { faint: 95, 'a-little': 80, some: 70, clear: 60 },
+    hd_redness: { faint: 99, 'a-little': 90, some: 75, clear: 60 },
+    hd_radiance: { faint: 90, 'a-little': 72, some: 65, clear: 60 },
+    hd_texture: { faint: 60, 'a-little': 35, some: 25, clear: 15 },
+    hd_dark_circle: { faint: 80, 'a-little': 58, some: 50, clear: 45 },
+    hd_moisture: { faint: 60, 'a-little': 32, some: 29, clear: 25 },
+  }
+  type BandName = keyof (typeof AT)['hd_acne']
+
+  /** Whole-face rows for all nine concerns: every one faint, then the bands given. */
+  const rowsOf = (bands: Partial<Record<ShownConcern, BandName>> = {}): Row[] =>
+    SHOWN_CONCERNS.map((concern) => ({ concern, region: 'whole', rawScore: AT[concern][bands[concern] ?? 'faint'] }))
+  /** The day-one rows: a glow, even-tone, ... chase's own concerns, all at a middling score a check-in can rise or fall from. */
+  const dayOneRows = (scores: Partial<Record<ShownConcern, number>>): Row[] => Object.entries(scores).map(([concern, rawScore]) => ({ concern, region: 'whole', rawScore }))
+  const call = (over: Partial<Input> & Pick<Input, 'goal'>) =>
+    nextGoalFor({ results: rowsOf(), dayOneResults: [], everWantedLighter: false, ...over })
+
+  // Glow's own three are radiance, moisture and texture. Day one had radiance at 50; a check-in rows set radiance to 56 (+6, fainter) or less.
+  const GLOW_DAY_ONE = dayOneRows({ hd_radiance: 50, hd_moisture: 50, hd_texture: 50 })
+  /** Glow's check-in rows with radiance fainter (+6) and then the bands given. */
+  const fainterGlow = (bands: Partial<Record<ShownConcern, BandName>>): Row[] => rowsOf(bands).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore: 56 } : row.concern === 'hd_moisture' || row.concern === 'hd_texture' ? { ...row, rawScore: 50 } : row))
+
+  describe('the gate: only after the goal\'s own concerns have got fainter', () => {
+    it('gives null when none of the goal\'s concerns is fainter, however plainly other goals\' concerns can be seen', () => {
+      const results = rowsOf({ hd_pore: 'clear', hd_acne: 'clear' }).map((row) => ({ ...row, rawScore: GLOW_DAY_ONE.find((d) => d.concern === row.concern)?.rawScore ?? row.rawScore }))
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+    })
+
+    it('gives null when the goal\'s concerns have only got more visible', () => {
+      const results = fainterGlow({ hd_pore: 'clear' }).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore: 40 } : row))
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+    })
+
+    it('suggests a goal when just one of the three concerns is fainter', () => {
+      const results = rowsOf({ hd_pore: 'clear' }).map((row) => (row.concern === 'hd_texture' ? { ...row, rawScore: 56 } : row.concern === 'hd_radiance' || row.concern === 'hd_moisture' ? { ...row, rawScore: 50 } : row))
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE })).toBe('clear-skin')
+    })
+
+    it('counts a rise of 6 as fainter but a rise of exactly 5 as within the noise', () => {
+      const withRadiance = (rawScore: number) => fainterGlow({ hd_pore: 'clear' }).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore } : row))
+
+      expect(call({ goal: 'glow', results: withRadiance(55), dayOneResults: GLOW_DAY_ONE })).toBeNull()
+      expect(call({ goal: 'glow', results: withRadiance(55.5), dayOneResults: GLOW_DAY_ONE })).toBe('clear-skin')
+    })
+
+    it('ignores a concern outside the goal getting fainter', () => {
+      // Acne rose 30 points since day one, but it is not one of glow's three, and glow's own are flat.
+      const dayOne = [...GLOW_DAY_ONE, ...dayOneRows({ hd_acne: 40 })]
+      const results = rowsOf({ hd_pore: 'clear' }).map((row) => (['hd_radiance', 'hd_moisture', 'hd_texture'].includes(row.concern) ? { ...row, rawScore: 50 } : row.concern === 'hd_acne' ? { ...row, rawScore: 70 } : row))
+
+      expect(call({ goal: 'glow', results, dayOneResults: dayOne })).toBeNull()
+    })
+
+    it('gives null when day one has no row for the concern, as there is nothing to be fainter than', () => {
+      expect(call({ goal: 'glow', results: fainterGlow({ hd_pore: 'clear' }), dayOneResults: [] })).toBeNull()
+    })
+
+    it('reads the whole-face row where there is one, ignoring the regions', () => {
+      const results = fainterGlow({ hd_pore: 'clear' }).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore: 50 } : row))
+      results.push({ concern: 'hd_radiance', region: 'cheek', rawScore: 90 })
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+    })
+
+    it('reads the first region by name when there is no whole-face row', () => {
+      const regions = (left: number, right: number): Row[] => [
+        { concern: 'hd_radiance', region: 'right-cheek', rawScore: right },
+        { concern: 'hd_radiance', region: 'left-cheek', rawScore: left },
+      ]
+      const withoutRadiance = (rows: Row[]) => rows.filter((row) => row.concern !== 'hd_radiance')
+      const pore = fainterGlow({ hd_pore: 'clear' })
+      const dayOne = [...withoutRadiance(GLOW_DAY_ONE), ...regions(50, 30)]
+
+      // left-cheek sorts first: flat at 50 while only right-cheek rose.
+      expect(call({ goal: 'glow', results: [...withoutRadiance(pore), ...regions(50, 60)], dayOneResults: dayOne })).toBeNull()
+      // left-cheek rose.
+      expect(call({ goal: 'glow', results: [...withoutRadiance(pore), ...regions(60, 30)], dayOneResults: dayOne })).toBe('clear-skin')
+    })
+  })
+
+  describe('scoring the other goals', () => {
+    it.each([
+      ['clear', 'clear-skin'],
+      ['some', 'clear-skin'],
+      ['a-little', 'clear-skin'],
+      ['faint', null],
+    ] as const)('counts a concern that is %s as visible only when it is not faint', (band, expected) => {
+      expect(call({ goal: 'glow', results: fainterGlow({ hd_pore: band }), dayOneResults: GLOW_DAY_ONE })).toBe(expected)
+    })
+
+    // Brighter is the only goal with dark circles, and (with the wish) the only way to put them against clear-skin's pores and shine, so the two are
+    // set against each other. The weights are clear 3, some 2, a-little 1, faint 0, pinned by sums that tie or just differ.
+    const lighter = (bands: Partial<Record<ShownConcern, BandName>>) => call({ goal: 'glow', results: fainterGlow(bands), dayOneResults: GLOW_DAY_ONE, everWantedLighter: true })
+
+    it('weighs clear as 3: one clear concern ties with a some (2) plus an a-little (1), and the tie goes to the earlier goal', () => {
+      expect(lighter({ hd_dark_circle: 'clear', hd_pore: 'some', hd_oiliness: 'a-little' })).toBe('clear-skin')
+    })
+
+    it('weighs clear as more than two a-littles (2)', () => {
+      expect(lighter({ hd_dark_circle: 'clear', hd_pore: 'a-little', hd_oiliness: 'a-little' })).toBe('brighter')
+    })
+
+    it('weighs some as 2: it ties with two a-littles, and beats one', () => {
+      expect(lighter({ hd_dark_circle: 'some', hd_pore: 'a-little', hd_oiliness: 'a-little' })).toBe('clear-skin')
+      expect(lighter({ hd_dark_circle: 'some', hd_pore: 'a-little' })).toBe('brighter')
+    })
+
+    it('weighs a-little as 1: one beats a faint (0) and loses to a some (2)', () => {
+      expect(lighter({ hd_dark_circle: 'a-little' })).toBe('brighter')
+      expect(lighter({ hd_dark_circle: 'a-little', hd_pore: 'some' })).toBe('clear-skin')
+    })
+
+    it('adds the three concerns of a goal together', () => {
+      // clear-skin: acne a-little + pore a-little + oiliness a-little = 3, against brighter dark circle some = 2.
+      expect(lighter({ hd_dark_circle: 'some', hd_acne: 'a-little', hd_pore: 'a-little', hd_oiliness: 'a-little' })).toBe('clear-skin')
+    })
+
+    it('leaves out the concerns the current goal shares, scoring only each candidate\'s other concerns', () => {
+      // Even-tone's age spot, redness and radiance; fade-dark-marks, brighter and calm-repair share some. Without the exclusion calm-repair (redness 3 + moisture 2
+      // + texture 1) wins; with it, calm-repair has moisture and texture only (3), and glow has the same (3), so the earlier, glow, wins.
+      const dayOne = dayOneRows({ hd_age_spot: 50, hd_redness: 50, hd_radiance: 50 })
+      const results = rowsOf({ hd_age_spot: 'clear', hd_redness: 'clear', hd_moisture: 'some', hd_texture: 'a-little' }).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore: 56 } : row))
+
+      expect(call({ goal: 'even-tone', results, dayOneResults: dayOne })).toBe('glow')
+    })
+
+    it('gives null when only the concerns the current goal shares can be seen', () => {
+      const dayOne = dayOneRows({ hd_age_spot: 50, hd_redness: 50, hd_radiance: 50 })
+      const results = rowsOf({ hd_age_spot: 'clear', hd_redness: 'clear' }).map((row) => (row.concern === 'hd_radiance' ? { ...row, rawScore: 56 } : row))
+
+      expect(call({ goal: 'even-tone', results, dayOneResults: dayOne })).toBeNull()
+    })
+
+    it('goes to the highest score', () => {
+      // clear-skin pore some (2) against calm-repair... glow current: even-tone redness clear (3).
+      expect(call({ goal: 'glow', results: fainterGlow({ hd_pore: 'some', hd_redness: 'clear' }), dayOneResults: GLOW_DAY_ONE })).toBe('even-tone')
+    })
+
+    it('breaks a tie by the fixed goal order, here taking the earliest of three that tie', () => {
+      // Current clear-skin (acne, pore, oiliness): texture clear gives fade-dark-marks, glow and calm-repair 3 each.
+      const dayOne = dayOneRows({ hd_acne: 50, hd_pore: 50, hd_oiliness: 50 })
+      const results = rowsOf({ hd_texture: 'clear' }).map((row) => (row.concern === 'hd_acne' ? { ...row, rawScore: 56 } : row))
+
+      expect(call({ goal: 'clear-skin', results, dayOneResults: dayOne })).toBe('fade-dark-marks')
+    })
+
+    it('breaks the same tie the same way whatever order the rows come in', () => {
+      const dayOne = dayOneRows({ hd_acne: 50, hd_pore: 50, hd_oiliness: 50 })
+      const results = rowsOf({ hd_texture: 'clear' }).map((row) => (row.concern === 'hd_acne' ? { ...row, rawScore: 56 } : row))
+
+      expect(call({ goal: 'clear-skin', results: [...results].reverse(), dayOneResults: [...dayOne].reverse() })).toBe('fade-dark-marks')
+    })
+
+    it('gives null when every score is 0', () => {
+      expect(call({ goal: 'glow', results: fainterGlow({}), dayOneResults: GLOW_DAY_ONE, everWantedLighter: true })).toBeNull()
+    })
+
+    it('counts a concern with no row as 0', () => {
+      const withoutPore = fainterGlow({ hd_pore: 'clear' }).filter((row) => row.concern !== 'hd_pore')
+      const justRadiance = [{ concern: 'hd_radiance', region: 'whole', rawScore: 56 }]
+
+      expect(call({ goal: 'glow', results: withoutPore, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+      expect(call({ goal: 'glow', results: justRadiance, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+    })
+
+    it('scores from the whole-face row where there is one, and the first region by name where there is not', () => {
+      const wholeFaint = [...fainterGlow({}).filter((row) => row.concern !== 'hd_pore'), { concern: 'hd_pore', region: 'whole', rawScore: AT.hd_pore.faint }, { concern: 'hd_pore', region: 'a-cheek', rawScore: AT.hd_pore.clear }]
+      const regionsOnly = [...fainterGlow({}).filter((row) => row.concern !== 'hd_pore'), { concern: 'hd_pore', region: 'b-cheek', rawScore: AT.hd_pore.faint }, { concern: 'hd_pore', region: 'a-cheek', rawScore: AT.hd_pore.clear }]
+
+      expect(call({ goal: 'glow', results: wholeFaint, dayOneResults: GLOW_DAY_ONE })).toBeNull()
+      expect(call({ goal: 'glow', results: regionsOnly, dayOneResults: GLOW_DAY_ONE })).toBe('clear-skin')
+    })
+  })
+
+  describe('brighter', () => {
+    it('is never suggested unless the profile ever wanted lighter, however plainly its concerns can be seen', () => {
+      const results = fainterGlow({ hd_dark_circle: 'clear' })
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE, everWantedLighter: false })).toBeNull()
+    })
+
+    it('is suggested when the profile ever wanted lighter and its concerns score highest', () => {
+      const results = fainterGlow({ hd_dark_circle: 'clear' })
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE, everWantedLighter: true })).toBe('brighter')
+    })
+
+    it('does not outrank a goal that scores higher just because the wish was made', () => {
+      const results = fainterGlow({ hd_dark_circle: 'a-little', hd_pore: 'clear' })
+
+      expect(call({ goal: 'glow', results, dayOneResults: GLOW_DAY_ONE, everWantedLighter: true })).toBe('clear-skin')
+    })
+
+    it('never returns the current goal, whichever goal that is, even with every other concern plain to see', () => {
+      for (const goal of GOALS) {
+        const own = GOAL_CONCERNS[goal]
+        const dayOne = dayOneRows(Object.fromEntries(own.map((concern) => [concern, 50])))
+        const results = SHOWN_CONCERNS.map((concern) => ({ concern, region: 'whole', rawScore: (own as readonly string[]).includes(concern) ? 56 : AT[concern].clear }))
+
+        const next = call({ goal, results, dayOneResults: dayOne, everWantedLighter: true })
+
+        expect(next).not.toBeNull()
+        expect(next).not.toBe(goal)
+      }
+    })
+  })
+
+  describe('purity', () => {
+    it('gives the same answer for the same inputs, every time', () => {
+      const input = { goal: 'glow' as const, results: fainterGlow({ hd_pore: 'some', hd_redness: 'some' }), dayOneResults: GLOW_DAY_ONE, everWantedLighter: true }
+
+      expect([nextGoalFor(input), nextGoalFor(input), nextGoalFor(input)]).toEqual(['clear-skin', 'clear-skin', 'clear-skin'])
+    })
+
+    it('does not change its inputs, and reads them frozen', () => {
+      const results = fainterGlow({ hd_pore: 'some' })
+      results.push({ concern: 'hd_redness', region: 'right', rawScore: 70 }, { concern: 'hd_redness', region: 'left', rawScore: 71 })
+      const dayOneResults = [...GLOW_DAY_ONE]
+      const before = structuredClone({ results, dayOneResults })
+      for (const row of [...results, ...dayOneResults]) Object.freeze(row)
+      Object.freeze(results)
+      Object.freeze(dayOneResults)
+
+      expect(nextGoalFor({ goal: 'glow', results, dayOneResults, everWantedLighter: true })).toBe('clear-skin')
+      expect({ results, dayOneResults }).toEqual(before)
+    })
   })
 })
