@@ -1018,7 +1018,7 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
   })
 
   it('shows the visible core extras as also noticed, in core order with a working overlay link each, and leaves out a faint one', async () => {
-    const guest = await readyGuest('glow')
+    const guest = await readyUser('glow')
     const stub = stubPerfectCorp()
     const view = await createdFace(guest)
     await runFaceJob(queued.at(-1))
