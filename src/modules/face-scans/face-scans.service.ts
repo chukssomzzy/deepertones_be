@@ -29,7 +29,22 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { chaseStartFor, concernsForGoal, hdActionsForGoal, measuredConcernsForGoal, noticedConcerns, RESUME_DAYS, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import {
+  chaseStartFor,
+  concernsForGoal,
+  hdActionsForCheckIn,
+  hdActionsForGoal,
+  measuredConcernsForGoal,
+  noticedConcerns,
+  type ResultView,
+  RESUME_DAYS,
+  resultView,
+  SHOWN_CONCERNS,
+  shownConcerns,
+  type SkinTypeLabel,
+  skinTypeLabel,
+  TABLES_VERSION,
+} from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -62,7 +77,7 @@ export type FaceScanView = {
   goal: Goal
   createdAt: Date
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
-  /** True when the profile's latest scan was taken under a goal other than its current one. Worked out when read, never stored. */
+  /** True when the due rule would allow a scan now, under the profile's current goal (issue #145). Worked out when read, never stored. */
   rescanSuggested: boolean
   result: ResultView | null
 }
@@ -94,14 +109,16 @@ export type FaceScanServiceDeps = {
 
 const POSITIONS: readonly FacePhotoPosition[] = ['front', 'right', 'left']
 
-/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). Every goal asks for 5 to 8. */
+/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). A normal scan asks 5 to 8 (16 units); a check-in asks 10 (20 units). */
 const unitsForActions = (actions: number): number => (actions <= 4 ? 12 : actions <= 8 ? 16 : actions <= 12 ? 20 : 22)
 /** What a Fitzpatrick read costs. */
 const FITZPATRICK_UNITS = 10
 
 export class FaceScanService {
   private static faceScanNotFound = () => new NotFoundError('FACE_SCAN_NOT_FOUND', 'Face scan not found')
-  private static notDue = (reason: 'already-scanned-for-goal') => new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', { reason })
+  /** `checkInDueAt` is set only for `check-in-not-due`, the one reason that carries a date the app can show. */
+  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken', checkInDueAt?: string) =>
+    new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', checkInDueAt ? { reason, checkInDueAt } : { reason })
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static notAwaitingRetake = () => new ConflictError('FACE_SCAN_NOT_AWAITING_RETAKE', 'This face scan is not waiting for a retake')
   private static consentRequired = () => new ConflictError('FACE_CONSENT_REQUIRED', 'Say yes to the face photo consent first')
@@ -179,16 +196,25 @@ export class FaceScanService {
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    // `latest` first, before the due rule: the write below guards against a scan stored since by checking this same `latest` is still the
+    // profile's latest at write time. Reading it after the due rule would let two requests, each catching the other's write in a fresh
+    // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote. `now` comes after the reads, so a
+    // rival scan stored in the middle of them is stamped no later than `now` and still counts (the policy has no upper bound either).
     const latest = await this.repository.latestForProfile(profileId)
-    const verdict = mayScanNow({ goal, latest })
-    if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason)
+    const history = await this.goals.history()
+    // The chase start only needs a time to measure the resume window from; the verdict and the stored scan use the later `now`.
+    const readAt = this.now()
+    const since = chaseStartFor(history, goal, readAt) ?? readAt
+    const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
+    const now = this.now()
+    const verdict = mayScanNow({ goal, history, scans, at: now })
+    if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
 
     const valid = POSITIONS.flatMap((position) => {
       const photo = photos[position]
       return photo ? [{ position, image: this.checkPhoto(photo) }] : []
     })
 
-    const now = this.now()
     const scanId = this.newId()
     const rows: NewFacePhoto[] = valid.map(({ position }) => ({
       faceScanId: scanId,
@@ -206,7 +232,11 @@ export class FaceScanService {
       if (failed) throw failed.reason
       // Two requests can both read "not scanned yet" before either writes, so the write itself refuses the second: it stores the scan only while the
       // latest scan is still the one read above.
-      const stored = await this.repository.createFaceScan({ id: scanId, userId, profileId, goalAtScan: goal, createdAt: now }, rows, { expectLatestId: latest?.id ?? null })
+      const stored = await this.repository.createFaceScan(
+        { id: scanId, userId, profileId, goalAtScan: goal, checkIn: verdict.checkIn, createdAt: now },
+        rows,
+        { expectLatestId: latest?.id ?? null },
+      )
       if (!stored) refused = true
     } catch (error) {
       await this.photos.deleteMany(keys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: scanId, error: describeUnexpectedError(cleanup) }))
@@ -215,7 +245,7 @@ export class FaceScanService {
     if (refused) {
       // Lost to a request that stored a scan first: its photos are the ones that count.
       await this.photos.deleteMany(keys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: scanId, error: describeUnexpectedError(cleanup) }))
-      throw FaceScanService.notDue('already-scanned-for-goal')
+      throw FaceScanService.notDue(verdict.checkIn ? 'check-in-taken' : 'already-scanned-for-goal')
     }
 
     try {
@@ -249,20 +279,21 @@ export class FaceScanService {
 
   /**
    * The profile's latest scans, newest first, in every state, each the view `getFaceScan` gives. Needs no consent and no goal, so it still works after the consent
-   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
+   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them; it now needs the goal history too
+   * (the due rule reads it), so the history is fetched once and shared with the day-one comparison every ready scan in the list makes.
    */
   async listFaceScans(): Promise<FaceScanView[]> {
     const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
-    const rescanSuggested = await this.rescanSuggested(profileId)
-    // Scans under one goal share a day one, so its scores are read once for the list.
-    const dayOneResults = new Map<string, Promise<FaceResult[]>>()
-    // Every ready scan in the list reads its chase from the same goal history, so it is fetched once and shared; a list of scans still
-    // analysing, needing a retake or failed never needs it.
-    const history = scans.some((scan) => scan.state === 'ready') ? this.goals.history() : undefined
+    // A profile with no goal has no chase to rank scans against, so the history is read only when there is a goal.
+    const goal = await this.currentGoal()
+    const history = goal === null ? undefined : this.goals.history()
     // Its first reader awaits it only after that scan's photo links, so a failed read is caught here meanwhile; each reader still sees it fail.
     history?.catch(() => undefined)
+    const rescanSuggested = await this.rescanSuggested(profileId, goal, history)
+    // Scans under one goal share a day one, so its scores are read once for the list.
+    const dayOneResults = new Map<string, Promise<FaceResult[]>>()
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
   }
 
@@ -477,7 +508,7 @@ export class FaceScanService {
     }
     await this.guarded(scan, async () => {
       const fileId = await this.perfectCorp.uploadFile(photo.bytes, { contentType: 'image/jpeg', fileName: 'front.jpg' })
-      const taskId = await this.perfectCorp.createSkinAnalysis({ fileId, actions: hdActionsForGoal(scan.goalAtScan) })
+      const taskId = await this.perfectCorp.createSkinAnalysis({ fileId, actions: FaceScanService.actionsFor(scan) })
       const now = this.now()
       // At once, before anything else can fail: a task Perfect Corp holds that we do not know of is one we cannot fetch or pay for. Only while the scan has no
       // task: of two uploads of one scan the first to store keeps its task.
@@ -518,7 +549,7 @@ export class FaceScanService {
       // Perfect Corp charges when the task succeeds, not when we store the result, so the spend is recorded now: a mask that will not download, a scan deleted
       // meanwhile or a failed write must not leave a charge off the books. The ledger is keyed by the task, so a retry does not record it twice.
       try {
-        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(hdActionsForGoal(scan.goalAtScan).length), key: taskId })
+        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(FaceScanService.actionsFor(scan).length), key: taskId })
       } catch (error) {
         // Not worth losing the result for: the books are caught up from the ledger's side, and a retry would only fail the same way.
         console.error({ outcome: 'spend-record-failed', faceScanId: id, taskId, error: describeUnexpectedError(error) })
@@ -571,11 +602,19 @@ export class FaceScanService {
     await this.publishFrame(id, 'ready', null, { done: true })
   }
 
-  /** A goal concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores, links or photo. */
+  /** What to ask Perfect Corp for: every concern the app can show at a check-in, else what the goal measures. */
+  private static actionsFor(scan: Pick<FaceScan, 'goalAtScan' | 'checkIn'>): string[] {
+    return scan.checkIn ? hdActionsForCheckIn() : hdActionsForGoal(scan.goalAtScan)
+  }
+
+  /**
+   * A concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores,
+   * links or photo. A check-in reads all nine concerns, so it is watched for all nine; a normal scan only for the goal's own three.
+   */
   private static warnMissingConcerns(scan: FaceScan, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): void {
     const present = new Set(analysis.concerns.map((item) => item.concern))
     const returned = [...present].sort()
-    for (const concern of concernsForGoal(scan.goalAtScan)) {
+    for (const concern of scan.checkIn ? SHOWN_CONCERNS : concernsForGoal(scan.goalAtScan)) {
       if (!present.has(concern)) console.warn({ outcome: 'face-scan-concern-missing', faceScanId: scan.id, concern, returned, skipped: analysis.skipped })
     }
   }
@@ -852,17 +891,27 @@ export class FaceScanService {
     return read
   }
 
-  /** Whether the profile's latest scan was taken under another goal than the one it has now. No goal, or typed words nobody sorted into one, suggests nothing. */
-  private async rescanSuggested(profileId: string): Promise<boolean> {
-    const goal = await this.goals.current().then(
+  private async currentGoal(): Promise<Goal | null> {
+    return this.goals.current().then(
       (view) => view.goal,
       (error: unknown) => {
         if (error instanceof NotFoundError) return null
         throw error
       },
     )
+  }
+
+  /**
+   * Whether the due rule would allow a scan right now, under the profile's current goal (issue #145): the policy's own "a scan is allowed",
+   * reused as the app's rescan hint. No goal, or typed words nobody sorted into one, suggests nothing.
+   */
+  private async rescanSuggested(profileId: string, known?: Goal | null, history?: Promise<GoalRow[]>): Promise<boolean> {
+    const goal = known === undefined ? await this.currentGoal() : known
     if (goal === null) return false
-    const latest = await this.repository.latestForProfile(profileId)
-    return latest !== null && latest.goalAtScan !== goal
+    const rows = await (history ?? this.goals.history())
+    const now = this.now()
+    const since = chaseStartFor(rows, goal, now) ?? now
+    const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
+    return mayScanNow({ goal, history: rows, scans, at: now }).allowed
   }
 }

@@ -61,19 +61,20 @@ export class D1FaceScansRepository {
   async createFaceScan(scan: NewFaceScan, photos: NewFacePhoto[], options?: { expectLatestId: string | null }): Promise<boolean> {
     if (!options) {
       const statements: BatchItem<'sqlite'>[] = [
-        this.db.insert(faceScans).values({ ...scan, updatedAt: scan.createdAt }),
+        this.db.insert(faceScans).values({ ...scan, checkIn: scan.checkIn ?? false, updatedAt: scan.createdAt }),
         ...photos.map((photo) => this.db.insert(faceScanPhotos).values(photo)),
       ]
       await this.db.batch(batchOf(statements))
       return true
     }
     const at = scan.createdAt.getTime()
+    const checkIn = scan.checkIn ? 1 : 0
     // insert ... select takes its values by column position, so each select lists the table's columns in order.
     const statements: BatchItem<'sqlite'>[] = [
       this.db
         .insert(faceScans)
         .select(
-          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}, NULL
+          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}, NULL, ${checkIn}
             WHERE (SELECT id FROM ${faceScans} WHERE ${faceScans.profileId} = ${scan.profileId} AND ${faceScans.state} <> 'failed' ORDER BY ${faceScans.createdAt} DESC, rowid DESC LIMIT 1) IS ${options.expectLatestId}`,
         )
         .returning({ id: faceScans.id }),
@@ -158,6 +159,14 @@ export class D1FaceScansRepository {
       .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
       .limit(1)
     return row ?? null
+  }
+
+  /**
+   * Every scan the profile has under `goal` since `since` (the start of the chase the caller worked out from the goal history, inclusive), whatever
+   * state it is in: the due rule's own read (issue #145). The read judges nothing; the policy decides what a failed, analysing or check-in scan means.
+   */
+  async scansUnderGoalSince(profileId: string, goal: Goal, since: Date): Promise<FaceScan[]> {
+    return this.db.select().from(faceScans).where(and(eq(faceScans.profileId, profileId), eq(faceScans.goalAtScan, goal), gte(faceScans.createdAt, since)))
   }
 
   /**

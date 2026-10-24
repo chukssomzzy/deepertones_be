@@ -23,9 +23,10 @@ export const faceConsents = sqliteTable(
 )
 
 /**
- * One face scan of one profile. `goal_at_scan` is the goal it was taken under, which is what "a rescan is suggested" is worked out
- * from when it is read. The `pc_*` columns are Perfect Corp's task ids and the Perfect Corp environment the tasks were made in (a
- * webhook for another environment's task is ignored); the skin age, skin type and tables version are written when a result comes back.
+ * One face scan of one profile. `goal_at_scan` is the goal it was taken under; the due rule (issue #145) reads it, with `check_in` and the
+ * profile's goal history, to decide whether a scan is due and to work out "a rescan is suggested" when read. The `pc_*` columns are Perfect
+ * Corp's task ids and the Perfect Corp environment the tasks were made in (a webhook for another environment's task is ignored); the skin
+ * age, skin type and tables version are written when a result comes back.
  */
 export const faceScans = sqliteTable(
   'face_scans',
@@ -49,8 +50,11 @@ export const faceScans = sqliteTable(
     tablesVersion: text('tables_version'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
-    // When the reaper queued its one check of this scan; null until it has. Last, because createFaceScan's INSERT ... SELECT lists the columns by position.
+    // When the reaper queued its one check of this scan; null until it has.
     reaperCheckedAt: integer('reaper_checked_at', { mode: 'timestamp_ms' }),
+    // Whether this was the chase's wider check-in scan, taken at the review point (issue #145). Last, because createFaceScan's INSERT ... SELECT
+    // lists the columns by position.
+    checkIn: integer('check_in', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [
     // (profile_id, created_at) serves "the latest scan of this profile".

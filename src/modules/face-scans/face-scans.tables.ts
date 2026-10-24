@@ -16,9 +16,10 @@ export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
 export const CHASE_VERSION = 1
+export const REVIEW_VERSION = 1
 
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
-export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION}`
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION}`
 
 /** A goal left and taken up again within this many days of leaving continues its chase; any longer and the goal starts fresh (issue #145). */
 export const RESUME_DAYS = 90
@@ -68,6 +69,13 @@ export const measuredConcernsForGoal = (goal: Goal): ShownConcern[] => {
 
 /** What to ask Perfect Corp for: everything measured for the goal and the skin type, which is 5 to 8 actions (the HD 5 to 8 tier, 16 units). */
 export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...measuredConcernsForGoal(goal), HD_SKIN_TYPE]
+
+/**
+ * What to ask Perfect Corp for at a chase's review point: every concern any goal can show, plus the skin type, whatever the goal is. Ten
+ * actions (the HD 9 to 12 tier, 20 units), against 5 to 8 for a normal scan: the extra reads feed the next-goal rule, though the result still
+ * shows only the goal's own three. A fresh list each time.
+ */
+export const hdActionsForCheckIn = (): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...SHOWN_CONCERNS, HD_SKIN_TYPE]
 
 // A concern is visible at or below `visible`, and the band is how far below: (some, visible] is a-little, (clear, some] is some, and
 // clear or less is clear. Above `visible` is faint. Each concern has its own cut-offs because Perfect Corp's raw_score sits on a different range for each
@@ -402,3 +410,21 @@ export const chaseStartFor = (history: readonly { goal: Goal | null; createdAt: 
     i = detourStart - 1
   }
 }
+
+/**
+ * Each goal's review week: how long after day one its chase is looked at again (issue #145, "Review point"). Every goal starts at 6, a
+ * placeholder to tune per goal later as a reviewed change.
+ */
+export const REVIEW_WEEKS: Record<Goal, number> = {
+  'clear-skin': 6,
+  'even-tone': 6,
+  'fade-dark-marks': 6,
+  brighter: 6,
+  glow: 6,
+  'calm-repair': 6,
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000
+
+/** A goal's review point: day one plus its review week, keeping day one's time of day. Does not mutate `dayOneAt`. */
+export const reviewPointFor = (dayOneAt: Date, goal: Goal): Date => new Date(dayOneAt.getTime() + REVIEW_WEEKS[goal] * WEEK_MS)

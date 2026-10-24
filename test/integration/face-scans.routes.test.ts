@@ -1061,8 +1061,9 @@ describe('GET /api/v1/scans/faces/{id}: where the analysis has got to', () => {
   })
 })
 
-// A second scan under the same goal is not due until the goal has changed, so a profile gets there as a person does: scan under glow, change the goal and
-// scan again (that scan is not finished here, so it neither counts nor cuts), change the goal back and scan under glow once more.
+// A second scan under one goal is now due only at the chase's check-in (issue #145): switching the goal away and back inside the resume window, by
+// itself, no longer unlocks one. So a profile gets to a second ready scan under glow by scanning, switching away (that scan is not finished here, so it
+// neither counts nor cuts the chase), switching back, and reaching the review point (backdated below, since this harness runs on the real clock).
 describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
   const glowAnalysis = ({ radiance, moisture, texture, skinAge, extras = [] }: { radiance: number; moisture: number; texture: number; skinAge: number; extras?: unknown[] }) => [
     { type: 'hd_radiance', region: 'whole', raw_score: radiance, ui_score: radiance + 10, mask_urls: [maskUrl('radiance')] },
@@ -1074,12 +1075,24 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
     ...extras,
   ]
   const messageFor = (scanId: string) => queued.find((body) => (body as { faceScanId: string }).faceScanId === scanId)
-  /** Scans under `glow`, one after the other, with a scan under another goal still analysing between. Resolves to the first, the one between and the second. */
+  const DAY_MS = 24 * 60 * 60 * 1000
+  // The due rule now gives a chase one scan plus one check-in at its review point (issue #145), so the old switch-back trick alone no longer makes a
+  // second scan due. This harness runs on the real clock, so the second scan is reached as the chase's check-in by backdating day one's own `created_at`
+  // and the goal row that opened its chase, by the same amount, well past the six-week review point but short of the 90-day resume window: the chase
+  // (and `later`'s due check) still finds day one inside it, and the real "now" these requests run at is already past its review point.
+  const backdateToCheckIn = async (guest: Account, dayOne: FaceScanView) => {
+    const byMs = 50 * DAY_MS
+    await env.DB.prepare('UPDATE profile_goals SET created_at = created_at - ? WHERE profile_id = ?').bind(byMs, guest.profileId).run()
+    await env.DB.prepare('UPDATE face_scans SET created_at = created_at - ? WHERE id = ?').bind(byMs, dayOne.id).run()
+    dayOne.createdAt = new Date(new Date(dayOne.createdAt).getTime() - byMs).toISOString()
+  }
+  /** Scans under `glow`, one after the other, with a scan under another goal still analysing between. Resolves to the first, the one between and the second (the chase's check-in). */
   const twoGlowScans = async (guest: Account, stub: ReturnType<typeof stubPerfectCorp>, first: ReturnType<typeof glowAnalysis>, second: ReturnType<typeof glowAnalysis>) => {
     const day = await createdFace(guest)
     await runFaceJob(messageFor(day.id))
     stub.answerSkin((await rowOf(day.id))!.task!, () => skinSuccess(first))
     await runFaceJob(stepOf(day.id, 'fetch'))
+    await backdateToCheckIn(guest, day)
     await setGoal(guest, 'brighter')
     const between = await createdFace(guest)
     await setGoal(guest, 'glow')
@@ -1130,6 +1143,8 @@ describe('GET /api/v1/scans/faces/{id}: the change since day one', () => {
     expect(await env.DB.prepare('SELECT fitzpatrick FROM profile_fitzpatrick WHERE profile_id = ?').bind(guest.profileId).first()).toEqual({ fitzpatrick: 'V' })
     stub.answerSkin((await rowOf(first.id))!.task!, () => skinSuccess(glowAnalysis({ radiance: 41.5, moisture: 62, texture: 55, skinAge: 31 })))
     await runFaceJob(stepOf(first.id, 'fetch'))
+    // Past day one's review point (see twoGlowScans above), so the switch back to glow below reaches the chase's check-in, not a refused second scan.
+    await backdateToCheckIn(guest, first)
     await setGoal(guest, 'brighter')
     await createdFace(guest)
     await setGoal(guest, 'glow')
