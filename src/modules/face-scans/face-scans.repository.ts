@@ -1,10 +1,13 @@
-import { and, asc, desc, eq, gte, inArray, isNull, lt, lte, ne, or, sql } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/sqlite-core'
+import { and, asc, desc, eq, exists, gte, inArray, isNull, lt, lte, ne, not, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import type { Goal } from '../goals/goals.vocabulary'
-import { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
+import { profileGoals } from '../goals/goals.table'
+import { faceCheckInPushes, faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
 import type {
+  FaceCheckInPush,
   FaceConsent,
   FaceMask,
   FaceResult,
@@ -19,7 +22,7 @@ import type {
   ProfileFitzpatrick,
 } from './face-scans.types'
 
-export type { FaceConsent, FaceMask, FaceResult, FaceScan, FaceScanCompletion, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan, ProfileFitzpatrick }
+export type { FaceCheckInPush, FaceConsent, FaceMask, FaceResult, FaceScan, FaceScanCompletion, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan, ProfileFitzpatrick }
 
 const batchOf = (statements: BatchItem<'sqlite'>[]) => statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
 
@@ -170,6 +173,77 @@ export class D1FaceScansRepository {
   }
 
   /**
+   * Records that the chase whose day one is `dayOneScanId` has been dealt with, and says whether this write landed: false means the chase was already recorded, and
+   * the first record stands. The caller records BEFORE it queues the push and queues only on true, so a chase is told at most once. Rejects for a profile that
+   * does not exist.
+   */
+  async recordCheckInPush(push: FaceCheckInPush): Promise<boolean> {
+    const rows = await this.db.insert(faceCheckInPushes).values(push).onConflictDoNothing().returning({ id: faceCheckInPushes.dayOneScanId })
+    return rows.length > 0
+  }
+
+  async checkInPushFor(profileId: string, dayOneScanId: string): Promise<FaceCheckInPush | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceCheckInPushes)
+      .where(and(eq(faceCheckInPushes.profileId, profileId), eq(faceCheckInPushes.dayOneScanId, dayOneScanId)))
+    return row ?? null
+  }
+
+  /**
+   * The day ones that might be due a check-in push, the longest overdue first and at most `limit`: ready scans that are not themselves check-ins, taken at or
+   * before `createdBefore`, whose chase has not been recorded as told and has no check-in that is not failed (a later scan of the same profile and goal that
+   * is one). It judges nothing else: the caller keeps the ones whose own goal and review point say so.
+   *
+   * Only day ones taken under the profile's current goal (its newest `profile_goals` row) are listed, so scans of goals the profile has left cannot fill the
+   * limit and starve the ones that can be told; they count again if the goal is taken up again. A profile with no goal row has no current goal to compare with,
+   * so it is not filtered.
+   */
+  async checkInPushCandidates({ createdBefore, limit }: { createdBefore: Date; limit: number }): Promise<FaceScan[]> {
+    const checkIn = alias(faceScans, 'check_in_scan')
+    return this.db
+      .select()
+      .from(faceScans)
+      .where(
+        and(
+          eq(faceScans.state, 'ready'),
+          eq(faceScans.checkIn, false),
+          lte(faceScans.createdAt, createdBefore),
+          not(
+            exists(
+              this.db
+                .select({ one: sql`1` })
+                .from(faceCheckInPushes)
+                .where(and(eq(faceCheckInPushes.profileId, faceScans.profileId), eq(faceCheckInPushes.dayOneScanId, faceScans.id))),
+            ),
+          ),
+          not(
+            exists(
+              this.db
+                .select({ one: sql`1` })
+                .from(checkIn)
+                .where(
+                  and(
+                    eq(checkIn.profileId, faceScans.profileId),
+                    eq(checkIn.goalAtScan, faceScans.goalAtScan),
+                    eq(checkIn.checkIn, true),
+                    ne(checkIn.state, 'failed'),
+                    sql`${checkIn.createdAt} > ${faceScans.createdAt}`,
+                  ),
+                ),
+            ),
+          ),
+          or(
+            not(exists(this.db.select({ one: sql`1` }).from(profileGoals).where(eq(profileGoals.profileId, faceScans.profileId)))),
+            sql`${faceScans.goalAtScan} IS (SELECT ${profileGoals.goal} FROM ${profileGoals} WHERE ${profileGoals.profileId} = ${faceScans.profileId} ORDER BY ${profileGoals.createdAt} DESC, rowid DESC LIMIT 1)`,
+          ),
+        ),
+      )
+      .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
+      .limit(limit)
+  }
+
+  /**
    * Applies the patch only while the scan is still in `expected`, and says whether it did (one conditional UPDATE, so of two simultaneous callers exactly one wins).
    * With `onlyIfNoAnalysisTask` it also holds only while the scan has no analysis task, so of two uploads that both created a task the first to store keeps its own.
    */
@@ -287,7 +361,7 @@ export class D1FaceScansRepository {
     return keys
   }
 
-  /** Deletes these users' face data in one batch: results, masks, photos, scans, Fitzpatrick reads and consents. Safe to repeat; an empty list deletes nothing. */
+  /** Deletes these users' face data in one batch: results, masks, photos, scans, Fitzpatrick reads, consents and check-in push records. Safe to repeat; an empty list deletes nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
     const statements: BatchItem<'sqlite'>[] = chunked(userIds).flatMap((ids) => [
@@ -297,6 +371,7 @@ export class D1FaceScansRepository {
       this.db.delete(faceScans).where(inArray(faceScans.userId, ids)),
       this.db.delete(profileFitzpatrick).where(inArray(profileFitzpatrick.userId, ids)),
       this.db.delete(faceConsents).where(inArray(faceConsents.userId, ids)),
+      this.db.delete(faceCheckInPushes).where(inArray(faceCheckInPushes.userId, ids)),
     ])
     await this.db.batch(batchOf(statements))
   }

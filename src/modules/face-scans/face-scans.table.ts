@@ -126,3 +126,22 @@ export const profileFitzpatrick = sqliteTable(
   },
   (t) => [index('profile_fitzpatrick_user_id_idx').on(t.userId)],
 )
+
+/**
+ * The "check-in due" push of a chase, recorded once and keyed by the chase's day-one scan (issue #145). The row is written BEFORE the push is queued and only
+ * the write that lands queues it, so a chase is told at most once. It is not tied to the scan by a foreign key: deleting the day one (or the check-in) must
+ * not make the push due again. `goal` is the chase's goal; the row goes with its profile.
+ */
+export const faceCheckInPushes = sqliteTable(
+  'face_check_in_pushes',
+  {
+    profileId: text('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
+    goal: text('goal', { enum: GOALS }).notNull(),
+    dayOneScanId: text('day_one_scan_id').notNull(),
+    sentAt: integer('sent_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.profileId, t.dayOneScanId] }), index('face_check_in_pushes_user_id_idx').on(t.userId)],
+)

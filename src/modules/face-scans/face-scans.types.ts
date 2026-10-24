@@ -1,4 +1,4 @@
-import type { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
+import type { faceCheckInPushes, faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
 
 export type FaceConsent = typeof faceConsents.$inferSelect
 export type FaceScan = typeof faceScans.$inferSelect
@@ -6,6 +6,7 @@ export type FaceScanPhoto = typeof faceScanPhotos.$inferSelect
 export type FaceResult = typeof faceResults.$inferSelect
 export type FaceMask = typeof faceMasks.$inferSelect
 export type ProfileFitzpatrick = typeof profileFitzpatrick.$inferSelect
+export type FaceCheckInPush = typeof faceCheckInPushes.$inferSelect
 
 export type FaceScanState = FaceScan['state']
 export type FaceScanReason = NonNullable<FaceScan['reason']>

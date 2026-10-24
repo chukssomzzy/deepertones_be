@@ -1,6 +1,7 @@
 import type { Goal } from '../goals/goals.vocabulary'
 import type { FaceScansRepository } from './face-scans.repository'
 import type {
+  FaceCheckInPush,
   FaceConsent,
   FaceMask,
   FacePhotoPosition,
@@ -31,6 +32,8 @@ export class FakeFaceScansRepository implements FaceScansRepository {
   private results = new Map<string, FaceResult[]>()
   private masks = new Map<string, FaceMask[]>()
   private fitzpatricks = new Map<string, ProfileFitzpatrick>()
+  // Keyed by profile and day-one scan, the table's primary key.
+  private checkInPushes = new Map<string, FaceCheckInPush>()
 
   async consentOf(profileId: string): Promise<FaceConsent | null> {
     const found = this.consents.get(profileId)
@@ -116,6 +119,42 @@ export class FakeFaceScansRepository implements FaceScansRepository {
   async scansUnderGoalSince(profileId: string, goal: Goal, since: Date): Promise<FaceScan[]> {
     return [...this.scans.values()]
       .filter((scan) => scan.profileId === profileId && scan.goalAtScan === goal && scan.createdAt.getTime() >= since.getTime())
+      .map((scan) => ({ ...scan }))
+  }
+
+  async recordCheckInPush(push: FaceCheckInPush): Promise<boolean> {
+    const key = `${push.profileId}:${push.dayOneScanId}`
+    if (this.checkInPushes.has(key)) return false
+    this.checkInPushes.set(key, { ...push })
+    return true
+  }
+
+  async checkInPushFor(profileId: string, dayOneScanId: string): Promise<FaceCheckInPush | null> {
+    const found = this.checkInPushes.get(`${profileId}:${dayOneScanId}`)
+    return found ? { ...found } : null
+  }
+
+  // It holds no goal history, so it does not narrow to the profile's current goal as D1 does; the service's own check keeps only what is really due.
+  async checkInPushCandidates({ createdBefore, limit }: { createdBefore: Date; limit: number }): Promise<FaceScan[]> {
+    const all = [...this.scans.values()]
+    return all
+      .filter(
+        (scan) =>
+          scan.state === 'ready' &&
+          !scan.checkIn &&
+          scan.createdAt.getTime() <= createdBefore.getTime() &&
+          !this.checkInPushes.has(`${scan.profileId}:${scan.id}`) &&
+          !all.some(
+            (other) =>
+              other.checkIn &&
+              other.state !== 'failed' &&
+              other.profileId === scan.profileId &&
+              other.goalAtScan === scan.goalAtScan &&
+              other.createdAt.getTime() > scan.createdAt.getTime(),
+          ),
+      )
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, limit)
       .map((scan) => ({ ...scan }))
   }
 
@@ -220,6 +259,7 @@ export class FakeFaceScansRepository implements FaceScansRepository {
       this.masks.delete(id)
     }
     for (const [profileId, fitzpatrick] of this.fitzpatricks) if (users.has(fitzpatrick.userId)) this.fitzpatricks.delete(profileId)
+    for (const [key, push] of this.checkInPushes) if (users.has(push.userId)) this.checkInPushes.delete(key)
     for (const [profileId, consent] of this.consents) if (users.has(consent.userId)) this.consents.delete(profileId)
   }
 }

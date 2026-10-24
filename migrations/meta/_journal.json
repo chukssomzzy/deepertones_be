@@ -246,6 +246,13 @@
       "when": 1792778978901,
       "tag": "0034_sudden_bromley",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "6",
+      "when": 1792867268911,
+      "tag": "0035_curved_wonder_man",
+      "breakpoints": true
     }
   ]
 }

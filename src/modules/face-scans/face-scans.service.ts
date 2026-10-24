@@ -38,6 +38,8 @@ import {
   noticedConcerns,
   type ResultView,
   resultView,
+  REVIEW_WEEKS,
+  reviewPointFor,
   SHOWN_CONCERNS,
   shownConcerns,
   type SkinTypeLabel,
@@ -86,7 +88,7 @@ export type RetakenFaceScanView = FaceScanView & { photos: { front: { url: strin
 
 export type FaceScanServiceDeps = {
   repository: FaceScansRepository
-  goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history'>
+  goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history' | 'historyFor'>
   photos: PhotoStore
   jobs: JobQueue
   perfectCorp: PerfectCorpClient
@@ -94,8 +96,8 @@ export type FaceScanServiceDeps = {
   aiUsage: VendorSpendLedger
   /** Tells whoever is watching a scan that it changed. */
   events: ScanEvents
-  /** Tells the person's phone when a scan is ready or needs a retake. Never throws: a push that cannot be queued does not fail a step. */
-  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
+  /** Tells the person's phone when a scan is ready, needs a retake or a check-in is due. Never throws: a push that cannot be queued does not fail a step. */
+  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
   /** Signs the photo links. photo-link.ts derives its own key from it. */
@@ -127,15 +129,18 @@ export class FaceScanService {
   private static readonly STUCK_AFTER_MS = 15 * FaceScanService.MINUTE
   private static readonly GIVE_UP_AFTER_MS = 120 * FaceScanService.MINUTE
   private static readonly REAP_BATCH = 100
+  private static readonly CHECK_IN_SWEEP_LIMIT = 200
+  /** The shortest review week of any goal, so the candidate read never cuts off a chase that is due; each candidate is then judged by its own goal's review point. */
+  private static readonly SHORTEST_REVIEW_MS = Math.min(...Object.values(REVIEW_WEEKS)) * 7 * 24 * 60 * 60 * 1000
 
   private readonly repository: FaceScansRepository
-  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history'>
+  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history' | 'historyFor'>
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly perfectCorp: PerfectCorpClient
   private readonly aiUsage: VendorSpendLedger
   private readonly events: ScanEvents
-  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
+  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
@@ -437,6 +442,42 @@ export class FaceScanService {
       }
     }
     return { checked, failed }
+  }
+
+  /**
+   * The daily sweep, run by the cron with no session: tells each profile whose chase has reached its review point and has not taken its check-in, once per
+   * chase, the longest overdue first and at most 200 a run. Answers how many pushes were queued.
+   *
+   * A candidate (a ready day one of the profile's current goal) is confirmed by the pure rule: it must be the first ready scan of the chase the goal is in now
+   * (`chaseStartFor`), and `now` must be at its review point. One that is a scan of an earlier chase of the same goal can never be told, so it is recorded without a
+   * push and leaves the candidate list. The record is written BEFORE the push is queued and only a write that landed queues it, so a chase is told at most once;
+   * a queue that is down is logged by id and swallowed, and that chase is not tried again. The account's `scanNeedsYou` switch is read when the push is sent,
+   * not here: with it off the push is dropped there.
+   */
+  async sendDueCheckIns(now: Date): Promise<number> {
+    let queued = 0
+    const candidates = await this.repository.checkInPushCandidates({
+      createdBefore: new Date(now.getTime() - FaceScanService.SHORTEST_REVIEW_MS),
+      limit: FaceScanService.CHECK_IN_SWEEP_LIMIT,
+    })
+    for (const dayOne of candidates) {
+      try {
+        const { profileId, userId, goalAtScan: goal } = dayOne
+        const chaseStart = chaseStartFor(await this.goals.historyFor(profileId), goal, now)
+        // The goal was left since the candidate was read: it counts again if the goal is taken up again.
+        if (chaseStart === null) continue
+        const first = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: dayOne.id })
+        const isDayOne = first?.id === dayOne.id
+        if (isDayOne && now.getTime() < reviewPointFor(dayOne.createdAt, goal).getTime()) continue
+        if (!(await this.repository.recordCheckInPush({ profileId, userId, goal, dayOneScanId: dayOne.id, sentAt: now }))) continue
+        if (!isDayOne) continue
+        await this.notifications.faceCheckInDue({ userId, profileId, dayOneScanId: dayOne.id })
+        queued++
+      } catch (error) {
+        console.error({ outcome: 'check-in-push-failed', profileId: dayOne.profileId, dayOneScanId: dayOne.id, error: describeUnexpectedError(error) })
+      }
+    }
+    return queued
   }
 
   /**

@@ -86,6 +86,14 @@ export class GoalsService {
    */
   async history(): Promise<GoalRow[]> {
     const { profileId } = requireUser()
+    return this.historyFor(profileId)
+  }
+
+  /**
+   * A profile's goal history, oldest first, for work that runs with no session (the cron's check-in sweep): the same read as `history`, named by profile.
+   * The profile's current goal is its last row.
+   */
+  async historyFor(profileId: string): Promise<GoalRow[]> {
     return [...(await this.repository.history(profileId))].reverse()
   }
 
