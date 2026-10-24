@@ -1376,6 +1376,12 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
     worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
+  - **Next goal.** Every ready result carries `nextGoal`, a goal or null, added by `FaceScanService.result()` on top of `resultView`'s output (the view's own keys
+    stay as they are). Only a check-in scan (`scan.checkIn`) can have one; every other scan has null, in the list and in `getFaceScan` alike. `nextGoalFor`
+    suggests nothing unless at least one of the scan's own goal's concerns got `fainter` since the chase's day one (read from the same region on both scans). It
+    then scores each other goal by the bands of its concerns that are not the current goal's (clear 3, some 2, a little 1, faint or missing 0), the highest
+    wins, a tie goes to the earlier goal in `GOALS`, and all zeros means none. `brighter` is a candidate only when the profile ever wanted lighter
+    (`history.some((row) => row.wantsLighter)`): it is never offered unasked. With no day one, `nextGoal` is null.
   - **Never** in the view: a score (`raw_score`, `ui_score` or the overall `all`), a Perfect Corp concern name, a condition name, the Fitzpatrick type, or a
     word about lightness. The tables test scans every string, and the pipeline and route tests scan the serialised view.
 - **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET

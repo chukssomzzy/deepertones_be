@@ -2459,6 +2459,7 @@ describe('FaceScanService.getFaceScan: the result of a ready scan', () => {
       skinAge: { years: 31, words: 'Your skin looks about 31' },
       sinceDayOne: null,
       tablesVersion: TABLES_VERSION,
+      nextGoal: null,
     })
   })
 

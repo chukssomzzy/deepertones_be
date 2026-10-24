@@ -35,6 +35,7 @@ import {
   hdActionsForCheckIn,
   hdActionsForGoal,
   measuredConcernsForGoal,
+  nextGoalFor,
   noticedConcerns,
   type ResultView,
   resultView,
@@ -78,7 +79,7 @@ export type FaceScanView = {
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
   /** True when the due rule would allow a scan now, under the profile's current goal (issue #145). Worked out when read, never stored. */
   rescanSuggested: boolean
-  result: ResultView | null
+  result: (ResultView & { nextGoal: Goal | null }) | null
 }
 
 /** The view of a scan that was retaken: it always has its front photo. */
@@ -826,7 +827,7 @@ export class FaceScanService {
     link: (key: string) => Promise<string>,
     dayOneResults: Map<string, Promise<FaceResult[]>>,
     history: Promise<GoalRow[]>,
-  ): Promise<ResultView> {
+  ): Promise<ResultView & { nextGoal: Goal | null }> {
     const [results, masks, historyRows] = await Promise.all([this.repository.resultsOf(scan.id), this.repository.masksOf(scan.id), history])
     // Through the product a scan is only ever taken under the current goal, so a chase always holds it; with none (unreachable) the scan is its own day one.
     const since = chaseStartFor(historyRows, scan.goalAtScan, scan.createdAt) ?? scan.createdAt
@@ -839,14 +840,21 @@ export class FaceScanService {
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null
-    return resultView({
+    const dayOneResultRows = dayOne ? await this.dayOneResultsOf(dayOne.id, dayOneResults) : null
+    const view = resultView({
       goal: scan.goalAtScan,
       results,
       overlays,
       skinType: scan.skinType,
       skinAge: scan.skinAge,
-      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.dayOneResultsOf(dayOne.id, dayOneResults), skinAge: dayOne.skinAge },
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: dayOneResultRows ?? [], skinAge: dayOne.skinAge },
     })
+    // Only a check-in suggests a next goal; the list and a single get both land here, so they agree.
+    const nextGoal =
+      scan.checkIn && dayOneResultRows
+        ? nextGoalFor({ goal: scan.goalAtScan, results, dayOneResults: dayOneResultRows, everWantedLighter: historyRows.some((row) => row.wantsLighter) })
+        : null
+    return { ...view, nextGoal }
   }
 
   private dayOneResultsOf(id: string, cache: Map<string, Promise<FaceResult[]>>): Promise<FaceResult[]> {

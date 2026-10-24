@@ -2411,6 +2411,22 @@
             ],
             "description": "The change since day one; null when this scan is its own day one."
           },
+          "nextGoal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair",
+              null
+            ],
+            "description": "The goal to suggest working on next, from this check-in scan. Null on every other scan."
+          },
           "tablesVersion": {
             "type": "string",
             "description": "The version of the rules that worded this result. The words are worked out each time the scan is read."
@@ -2423,6 +2439,7 @@
           "skinType",
           "skinAge",
           "sinceDayOne",
+          "nextGoal",
           "tablesVersion"
         ],
         "description": "What a ready scan shows. It never holds a score or any number but the skin age in years, never a condition name, never a Perfect Corp name, never a Fitzpatrick type, and never a word about lightness. It describes the face, not the person: show the words as they are."
