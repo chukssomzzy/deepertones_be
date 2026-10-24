@@ -1521,7 +1521,7 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
 
 // The cron has no session, so the sweep is called with no actor. Every state is reached the way a person reaches it: consent, a goal, a scan taken through
 // `create` and made ready by the write the analysis makes, with the clock moved on. A day one is "ready"; the chase's review point is six weeks after the day
-// one was TAKEN (not after it became ready). Guests cannot scan (face scans are verified-only since #153), so a guest never has a day one to be told about.
+// one was TAKEN (not after it became ready).
 describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
   const sweep = (ctx: Ctx, when: Date = ctx.now()) => ctx.service.sendDueCheckIns(when)
   const pushesTo = (ctx: Ctx, who: Who = {}) => ctx.checkInPushes.filter((push) => push.profileId === as(who).profileId)
@@ -1695,16 +1695,6 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
     expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual([first.id, fresh.id])
   })
 
-  it('sends nothing to a guest, who has set a goal but cannot scan', async () => {
-    const ctx = setup()
-    await asGuest(() => ctx.goals.set({ goal: 'glow' }))
-    ctx.advance(REVIEW_POINT)
-
-    expect(await sweep(ctx)).toBe(0)
-
-    expect(ctx.checkInPushes).toEqual([])
-  })
-
   it('keeps profiles apart: one with its check-in taken does not hide another that is due, and a profile of the same account is its own', async () => {
     const ctx = setup()
     const [a, b] = [person(1), person(2)]
@@ -1764,14 +1754,14 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
       const aDayOne = await dayOneUnder(ctx, 'glow', a)
       const bDayOne = await dayOneUnder(ctx, 'glow', b)
       advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
-      ctx.queueDownFor.add(a.profileId)
+      ctx.queueDownFor.add(as(a).profileId)
 
       await expect(sweep(ctx)).resolves.toBe(1)
 
       expect(ctx.checkInPushes).toEqual([{ userId: b.userId, profileId: b.profileId, dayOneScanId: bDayOne.id }])
       expect(logged).toHaveBeenCalled()
       // By id: the profile's or the chase's.
-      expect(JSON.stringify(logged.mock.calls)).toMatch(new RegExp(`${a.profileId}|${aDayOne.id}`))
+      expect(JSON.stringify(logged.mock.calls)).toMatch(new RegExp(`${as(a).profileId}|${aDayOne.id}`))
     })
 
     it('does not try that chase again on a later run: the send is recorded first, and at most once beats at least once', async () => {
@@ -1780,7 +1770,7 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
       const a = person(1)
       await dayOneUnder(ctx, 'glow', a)
       advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
-      ctx.queueDownFor.add(a.profileId)
+      ctx.queueDownFor.add(as(a).profileId)
       await sweep(ctx)
       ctx.queueDownFor.clear()
 
