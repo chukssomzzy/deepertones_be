@@ -2127,7 +2127,7 @@
           },
           "rescanSuggested": {
             "type": "boolean",
-            "description": "True when the profile's latest scan was taken under another goal than its current one."
+            "description": "True when a face scan is due now for the profile's current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase's check-in at the review point."
           },
           "result": {
             "anyOf": [
@@ -6452,7 +6452,7 @@
           "Face scans"
         ],
         "summary": "Start a face scan from a front photo and optionally two side photos",
-        "description": "A guest may call this. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE` (`details.reason` is `already-scanned-for-goal`: the profile's latest scan was taken under its current goal), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "A guest may call this. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE`: the current goal's chase gets one scan, plus one wider check-in scan at its review point (issue #145). `details.reason` is `already-scanned-for-goal` (the chase already has a scan, or its check-in is still being analysed or needs a retake), `check-in-not-due` (the chase has its day one but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase's check-in has already been taken), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
