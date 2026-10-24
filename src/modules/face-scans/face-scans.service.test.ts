@@ -12,7 +12,7 @@ import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import { FakeGoalsRepository } from '../goals/goals.repository.fake'
 import { GoalsService } from '../goals/goals.service'
-import type { Goal } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import { FakeOpsAlertsRepository } from '../ops-alerts/ops-alerts.repository.fake'
 import { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
 import { FakeSafetyRepository } from '../safety/safety.repository.fake'
@@ -1502,6 +1502,143 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     await create(ctx, { front: face({}, 2) })
 
     expect(seen).toEqual([null, first.id])
+  })
+})
+
+// The switch preview (issue #145, PR 3): what `GET /me/goal/switch-preview?goal=` tells the user before they switch. It lives here, not on the
+// goals service, because its day one comes from the face-scan tables. Switching is never blocked, so this reads only: no goal row is written and no
+// scan is made. The chase is read from the goal history alone, as if the goal were picked now, so it agrees with the day-one rule by construction.
+//
+// A goal is "left" at the moment the row that followed it was saved, not when it was picked, and the 90-day window runs from there. Every fixture
+// below holds its goal for a while first, so a reading that measured from the wrong row shows.
+
+const previewOf = (ctx: Ctx, goal: Goal, who: Who = {}) => asUser(() => ctx.service.switchPreview(goal), as(who).userId, as(who).profileId)
+const typedWords = (ctx: Ctx, text: string, who: Who = {}) => asUser(() => ctx.goals.set({ text }), as(who).userId, as(who).profileId)
+
+describe('FaceScanService.switchPreview', () => {
+  it('says a goal left inside the 90 days would resume, with the day the window closes', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(30 * DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    // No scan was ever taken under glow, so the chase has no day one to show, and the window closes 90 days after glow was left for brighter.
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('still resumes a goal taken up again exactly 90 days after it was left: the last day of the window counts', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(RESUME_WINDOW)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('starts fresh one millisecond past the 90 days, with nothing to resume', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    await setGoal(ctx, 'brighter')
+    ctx.advance(RESUME_WINDOW + 1)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('starts fresh for a goal the profile never had', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'brighter')
+
+    expect(preview).toEqual({ goal: 'brighter', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('refuses the goal the profile is already on with 400 GOAL_ALREADY_CURRENT', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+
+    const error = await errorOf(previewOf(ctx, 'glow'))
+
+    expect(error).toBeInstanceOf(ValidationError)
+    expect(error.code).toBe('GOAL_ALREADY_CURRENT')
+  })
+
+  it.each(GOALS.map((goal: Goal): [Goal] => [goal]))('starts %s fresh for a profile with no goal yet, rather than refusing it', async (goal: Goal) => {
+    const ctx = setup()
+
+    const preview = await previewOf(ctx, goal)
+
+    expect(preview).toEqual({ goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('counts words nobody sorted into a goal as leaving, and measures the window from them', async () => {
+    const ctx = setup()
+    await setGoal(ctx, 'glow')
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    // The reader finds no goal in these words, so the row saved has none: the glow chase is left as surely as by another chip.
+    await typedWords(ctx, 'something about my skin')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('shows no day one for a chase whose only scan is still being analysed', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    await create(ctx)
+    ctx.advance(DAY)
+    const left = ctx.now()
+    await setGoal(ctx, 'brighter')
+    ctx.advance(DAY)
+
+    const preview = await previewOf(ctx, 'glow')
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('changes nothing: the goal stays as it was and no scan is made', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    ctx.advance(DAY)
+    await setGoal(ctx, 'brighter')
+    const historyBefore = await asUser(() => ctx.goals.history())
+    const currentBefore = await asUser(() => ctx.goals.current())
+
+    await previewOf(ctx, 'glow')
+    await previewOf(ctx, 'clear-skin')
+
+    expect(await asUser(() => ctx.goals.history())).toEqual(historyBefore)
+    expect(await asUser(() => ctx.goals.current())).toEqual(currentBefore)
+    expect(await asUser(() => ctx.service.listFaceScans())).toEqual([])
+    nothingStored(ctx)
+  })
+
+  it('answers a guest, who sets goals like anyone else', async () => {
+    const ctx = setup()
+    await asGuest(() => ctx.goals.set({ goal: 'glow' }))
+    ctx.advance(10 * DAY)
+    const left = ctx.now()
+    await asGuest(() => ctx.goals.set({ goal: 'brighter' }))
+    ctx.advance(DAY)
+
+    const preview = await asGuest(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt: null, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
   })
 })
 

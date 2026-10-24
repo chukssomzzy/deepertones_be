@@ -20,7 +20,7 @@ import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/p
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
-import type { GoalRow } from '../goals/goals.types'
+import type { GoalRow, SwitchPreviewView } from '../goals/goals.types'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
@@ -38,6 +38,7 @@ import {
   nextGoalFor,
   noticedConcerns,
   type ResultView,
+  RESUME_DAYS,
   resultView,
   SHOWN_CONCERNS,
   shownConcerns,
@@ -295,6 +296,33 @@ export class FaceScanService {
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
+  }
+
+  /**
+   * What switching to `goal` would do, as if it were picked now: `resume` when the chase rule reaches back into an earlier run of the goal,
+   * else `fresh`. Reads only. The goal the profile is on is 400 GOAL_ALREADY_CURRENT; a profile with no goal yet starts every goal fresh.
+   */
+  async switchPreview(goal: Goal): Promise<SwitchPreviewView> {
+    const { profileId } = requireUser()
+    const current = await this.goals.current().then(
+      (view) => view.goal,
+      (error: unknown) => {
+        if (error instanceof NotFoundError) return null
+        throw error
+      },
+    )
+    if (current === goal) throw new ValidationError('GOAL_ALREADY_CURRENT', 'That is already your goal')
+    const now = this.now()
+    const fresh: SwitchPreviewView = { goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null }
+    const history = await this.goals.history()
+    const chaseStart = chaseStartFor([...history, { goal, createdAt: now }], goal, now)
+    if (chaseStart === null || chaseStart.getTime() >= now.getTime()) return fresh
+    // The goal was left when the row after its latest run was saved. A run of the goal that is not the last row always has one after it.
+    const lastRun = history.map((row) => row.goal).lastIndexOf(goal)
+    const left = history[lastRun + 1]!.createdAt
+    // dayOneFor ignores `scanId`; no scan is being asked about here.
+    const dayOne = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: '' })
+    return { goal, outcome: 'resume', dayOneAt: dayOne?.createdAt ?? null, resumeUntil: new Date(left.getTime() + RESUME_DAYS * 24 * 60 * 60 * 1000) }
   }
 
   /**

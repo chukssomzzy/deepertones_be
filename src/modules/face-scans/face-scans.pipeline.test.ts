@@ -2826,6 +2826,41 @@ describe('FaceScanService.getFaceScan: the change since day one', () => {
   })
 })
 
+// The switch preview's `dayOneAt` (issue #145, PR 3) is the day one of the chase the goal would resume into, so it is tested here, beside the
+// day-one rule, where a scan can be made ready the real way; the rest of the preview is in face-scans.service.test.ts. The window is 90 days
+// from the moment the goal was left (RESUME_DAYS in face-scans.tables.ts).
+const RESUME_WINDOW = 90 * DAY
+
+describe('FaceScanService.switchPreview: the day one a goal would resume into', () => {
+  it('answers the first ready scan of the chase, not the latest scan under the goal', async () => {
+    const ctx = setup()
+    const glowDayOne = await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    const dayOneAt = ctx.now()
+    await readyUnder(ctx, 'brighter', analysisOf(brighterScores(40, 50, 55)))
+    // A later scan in the same glow chase (back within 90 days, its check-in at the review point): the preview must still point at the first one.
+    await checkInReadyUnder(ctx, 'glow', analysisOf(glowScores(46, 44, 55)), glowDayOne)
+    await takenUnder(ctx, 'brighter')
+    const left = ctx.now()
+    ctx.advanceClock(10 * DAY)
+
+    const preview = await asUser(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'resume', dayOneAt, resumeUntil: new Date(left.getTime() + RESUME_WINDOW) })
+  })
+
+  it('shows no day one for a goal left too long ago, though a ready scan under it is still stored', async () => {
+    const ctx = setup()
+    await readyUnder(ctx, 'glow', analysisOf(glowScores(40, 50, 55)))
+    await takenUnder(ctx, 'brighter')
+    // A millisecond past the window: the old chase is over, so its day one is not this switch's day one.
+    ctx.advanceClock(RESUME_WINDOW + 1)
+
+    const preview = await asUser(() => ctx.service.switchPreview('glow'))
+
+    expect(preview).toEqual({ goal: 'glow', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+})
+
 // The check-in scan at a chase's review point looks wider than a normal scan: it asks Perfect Corp for every concern the app can show plus the skin
 // type (10 actions, 20 units, against the 5 to 8 actions and 16 units of a normal scan), whatever the goal, and every score it reads is stored. What
 // it SHOWS is unchanged (issue #145): the goal's own three concerns as `seen`, the measured core extras that can be seen as `alsoNoticed`, and the
