@@ -17,9 +17,12 @@ export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
 export const CHASE_VERSION = 1
 export const REVIEW_VERSION = 1
+export const SPACING_VERSION = 1
+/** A new chase's first scan waits this many days after the profile's last day-one scan, under any goal. */
+export const SCAN_SPACING_DAYS = 30
 
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
-export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION}`
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION},spacing:${SPACING_VERSION}`
 
 /** A goal left and taken up again within this many days of leaving continues its chase; any longer and the goal starts fresh (issue #145). */
 export const RESUME_DAYS = 90

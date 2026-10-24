@@ -90,7 +90,7 @@ const createFaceScan = defineRoute({
     'The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), ' +
     '429 `FACE_SCAN_NOT_DUE`: the current goal\'s chase gets one scan, plus one wider check-in scan at its review point (issue #145). `details.reason` is ' +
     '`already-scanned-for-goal` (the chase already has a scan, or its check-in is still being analysed or needs a retake), `check-in-not-due` (the chase has its day one ' +
-    'but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase\'s check-in has already been taken), then the photos: ' +
+    'but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase\'s check-in has already been taken) or `scan-limit` (a new chase\'s first scan waits 30 days after the profile\'s last day-one scan under any goal; check-ins neither count nor are limited; `details.nextScanAt` says when), then the photos: ' +
     '400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. ' +
     'The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. ' +
     'Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. ' +

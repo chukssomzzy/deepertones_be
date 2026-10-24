@@ -1330,15 +1330,18 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     goal)`, and the chase has no non-failed check-in yet;
   - otherwise refused: `already-scanned-for-goal` when the chase has a non-failed scan but no ready day one yet (the first scan is still analysing or
     needs a retake); `check-in-not-due` (carrying `due`, the review point) before the review point; `check-in-taken` once the chase has had its check-in
-    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again).
-  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then the history and the scans, and takes `now` only after those
+    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again);
+  - `{ allowed: false, reason: 'scan-limit', nextScanAt }` when the chase has no non-failed scan but the profile's last **day-one** scan (`lastDayOneAt`: its newest
+    non-failed, non-check-in scan under any goal, from `latestDayOneForProfile`) was less than 30 days before `at` (`SCAN_SPACING_DAYS`); `nextScanAt` is `lastDayOneAt` + 30 days,
+    and exactly 30 days is allowed. So changing goal never unlocks a paid scan. Check-ins do not count towards the 30 days and are not limited by it; a profile's first scan is always allowed.
+  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then `latestDayOneForProfile`, then the history and the scans, and takes `now` only after those
   reads, so a rival scan stored in the middle is stamped no later than `now`; that `now` is also the time the scan is stored at and `checkInDueAt` is worked out from. It calls the policy with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
   repository.scansUnderGoalSince(profileId, goal, since)` (every scan under the goal since the chase start, whatever state, read without judging it:
-  the policy alone decides what it means). The 429's `details.reason` is one of the three above; `check-in-not-due` alone also carries
+  the policy alone decides what it means). The 429's `details.reason` is one of the four above (`scan-limit` carries `details.nextScanAt`, an ISO string, instead); `check-in-not-due` alone also carries
   `details.checkInDueAt`, the ISO date of `reviewPointFor(dayOne.createdAt, goal)` (`createdAt`, never `updatedAt`).
 - **`rescanSuggested`** is the due rule itself, reused: `mayScanNow(...).allowed` for the profile's current goal, worked out once per list (no
   goal, or typed words nobody sorted into one, suggests nothing). It is **derived when read**, never stored, and so is true exactly when `create`
-  would allow a scan now, whether a first scan or the chase's check-in.
+  would allow a scan now, whether a first scan or the chase's check-in. It passes `lastDayOneAt` too, so inside the 30-day limit after another goal's day-one scan it is false.
   It has no upper-bound filter of its own: it is the same policy call.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
   per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. The stored `check_in` flag (below) is read by the policy

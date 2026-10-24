@@ -116,7 +116,7 @@ const FITZPATRICK_UNITS = 10
 export class FaceScanService {
   private static faceScanNotFound = () => new NotFoundError('FACE_SCAN_NOT_FOUND', 'Face scan not found')
   /** `checkInDueAt` is set only for `check-in-not-due`, the one reason that carries a date the app can show. */
-  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken', checkInDueAt?: string) =>
+  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken' | 'scan-limit', checkInDueAt?: string) =>
     new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', checkInDueAt ? { reason, checkInDueAt } : { reason })
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static notAwaitingRetake = () => new ConflictError('FACE_SCAN_NOT_AWAITING_RETAKE', 'This face scan is not waiting for a retake')
@@ -200,14 +200,18 @@ export class FaceScanService {
     // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote. `now` comes after the reads, so a
     // rival scan stored in the middle of them is stamped no later than `now` and still counts (the policy has no upper bound either).
     const latest = await this.repository.latestForProfile(profileId)
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
     const history = await this.goals.history()
     // The chase start only needs a time to measure the resume window from; the verdict and the stored scan use the later `now`.
     const readAt = this.now()
     const since = chaseStartFor(history, goal, readAt) ?? readAt
     const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
     const now = this.now()
-    const verdict = mayScanNow({ goal, history, scans, at: now })
-    if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
+    const verdict = mayScanNow({ goal, history, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null })
+    if (!verdict.allowed) {
+      if (verdict.reason === 'scan-limit') throw new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', { reason: 'scan-limit', nextScanAt: verdict.nextScanAt.toISOString() })
+      throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
+    }
 
     const valid = POSITIONS.flatMap((position) => {
       const photo = photos[position]
@@ -884,6 +888,7 @@ export class FaceScanService {
     const now = this.now()
     const since = chaseStartFor(rows, goal, now) ?? now
     const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
-    return mayScanNow({ goal, history: rows, scans, at: now }).allowed
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
+    return mayScanNow({ goal, history: rows, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null }).allowed
   }
 }
