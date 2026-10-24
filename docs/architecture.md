@@ -1323,20 +1323,23 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
 - **The policy** (`face-scans.policy.ts`, pure; issue #145): `mayScanNow({ goal, history, scans, at })` is the due rule. A goal's chase (`chaseStartFor`,
   read from `history`, the profile's goal rows oldest first) gets **one scan**, plus **one wider check-in scan** once it reaches its review point;
   switching away and back inside the resume window can never unlock another. Only `scans` inside the current chase count (filtered by `goalAtScan`
-  and the chase start); a scan that **failed** counts as nothing (not the chase's scan, not its day one, not its check-in). It answers:
+  and the chase start, with **no upper bound**: a scan stamped after `at`, by clock skew between isolates or a rival stored mid-read, still counts; `at` only
+  decides the chase start and whether the review point is reached); a scan that **failed** counts as nothing (not the chase's scan, not its day one, not its check-in). It answers:
   - `{ allowed: true, checkIn: false }` when the chase has no non-failed scan yet (a first chase, or a fresh restart after the 90-day window);
   - `{ allowed: true, checkIn: true }` when the chase has a day one (its first **ready** scan) and `at` is at or past `reviewPointFor(dayOne.createdAt,
     goal)`, and the chase has no non-failed check-in yet;
   - otherwise refused: `already-scanned-for-goal` when the chase has a non-failed scan but no ready day one yet (the first scan is still analysing or
     needs a retake); `check-in-not-due` (carrying `due`, the review point) before the review point; `check-in-taken` once the chase has had its check-in
     (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again).
-  `FaceScanService.create` calls it with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
+  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then the history and the scans, and takes `now` only after those
+  reads, so a rival scan stored in the middle is stamped no later than `now`; that `now` is also the time the scan is stored at and `checkInDueAt` is worked out from. It calls the policy with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
   repository.scansUnderGoalSince(profileId, goal, since)` (every scan under the goal since the chase start, whatever state, read without judging it:
   the policy alone decides what it means). The 429's `details.reason` is one of the three above; `check-in-not-due` alone also carries
   `details.checkInDueAt`, the ISO date of `reviewPointFor(dayOne.createdAt, goal)` (`createdAt`, never `updatedAt`).
 - **`rescanSuggested`** is the due rule itself, reused: `mayScanNow(...).allowed` for the profile's current goal, worked out once per list (no
   goal, or typed words nobody sorted into one, suggests nothing). It is **derived when read**, never stored, and so is true exactly when `create`
   would allow a scan now, whether a first scan or the chase's check-in.
+  It has no upper-bound filter of its own: it is the same policy call.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
   per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. The stored `check_in` flag (below) is read by the policy
   alone and never appears in the view. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
@@ -1386,7 +1389,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
-  is read once per list) and the goal history (fetched once and shared: `rescanSuggested`'s own due check now needs it too, not only a ready scan's day one).
+  is read once per list) and the goal history (read only when the profile has a current goal, fetched once and shared: `rescanSuggested`'s own due check now needs it too, not only a ready scan's day one).
 - **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
   then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
   does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").
