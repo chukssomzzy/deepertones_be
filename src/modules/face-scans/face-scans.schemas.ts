@@ -126,7 +126,7 @@ export const FaceScanResponse = z
     goal: z.enum(GOALS).openapi({ description: 'The goal the scan was taken under, whatever the goal is now.' }),
     createdAt: z.iso.datetime(),
     photos: z.object({ front: FacePhotoLink.optional(), right: FacePhotoLink.optional(), left: FacePhotoLink.optional() }).openapi({ description: 'A link for each photo that was sent.' }),
-    rescanSuggested: z.boolean().openapi({ description: 'True when the profile\'s latest scan was taken under another goal than its current one.' }),
+    rescanSuggested: z.boolean().openapi({ description: 'True when a face scan is due now for the profile\'s current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase\'s check-in at the review point.' }),
     // Not `FaceScanResult.nullable()`: that would make the registered component itself nullable and replace its never-list description.
     result: z.union([FaceScanResult, z.null()]).openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
   })
