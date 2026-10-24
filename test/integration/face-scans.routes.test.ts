@@ -197,6 +197,17 @@ const putConsent = (guest: Account | undefined, body: unknown = { version: CONSE
 const getConsent = (guest: Account | undefined) => json(guest, 'GET', CONSENT)
 const deleteConsent = (guest: Account | undefined) => json(guest, 'DELETE', CONSENT)
 const setGoal = async (guest: Account, goal: string) => expect((await json(guest, 'PUT', '/api/v1/me/goal', { goal })).status).toBe(200)
+/**
+ * A new chase's day-one scan needs the profile's last day-one scan, under any goal, to be 30 days back (issue #145). This harness runs on the real clock,
+ * so a profile that scanned and then switches goal gets there by backdating that scan, and the goal rows that opened its chase by the same amount (so
+ * the scan still sits inside its chase), 31 days: a fixture move only, the way `backdateToCheckIn` below does it.
+ */
+const SCAN_SPACING_MS = 30 * 24 * 60 * 60 * 1000
+const spacedOut = async (guest: Account, scanId: string) => {
+  const byMs = SCAN_SPACING_MS + 24 * 60 * 60 * 1000
+  await env.DB.prepare('UPDATE profile_goals SET created_at = created_at - ? WHERE profile_id = ?').bind(byMs, guest.profileId).run()
+  await env.DB.prepare('UPDATE face_scans SET created_at = created_at - ? WHERE id = ?').bind(byMs, scanId).run()
+}
 /** A verified user who has said yes to the face photo consent and picked a goal: one that may scan. */
 const readyUser = async (goal = 'glow') => {
   const guest = await newVerified()
@@ -477,7 +488,8 @@ describe('POST /api/v1/scans/faces: who may scan', () => {
 
   it('allows a scan again once the goal has changed', async () => {
     const guest = await readyUser('glow')
-    await createdFace(guest)
+    const first = await createdFace(guest)
+    await spacedOut(guest, first.id)
     await setGoal(guest, 'brighter')
 
     const second = await createdFace(guest, { front: fileOf(face({}, 2), 'front') })
@@ -721,6 +733,7 @@ describe('GET /api/v1/scans/faces/{id}', () => {
     const made = await createdFace(guest)
     expect((await dataOf<FaceScanView>(await getFace(guest, made.id))).rescanSuggested).toBe(false)
 
+    await spacedOut(guest, made.id)
     await setGoal(guest, 'brighter')
     const changed = await dataOf<FaceScanView>(await getFace(guest, made.id))
     expect(changed.rescanSuggested).toBe(true)
@@ -865,6 +878,7 @@ describe('DELETE /api/v1/scans/faces/{id}', () => {
   it('deletes only that scan\'s photos', async () => {
     const guest = await readyUser('glow')
     const first = await createdFace(guest, threeFiles())
+    await spacedOut(guest, first.id)
     await setGoal(guest, 'brighter')
     const second = await createdFace(guest, { front: fileOf(face({}, 5), 'front') })
 
@@ -1498,6 +1512,7 @@ describe('GET /api/v1/scans/faces', () => {
   it('lists two scans newest first, each as GET /scans/faces/{id} shows it', async () => {
     const guest = await readyUser('glow')
     const older = await createdFace(guest, threeFiles())
+    await spacedOut(guest, older.id)
     await setGoal(guest, 'brighter')
     await aMomentLater()
     const newer = await createdFace(guest, { front: fileOf(face({}, 2), 'front') })
@@ -1520,6 +1535,7 @@ describe('GET /api/v1/scans/faces', () => {
     await runFaceJob(queued.at(-1))
     stub.answerSkin((await rowOf(ready.id))!.task!, () => skinSuccess(glowOutput()))
     await runFaceJob(stepOf(ready.id, 'fetch'))
+    await spacedOut(guest, ready.id)
     await setGoal(guest, 'brighter')
     await aMomentLater()
     const analysing = await createdFace(guest)
@@ -1535,6 +1551,7 @@ describe('GET /api/v1/scans/faces', () => {
   it('shows a scan that needs a retake and one that failed, with their reasons', async () => {
     const guest = await readyUser('glow')
     const { view: needsRetake } = await needingRetake(guest, 'error_lighting_dark')
+    await spacedOut(guest, needsRetake.id)
     await setGoal(guest, 'brighter')
     queueFails = true
     await aMomentLater()

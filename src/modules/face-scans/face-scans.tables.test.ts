@@ -10,7 +10,9 @@ import {
   RESUME_DAYS,
   REVIEW_VERSION,
   REVIEW_WEEKS,
+  SCAN_SPACING_DAYS,
   SKIN_TYPE_VERSION,
+  SPACING_VERSION,
   TABLES_VERSION,
   VISIBILITY_VERSION,
   WORDING,
@@ -112,6 +114,7 @@ describe('the version constants', () => {
     ['CHANGE_VERSION', CHANGE_VERSION, 1],
     ['CHASE_VERSION', CHASE_VERSION, 1],
     ['REVIEW_VERSION', REVIEW_VERSION, 1],
+    ['SPACING_VERSION', SPACING_VERSION, 1],
     ['NEXT_GOAL_VERSION', NEXT_GOAL_VERSION, 1],
   ])('%s is %s, the number a result carries so a client can tell which rules wrote what it shows', (_name, version, expected) => {
     expect(version).toBe(expected)
@@ -120,8 +123,13 @@ describe('the version constants', () => {
   // Visibility v3 gives each concern its own cut-offs (v2 showed every goal concern with one shared set) and wording v2 adds the faint words.
   // Concerns v2 measures the core set on every scan. The chase rule and the review weeks (issue #145) join the others, so a stored result says
   // which resume window worked out its day one and which review weeks were in force.
-  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2, then the chase rule, the review weeks and the next-goal rule last', () => {
-    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1,review:1,next-goal:1')
+  it('puts every version in TABLES_VERSION, with concerns:2, visibility:3 and wording:2, then the chase rule, the review weeks, the scan spacing and the next-goal rule last', () => {
+    expect(TABLES_VERSION).toBe('concerns:2,visibility:3,wording:2,skin-type:1,change:1,chase:1,review:1,spacing:1,next-goal:1')
+  })
+
+  // The scan spacing (issue #145): a new chase's day-one scan needs the profile's last day-one scan, under any goal, to be at least this many days back.
+  it('spaces a new chase\'s day-one scans 30 days apart, the number from the spec', () => {
+    expect(SCAN_SPACING_DAYS).toBe(30)
   })
 })
 
