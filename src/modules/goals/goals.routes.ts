@@ -1,8 +1,8 @@
 import { defineRoute, errorResponses, jsonBody, ok, openapiApp, success } from '../../lib/openapi'
 import { rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
-import { toGoalResponse, toOnboardingResponse } from './goals.presenter'
-import { GoalResponse, OnboardingResponse, SetGoalBody } from './goals.schemas'
+import { toGoalResponse, toOnboardingResponse, toSwitchPreviewResponse } from './goals.presenter'
+import { GoalResponse, OnboardingResponse, SetGoalBody, SwitchPreviewQuery, SwitchPreviewResponse } from './goals.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -49,7 +49,23 @@ const getOnboarding = defineRoute({
   responses: { 200: success(OnboardingResponse, 'Where the profile is in the first run'), ...errorResponses(401) },
 })
 
+const getSwitchPreview = defineRoute({
+  method: 'get',
+  path: '/goal/switch-preview',
+  operationId: 'getSwitchPreview',
+  tags: ['Onboarding'],
+  summary: 'What switching to another goal would do',
+  description:
+    'Guests included. `outcome` is `resume` when the goal was left no more than 90 days ago and its chase would continue, with `dayOneAt` (its first ready scan, or null) and `resumeUntil` (90 days after it was left); ' +
+    'otherwise `fresh`, with both null. A profile with no goal yet starts every goal fresh. Reads only: no goal is saved and no scan is made. The goal the profile is already on is 400 `GOAL_ALREADY_CURRENT`.',
+  security: bearer,
+  request: { query: SwitchPreviewQuery },
+  responses: { 200: success(SwitchPreviewResponse, 'What switching would do'), ...errorResponses(400, 401) },
+})
+
 export const goalsRoutes = openapiApp()
   .openapi(setGoal, async (c) => ok(c, toGoalResponse(await c.var.services.goals.set(c.req.valid('json'))), 'Goal saved'))
   .openapi(getGoal, async (c) => ok(c, toGoalResponse(await c.var.services.goals.current()), 'Goal'))
   .openapi(getOnboarding, async (c) => ok(c, toOnboardingResponse(await c.var.services.goals.onboarding()), 'Onboarding'))
+
+  .openapi(getSwitchPreview, async (c) => ok(c, toSwitchPreviewResponse(await c.var.services.faceScans.switchPreview(c.req.valid('query').goal)), 'Switch preview'))

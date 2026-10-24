@@ -52,6 +52,10 @@ const faceReady = (over: Record<string, unknown> = {}) =>
 const faceRetake = (over: Record<string, unknown> = {}) =>
   ({ kind: 'face-scan-needs-retake', userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime(), ...over }) as SendPushBody
 
+const checkInDue = (over: Record<string, unknown> = {}) =>
+  ({ kind: 'face-check-in-due', userId: 'user-ada', profileId: 'profile-ada-1', dayOneScanId: 'day-one-1', ...over }) as SendPushBody
+const CHECK_IN_DUE_INPUT = { userId: 'user-ada', profileId: 'profile-ada-1', dayOneScanId: 'day-one-1' }
+
 /** A sender whose `send` can do something after Expo has answered but before the service sees the tickets: a phone registering mid-send. */
 class RacingSender extends MemoryPushSender {
   duringSend?: () => Promise<void>
@@ -179,6 +183,16 @@ describe('NotificationsService enqueueing', () => {
     expect(push.sent).toEqual([])
   })
 
+  it('queues a face-check-in-due push carrying only ids, keyed by the chase\'s day-one scan, with no delay', async () => {
+    await service.faceCheckInDue(CHECK_IN_DUE_INPUT)
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(jobs.enqueued[0]).toMatchObject({ job: 'send-push', body: checkInDue() })
+    expect(jobs.enqueued[0]!.delaySeconds).toBeUndefined()
+    expect(sendPushSpec.key(jobs.enqueued[0]!.body as SendPushBody)).toBe('face-check-in-due:day-one-1')
+    expect(push.sent).toEqual([])
+  })
+
   it('queues a face-scan-needs-retake push with the reason and the instant it was stamped with, keyed by the face scan and that instant', async () => {
     await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })
 
@@ -251,6 +265,7 @@ describe('NotificationsService enqueueing', () => {
     ['new-sign-in', () => service.newSignIn({ userId: 'user-ada', platform: 'ios' })],
     ['face-scan-ready', () => service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })],
     ['face-scan-needs-retake', () => service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })],
+    ['face-check-in-due', () => service.faceCheckInDue(CHECK_IN_DUE_INPUT)],
   ])('logs a failed %s enqueue without throwing, so the scan or the sign-in carries on', async (kind, enqueue) => {
     jobs.failNextWith(new Error('queue is down'))
 
@@ -273,6 +288,7 @@ describe('NotificationsService enqueueing', () => {
   it.each([
     ['face-scan-ready', () => service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })],
     ['face-scan-needs-retake', () => service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'no-face', at: T0.getTime() })],
+    ['face-check-in-due', () => service.faceCheckInDue(CHECK_IN_DUE_INPUT)],
   ])('logs a failed %s enqueue with no account, profile or error text', async (_kind, enqueue) => {
     jobs.failNextWith(new Error('queue is down for user-ada'))
 
@@ -362,6 +378,27 @@ describe('NotificationsService.deliver: who is told', () => {
 
     await deliver(faceReady())
     await deliver(faceRetake())
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('sends a check-in-due push to the phones on the profile\'s own account and profile and to no other phone', async () => {
+    await register(ADA, 'ada-phone-1', TOKEN_A)
+    await register(ADA, 'ada-phone-2', TOKEN_B, 'android')
+    await register(ADA_SECOND_PROFILE, 'ada-tablet', TOKEN_C)
+    await register(BOB, 'bob-phone', TOKEN_D)
+
+    await deliver(checkInDue())
+
+    expect(sentTo()).toEqual([TOKEN_A, TOKEN_B])
+  })
+
+  it('does not send check-in-due to a phone on the profile that belongs to another account than the message names, or to a phone that moved to the other profile', async () => {
+    await register(ADA, 'ada-phone', TOKEN_A)
+    await register(ADA_SECOND_PROFILE, 'ada-phone', TOKEN_A)
+
+    await deliver(checkInDue())
+    await deliver(checkInDue({ userId: 'user-bob' }))
 
     expect(push.sent).toEqual([])
   })
@@ -550,6 +587,50 @@ describe('NotificationsService.deliver: settings', () => {
     expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready', 'face-scan-needs-retake'])
   })
 
+  it('puts a check-in-due push behind the scanNeedsYou switch: off sends nothing, on sends it, and the ready face scan push is not affected', async () => {
+    await setSettings(ADA, { scanNeedsYou: false })
+    await deliver(checkInDue())
+    expect(push.sent).toEqual([])
+    await deliver(faceReady())
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready'])
+
+    await setSettings(ADA, { scanNeedsYou: true })
+    await deliver(checkInDue())
+
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-scan-ready', 'face-check-in-due'])
+  })
+
+  it('sends check-in-due when only scanFinished is off: the other switch does not gate it', async () => {
+    await setSettings(ADA, { scanFinished: false })
+
+    await deliver(checkInDue())
+
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind)).toEqual(['face-check-in-due'])
+  })
+
+  it('sends check-in-due to an account that never touched its settings, because the switches default to on', async () => {
+    await deliver(checkInDue())
+
+    expect(push.sent).toHaveLength(1)
+  })
+
+  it('reads the switch when it sends, so turning scanNeedsYou off after the check-in push queued still stops it', async () => {
+    await service.faceCheckInDue(CHECK_IN_DUE_INPUT)
+    await setSettings(ADA, { scanNeedsYou: false })
+
+    for (const entry of jobs.enqueued) await deliver(entry.body as SendPushBody)
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('takes the check-in switch from the account the message names, not from another account', async () => {
+    await setSettings(BOB, { scanNeedsYou: false })
+
+    await deliver(checkInDue())
+
+    expect(push.sent).toHaveLength(1)
+  })
+
   it('reads the face scan switches when it sends, so turning one off after the event queued still stops the push', async () => {
     await service.faceScanReady({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1' })
     await service.faceScanNeedsRetake({ userId: 'user-ada', profileId: 'profile-ada-1', faceScanId: 'face-1', reason: 'too-dark', at: T0.getTime() })
@@ -636,6 +717,19 @@ describe('NotificationsService.deliver: what the phone shows', () => {
     expect(push.sent).toEqual([
       { to: TOKEN_A, title: 'New sign-in to your Deeper Tones account', body, data: { url: '/settings/security', kind: 'new-sign-in' } },
     ])
+  })
+
+  it('tells a check-in is due in a plain line and links to a new face scan, with only ids in the data', async () => {
+    await deliver(checkInDue({ dayOneScanId: 'day-one-7' }))
+
+    expect(push.sent).toHaveLength(1)
+    const [message] = push.sent
+    expect(message!.to).toBe(TOKEN_A)
+    expect(message!.title).toEqual(expect.any(String))
+    expect(message!.title.trim()).not.toBe('')
+    expect(message!.body).toEqual(expect.any(String))
+    expect(message!.body.trim()).not.toBe('')
+    expect(message!.data).toEqual({ url: '/scans/faces/new', kind: 'face-check-in-due', profileId: 'profile-ada-1', dayOneScanId: 'day-one-7' })
   })
 
   it('tells a ready face scan in generic words and links to the face scan', async () => {
@@ -1075,9 +1169,10 @@ describe('the face scan push words', () => {
   it('puts no condition word, "you have", lightness word or digit in any title or body a face scan push shows', async () => {
     await register(ADA, 'ada-phone', TOKEN_A)
     await deliver(faceReady())
+    await deliver(checkInDue())
     for (const reason of REJECTED_PHOTO_REASONS) await deliver(faceRetake({ reason }))
 
-    expect(push.sent).toHaveLength(1 + REJECTED_PHOTO_REASONS.length)
+    expect(push.sent).toHaveLength(2 + REJECTED_PHOTO_REASONS.length)
     for (const message of push.sent) {
       expect(message.title).toEqual(expect.any(String))
       expect(message.body).toEqual(expect.any(String))

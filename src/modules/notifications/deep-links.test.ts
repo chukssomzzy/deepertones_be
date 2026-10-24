@@ -12,6 +12,7 @@ const PROVIDED_IDS: Record<(typeof NOTIFICATION_KINDS)[number], string[]> = {
   'new-sign-in': [],
   'face-scan-ready': ['faceScanId'],
   'face-scan-needs-retake': ['faceScanId'],
+  'face-check-in-due': [],
 }
 
 const templates = deepLinks as Record<string, string>
@@ -41,11 +42,24 @@ describe('the deep-link table (deep-links.json)', () => {
     expect(placeholdersOf(templates['new-sign-in']!)).toEqual([])
     expect(placeholdersOf(templates['face-scan-ready']!)).toEqual(['faceScanId'])
     expect(placeholdersOf(templates['face-scan-needs-retake']!)).toEqual(['faceScanId'])
+    expect(placeholdersOf(templates['face-check-in-due']!)).toEqual([])
   })
 
   it('writes the face scan paths exactly as the app routes them', () => {
     expect(templates['face-scan-ready']).toBe('/scans/faces/{faceScanId}')
     expect(templates['face-scan-needs-retake']).toBe('/scans/faces/{faceScanId}/retake')
+  })
+})
+
+describe('the check-in-due deep link', () => {
+  // A check-in is a new face scan, not a scan that exists yet, so the path is static and carries no id (issue #145).
+  it('writes the path exactly as the app routes a new face scan', () => {
+    expect(templates['face-check-in-due']).toBe('/scans/faces/new')
+  })
+
+  it('opens the new face scan screen, whatever ids it is given', () => {
+    expect(deepLinkFor('face-check-in-due', {})).toBe('/scans/faces/new')
+    expect(deepLinkFor('face-check-in-due', { faceScanId: 'face-1', scanId: 'scan-1' })).toBe('/scans/faces/new')
   })
 })
 

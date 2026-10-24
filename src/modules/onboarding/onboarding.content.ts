@@ -30,6 +30,8 @@ export type OnboardingContent = {
   /** Shown only when the user's own words asked to be lighter. */
   colourNote: string
   safetyScreen: { title: string; subtitle: string; footnote: string; continueLabel: string; choices: Choice[] }
+  /** The heads-up before a goal switch, keyed by the `outcome` of `GET /me/goal/switch-preview`. */
+  switchScreen: { resume: string; fresh: string }
 }
 
 /** The languages the copy is written in. Anything else is served in English. */
@@ -43,7 +45,10 @@ const DRAFT_CHIP_LABEL = 'Calm, healthy skin' // DRAFT
 const DRAFT_REACTION_FIELD_LABEL = 'Which product? (optional)' // DRAFT
 const DRAFT_REACTION_FIELD_HINT = 'Add the ingredient too if you know it.' // DRAFT
 
-export const DRAFT_COPY: readonly string[] = [DRAFT_CHIP_LABEL, DRAFT_REACTION_FIELD_LABEL, DRAFT_REACTION_FIELD_HINT]
+const DRAFT_SWITCH_RESUME = 'Picks up where you left off: your progress on this goal still counts.' // DRAFT (issue #145)
+const DRAFT_SWITCH_FRESH = 'Starts fresh, with a new face scan as your day one.' // DRAFT (issue #145)
+
+export const DRAFT_COPY: readonly string[] = [DRAFT_CHIP_LABEL, DRAFT_REACTION_FIELD_LABEL, DRAFT_REACTION_FIELD_HINT, DRAFT_SWITCH_RESUME, DRAFT_SWITCH_FRESH]
 
 const CHIP_LABELS: Record<Goal, string> = {
   'clear-skin': 'Clear skin',
@@ -103,6 +108,7 @@ const withoutVersion = (locale: Locale): Omit<OnboardingContent, 'contentVersion
       continueLabel: 'Continue',
       choices: SAFETY_CHOICES.map((id) => ({ id, ...CHOICES[id] })),
     },
+    switchScreen: { resume: DRAFT_SWITCH_RESUME, fresh: DRAFT_SWITCH_FRESH },
   }
 }
 

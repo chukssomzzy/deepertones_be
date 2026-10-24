@@ -64,5 +64,9 @@ export const OnboardingContentResponse = z
       continueLabel: z.string(),
       choices: z.array(Choice).openapi({ description: 'The choices to offer, in display order. Each `id` is accepted in `choices` of `PUT /api/v1/me/safety`.' }),
     }),
+    switchScreen: z.object({
+      resume: z.string(),
+      fresh: z.string(),
+    }).openapi({ description: 'The heads-up before a goal switch: show the line named by the `outcome` of `GET /api/v1/me/goal/switch-preview`. Draft wording.' }),
   })
   .openapi('OnboardingContent')

@@ -702,6 +702,54 @@
         ],
         "description": "The current safety answers, or null until the profile answers. Shown even when the goal is not set yet."
       },
+      "SwitchPreview": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair"
+            ],
+            "description": "One of the six goals the app offers.",
+            "example": "fade-dark-marks"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resume",
+              "fresh"
+            ],
+            "description": "`resume` when switching continues the chase the goal had; `fresh` when it starts a new one."
+          },
+          "dayOneAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the chase's first ready scan was taken. Null for a fresh start, or while the chase has no ready scan."
+          },
+          "resumeUntil": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last moment the goal can be taken up again and still resume. Null for a fresh start."
+          }
+        },
+        "required": [
+          "goal",
+          "outcome",
+          "dayOneAt",
+          "resumeUntil"
+        ]
+      },
       "SetSafetyBody": {
         "type": "object",
         "properties": {
@@ -1480,6 +1528,22 @@
               "continueLabel",
               "choices"
             ]
+          },
+          "switchScreen": {
+            "type": "object",
+            "properties": {
+              "resume": {
+                "type": "string"
+              },
+              "fresh": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "resume",
+              "fresh"
+            ],
+            "description": "The heads-up before a goal switch: show the line named by the `outcome` of `GET /api/v1/me/goal/switch-preview`. Draft wording."
           }
         },
         "required": [
@@ -1489,7 +1553,8 @@
           "answerScreen",
           "answers",
           "colourNote",
-          "safetyScreen"
+          "safetyScreen",
+          "switchScreen"
         ]
       },
       "Scan": {
@@ -2127,7 +2192,7 @@
           },
           "rescanSuggested": {
             "type": "boolean",
-            "description": "True when the profile's latest scan was taken under another goal than its current one."
+            "description": "True when a face scan is due now for the profile's current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase's check-in at the review point."
           },
           "result": {
             "anyOf": [
@@ -2411,6 +2476,22 @@
             ],
             "description": "The change since day one; null when this scan is its own day one."
           },
+          "nextGoal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair",
+              null
+            ],
+            "description": "The goal to suggest working on next, from this check-in scan. Null on every other scan."
+          },
           "tablesVersion": {
             "type": "string",
             "description": "The version of the rules that worded this result. The words are worked out each time the scan is read."
@@ -2423,6 +2504,7 @@
           "skinType",
           "skinAge",
           "sinceDayOne",
+          "nextGoal",
           "tablesVersion"
         ],
         "description": "What a ready scan shows. It never holds a score or any number but the skin age in years, never a condition name, never a Perfect Corp name, never a Fitzpatrick type, and never a word about lightness. It describes the face, not the person: show the words as they are."
@@ -3993,6 +4075,110 @@
                     "message",
                     "data"
                   ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/goal/switch-preview": {
+      "get": {
+        "operationId": "getSwitchPreview",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "What switching to another goal would do",
+        "description": "Guests included. `outcome` is `resume` when the goal was left no more than 90 days ago and its chase would continue, with `dayOneAt` (its first ready scan, or null) and `resumeUntil` (90 days after it was left); otherwise `fresh`, with both null. A profile with no goal yet starts every goal fresh. Reads only: no goal is saved and no scan is made. The goal the profile is already on is 400 `GOAL_ALREADY_CURRENT`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "clear-skin",
+                "even-tone",
+                "fade-dark-marks",
+                "brighter",
+                "glow",
+                "calm-repair"
+              ],
+              "description": "One of the six goals the app offers.",
+              "example": "fade-dark-marks"
+            },
+            "required": true,
+            "description": "One of the six goals the app offers.",
+            "name": "goal",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What switching would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SwitchPreview"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -6462,7 +6648,7 @@
           "Face scans"
         ],
         "summary": "Start a face scan from a front photo and optionally two side photos",
-        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE` (`details.reason` is `already-scanned-for-goal`: the profile's latest scan was taken under its current goal), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; follow the scan with `GET /api/v1/scans/faces/{id}/events` or poll `GET /api/v1/scans/faces/{id}` for it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE`: the current goal's chase gets one scan, plus one wider check-in scan at its review point (issue #145). `details.reason` is `already-scanned-for-goal` (the chase already has a scan, or its check-in is still being analysed or needs a retake), `check-in-not-due` (the chase has its day one but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase's check-in has already been taken) or `scan-limit` (a new chase's first scan waits 30 days after the profile's last day-one scan under any goal; check-ins neither count nor are limited; `details.nextScanAt` says when), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; follow the scan with `GET /api/v1/scans/faces/{id}/events` or poll `GET /api/v1/scans/faces/{id}` for it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
