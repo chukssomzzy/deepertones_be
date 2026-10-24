@@ -2553,6 +2553,16 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 - **The `counted` flag.** `scan_items.counted` (integer boolean, NOT NULL, default true; migration 0027, a plain `ALTER TABLE ... ADD`) says whether an item counts toward the daily photo quotas. `photoCounts`, so both `photosSince` and `photosSinceIp`, count only counted items. Every item that existed before the column, and every photo or shelf item, is counted; only a typed item created with `counted = false` is not, and that is a product that needed no model (`ready` or `analysis-failed`), so adding one is never refused for the allowance and does not use any of it. A typed item that needs a model is counted, as one photo.
 - **The push rule.** A typed scan sends "your scan is ready" only if it waited for a model: `notifyFinished` skips the push for a typed scan none of whose items is counted (it finished inside the request, in front of the user), and sends it, with the usual notification settings, for a counted one (which finishes later, possibly after the user left). The `done` event is published either way.
 
+### Routines
+
+`src/modules/routines` is pure code for the routine stage (#152): no service, repository, route or provider yet; the routine-stage spec adds those. It imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`.
+
+- **Contracts.** `routines.types.ts` holds `RoutineSkeleton` (what the rules decided: shelf verdicts, gaps with their safe candidates, limits) and `Routine` (what the AI writer answers). They are the seam between the rules, the writer, the eval and, later, production. `SkeletonCandidate` has no `origin` field on purpose: who paid for a review must never reach a choice.
+- **Schema.** `RoutineSchema` (`routines.schema.ts`) is made of closed zod objects; an extra field is a parse failure.
+- **Gates.** `checkRoutine(skeleton, routine: unknown)` (`routines.gates.ts`) returns `[]` or every `GateFailure` (a fixed code and a step, never model text), gate by gate in a fixed order (parse, unknown-product, stopped-product, over-reduced, taper, too-many-new, frequency, order, gap, grounding, wording), and within a gate in entry order. A routine that does not parse fails `parse` alone. `FREQUENCY_RANK` ranks frequencies for the over-reduced check.
+- **Wording.** `FORBIDDEN_WORDING` (`routines.wording.ts`) is a starter list of condition names, diagnosis phrasing, lightness-as-outcome and grades/scores (CONTEXT.md, Safety). Its patterns are never global or sticky.
+- **Grounding is internal only.** `RoutineEntry.grounding` lists the links a reason drew on and is checked against the chosen product's own links; it must never appear in an API response or on a screen.
+
 ### Admin access
 The `/api/v1/admin` routes change shared data (today the catalog workbook, see below), so they are not a user's to call. A user's token, guest or
 signed-in, never opens them: they have a door of their own.
