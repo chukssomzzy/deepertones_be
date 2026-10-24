@@ -14,7 +14,9 @@ export type ScanVerdict =
  * asks. A goal gets ONE scan per chase, plus ONE wider check-in scan once the chase reaches its review point, so switching away and back can
  * never unlock a paid scan.
  *
- * Only scans inside the current chase count (`chaseStartFor`, read from `history`). A scan that failed gave the profile nothing, so it never
+ * Only scans inside the current chase count (`chaseStartFor`, read from `history`): those stamped at or after the chase start, with no upper
+ * bound, so a scan stamped later than `at` (clock skew between isolates, or a rival stored while the caller was reading) still counts. `at` only
+ * decides the chase start and whether the review point has been reached. A scan that failed gave the profile nothing, so it never
  * counts: not as the chase's scan, not as its day one, not as its check-in. Day one is the chase's first `ready` scan; the review point is
  * day one plus the goal's review week.
  */
@@ -31,7 +33,7 @@ export const mayScanNow = ({
 }): ScanVerdict => {
   const chaseStart = chaseStartFor(history, goal, at)
   const chaseScans = chaseStart
-    ? scans.filter((scan) => scan.goalAtScan === goal && scan.createdAt.getTime() >= chaseStart.getTime() && scan.createdAt.getTime() <= at.getTime())
+    ? scans.filter((scan) => scan.goalAtScan === goal && scan.createdAt.getTime() >= chaseStart.getTime())
     : []
   const notFailed = chaseScans.filter((scan) => scan.state !== 'failed')
   if (notFailed.length === 0) return { allowed: true, checkIn: false }

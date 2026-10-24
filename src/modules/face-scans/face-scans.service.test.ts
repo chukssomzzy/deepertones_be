@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { runAs } from '../../lib/context'
 import { ConflictError, ForbiddenError, NotFoundError, RateLimitedError, UnauthorizedError, ValidationError } from '../../lib/errors'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -1502,5 +1502,146 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     await create(ctx, { front: face({}, 2) })
 
     expect(seen).toEqual([null, first.id])
+  })
+})
+
+// A rival request stores its scan in the middle of another's reads. `create` reads `latestForProfile` first (it arms the write's guard), then the goal
+// history and the chase's scans, so a rival that lands AFTER `latestForProfile` is caught by the guard, and one that lands BEFORE it is invisible to the
+// guard and only the due rule can see it.
+describe('FaceScanService.create: a rival scan stored in the middle of its reads', () => {
+  const scansOf = async (ctx: Ctx) => ctx.repository.listForProfile(PROFILE, 10)
+
+  const rivalOf = (ctx: Ctx, over: { checkIn: boolean; createdAt: Date }) => ({
+    id: 'rival-scan',
+    userId: USER,
+    profileId: PROFILE,
+    goalAtScan: 'glow' as Goal,
+    ...over,
+  })
+
+  /** Once armed, stores `rival` through the write path, just AFTER `create` has read the latest scan, as the first read after it asks. */
+  const rivalAfterLatest = (rival: () => Parameters<FakeFaceScansRepository['createFaceScan']>[0]) => {
+    class RivalAfterLatest extends FakeFaceScansRepository {
+      armed = false
+      override async scansUnderGoalSince(...args: Parameters<FakeFaceScansRepository['scansUnderGoalSince']>) {
+        if (this.armed) {
+          this.armed = false
+          await super.createFaceScan(rival(), [])
+        }
+        return super.scansUnderGoalSince(...args)
+      }
+    }
+    return new RivalAfterLatest()
+  }
+
+  /** Once armed, stores `rival` through the write path, just BEFORE `create` reads the latest scan: after it took its clock, so the guard sees the rival as latest. */
+  const rivalBeforeLatest = (rival: () => Parameters<FakeFaceScansRepository['createFaceScan']>[0]) => {
+    class RivalBeforeLatest extends FakeFaceScansRepository {
+      armed = false
+      override async latestForProfile(...args: Parameters<FakeFaceScansRepository['latestForProfile']>) {
+        if (this.armed) {
+          this.armed = false
+          await super.createFaceScan(rival(), [])
+        }
+        return super.latestForProfile(...args)
+      }
+    }
+    return new RivalBeforeLatest()
+  }
+
+  it('refuses a first scan with 429 FACE_SCAN_NOT_DUE when a rival scan lands after the latest scan was read, and stores only the rival', async () => {
+    let ctx!: Ctx
+    const repository = rivalAfterLatest(() => rivalOf(ctx, { checkIn: false, createdAt: ctx.now() }))
+    ctx = setup({ repository })
+    await ready(ctx)
+    repository.armed = true
+
+    const error = await errorOf(create(ctx, three()))
+
+    expect(error).toBeInstanceOf(RateLimitedError)
+    expect(error.code).toBe('FACE_SCAN_NOT_DUE')
+    expect((await scansOf(ctx)).map((scan) => scan.id)).toEqual(['rival-scan'])
+    nothingStored(ctx)
+  })
+
+  it('refuses a check-in with check-in-taken when a rival check-in lands after the latest scan was read, and stores only one check-in', async () => {
+    let ctx!: Ctx
+    const repository = rivalAfterLatest(() => rivalOf(ctx, { checkIn: true, createdAt: ctx.now() }))
+    ctx = setup({ repository })
+    const dayOne = await atReviewPoint(ctx)
+    repository.armed = true
+
+    const error = await errorOf(create(ctx, { front: face({}, 2) }))
+
+    expect(error).toBeInstanceOf(RateLimitedError)
+    expect(error.code).toBe('FACE_SCAN_NOT_DUE')
+    expect(error.details).toMatchObject({ reason: 'check-in-taken' })
+    const stored = await scansOf(ctx)
+    expect(stored.map((scan) => scan.id).sort()).toEqual([dayOne.id, 'rival-scan'].sort())
+    expect(stored.filter((scan) => scan.checkIn).map((scan) => scan.id)).toEqual(['rival-scan'])
+  })
+
+  // The gap: `create` takes its clock, then a rival is stored (its own clock a millisecond ahead), then `create` reads the latest scan, which is now
+  // the rival, so the write's guard passes. Only the due rule can still refuse, and it must count a scan stamped after this request's clock.
+  it('refuses a first scan when a rival stamped a millisecond after its clock landed before the latest scan was read, and stores only the rival', async () => {
+    let ctx!: Ctx
+    const repository = rivalBeforeLatest(() => rivalOf(ctx, { checkIn: false, createdAt: new Date(ctx.now().getTime() + 1) }))
+    ctx = setup({ repository })
+    await ready(ctx)
+    repository.armed = true
+
+    const error = await errorOf(create(ctx, three()))
+
+    expect(error).toBeInstanceOf(RateLimitedError)
+    expect(error.code).toBe('FACE_SCAN_NOT_DUE')
+    expect((await scansOf(ctx)).map((scan) => scan.id)).toEqual(['rival-scan'])
+    nothingStored(ctx)
+  })
+
+  it('refuses a check-in with check-in-taken when a rival check-in stamped a millisecond after its clock landed before the latest scan was read', async () => {
+    let ctx!: Ctx
+    const repository = rivalBeforeLatest(() => rivalOf(ctx, { checkIn: true, createdAt: new Date(ctx.now().getTime() + 1) }))
+    ctx = setup({ repository })
+    const dayOne = await atReviewPoint(ctx)
+    repository.armed = true
+
+    const error = await errorOf(create(ctx, { front: face({}, 2) }))
+
+    expect(error).toBeInstanceOf(RateLimitedError)
+    expect(error.details).toMatchObject({ reason: 'check-in-taken' })
+    const stored = await scansOf(ctx)
+    expect(stored.map((scan) => scan.id).sort()).toEqual([dayOne.id, 'rival-scan'].sort())
+    expect(stored.filter((scan) => scan.checkIn)).toHaveLength(1)
+  })
+})
+
+// The list asks for the goal history only to rank the scans against the chase: a profile with no goal has no chase, so it must not be read.
+describe('FaceScanService.listFaceScans: the goal history', () => {
+  it('does not read the goal history for a profile that never set a goal', async () => {
+    const ctx = setup()
+    await giveConsent(ctx)
+    // No path makes a scan without a goal, so the scan is written straight to the repository.
+    await ctx.repository.createFaceScan({ id: 'old-scan', userId: USER, profileId: PROFILE, goalAtScan: 'glow', createdAt: T0 }, [])
+    const history = vi.spyOn(ctx.goals, 'history')
+
+    const list = await asUser(() => ctx.service.listFaceScans())
+
+    expect(list.map((scan) => scan.id)).toEqual(['old-scan'])
+    expect(list[0]!.rescanSuggested).toBe(false)
+    expect(history).not.toHaveBeenCalled()
+  })
+
+  it('does not read the goal history for a profile whose words were never sorted into a goal, when none of its scans is ready', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    const made = await create(ctx)
+    ctx.advance(MINUTE)
+    await asUser(() => ctx.goals.set({ text: 'something the reader finds no goal in' }))
+    const history = vi.spyOn(ctx.goals, 'history')
+
+    const list = await asUser(() => ctx.service.listFaceScans())
+
+    expect(list.map((scan) => scan.id)).toEqual([made.id])
+    expect(history).not.toHaveBeenCalled()
   })
 })
