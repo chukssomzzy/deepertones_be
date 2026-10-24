@@ -1587,6 +1587,195 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
       })
     })
 
+    // The daily "check-in due" push (issue #145, PR 5). A push is recorded once per chase, keyed by the chase's day-one scan; the record is written
+    // BEFORE the push is queued and only a write that landed queues it, so a chase is told at most once. The candidates are the day ones that might be
+    // due: the service then keeps the ones whose own goal and review point say so.
+    describe('check-in pushes: recordCheckInPush, checkInPushFor and checkInPushCandidates', () => {
+      const day = (n: number) => at(n * DAY)
+      type EndState = 'ready' | 'failed' | 'needs-retake' | 'analysing'
+
+      /** A scan written the way the pipeline writes one: created analysing (a check-in or not), then ended by the write that ends it. */
+      const scanned = async (
+        repository: FaceScansContractSetup['repository'],
+        account: Account,
+        createdAt: Date,
+        over: { state?: EndState; checkIn?: boolean; goal?: Goal } = {},
+      ) => {
+        const { state = 'ready', checkIn = false, goal = 'glow' } = over
+        const scan = newScan(account, { goalAtScan: goal, createdAt, checkIn })
+        await repository.createFaceScan(scan, [newPhoto(scan, 'front')])
+        const updatedAt = new Date(createdAt.getTime() + MINUTE)
+        if (state === 'ready') await repository.completeFaceScan(scan.id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt })
+        if (state === 'failed') await repository.updateFaceScan(scan.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt })
+        if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'no-face', updatedAt })
+        return scan
+      }
+      const pushFor = (account: Account, scan: NewFaceScan, sentAt: Date, goal: Goal = 'glow') => ({
+        profileId: account.profileId,
+        userId: account.userId,
+        goal,
+        dayOneScanId: scan.id,
+        sentAt,
+      })
+      const candidateIds = async (repository: FaceScansContractSetup['repository'], createdBefore: Date, limit = 100) =>
+        (await repository.checkInPushCandidates({ createdBefore, limit })).map((scan) => scan.id)
+
+      describe('recordCheckInPush', () => {
+        it('lands the first record for a chase and reads back as written', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const dayOne = await scanned(repository, account, day(1))
+
+          expect(await repository.recordCheckInPush(pushFor(account, dayOne, day(43)))).toBe(true)
+
+          const found = await repository.checkInPushFor(account.profileId, dayOne.id)
+          expect(found).toMatchObject({ profileId: account.profileId, userId: account.userId, goal: 'glow', dayOneScanId: dayOne.id })
+          expect(found!.sentAt.getTime()).toBe(day(43).getTime())
+        })
+
+        it('has no record for a chase that was never told', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const dayOne = await scanned(repository, account, day(1))
+
+          expect(await repository.checkInPushFor(account.profileId, dayOne.id)).toBeNull()
+        })
+
+        it('answers false for a chase already recorded, and keeps the first record as it was', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const dayOne = await scanned(repository, account, day(1))
+          await repository.recordCheckInPush(pushFor(account, dayOne, day(43)))
+
+          expect(await repository.recordCheckInPush(pushFor(account, dayOne, day(44)))).toBe(false)
+
+          expect((await repository.checkInPushFor(account.profileId, dayOne.id))!.sentAt.getTime()).toBe(day(43).getTime())
+        })
+
+        it('records a later chase of the same profile as its own, because it has another day one', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const first = await scanned(repository, account, day(1))
+          const second = await scanned(repository, account, day(200))
+          await repository.recordCheckInPush(pushFor(account, first, day(43)))
+
+          expect(await repository.recordCheckInPush(pushFor(account, second, day(242)))).toBe(true)
+        })
+      })
+
+      describe('checkInPushCandidates', () => {
+        it('lists a ready scan taken exactly at the cut-off and not one taken a millisecond after it', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const onTheLine = await scanned(repository, account, day(10))
+          const justAfter = await scanned(repository, account, new Date(day(10).getTime() + 1))
+
+          expect(await candidateIds(repository, day(10))).toEqual([onTheLine.id])
+          expect(await candidateIds(repository, new Date(day(10).getTime() + 1))).toEqual([onTheLine.id, justAfter.id])
+        })
+
+        it.each<EndState>(['analysing', 'failed', 'needs-retake'])('leaves out a day one that is %s: only a ready scan is a day one', async (state) => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          await scanned(repository, account, day(1), { state })
+
+          expect(await candidateIds(repository, day(100))).toEqual([])
+        })
+
+        it('leaves out a scan that is itself a check-in', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          await scanned(repository, account, day(43), { checkIn: true })
+
+          expect(await candidateIds(repository, day(100))).toEqual([])
+        })
+
+        it.each<EndState>(['ready', 'analysing', 'needs-retake'])('leaves out a day one whose chase has a check-in that is %s, because that check-in is taken', async (state) => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          await scanned(repository, account, day(1))
+          await scanned(repository, account, day(43), { checkIn: true, state })
+
+          expect(await candidateIds(repository, day(100))).toEqual([])
+        })
+
+        it('keeps a day one whose check-in failed, because the check-in was not taken', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const dayOne = await scanned(repository, account, day(1))
+          await scanned(repository, account, day(43), { checkIn: true, state: 'failed' })
+
+          expect(await candidateIds(repository, day(100))).toEqual([dayOne.id])
+        })
+
+        it('keeps a day one whose only check-in is under another goal, which is another chase', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const dayOne = await scanned(repository, account, day(1))
+          await scanned(repository, account, day(43), { checkIn: true, goal: 'brighter' })
+
+          expect(await candidateIds(repository, day(100))).toEqual([dayOne.id])
+        })
+
+        it('does not let the previous chase\'s check-in hide a fresh day one under the same goal', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          await scanned(repository, account, day(1))
+          await scanned(repository, account, day(43), { checkIn: true })
+          const fresh = await scanned(repository, account, day(200))
+
+          expect(await candidateIds(repository, day(300))).toEqual([fresh.id])
+        })
+
+        it('does not let another profile\'s check-in hide this profile\'s day one', async () => {
+          const { repository, newAccount } = await make()
+          const mine = await newAccount()
+          const theirs = await newAccount()
+          const dayOne = await scanned(repository, mine, day(1))
+          await scanned(repository, theirs, day(1))
+          await scanned(repository, theirs, day(43), { checkIn: true })
+
+          expect(await candidateIds(repository, day(100))).toEqual([dayOne.id])
+        })
+
+        it('leaves out a day one once its chase has been told, and still lists the profile\'s later day one', async () => {
+          const { repository, newAccount } = await make()
+          const account = await newAccount()
+          const told = await scanned(repository, account, day(1))
+          const fresh = await scanned(repository, account, day(200))
+          await repository.recordCheckInPush(pushFor(account, told, day(43)))
+
+          expect(await candidateIds(repository, day(300))).toEqual([fresh.id])
+        })
+
+        it('lists the longest overdue first, whatever order the profiles scanned in', async () => {
+          const { repository, newAccount } = await make()
+          const [a, b, c] = [await newAccount(), await newAccount(), await newAccount()]
+          const middle = await scanned(repository, b, day(5))
+          const newest = await scanned(repository, c, day(9))
+          const oldest = await scanned(repository, a, day(2))
+
+          expect(await candidateIds(repository, day(100))).toEqual([oldest.id, middle.id, newest.id])
+        })
+
+        it('lists at most the limit, taking the longest overdue', async () => {
+          const { repository, newAccount } = await make()
+          const [a, b, c] = [await newAccount(), await newAccount(), await newAccount()]
+          const second = await scanned(repository, b, day(5))
+          await scanned(repository, c, day(9))
+          const first = await scanned(repository, a, day(2))
+
+          expect(await candidateIds(repository, day(100), 2)).toEqual([first.id, second.id])
+        })
+
+        it('lists nothing when nobody has scanned', async () => {
+          const { repository } = await make()
+
+          expect(await candidateIds(repository, day(100))).toEqual([])
+        })
+      })
+    })
+
     describe('fitzpatrickOf and saveFitzpatrick', () => {
       it('has none for a profile that was never read', async () => {
         const { repository, newAccount } = await make()

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runAs } from '../../lib/context'
 import { ConflictError, ForbiddenError, NotFoundError, RateLimitedError, UnauthorizedError, ValidationError } from '../../lib/errors'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -78,6 +78,9 @@ const setup = (options: SetupOptions = {}) => {
   const photos = options.photos ?? new MemoryPhotoStore({ environment: 'test' })
   const jobs = new MemoryJobQueue()
   const events = new MemoryScanEvents()
+  // The check-in pushes the sweep asks for, in the order it asked. A profile in `queueDownFor` has a push that cannot be queued: the call throws.
+  const checkInPushes: { userId: string; profileId: string; dayOneScanId: string }[] = []
+  const queueDownFor = new Set<string>()
   const service = new FaceScanService({
     repository,
     goals,
@@ -88,7 +91,14 @@ const setup = (options: SetupOptions = {}) => {
     aiUsage: new FakeVendorSpendLedger(),
     events,
     // The pushes are the pipeline tests' concern; nothing here reaches them.
-    notifications: { faceScanReady: async () => undefined, faceScanNeedsRetake: async () => undefined },
+    notifications: {
+      faceScanReady: async () => undefined,
+      faceScanNeedsRetake: async () => undefined,
+      faceCheckInDue: async (input: { userId: string; profileId: string; dayOneScanId: string }) => {
+        if (queueDownFor.has(input.profileId)) throw new Error('queue is down')
+        checkInPushes.push(input)
+      },
+    },
     opsAlerts: new OpsAlertsService({ repository: new FakeOpsAlertsRepository(), jobs: new MemoryJobQueue(), email: new MemoryEmailSender(), recipient: '', environment: 'test', now: () => clock }),
     photoLinkSecret: PHOTO_SECRET,
     environment: 'test',
@@ -103,6 +113,8 @@ const setup = (options: SetupOptions = {}) => {
     photos,
     jobs,
     events,
+    checkInPushes,
+    queueDownFor,
     advance: (ms: number) => (clock = new Date(clock.getTime() + ms)),
     now: () => clock,
   }
@@ -1502,5 +1514,279 @@ describe('FaceScanService.create: two at once for one profile and goal', () => {
     await create(ctx, { front: face({}, 2) })
 
     expect(seen).toEqual([null, first.id])
+  })
+})
+
+// --- the "check-in due" push, sent by the daily cron (issue #145, PR 5) ---
+
+// The cron has no session, so the sweep is called with no actor. Every state is reached the way a person reaches it: consent, a goal, a scan taken through
+// `create` and made ready by the write the analysis makes, with the clock moved on. A day one is "ready"; the chase's review point is six weeks after the day
+// one was TAKEN (not after it became ready). Guests cannot scan (face scans are verified-only since #153), so a guest never has a day one to be told about.
+describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
+  const sweep = (ctx: Ctx, when: Date = ctx.now()) => ctx.service.sendDueCheckIns(when)
+  const pushesTo = (ctx: Ctx, who: Who = {}) => ctx.checkInPushes.filter((push) => push.profileId === as(who).profileId)
+  /** Moves the clock to `when` (never earlier than now). */
+  const advanceTo = (ctx: Ctx, when: Date) => ctx.advance(when.getTime() - ctx.now().getTime())
+  /** A ready day one under `goal`, taken now; the clock stands an hour on, when it became ready. Resolves to the scan's view. */
+  const dayOneUnder = async (ctx: Ctx, goal: Goal = 'glow', who: Who = {}): Promise<any> => {
+    await ready(ctx, goal, who)
+    const view = await create(ctx, { front: face() }, who)
+    await becomeReady(ctx, view.id)
+    return view
+  }
+  /** A different account per number, each with its own profile. */
+  const person = (n: number): Who => ({ userId: `user-n${String(n).padStart(3, '0')}`, profileId: `profile-n${String(n).padStart(3, '0')}` })
+
+  it('sends one push for a ready day one at exactly its review point, naming the account, the profile and the chase', async () => {
+    const ctx = setup()
+    const dayOne = await atReviewPoint(ctx)
+
+    expect(await sweep(ctx)).toBe(1)
+
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: dayOne.id }])
+  })
+
+  it('sends nothing a millisecond before the review point, and sends at the review point itself', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx)
+
+    expect(await sweep(ctx, new Date(ctx.now().getTime() - 1))).toBe(0)
+    expect(ctx.checkInPushes).toEqual([])
+
+    expect(await sweep(ctx)).toBe(1)
+  })
+
+  it('still sends when the sweep first looks long after the review point: a push is late, never lost', async () => {
+    const ctx = setup()
+    const dayOne = await atReviewPoint(ctx)
+    ctx.advance(30 * DAY)
+
+    expect(await sweep(ctx)).toBe(1)
+
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: dayOne.id }])
+  })
+
+  it('sends a chase its push once: later sweeps, that day or after, send nothing more', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx)
+    await sweep(ctx)
+
+    expect(await sweep(ctx)).toBe(0)
+    ctx.advance(DAY)
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toHaveLength(1)
+  })
+
+  it('sends nothing for a day one that is still being analysed: it is not a day one until it is ready', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    await create(ctx)
+    ctx.advance(REVIEW_POINT)
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toEqual([])
+  })
+
+  it('sends nothing for a profile that has a goal but never scanned', async () => {
+    const ctx = setup()
+    await ready(ctx, 'glow')
+    ctx.advance(REVIEW_POINT)
+
+    expect(await sweep(ctx)).toBe(0)
+  })
+
+  it('sends nothing once the check-in has been taken, even while it is still being analysed', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx)
+    await create(ctx, { front: face({}, 2) })
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toEqual([])
+  })
+
+  it('sends when the check-in failed, because the check-in has not been taken', async () => {
+    const ctx = setup()
+    const dayOne = await atReviewPoint(ctx)
+    const checkIn = await create(ctx, { front: face({}, 2) })
+    await ctx.repository.updateFaceScan(checkIn.id, 'analysing', { state: 'failed', reason: 'unavailable', updatedAt: ctx.now() })
+
+    expect(await sweep(ctx)).toBe(1)
+
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: dayOne.id }])
+  })
+
+  it('does not tell a chase again after its check-in is deleted, though deleting it reopens the review point', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx)
+    await sweep(ctx)
+    const checkIn = await create(ctx, { front: face({}, 2) })
+    await deleteScan(ctx, checkIn.id)
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toHaveLength(1)
+  })
+
+  it('sends nothing for a profile that switched to a goal it has no ready scan for: that goal is due its day one, not a check-in', async () => {
+    const ctx = setup()
+    await atReviewPoint(ctx, 'glow')
+    await setGoal(ctx, 'brighter')
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toEqual([])
+  })
+
+  it('measures the review point from the current goal\'s own day one: the goal left behind reaching its review point sends nothing', async () => {
+    const ctx = setup()
+    const glowDayOne = await dayOneUnder(ctx, 'glow')
+    const glowTakenAt = new Date(T0.getTime())
+    ctx.advance(DAY)
+    await setGoal(ctx, 'brighter')
+    const brighterDayOne = await create(ctx, { front: face({}, 2) })
+    const brighterTakenAt = ctx.now()
+    await becomeReady(ctx, brighterDayOne.id)
+
+    advanceTo(ctx, new Date(glowTakenAt.getTime() + REVIEW_POINT))
+    expect(await sweep(ctx)).toBe(0)
+
+    advanceTo(ctx, new Date(brighterTakenAt.getTime() + REVIEW_POINT))
+    expect(await sweep(ctx)).toBe(1)
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: brighterDayOne.id }])
+    expect(ctx.checkInPushes[0]!.dayOneScanId).not.toBe(glowDayOne.id)
+  })
+
+  it('carries on the same chase after a goal is left and taken up again inside the 90 days: it is still told at the original day one\'s review point', async () => {
+    const ctx = setup()
+    const dayOne = await dayOneUnder(ctx, 'glow')
+    ctx.advance(DAY)
+    await setGoal(ctx, 'brighter')
+    ctx.advance(10 * DAY)
+    await setGoal(ctx, 'glow')
+
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT - 1))
+    expect(await sweep(ctx)).toBe(0)
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT))
+    expect(await sweep(ctx)).toBe(1)
+
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: dayOne.id }])
+  })
+
+  it('tells a fresh chase (a goal taken up again after more than 90 days away) at its own review point, apart from the first chase', async () => {
+    const ctx = setup()
+    const first = await atReviewPoint(ctx, 'glow')
+    await sweep(ctx)
+    await setGoal(ctx, 'brighter')
+    ctx.advance(RESUME_WINDOW + DAY)
+    await setGoal(ctx, 'glow')
+    const freshTakenAt = ctx.now()
+    const fresh = await create(ctx, { front: face({}, 2) })
+    await becomeReady(ctx, fresh.id)
+    expect(await sweep(ctx)).toBe(0)
+
+    advanceTo(ctx, new Date(freshTakenAt.getTime() + REVIEW_POINT - 1))
+    expect(await sweep(ctx)).toBe(0)
+    advanceTo(ctx, new Date(freshTakenAt.getTime() + REVIEW_POINT))
+    expect(await sweep(ctx)).toBe(1)
+
+    expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual([first.id, fresh.id])
+  })
+
+  it('sends nothing to a guest, who has set a goal but cannot scan', async () => {
+    const ctx = setup()
+    await asGuest(() => ctx.goals.set({ goal: 'glow' }))
+    ctx.advance(REVIEW_POINT)
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(ctx.checkInPushes).toEqual([])
+  })
+
+  it('keeps profiles apart: one with its check-in taken does not hide another that is due, and a profile of the same account is its own', async () => {
+    const ctx = setup()
+    const [a, b] = [person(1), person(2)]
+    const aDayOne = await dayOneUnder(ctx, 'glow', a)
+    const bDayOne = await dayOneUnder(ctx, 'glow', b)
+    // The same account's second profile has its own goal and day one.
+    const sibling = { userId: a.userId, profileId: 'profile-sibling' }
+    const siblingDayOne = await dayOneUnder(ctx, 'glow', sibling)
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + 3 * HOUR))
+    await create(ctx, { front: face({}, 2) }, a)
+
+    expect(await sweep(ctx)).toBe(2)
+
+    expect(ctx.checkInPushes).toEqual([
+      { userId: b.userId, profileId: b.profileId, dayOneScanId: bDayOne.id },
+      { userId: sibling.userId, profileId: sibling.profileId, dayOneScanId: siblingDayOne.id },
+    ])
+    expect(pushesTo(ctx, a)).toEqual([])
+    expect(aDayOne.id).not.toBe(bDayOne.id)
+  })
+
+  it('sends the longest overdue first, whatever order the ids sort in', async () => {
+    const ctx = setup()
+    const first = await dayOneUnder(ctx, 'glow', person(9))
+    const second = await dayOneUnder(ctx, 'glow', person(1))
+    const third = await dayOneUnder(ctx, 'glow', person(5))
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
+
+    await sweep(ctx)
+
+    expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual([first.id, second.id, third.id])
+  })
+
+  it('sends at most 200 in a run, the longest overdue first, and the rest on the next run', async () => {
+    const ctx = setup()
+    const dayOnes: string[] = []
+    for (let n = 0; n < 201; n++) dayOnes.push((await dayOneUnder(ctx, 'glow', person(n))).id)
+    advanceTo(ctx, new Date(ctx.now().getTime() + REVIEW_POINT))
+
+    expect(await sweep(ctx)).toBe(200)
+
+    expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual(dayOnes.slice(0, 200))
+    expect(await sweep(ctx)).toBe(1)
+    expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual(dayOnes)
+    expect(await sweep(ctx)).toBe(0)
+  })
+
+  describe('when a push cannot be queued', () => {
+    afterEach(() => {
+      vi.restoreAllMocks()
+    })
+
+    it('logs it by id and carries on: the others are still sent and the sweep does not throw', async () => {
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const ctx = setup()
+      const [a, b] = [person(1), person(2)]
+      const aDayOne = await dayOneUnder(ctx, 'glow', a)
+      const bDayOne = await dayOneUnder(ctx, 'glow', b)
+      advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
+      ctx.queueDownFor.add(a.profileId)
+
+      await expect(sweep(ctx)).resolves.toBe(1)
+
+      expect(ctx.checkInPushes).toEqual([{ userId: b.userId, profileId: b.profileId, dayOneScanId: bDayOne.id }])
+      expect(logged).toHaveBeenCalled()
+      // By id: the profile's or the chase's.
+      expect(JSON.stringify(logged.mock.calls)).toMatch(new RegExp(`${a.profileId}|${aDayOne.id}`))
+    })
+
+    it('does not try that chase again on a later run: the send is recorded first, and at most once beats at least once', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => undefined)
+      const ctx = setup()
+      const a = person(1)
+      await dayOneUnder(ctx, 'glow', a)
+      advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
+      ctx.queueDownFor.add(a.profileId)
+      await sweep(ctx)
+      ctx.queueDownFor.clear()
+
+      expect(await sweep(ctx)).toBe(0)
+
+      expect(ctx.checkInPushes).toEqual([])
+    })
   })
 })
