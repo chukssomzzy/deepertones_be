@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { FaceScansRepository } from './face-scans.repository'
 import type { FaceMask, FaceResult, FaceScanCompletion, NewFacePhoto, NewFaceScan } from './face-scans.types'
 import type { Goal } from '../goals/goals.vocabulary'
@@ -1595,7 +1595,7 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
       type EndState = 'ready' | 'failed' | 'needs-retake' | 'analysing'
 
       /** A scan written the way the pipeline writes one: created analysing (a check-in or not), then ended by the write that ends it. */
-      const scanned = async (
+      const scannedAnywhere = async (
         repository: FaceScansContractSetup['repository'],
         account: Account,
         createdAt: Date,
@@ -1610,6 +1610,7 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
         if (state === 'needs-retake') await repository.updateFaceScan(scan.id, 'analysing', { state: 'needs-retake', reason: 'no-face', updatedAt })
         return scan
       }
+      const scanned = scannedAnywhere
       const pushFor = (account: Account, scan: NewFaceScan, sentAt: Date, goal: Goal = 'glow') => ({
         profileId: account.profileId,
         userId: account.userId,
@@ -1663,7 +1664,28 @@ export const faceScansRepositoryContract = (name: string, make: () => FaceScansC
         })
       })
 
+      // The candidates query is over every ready scan there is and the D1 database is shared by the whole file, so each test lives in its own era
+      // (around 1980, which no other test uses) and deletes the scans it made: only its own rows can qualify, so lists and the limit mean what they say.
       describe('checkInPushCandidates', () => {
+        const isolatedDay = (eraStart: number) => (n: number) => new Date(eraStart + n * DAY)
+        let day = isolatedDay(0)
+        let made: NewFaceScan[] = []
+        let owner: FaceScansContractSetup['repository'] | undefined
+        const scanned = async (...args: Parameters<typeof scannedAnywhere>) => {
+          const scan = await scannedAnywhere(...args)
+          made.push(scan)
+          owner = args[0]
+          return scan
+        }
+        beforeEach(() => {
+          day = isolatedDay(BASE.getTime() - 50 * YEAR + Math.floor(Math.random() * 1_000_000_000))
+          made = []
+          owner = undefined
+        })
+        afterEach(async () => {
+          if (owner) for (const scan of made) await owner.deleteFaceScan(scan.id)
+        })
+
         it('lists a ready scan taken exactly at the cut-off and not one taken a millisecond after it', async () => {
           const { repository, newAccount } = await make()
           const account = await newAccount()
