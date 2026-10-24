@@ -1,0 +1,455 @@
+import { describe, expect, it } from 'vitest'
+import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
+import type { GateFailure } from '../../src/modules/routines/routines.types'
+import { barExitCode, compare, formatBarLine, scoreRoutineCase, scoreRun, type RoutineCaseInput } from './routine-score'
+import { routineOf } from './routine.fixture'
+
+// The pure half of `npm run eval:routine` (routine-run.ts is the orchestration): a case's gate result, its picks against the labels, and the run's
+// percentages, bar and comparison. Everything here is a fixture; nothing calls the API. Expected numbers are worked out by hand from the fixtures in each
+// test's comment, never by recomputing with the scorer's own rules. Percentages are exact (not rounded), so a boundary is exact too: 17 of 20 is 85.
+
+type Labels = NonNullable<RoutineCaseInput['labels']>
+type GapLabel = Labels[RoutineStep] & object
+
+const label = (candidates: string[], best: string, acceptable: string[] = []): GapLabel => ({ candidates, best, acceptable })
+const WORDING: GateFailure = { gate: 'wording', step: 'cleanse' }
+const JUDGED = { picksAgreed: 4, picksJudged: 4, fit: 5, simplicity: 5, words: 5 }
+
+/**
+ * A case whose routine passes every gate and picks A for its one scored gap (cleanse: A or B), where A is labelled best.
+ * Override what a test is about.
+ */
+const input = (id: string, over: Partial<RoutineCaseInput> = {}): RoutineCaseInput => ({
+  id,
+  gapCodes: { cleanse: ['A', 'B'] },
+  routine: routineOf({ cleanse: 'A' }),
+  writerError: null,
+  failures: [],
+  labels: { cleanse: label(['A', 'B'], 'A', ['B']) },
+  judge: JUDGED,
+  costMicros: 0,
+  ...over,
+})
+
+/** `n` such cases with ids case-1..case-n. */
+const perfect = (n = 1, over: (i: number) => Partial<RoutineCaseInput> = () => ({})): RoutineCaseInput[] => Array.from({ length: n }, (_, i) => input(`case-${i + 1}`, over(i)))
+
+/** A pick of B, which the default labels do not call best or acceptable: `acceptable` is empty here. */
+const WRONG: Partial<RoutineCaseInput> = { routine: routineOf({ cleanse: 'B' }), labels: { cleanse: label(['A', 'B'], 'A') } }
+
+const holdout = (inputs: RoutineCaseInput[], partial = false) => scoreRun(inputs, { set: 'holdout', partial })
+
+describe('scoreRoutineCase: the gates', () => {
+  it('passes a routine with no gate failures', () => {
+    expect(scoreRoutineCase(input('a')).gatesPassed).toBe(true)
+  })
+
+  it('fails a routine with any gate failure', () => {
+    expect(scoreRoutineCase(input('a', { failures: [{ gate: 'frequency', step: 'treat' }] })).gatesPassed).toBe(false)
+  })
+
+  it('counts a writer error as a failed routine, though it has no failures listed', () => {
+    const score = scoreRoutineCase(input('a', { routine: null, writerError: 'AnthropicRequestError', failures: [] }))
+
+    expect(score.gatesPassed).toBe(false)
+  })
+
+  it('counts only the wording failures as forbidden wording', () => {
+    const failures: GateFailure[] = [WORDING, { gate: 'wording', step: null }, { gate: 'frequency', step: 'treat' }, { gate: 'grounding', step: 'cleanse' }]
+
+    expect(scoreRoutineCase(input('a', { failures })).forbiddenWording).toBe(2)
+    expect(scoreRoutineCase(input('b')).forbiddenWording).toBe(0)
+  })
+})
+
+describe('scoreRun: gates and forbidden wording', () => {
+  it('reports the share of cases whose routine passed every gate, a writer error counting as a failure', () => {
+    // 4 cases: one clean, one with a parse failure, one with a wording failure, one writer error. 1 of 4 passes.
+    const inputs = [
+      input('ok'),
+      input('parse', { failures: [{ gate: 'parse', step: null }] }),
+      input('words', { failures: [WORDING] }),
+      input('error', { routine: null, writerError: 'AnthropicRequestError' }),
+    ]
+
+    expect(scoreRun(inputs, { set: 'dev', partial: false }).gatesPassed).toBe(25)
+  })
+
+  it('sums the wording failures over the run (the wording case above has 1, this one 3)', () => {
+    const inputs = [input('a', { failures: [WORDING] }), input('b', { failures: [WORDING, { gate: 'wording', step: null }] }), input('c')]
+
+    expect(scoreRun(inputs, { set: 'dev', partial: false }).forbiddenWording).toBe(3)
+  })
+
+  it('sums what the cases cost', () => {
+    // 120000 + 80000 + 0
+    const inputs = [input('a', { costMicros: 120_000 }), input('b', { costMicros: 80_000 }), input('c')]
+
+    expect(scoreRun(inputs, { set: 'dev', partial: false }).costMicros).toBe(200_000)
+  })
+})
+
+describe('scoreRun: the right product and the exactly best product', () => {
+  it('counts a pick that is labelled best or acceptable as right, and only one labelled best as exactly best', () => {
+    // case 1: cleanse picks B (labelled not), treat picks D (acceptable) -> 2 scored gaps, 1 right, 0 best.
+    //         protect has one candidate, so it is not scored.
+    // case 2: cleanse picks A (best) -> 1 scored gap, 1 right, 1 best.
+    // Run: 3 scored, 2 right (66.67%), 1 best (33.33%).
+    const one = input('one', {
+      gapCodes: { cleanse: ['A', 'B'], treat: ['C', 'D', 'E'], protect: ['P'] },
+      routine: routineOf({ cleanse: 'B', treat: 'D', protect: 'P' }),
+      labels: { cleanse: label(['A', 'B'], 'A'), treat: label(['C', 'D', 'E'], 'C', ['D']), protect: label(['P'], 'P') },
+    })
+    const two = input('two')
+
+    const run = holdout([one, two])
+
+    expect(run.rightProduct).toBeCloseTo(66.667, 2)
+    expect(run.exactlyBest).toBeCloseTo(33.333, 2)
+    expect(scoreRoutineCase(one).picks).toBe('wrong')
+    expect(scoreRoutineCase(two).picks).toBe('right')
+  })
+
+  it('does not score a gap with a single candidate', () => {
+    const only = input('only', { gapCodes: { protect: ['P'] }, routine: routineOf({ protect: 'P' }), labels: { protect: label(['P'], 'P') } })
+
+    const run = holdout([only])
+
+    expect(run.rightProduct).toBeNull()
+    expect(run.exactlyBest).toBeNull()
+    expect(scoreRoutineCase(only).picks).toBe('unscored')
+  })
+
+  it('scores the picks of a routine that failed the gates as not right, even when the pick is labelled best', () => {
+    // The routine picks A, which is best, but it broke the order gate: 1 scored gap, 0 right.
+    const failed = input('failed', { failures: [{ gate: 'order', step: 'protect' }] })
+
+    const run = holdout([failed])
+
+    expect(run.rightProduct).toBe(0)
+    expect(run.exactlyBest).toBe(0)
+    expect(scoreRoutineCase(failed).picks).toBe('wrong')
+  })
+
+  it('scores the labelled gaps of a case whose writer errored as not right', () => {
+    // case 1 picks A (best): 1 of 1. case 2 errored: its 1 labelled gap counts, not right. 1 of 2 right, 1 of 2 best.
+    const errored = input('errored', { routine: null, writerError: 'AnthropicRequestError' })
+
+    const run = holdout([input('fine'), errored])
+
+    expect(run.rightProduct).toBe(50)
+    expect(run.exactlyBest).toBe(50)
+  })
+
+  it('leaves a case with no labels out of the percentages', () => {
+    // case 1 is right (1 of 1). case 2 picks a wrong product but has no labels, so it is not scored: 100%.
+    const unlabelled = input('unlabelled', { ...WRONG, labels: null })
+
+    const run = holdout([input('labelled'), unlabelled])
+
+    expect(run.rightProduct).toBe(100)
+    expect(scoreRoutineCase(unlabelled).picks).toBe('unscored')
+  })
+
+  it('leaves out of the percentages a gap whose candidates have no labels and does not call it needs-relabel', () => {
+    // The gap with zero candidates is "use what you have": nothing to pick, nothing to label.
+    const empty = input('empty', { gapCodes: { cleanse: [] }, routine: routineOf({}), labels: null })
+
+    const run = holdout([empty])
+
+    expect(run.rightProduct).toBeNull()
+    expect(run.needsRelabel).toEqual([])
+  })
+})
+
+describe('scoreRun: needs re-label', () => {
+  // The labels were made on cleanse [A, B]. Each case below has a skeleton whose candidates no longer match, and picks a wrong product, so scoring it would
+  // pull the right-product percentage down: it is left out of the percentage and its id is listed instead.
+  const stale: [string, Partial<RoutineCaseInput>][] = [
+    ['a candidate was added', { gapCodes: { cleanse: ['A', 'B', 'C'] } }],
+    ['a candidate was dropped', { gapCodes: { cleanse: ['A'] } }],
+    ['a candidate was swapped', { gapCodes: { cleanse: ['A', 'C'] } }],
+    ['the step is no longer a gap', { gapCodes: {} }],
+    ['a new step has candidates the labels never covered', { gapCodes: { cleanse: ['A', 'B'], treat: ['X', 'Y'] } }],
+  ]
+
+  it.each(stale)('lists the case and leaves it unscored when %s', (_why, over) => {
+    const changed = input('changed', { ...WRONG, ...over })
+
+    const run = holdout([input('fine'), changed])
+
+    expect(run.needsRelabel).toEqual(['changed'])
+    expect(run.rightProduct).toBe(100)
+    expect(scoreRoutineCase(changed).needsRelabel).toBe(true)
+    expect(scoreRoutineCase(changed).picks).toBe('unscored')
+  })
+
+  it('does not list a case whose gaps with candidates are the ones its labels were made on', () => {
+    // treat has no candidates now and had none then: it is not in the labels and does not make the case stale.
+    const same = input('same', { gapCodes: { cleanse: ['A', 'B'], treat: [] } })
+
+    expect(holdout([same]).needsRelabel).toEqual([])
+  })
+
+  it('lists every such case, in the order the run had them', () => {
+    const run = holdout([input('a', { gapCodes: { cleanse: ['A'] } }), input('ok'), input('b', { gapCodes: { cleanse: ['B'] } })])
+
+    expect(run.needsRelabel).toEqual(['a', 'b'])
+  })
+})
+
+describe('scoreRun: the judge, which D1 does not have', () => {
+  it('has no judge agreement, fit, simplicity or words when no case was judged', () => {
+    const run = holdout(perfect(2, () => ({ judge: null })))
+
+    expect(run.judgeAgreement).toBeNull()
+    expect(run.fit).toBeNull()
+    expect(run.simplicity).toBeNull()
+    expect(run.words).toBeNull()
+  })
+
+  it('pools agreement over all the picks judged, and averages fit, simplicity and words over the cases judged', () => {
+    // 3 agreed of 4 judged + 1 of 1 = 4 of 5 = 80%. fit (4 + 3) / 2 = 3.5, simplicity (5 + 2) / 2 = 3.5, words (1 + 2) / 2 = 1.5.
+    const inputs = [
+      input('a', { judge: { picksAgreed: 3, picksJudged: 4, fit: 4, simplicity: 5, words: 1 } }),
+      input('b', { judge: { picksAgreed: 1, picksJudged: 1, fit: 3, simplicity: 2, words: 2 } }),
+    ]
+
+    const run = holdout(inputs)
+
+    expect(run.judgeAgreement).toBe(80)
+    expect(run.fit).toBe(3.5)
+    expect(run.simplicity).toBe(3.5)
+    expect(run.words).toBe(1.5)
+  })
+})
+
+describe('the bar: holdout only, and never a pass on missing data', () => {
+  it('passes a full holdout run with every input and every rule holding', () => {
+    expect(holdout(perfect(20)).bar).toEqual({ status: 'pass' })
+  })
+
+  it.each([
+    [20, 17, 'pass'],
+    [19, 16, 'fail'],
+  ] as const)('judges right product at its threshold of 85%%: %i scored gaps with %i right is %s', (gaps, right, expected) => {
+    // 17 of 20 is exactly 85 and passes; 16 of 19 is 84.2 and fails.
+    const run = holdout(perfect(gaps, (i) => (i < right ? {} : WRONG)))
+
+    if (expected === 'pass') expect(run.bar).toEqual({ status: 'pass' })
+    else expect(run.bar).toEqual({ status: 'fail', rules: ['right-product'], notEvaluated: [] })
+  })
+
+  it('fails the gates rule when one routine in 21 breaks a gate (the rest are right: 20 of 21 picks are right, above 85)', () => {
+    const run = holdout(perfect(21, (i) => (i === 0 ? { failures: [{ gate: 'frequency', step: 'treat' }] } : {})))
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates'], notEvaluated: [] })
+  })
+
+  it('fails on a single forbidden wording, which also breaks the gates', () => {
+    const run = holdout(perfect(20, (i) => (i === 0 ? { failures: [WORDING] } : {})))
+
+    expect(run.forbiddenWording).toBe(1)
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates', 'forbidden-wording'], notEvaluated: [] })
+  })
+
+  it.each([
+    [{ picksAgreed: 4, picksJudged: 5 }, 'pass'],
+    [{ picksAgreed: 19, picksJudged: 24 }, 'fail'],
+  ] as const)('judges agreement at its threshold of 80%%: %j is %s', (agreement, expected) => {
+    // 4 of 5 is exactly 80 and passes; 19 of 24 is 79.2 and fails.
+    const run = holdout(perfect(1, () => ({ judge: { ...JUDGED, ...agreement } })))
+
+    if (expected === 'pass') expect(run.bar).toEqual({ status: 'pass' })
+    else expect(run.bar).toEqual({ status: 'fail', rules: ['judge-agreement'], notEvaluated: [] })
+  })
+
+  it('lists every failed rule, in the order gates, right-product, judge-agreement, forbidden-wording', () => {
+    // All 20 cases break the order gate and pick a wrong product, agree with the judge on 1 of 5, and one has a wording failure.
+    const run = holdout(perfect(20, (i) => ({ ...WRONG, failures: i === 0 ? [WORDING] : [{ gate: 'order', step: null }], judge: { ...JUDGED, picksAgreed: 1, picksJudged: 5 } })))
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates', 'right-product', 'judge-agreement', 'forbidden-wording'], notEvaluated: [] })
+  })
+
+  it('is not evaluated for a partial run, however good the cases that finished were', () => {
+    const run = holdout(perfect(20), true)
+
+    expect(run.bar.status).toBe('not-evaluated')
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['partial-run'] })
+  })
+
+  it('is not evaluated when no case was judged: D1 has no judge, so a D1 run can never pass', () => {
+    const run = holdout(perfect(20, () => ({ judge: null })))
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['no-judge'] })
+  })
+
+  it('is not evaluated when a case that has candidates to pick between has no labels', () => {
+    const run = holdout(perfect(20, (i) => (i === 3 ? { labels: null } : {})))
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['no-labels'] })
+  })
+
+  it('is not evaluated when a case needs re-labelling, because the percentages would leave it out', () => {
+    const run = holdout(perfect(20, (i) => (i === 3 ? { gapCodes: { cleanse: ['A', 'B', 'C'] } } : {})))
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['needs-relabel'] })
+  })
+
+  it('is never evaluated for the dev set, which is for tuning', () => {
+    const run = scoreRun(perfect(20), { set: 'dev', partial: false })
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['dev-set'] })
+  })
+
+  it('gives every reason that applies: a D1 trial with no labels, no judge and a stop at the cap', () => {
+    const run = holdout(perfect(5, () => ({ labels: null, judge: null })), true)
+
+    expect(run.bar.status).toBe('not-evaluated')
+    expect([...(run.bar as { reasons: string[] }).reasons].sort()).toEqual(['no-judge', 'no-labels', 'partial-run'])
+  })
+
+  // A rule that CAN be evaluated and fails is never hidden by missing data: the bar is FAIL, and what could not be evaluated is listed beside the rules on
+  // the same object as `notEvaluated`. Gates and forbidden wording are always evaluable. Right product is evaluable when no case lacks labels and none needs
+  // re-labelling; judge agreement when a judge result exists. A partial run does not stop any of them (a trial can still fail). Only when nothing evaluable
+  // fails and something is missing is the bar `not-evaluated`, and the dev set is always `not-evaluated`.
+  it('fails on gates even when the judge is missing, and lists the missing judge beside the failure', () => {
+    const run = holdout(perfect(21, (i) => ({ judge: null, ...(i === 0 ? { failures: [{ gate: 'frequency' as const, step: 'treat' as const }] } : {}) })))
+
+    expect(run.gatesPassed).toBeCloseTo(95.238, 2)
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates'], notEvaluated: ['no-judge'] })
+  })
+
+  it('fails on a forbidden wording even when the run is partial and has no labels and no judge', () => {
+    const run = holdout(perfect(5, (i) => ({ labels: null, judge: null, ...(i === 0 ? { failures: [WORDING] } : {}) })), true)
+
+    expect(run.bar.status).toBe('fail')
+    const bar = run.bar as { rules: string[]; notEvaluated: string[] }
+    expect(bar.rules).toEqual(['gates', 'forbidden-wording'])
+    expect([...bar.notEvaluated].sort()).toEqual(['no-judge', 'no-labels', 'partial-run'])
+  })
+
+  it('fails on a gate failure in a partial run, listing the partial run beside it', () => {
+    const run = holdout(perfect(21, (i) => (i === 0 ? { failures: [{ gate: 'order', step: null }] } : {})), true)
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates'], notEvaluated: ['partial-run'] })
+  })
+
+  it('fails on the right product with labels complete and no judge', () => {
+    const run = holdout(perfect(19, (i) => (i < 16 ? { judge: null } : { ...WRONG, judge: null })))
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['right-product'], notEvaluated: ['no-judge'] })
+  })
+
+  it('fails on judge agreement with no labels, listing the missing labels beside it', () => {
+    const run = holdout(perfect(1, () => ({ labels: null, judge: { ...JUDGED, picksAgreed: 19, picksJudged: 24 } })))
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['judge-agreement'], notEvaluated: ['no-labels'] })
+  })
+
+  it('does not fail the right product it cannot evaluate: with no labels, a wrong pick is not counted against the run', () => {
+    const run = holdout(perfect(20, () => ({ ...WRONG, labels: null })))
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['no-labels'] })
+  })
+
+  it('does not fail the dev set, whatever it did: the bar is for the holdout', () => {
+    const run = scoreRun(perfect(21, (i) => (i === 0 ? { failures: [WORDING] } : {})), { set: 'dev', partial: false })
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['dev-set'] })
+  })
+
+  it('does not ask for a judge, or labels, of a case with nothing to judge or label: a writer error, and a case with no candidates', () => {
+    // 19 full cases and one writer error. The error has no routine to judge, so it does not make the judge "missing", and the bar is evaluated: gates are
+    // 19 of 20 = 95% and fail; right product is 19 of 20 = 95% (the errored case's labelled gap counts as not right) and holds.
+    const run = holdout([...perfect(19), input('errored', { routine: null, writerError: 'AnthropicRequestError', judge: null })])
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates'], notEvaluated: [] })
+
+    // A case whose gaps have no candidates needs no labels.
+    const nothing = input('nothing', { gapCodes: { cleanse: [] }, routine: routineOf({}), labels: null })
+    expect(holdout([...perfect(19), nothing]).bar).toEqual({ status: 'pass' })
+  })
+})
+
+describe('the bar: one precedence rule', () => {
+  it('is not evaluated, with no-scored-gaps, when the labels are all there and current but no gap has 2 candidates to pick between', () => {
+    const only = (id: string) => input(id, { gapCodes: { protect: ['P'] }, routine: routineOf({ protect: 'P' }), labels: { protect: label(['P'], 'P') } })
+
+    const run = holdout([only('a'), only('b')])
+
+    expect(run.rightProduct).toBeNull()
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['no-scored-gaps'] })
+  })
+
+  it('does not say no-scored-gaps when the reason is missing or stale labels', () => {
+    expect(holdout(perfect(2, () => ({ labels: null, gapCodes: { cleanse: ['A', 'B'] } }))).bar).toEqual({ status: 'not-evaluated', reasons: ['no-labels'] })
+  })
+
+  it('fails on a gate whatever else is missing, no-scored-gaps included', () => {
+    const run = holdout([input('a', { gapCodes: { protect: ['P'] }, routine: routineOf({ protect: 'P' }), labels: { protect: label(['P'], 'P') }, failures: [{ gate: 'order', step: null }] })])
+
+    expect(run.bar).toEqual({ status: 'fail', rules: ['gates'], notEvaluated: ['no-scored-gaps'] })
+  })
+
+  it('does not fail the right product when one case lacks labels, though the other cases picked wrong: the percentage would leave that case out', () => {
+    const run = holdout([input('labelled', WRONG), input('unlabelled', { labels: null })])
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['no-labels'] })
+  })
+})
+
+describe('formatBarLine and barExitCode', () => {
+  it('prints the last line of the run for each outcome', () => {
+    expect(formatBarLine({ status: 'pass' })).toBe('Bar: PASS')
+    expect(formatBarLine({ status: 'fail', rules: ['gates', 'forbidden-wording'], notEvaluated: [] })).toBe('Bar: FAIL (gates, forbidden-wording)')
+    expect(formatBarLine({ status: 'not-evaluated', reasons: ['partial-run', 'no-judge'] })).toBe('Bar: not evaluated (partial-run, no-judge)')
+  })
+
+  it('shows what could not be evaluated beside the rules of a failure', () => {
+    expect(formatBarLine({ status: 'fail', rules: ['gates', 'right-product'], notEvaluated: ['partial-run', 'no-judge'] })).toBe('Bar: FAIL (gates, right-product; not evaluated: partial-run, no-judge)')
+  })
+
+  it('exits 0 for a pass, 1 for a fail (whatever else is missing) and 0 for a run that was not evaluated (a trial)', () => {
+    expect(barExitCode({ status: 'pass' })).toBe(0)
+    expect(barExitCode({ status: 'fail', rules: ['gates'], notEvaluated: [] })).toBe(1)
+    expect(barExitCode({ status: 'fail', rules: ['gates'], notEvaluated: ['no-judge'] })).toBe(1)
+    expect(barExitCode({ status: 'not-evaluated', reasons: ['no-judge'] })).toBe(0)
+  })
+})
+
+describe('compare', () => {
+  const scores = (over: Partial<Parameters<typeof compare>[0]> = {}) => ({ rightProduct: 80, fit: 4, simplicity: 4, words: 4, ...over })
+
+  it('is better when the right product went up, and says that decided it', () => {
+    expect(compare(scores(), scores({ rightProduct: 85 }))).toEqual({ verdict: 'better', decidedBy: 'rightProduct' })
+  })
+
+  it('is worse when the right product went down, whatever the other measures did', () => {
+    expect(compare(scores(), scores({ rightProduct: 75, fit: 5, simplicity: 5, words: 5 }))).toEqual({ verdict: 'worse', decidedBy: 'rightProduct' })
+  })
+
+  it('goes on to fit when the right product is the same', () => {
+    expect(compare(scores(), scores({ fit: 4.5 }))).toEqual({ verdict: 'better', decidedBy: 'fit' })
+    expect(compare(scores(), scores({ fit: 3.5, simplicity: 5 }))).toEqual({ verdict: 'worse', decidedBy: 'fit' })
+  })
+
+  it('goes on to simplicity, then words', () => {
+    expect(compare(scores(), scores({ simplicity: 3 }))).toEqual({ verdict: 'worse', decidedBy: 'simplicity' })
+    expect(compare(scores(), scores({ words: 4.5 }))).toEqual({ verdict: 'better', decidedBy: 'words' })
+  })
+
+  it('is the same, decided by nothing, when every measure is equal', () => {
+    expect(compare(scores(), scores())).toEqual({ verdict: 'same', decidedBy: null })
+  })
+
+  it('skips a measure that is null on either side', () => {
+    // D1 reports have no fit; the right product decides, and when it is equal there is nothing else to decide on.
+    const noJudge = { rightProduct: 80, fit: null, simplicity: null, words: null }
+    expect(compare(noJudge, { ...noJudge, rightProduct: 90 })).toEqual({ verdict: 'better', decidedBy: 'rightProduct' })
+    expect(compare(noJudge, noJudge)).toEqual({ verdict: 'same', decidedBy: null })
+    // fit is null before and 5 now: it is skipped, so simplicity decides.
+    expect(compare(scores({ fit: null }), scores({ fit: 5, simplicity: 3 }))).toEqual({ verdict: 'worse', decidedBy: 'simplicity' })
+    // The right product is null now (nothing was scored): it is skipped, and fit decides.
+    expect(compare(scores(), scores({ rightProduct: null, fit: 5 }))).toEqual({ verdict: 'better', decidedBy: 'fit' })
+  })
+})
