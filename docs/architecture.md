@@ -825,6 +825,11 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
+- **Switch preview.** `GET /goal/switch-preview?goal=` (bearer, guests included, no middleware) answers `{ goal, outcome, dayOneAt, resumeUntil }` from `FaceScanService.switchPreview`, which lives
+  there because the day one comes from the face-scan tables. `outcome` is `resume` iff `chaseStartFor([...history, { goal, createdAt: now }], goal, now)` is before now, else `fresh`. `resumeUntil` is the
+  `createdAt` of the row that followed the goal's latest run plus `RESUME_DAYS` (90); `dayOneAt` is the chase's first ready scan (`dayOneFor`), null when it has none; both are null for `fresh`.
+  The goal the profile is on is 400 `GOAL_ALREADY_CURRENT`; a profile with no goal yet (the `NotFoundError` from `goals.current()`) starts every goal fresh. It only reads. The app's wording is
+  `switchScreen[outcome]` in the onboarding content (DRAFT copy).
 - **Not part of the goal.** The words typed beside the safety choices (a product that gave a reaction, a prescription) are read in the background by the parse job; see "Safety facts (onboarding)".
 
 ### Safety facts (onboarding)

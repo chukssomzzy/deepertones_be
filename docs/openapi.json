@@ -702,6 +702,54 @@
         ],
         "description": "The current safety answers, or null until the profile answers. Shown even when the goal is not set yet."
       },
+      "SwitchPreview": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair"
+            ],
+            "description": "One of the six goals the app offers.",
+            "example": "fade-dark-marks"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resume",
+              "fresh"
+            ],
+            "description": "`resume` when switching continues the chase the goal had; `fresh` when it starts a new one."
+          },
+          "dayOneAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the chase's first ready scan was taken. Null for a fresh start, or while the chase has no ready scan."
+          },
+          "resumeUntil": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last moment the goal can be taken up again and still resume. Null for a fresh start."
+          }
+        },
+        "required": [
+          "goal",
+          "outcome",
+          "dayOneAt",
+          "resumeUntil"
+        ]
+      },
       "SetSafetyBody": {
         "type": "object",
         "properties": {
@@ -1480,6 +1528,22 @@
               "continueLabel",
               "choices"
             ]
+          },
+          "switchScreen": {
+            "type": "object",
+            "properties": {
+              "resume": {
+                "type": "string"
+              },
+              "fresh": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "resume",
+              "fresh"
+            ],
+            "description": "The heads-up before a goal switch: show the line named by the `outcome` of `GET /api/v1/me/goal/switch-preview`. Draft wording."
           }
         },
         "required": [
@@ -1489,7 +1553,8 @@
           "answerScreen",
           "answers",
           "colourNote",
-          "safetyScreen"
+          "safetyScreen",
+          "switchScreen"
         ]
       },
       "Scan": {
@@ -3993,6 +4058,110 @@
                     "message",
                     "data"
                   ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/goal/switch-preview": {
+      "get": {
+        "operationId": "getSwitchPreview",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "What switching to another goal would do",
+        "description": "Guests included. `outcome` is `resume` when the goal was left no more than 90 days ago and its chase would continue, with `dayOneAt` (its first ready scan, or null) and `resumeUntil` (90 days after it was left); otherwise `fresh`, with both null. A profile with no goal yet starts every goal fresh. Reads only: no goal is saved and no scan is made. The goal the profile is already on is 400 `GOAL_ALREADY_CURRENT`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "clear-skin",
+                "even-tone",
+                "fade-dark-marks",
+                "brighter",
+                "glow",
+                "calm-repair"
+              ],
+              "description": "One of the six goals the app offers.",
+              "example": "fade-dark-marks"
+            },
+            "required": true,
+            "description": "One of the six goals the app offers.",
+            "name": "goal",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What switching would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SwitchPreview"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
