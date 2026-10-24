@@ -48,6 +48,17 @@ describe('contentFor', () => {
     for (const goal of GOALS as readonly Goal[]) expect(colourNote, goal).toBe(answerFor(goal, true).note)
   })
 
+  // The heads-up before a goal switch (issue #145): the app shows one of these two lines next to what `GET /me/goal/switch-preview` answers, so
+  // they are keyed by its `outcome` and the app can read `switchScreen[outcome]`. Both are DRAFT; the words themselves are the owner's to settle.
+  it('gives the switch heads-up a line for each outcome, so neither a resume nor a fresh start is left blank', async () => {
+    const { switchScreen } = await contentFor('en')
+
+    expect(Object.keys(switchScreen).sort()).toEqual(['fresh', 'resume'])
+    expect(switchScreen.resume.trim()).not.toBe('')
+    expect(switchScreen.fresh.trim()).not.toBe('')
+    expect(switchScreen.resume).not.toBe(switchScreen.fresh)
+  })
+
   it('says en for en', async () => {
     expect((await contentFor('en')).locale).toBe('en')
   })
@@ -145,6 +156,14 @@ describe('contentVersionOf', () => {
     return value
   }
 
+  // The heads-up words are copy like any other, so a change to either of them must reach the apps: they are part of what is hashed, which the
+  // "changes when any one string changes" test above only covers while they are strings in the content.
+  it('counts the switch heads-up lines among the strings it hashes', async () => {
+    const base = await baseOf()
+
+    expect(stringPaths(base)).toEqual(expect.arrayContaining([['switchScreen', 'resume'], ['switchScreen', 'fresh']]))
+  })
+
   it('does not depend on the order the keys of the content are written in', async () => {
     const base = await baseOf()
     const flipped = reversed(base) as typeof base
@@ -175,12 +194,16 @@ describe('contentVersionOf', () => {
   })
 })
 
-// The sixth chip and the field under the reaction choice are new words nobody has reviewed yet (issue #82). DRAFT_COPY lists the copy still in
-// draft, so the owner finds it before launch and a later reader does not mistake it for approved copy. Removing a string from it is the act of
-// approving that string.
+// The sixth chip and the field under the reaction choice are new words nobody has reviewed yet (issue #82), and so are the two lines of the goal-switch
+// heads-up (issue #145). DRAFT_COPY lists the copy still in draft, so the owner finds it before launch and a later reader does not mistake it for
+// approved copy. Removing a string from it is the act of approving that string.
 describe('DRAFT_COPY', () => {
-  it('lists exactly the strings still in draft', () => {
-    expect([...DRAFT_COPY].sort()).toEqual(['Add the ingredient too if you know it.', 'Calm, healthy skin', 'Which product? (optional)'])
+  it('lists exactly the strings still in draft, the goal-switch heads-up included', async () => {
+    const { switchScreen } = await contentFor('en')
+
+    expect([...DRAFT_COPY].sort()).toEqual(
+      ['Add the ingredient too if you know it.', 'Calm, healthy skin', 'Which product? (optional)', switchScreen.resume, switchScreen.fresh].sort(),
+    )
   })
 
   it('lists only words the content actually shows, so the list cannot name copy that has gone', async () => {

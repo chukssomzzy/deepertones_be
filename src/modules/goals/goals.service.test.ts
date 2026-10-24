@@ -53,6 +53,7 @@ let service: GoalsService
 
 const set = (who: Actor, input: Parameters<GoalsService['set']>[0]) => runAs(who, () => service.set(input))
 const current = (who: Actor) => runAs(who, () => service.current())
+const history = (who: Actor) => runAs(who, () => service.history())
 const onboarding = (who: Actor) => runAs(who, () => service.onboarding())
 const requireGoal = (who: Actor) => runAs(who, () => service.requireGoal())
 const setSafety = (who: Actor, input: Parameters<SafetyService['set']>[0]) => runAs(who, () => safety.set(input))
@@ -541,6 +542,52 @@ describe('GoalsService.onboarding', () => {
 
     expect((await onboarding(AMARA)).next).toBe('shelf')
     expect(await onboarding(AMARA_SECOND_PROFILE)).toMatchObject({ safety: null, next: 'safety' })
+  })
+})
+
+// The caller's own goal history, oldest first, which is the order the chase rule reads it in (face-scans.tables.ts, issue #145): a run of one
+// goal, a detour, a row with no goal. The repository answers newest first, so the order here is the service's own promise.
+describe('GoalsService.history', () => {
+  it('answers the caller\'s rows oldest first, each with the goal it set and when', async () => {
+    await set(AMARA, { goal: 'clear-skin' })
+    tick()
+    await set(AMARA, { goal: 'even-tone' })
+    tick()
+    await set(AMARA, { goal: 'glow' })
+
+    const rows = await history(AMARA)
+
+    expect(rows.map((row: GoalRow) => row.goal)).toEqual(['clear-skin', 'even-tone', 'glow'])
+    expect(rows.map((row: GoalRow) => row.createdAt)).toEqual([T0, at(MINUTE), at(2 * MINUTE)])
+  })
+
+  it('keeps a row for every change, including picking the same goal again and words nobody sorted into a goal', async () => {
+    await set(AMARA, { goal: 'glow' })
+    tick()
+    await set(AMARA, { goal: 'glow' })
+    tick()
+    await set(AMARA, { text: 'something the reader finds no goal in' })
+
+    expect((await history(AMARA)).map((row: GoalRow) => row.goal)).toEqual(['glow', 'glow', null])
+  })
+
+  it('answers nothing for a profile that never set a goal, even when another profile of the account has one', async () => {
+    await set(AMARA, { goal: 'glow' })
+
+    expect(await history(AMARA_SECOND_PROFILE)).toEqual([])
+  })
+
+  it('is the caller\'s own history: another account\'s rows are not in it', async () => {
+    await set(AMARA, { goal: 'glow' })
+    tick()
+    await set(TOLU, { goal: 'brighter' })
+
+    expect((await history(AMARA)).map((row: GoalRow) => row.goal)).toEqual(['glow'])
+    expect((await history(TOLU)).map((row: GoalRow) => row.goal)).toEqual(['brighter'])
+  })
+
+  it('answers 401 AUTH_REQUIRED without a session', async () => {
+    expect((await errorOf(history(PUBLIC))).code).toBe('AUTH_REQUIRED')
   })
 })
 

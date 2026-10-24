@@ -48,8 +48,8 @@ export const createScanReaper = (): ScheduledHandler => async (_controller, env)
 
 /**
  * The daily cron: the guest cleanup, then the second try of the safety parses that dead-lettered (SafetyService.requeueDueParses, which queues the
- * pending parses whose due time has come). Each runs whether or not the other failed; a failure is logged and the first one is rethrown after both have
- * run, so Cloudflare records the run as failed and the next day's run looks at the same work again.
+ * pending parses whose due time has come), then the check-in-due pushes (FaceScanService.sendDueCheckIns). Each runs whether or not the other failed; a failure is logged and the first one is rethrown after all
+ * have run, so Cloudflare records the run as failed and the next day's run looks at the same work again.
  */
 export const createDailyJobs = (): ScheduledHandler => {
   const guestCleanup = createGuestCleanup()
@@ -68,6 +68,16 @@ export const createDailyJobs = (): ScheduledHandler => {
       if (queued > 0) console.log({ job: 'safety-parse-requeue', outcome: 'done', queued })
     } catch (error) {
       console.error({ job: 'safety-parse-requeue', outcome: 'failed', error: describeError(error) })
+      if (!failed) {
+        failed = true
+        failure = error
+      }
+    }
+    try {
+      const queued = await buildContainer(env).faceScans.sendDueCheckIns(new Date())
+      if (queued > 0) console.log({ job: 'face-check-in-push', outcome: 'done', queued })
+    } catch (error) {
+      console.error({ job: 'face-check-in-push', outcome: 'failed', error: describeError(error) })
       if (!failed) {
         failed = true
         failure = error
