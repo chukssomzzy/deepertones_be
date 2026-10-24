@@ -65,8 +65,8 @@ const assertValid = (c: OutcomeCounts): void => {
   if (fainter + flaredOrStopped - both > n) throw new RangeError(BAD_COUNTS)
 }
 
-// mean(v) over the group; an empty group has no mean, so callers check n first.
-const netFainterOf = (c: OutcomeCounts): number => (c.fainter - c.flaredOrStopped) / c.n
+// mean(v) over the group; an empty group has no mean, so callers check n first. Exported for the label update in the eval, which has the counts of a group that passed labelChange.
+export const netFainterOf = (c: OutcomeCounts): number => (c.fainter - c.flaredOrStopped) / c.n
 
 // var(v) = mean(v^2) - mean(v)^2. v is 0 for a user in both, so the overlap is taken out of mean(v^2) twice.
 const varianceOf = (c: OutcomeCounts): number => {

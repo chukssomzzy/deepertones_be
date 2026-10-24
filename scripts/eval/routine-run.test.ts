@@ -9,6 +9,8 @@ import { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spe
 import { MemoryRoutineWriter } from '../../src/providers/routine-writing/memory.routine-writer'
 import type { RoutineWriter } from '../../src/providers/routine-writing/routine-writer.provider'
 import type { RoutineCase } from './routine-cases'
+import type { GroundingJudge, GroundingRequest, GroundingVerdict } from './routine-grounding-judge'
+import type { RoutineJudge, RoutineJudgement } from './routine-judge'
 import type { LabelSet } from './routine-labels'
 import { defaultOutDir, runRoutineEval } from './routine-run'
 import { caseOf, offer, row, snapshotOf } from './routine.fixture'
@@ -17,9 +19,12 @@ import { caseOf, offer, row, snapshotOf } from './routine.fixture'
 // the snapshot, labels, clock and disk handed in: each case's skeleton is built by the real buildSkeleton over a tiny snapshot, written, checked by the real
 // checkRoutine, scored, and the report and console lines come out. Nothing here calls the API or touches the disk.
 //
-// The bar in D1: with no judge it can never PASS, but a rule that can be evaluated and fails (gates, forbidden wording, right product with labels) is a FAIL
-// and exits 1, with what could not be evaluated listed beside it. A run with nothing failing and something missing is a trial: not evaluated, exit 0.
-// A rejected key exits 2.
+// D2 adds the judges: after a case's routine is written and checked, the rubric judge (judge-routine) judges it once, and then each of its grounding links is checked
+// by the page-support judge (judge-grounding), up to --max-grounding fetches for the whole run. Both are faked here (a recording judge that spends on the real ledger,
+// as the writer's fake does). With a judge a full, labelled holdout run CAN pass the bar. A rule that can be evaluated and fails (gates, forbidden wording, right
+// product with labels, judge agreement) is a FAIL and exits 1, with what could not be evaluated listed beside it. A run with nothing failing and something missing
+// is a trial: not evaluated, exit 0. A rejected key exits 2. A judge that fails in any other way leaves the case unjudged (the bar then says no-judge); it never
+// stops the run. The page-support score is reported and is not in the bar.
 
 /** The one day every date in this file hangs from. */
 const BASE = new Date('2030-06-15T00:00:00.000Z')
@@ -35,6 +40,13 @@ const URL_SENTINEL = 'SENTINEL-URL-PATH'
 const ERROR_SENTINEL = 'SENTINEL-ERROR-MESSAGE'
 
 class FakeWriterError extends Error {}
+class FakeJudgeError extends Error {}
+
+// What the judges' answers hold that must never reach the console: the problem codes (and a judge's error message).
+const PROBLEMS = ['vague-reason', 'poor-fit'] as const
+const JUDGE_ERROR_SENTINEL = 'SENTINEL-JUDGE-ERROR-MESSAGE'
+const WRITER_MODEL = 'claude-test-model'
+const JUDGE_MODEL = 'claude-judge-test-model'
 
 // --- the snapshot, the cases and the labels --------------------------------------------------------------------------------------------------
 
@@ -100,6 +112,62 @@ class SpendingWriter implements RoutineWriter {
   }
 }
 
+type Usage = { inputTokens: 0; outputTokens: 0; cacheWriteTokens: 0; cacheReadTokens: 0; webSearches: 0 }
+const NO_USAGE: Usage = { inputTokens: 0, outputTokens: 0, cacheWriteTokens: 0, cacheReadTokens: 0, webSearches: 0 }
+
+const spend = async (ledger: MemoryAiSpendLedger, job: AiJob, micros: number) => {
+  if (micros <= 0) return
+  const id = await ledger.reserve({ job, model: 'fake-model', estimateMicros: micros })
+  await ledger.settle(id, { usage: NO_USAGE, costMicros: micros })
+}
+
+/** The default answer of the rubric judge: it agrees with the labels (each of the routine's picks is the labelled best) and scores fit 4, simplicity 5, words 3. */
+const agreeingJudgement = (): RoutineJudgement => ({
+  picks: [
+    { step: 'cleanse', pickClass: 'best' },
+    { step: 'moisturise', pickClass: 'best' },
+    { step: 'protect', pickClass: 'best' },
+  ],
+  fit: 4,
+  simplicity: 5,
+  words: 3,
+  problems: [...PROBLEMS],
+})
+
+/** The rubric judge: takes its call's cost on the real ledger, and records what it was asked. */
+class SpendingJudge implements RoutineJudge {
+  readonly calls: { skeleton: RoutineSkeleton; routine: Routine }[] = []
+  constructor(
+    private readonly ledger: MemoryAiSpendLedger,
+    private readonly micros: number,
+    private readonly answer: (call: number, input: { skeleton: RoutineSkeleton; routine: Routine }) => RoutineJudgement | undefined,
+    private readonly order: string[],
+  ) {}
+  async judge(input: { skeleton: RoutineSkeleton; routine: Routine }): Promise<RoutineJudgement> {
+    this.calls.push(input)
+    this.order.push('judge')
+    await spend(this.ledger, 'judge-routine' as AiJob, this.micros)
+    return this.answer(this.calls.length, input) ?? agreeingJudgement()
+  }
+}
+
+/** The page-support judge: the default verdict is a page that supports the reason. */
+class SpendingGrounding implements GroundingJudge {
+  readonly calls: GroundingRequest[] = []
+  constructor(
+    private readonly ledger: MemoryAiSpendLedger,
+    private readonly micros: number,
+    private readonly answer: (call: number, request: GroundingRequest) => GroundingVerdict | undefined,
+    private readonly order: string[],
+  ) {}
+  async judge(request: GroundingRequest): Promise<GroundingVerdict> {
+    this.calls.push(request)
+    this.order.push('ground')
+    await spend(this.ledger, 'judge-grounding' as AiJob, this.micros)
+    return this.answer(this.calls.length, request) ?? { fetched: true, supports: 'yes' }
+  }
+}
+
 type Setup = {
   cases?: RoutineCase[]
   set?: 'dev' | 'holdout'
@@ -109,14 +177,29 @@ type Setup = {
   previous?: { summary: { rightProduct: number | null; fit: number | null; simplicity: number | null; words: number | null } } | null
   /** What the writer answers on the n-th call (1-based); the good routine when it returns undefined. Throw to fail that call. */
   answer?: (call: number, skeleton: RoutineSkeleton) => Routine | undefined
+  /** What the rubric judge answers on its n-th call; the agreeing judgement when it returns undefined. Throw to fail that call. */
+  judgeAnswer?: (call: number, input: { skeleton: RoutineSkeleton; routine: Routine }) => RoutineJudgement | undefined
+  /** What the page-support judge answers on its n-th call; a supported page when it returns undefined. */
+  groundingAnswer?: (call: number, request: GroundingRequest) => GroundingVerdict | undefined
+  /** What each judge call costs on the ledger (0: nothing, so the writer's arithmetic stays the only spend). */
+  judgeMicros?: number
+  groundingMicros?: number
+  maxGrounding?: number
+  judgeModel?: string
 }
 
-const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_CAP_MICROS, previous, answer = () => undefined }: Setup = {}) => {
+const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_CAP_MICROS, previous, answer = () => undefined, judgeAnswer = () => undefined, groundingAnswer = () => undefined, judgeMicros = 0, groundingMicros = 0, maxGrounding = 100, judgeModel = JUDGE_MODEL }: Setup = {}) => {
   const ledger = new MemoryAiSpendLedger({ capMicros })
   const memory = new MemoryRoutineWriter()
+  const order: string[] = []
   let call = 0
-  memory.respondWith((skeleton) => answer(++call, skeleton) ?? goodRoutine(skeleton))
+  memory.respondWith((skeleton) => {
+    order.push('write')
+    return answer(++call, skeleton) ?? goodRoutine(skeleton)
+  })
   const writer = new SpendingWriter(memory, ledger, MICROS_PER_CALL)
+  const judge = new SpendingJudge(ledger, judgeMicros, judgeAnswer, order)
+  const grounding = new SpendingGrounding(ledger, groundingMicros, groundingAnswer, order)
   const logs: string[] = []
   const dirs: string[] = []
   const files = new Map<string, string>()
@@ -127,19 +210,21 @@ const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_
       limit,
       outDir: OUT,
       startedAt: BASE,
-      model: 'claude-test-model',
+      model: WRITER_MODEL,
+      judgeModel,
+      maxGrounding,
       promptHash: 'prompt-hash-123',
       snapshot: SNAPSHOT,
       labels: labels === undefined ? LABELS_FOR_ALL(cases) : labels,
       ...(previous === undefined ? {} : { previous }),
-      deps: { writer, ledger },
+      deps: { writer, judge, grounding, ledger },
       io: {
         log: (line) => logs.push(line),
         mkdir: async (dir) => void dirs.push(dir),
         writeFile: async (path, text) => void files.set(path, text),
       },
     })
-  return { ledger, memory, writer, logs, dirs, files, run }
+  return { ledger, memory, writer, judge, grounding, order, logs, dirs, files, run }
 }
 
 type Reported = {
@@ -149,10 +234,42 @@ type Reported = {
   labelVersion: string | null
   labelSnapshotSha256: string | null
   model: string
+  judgeModel: string
   promptHash: string
   partial: boolean
-  cases: { id: string; state: string; writerError?: string; skeleton?: RoutineSkeleton; routine: Routine | null; failures: { gate: string; step: RoutineStep | null }[]; costMicros: number; score: { picks: string; gatesPassed: boolean } }[]
-  summary: { gatesPassed: number | null; forbiddenWording: number; rightProduct: number | null; needsRelabel: string[]; costMicros: number; bar: { status: string; reasons?: string[]; rules?: string[] } }
+  cases: {
+    id: string
+    state: string
+    writerError?: string
+    judgeError?: string
+    skeleton?: RoutineSkeleton
+    routine: Routine | null
+    failures: { gate: string; step: RoutineStep | null }[]
+    costMicros: number
+    score: { picks: string; gatesPassed: boolean }
+    /** What the rubric judge said, whole (its problem codes are here and only here), or null. */
+    judgement: RoutineJudgement | null
+    /** The judge's result as the score takes it: picks agreed of judged, and the three means' inputs. Null when not judged. */
+    judge: { picksAgreed: number; picksJudged: number; fit: number; simplicity: number; words: number } | null
+    grounding: { step: string; sourceUrl: string; verdict: GroundingVerdict }[]
+  }[]
+  summary: {
+    gatesPassed: number | null
+    forbiddenWording: number
+    rightProduct: number | null
+    needsRelabel: string[]
+    costMicros: number
+    judgeAgreement: number | null
+    fit: number | null
+    simplicity: number | null
+    words: number | null
+    groundingSupport: number | null
+    groundingChecked: number
+    groundingSupported: number
+    groundingUnverifiable: number
+    groundingSkipped: number
+    bar: { status: string; reasons?: string[]; rules?: string[] }
+  }
 }
 const reportOf = (files: Map<string, string>): Reported => JSON.parse(files.get(REPORT_PATH)!)
 const lineOf = (logs: string[], id: string) => logs.filter((l) => l.startsWith(id))
@@ -290,7 +407,7 @@ describe('runRoutineEval: the report', () => {
     await run()
 
     const report = reportOf(files)
-    expect(report).toMatchObject({ startedAt: BASE.toISOString(), set: 'holdout', snapshotSha256: SNAPSHOT.sha256, labelVersion: 'v1', model: 'claude-test-model', promptHash: 'prompt-hash-123', partial: false })
+    expect(report).toMatchObject({ startedAt: BASE.toISOString(), set: 'holdout', snapshotSha256: SNAPSHOT.sha256, labelVersion: 'v1', model: WRITER_MODEL, judgeModel: JUDGE_MODEL, promptHash: 'prompt-hash-123', partial: false })
   })
 
   it('records every case\'s skeleton, routine, gate failures, cost and score', async () => {
@@ -351,9 +468,26 @@ describe('runRoutineEval: the report', () => {
   })
 })
 
-describe('runRoutineEval: the bar, which a run in D1 can never pass', () => {
-  it('is not evaluated for a full holdout run with labels and no judge, exits 0 and says it is a trial', async () => {
+describe('runRoutineEval: the bar', () => {
+  it('PASSES a full, labelled holdout run whose routines pass every gate, whose picks the judge agrees with and whose wording is clean, and exits 0', async () => {
+    // 3 of 3 routines pass the gates; the one scored gap per case picks the labelled best (100% right product); the judge agrees on 3 of 3 (100%, the bar is 80%).
     const { run, logs, files } = setup()
+
+    const { exitCode } = await run()
+
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+    expect(reportOf(files).summary.bar).toEqual({ status: 'pass' })
+    expect(logs.join('\n')).not.toMatch(/trial/i)
+  })
+
+  it('is not evaluated, exits 0 and says it is a trial, when the rubric judge could not judge any case: no judge result, no pass', async () => {
+    // A judge that fails on every call (not the key, not the cap) leaves every case unjudged: the run goes on and the bar says what is missing.
+    const { run, logs, files } = setup({
+      judgeAnswer: () => {
+        throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+      },
+    })
 
     const { exitCode } = await run()
 
@@ -381,7 +515,7 @@ describe('runRoutineEval: the bar, which a run in D1 can never pass', () => {
     expect(exitCode).toBe(0)
   })
 
-  it('fails the bar and exits 1 when a routine breaks a gate, even with no judge, and says the judge is not evaluated', async () => {
+  it('fails the bar and exits 1 when a routine breaks a gate, naming the rules that failed', async () => {
     // Case 3's routine breaks the frequency gate (protect must be am): gates are 2 of 3, and the right product is 2 of 3 (its pick counts as not right).
     const { run, logs, files } = setup({
       answer: (call, skeleton) => {
@@ -394,8 +528,8 @@ describe('runRoutineEval: the bar, which a run in D1 can never pass', () => {
     const { exitCode } = await run()
 
     expect(exitCode).toBe(1)
-    expect(logs.at(-1)).toBe('Bar: FAIL (gates, right-product; not evaluated: no-judge)')
-    expect(reportOf(files).summary.bar).toEqual({ status: 'fail', rules: ['gates', 'right-product'], notEvaluated: ['no-judge'] })
+    expect(logs.at(-1)).toBe('Bar: FAIL (gates, right-product)')
+    expect(reportOf(files).summary.bar).toEqual({ status: 'fail', rules: ['gates', 'right-product'], notEvaluated: [] })
   })
 
   it('fails the bar when a reason uses forbidden wording', async () => {
@@ -571,3 +705,414 @@ describe('runRoutineEval: the label set it was scored with', () => {
   })
 })
 
+
+// --- D2: the judges -------------------------------------------------------------------------------------------------------------------------
+
+/** Each case's goodRoutine has three grounding links (cleanse, moisturise, protect: the first evidence address of the candidate it picks); treat is "use what you have". */
+const LINKS_PER_CASE = 3
+
+describe('runRoutineEval: the rubric judge', () => {
+  it('judges each case that has a routine once, after the writer wrote it and before the next case is written', async () => {
+    const { run, judge, order } = setup()
+
+    await run()
+
+    expect(judge.calls).toHaveLength(3)
+    expect(order.filter((e) => e === 'write' || e === 'judge')).toEqual(['write', 'judge', 'write', 'judge', 'write', 'judge'])
+  })
+
+  it('gives the judge exactly the skeleton the writer was given and the routine it wrote, and nothing else: no label, no gap code list, no score', async () => {
+    const { run, judge, memory } = setup()
+
+    await run()
+
+    for (const [i, input] of judge.calls.entries()) {
+      expect(Object.keys(input).sort()).toEqual(['routine', 'skeleton'])
+      expect(input.skeleton).toBe(memory.calls[i])
+      expect(input.routine).toEqual(goodRoutine(memory.calls[i]!))
+    }
+  })
+
+  it('gives the judge the same input when there are no labels at all, and when there are: the labels never change what it is asked', async () => {
+    const labelled = setup()
+    const unlabelled = setup({ labels: null })
+
+    await labelled.run()
+    await unlabelled.run()
+
+    expect(unlabelled.judge.calls).toEqual(labelled.judge.calls)
+  })
+
+  it('does not judge a case whose writer failed, and judges the others', async () => {
+    const { run, judge, files } = setup({
+      answer: (call) => {
+        if (call === 2) throw new FakeWriterError(ERROR_SENTINEL)
+        return undefined
+      },
+    })
+
+    await run()
+
+    expect(judge.calls).toHaveLength(2)
+    const [one, two, three] = reportOf(files).cases
+    expect(one!.judgement).not.toBeNull()
+    expect(two).toMatchObject({ state: 'writer-error', judgement: null, judge: null })
+    expect(three!.judgement).not.toBeNull()
+  })
+
+  it('does not judge a case the run never reached (cut off by the spend cap)', async () => {
+    // The cap of 2500 lets writer calls 1 and 2 through (1000 each) and stops the third.
+    const { run, judge, files } = setup({ capMicros: 2500 })
+
+    await run()
+
+    expect(reportOf(files).cases.map((c) => c.state)).toEqual(['done', 'done', 'cut-off'])
+    expect(judge.calls).toHaveLength(2)
+  })
+
+  it('judges a routine that broke a gate: the gates and the judge are different checks', async () => {
+    const { run, judge } = setup({
+      answer: (call, skeleton) => {
+        if (call !== 1) return undefined
+        const routine = goodRoutine(skeleton)
+        return { ...routine, steps: routine.steps.map((e) => (e.step === 'protect' ? { ...e, frequency: 'pm' as const } : e)) }
+      },
+    })
+
+    await run()
+
+    expect(judge.calls).toHaveLength(3)
+  })
+
+  it('records the judgement whole in the report, and the result the score takes from it', async () => {
+    const { run, files } = setup()
+
+    await run()
+
+    const [first] = reportOf(files).cases
+    expect(first!.judgement).toEqual(agreeingJudgement())
+    // Scored gaps: cleanse only (the other two gaps have one candidate). The judge said "best" and the labels say the pick (C-A) is the best: 1 of 1.
+    expect(first!.judge).toEqual({ picksAgreed: 1, picksJudged: 1, fit: 4, simplicity: 5, words: 3 })
+  })
+
+  it('pools the agreement over all picks judged and averages fit, simplicity and words over the cases judged', async () => {
+    // Cleanse is the one scored gap of each case. Case 1: the judge says best (the label says best): agreed. Case 2: it says acceptable: not agreed. Case 3: best: agreed.
+    // So 2 of 3 = 66.67%. fit (5 + 3 + 1) / 3 = 3, simplicity (5 + 4 + 3) / 3 = 4, words (2 + 3 + 4) / 3 = 3.
+    const scores = [
+      { fit: 5, simplicity: 5, words: 2 },
+      { fit: 3, simplicity: 4, words: 3 },
+      { fit: 1, simplicity: 3, words: 4 },
+    ]
+    const { run, files } = setup({
+      judgeAnswer: (call) => {
+        const base = agreeingJudgement()
+        const picks = base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p))
+        return { ...base, ...scores[call - 1]!, picks }
+      },
+    })
+
+    await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.judgeAgreement).toBeCloseTo(66.667, 2)
+    expect(summary.fit).toBe(3)
+    expect(summary.simplicity).toBe(4)
+    expect(summary.words).toBe(3)
+  })
+
+  it('fails the bar on judge agreement below 80%, naming it, and exits 1', async () => {
+    // The judge disagrees on case 2 and case 3: 1 of 3 = 33%.
+    const { run, logs } = setup({
+      judgeAnswer: (call) => {
+        const base = agreeingJudgement()
+        return { ...base, picks: base.picks.map((p) => (call > 1 && p.step === 'cleanse' ? { ...p, pickClass: 'not' as const } : p)) }
+      },
+    })
+
+    const { exitCode } = await run()
+
+    expect(exitCode).toBe(1)
+    expect(logs.at(-1)).toBe('Bar: FAIL (judge-agreement)')
+  })
+
+  it('keeps going when the judge fails on one case (not the key, not the cap): the case is reported unjudged, with the error\'s class name and never its message', async () => {
+    const { run, judge, files, logs } = setup({
+      judgeAnswer: (call) => {
+        if (call === 2) throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+        return undefined
+      },
+    })
+
+    const { exitCode } = await run()
+
+    expect(judge.calls).toHaveLength(3)
+    const report = reportOf(files)
+    expect(report.cases.map((c) => c.state)).toEqual(['done', 'done', 'done'])
+    expect(report.cases[1]).toMatchObject({ judgement: null, judge: null, judgeError: 'FakeJudgeError' })
+    expect(report.cases[0]!.judgeError).toBeUndefined()
+    expect(files.get(REPORT_PATH)).not.toContain(JUDGE_ERROR_SENTINEL)
+    expect(logs.join('\n')).not.toContain(JUDGE_ERROR_SENTINEL)
+    // One case is unjudged, so the bar cannot pass: it is a trial, with the judge named as the missing piece.
+    expect(logs.at(-1)).toBe('Bar: not evaluated (no-judge)')
+    expect(exitCode).toBe(0)
+  })
+
+  it('stops, exits 2 and asks for no more calls when the judge is refused by Claude (key, billing or permission), like a writer', async () => {
+    const { run, judge, memory, logs, files } = setup({
+      judgeAnswer: () => {
+        throw new AnthropicConfigError(ERROR_SENTINEL)
+      },
+    })
+
+    const { exitCode } = await run()
+
+    expect(exitCode).toBe(2)
+    expect(judge.calls).toHaveLength(1)
+    expect(memory.calls).toHaveLength(1)
+    expect(reportOf(files).cases[0]).toMatchObject({ judgement: null, judgeError: 'AnthropicConfigError' })
+    expect(reportOf(files).partial).toBe(true)
+    expect(reportOf(files).cases.map((c) => c.state)).toEqual(['done', 'cut-off', 'cut-off'])
+    expect(logs.join('\n')).toMatch(/key/i)
+    expect(logs.join('\n')).not.toContain(ERROR_SENTINEL)
+  })
+
+  it('shares the spend cap with the writer: when the judge\'s call would pass the cap the run stops, the rest are cut off, and it is a trial', async () => {
+    // Cap 1500, writer 1000 and judge 1000 a call: case 1's writer call fits (1000), its judge call would make 2000.
+    const { run, judge, memory, grounding, files, logs } = setup({
+      capMicros: 1500,
+      judgeMicros: 1000,
+    })
+
+    const { exitCode } = await run()
+
+    expect(memory.calls).toHaveLength(1)
+    expect(judge.calls).toHaveLength(1)
+    expect(grounding.calls).toHaveLength(0)
+    const report = reportOf(files)
+    expect(report.partial).toBe(true)
+    expect(report.cases.map((c) => c.state)).toEqual(['done', 'cut-off', 'cut-off'])
+    expect(report.cases[0]!.judgement).toBeNull()
+    expect(logs.join('\n')).toMatch(/spend cap/i)
+    expect(logs.at(-1)).toMatch(/^Bar: not evaluated \(.*partial-run.*\)$/)
+    expect(exitCode).toBe(0)
+  })
+
+  it('counts the judges\' spend in each case\'s cost and in the total: writer 1000 + rubric judge 500 + 3 grounding checks of 100 = 1800 a case', async () => {
+    const { run, logs, files, ledger } = setup({ judgeMicros: 500, groundingMicros: 100 })
+
+    await run()
+
+    const report = reportOf(files)
+    expect(report.cases.map((c) => c.costMicros)).toEqual([1800, 1800, 1800])
+    expect(report.summary.costMicros).toBe(5400)
+    expect(ledger.spentMicros()).toBe(5400)
+    expect(lineOf(logs, 'hold-01')[0]).toContain('$0.0018')
+  })
+})
+
+describe('runRoutineEval: what the console never prints from the judges', () => {
+  it('never prints a problem code or any other judge output, and prints no extra line that starts with a case id', async () => {
+    const { run, logs, files } = setup()
+
+    await run()
+
+    const console_ = logs.join('\n')
+    for (const code of PROBLEMS) expect(console_, code).not.toContain(code)
+    // The report is where they go, which is what proves the check above is not vacuous.
+    for (const code of PROBLEMS) expect(files.get(REPORT_PATH)!, code).toContain(code)
+    for (const id of ['hold-01', 'hold-02', 'hold-03']) expect(lineOf(logs, id), id).toHaveLength(1)
+  })
+
+  it('prints the judge\'s numbers (agreement, fit, simplicity, words) as scores', async () => {
+    const { run, logs } = setup()
+
+    await run()
+
+    const line = logs.find((l) => /agreement/i.test(l))
+    expect(line).toBeDefined()
+    expect(line).toContain('100.0%')
+    expect(line).toMatch(/fit 4\.0/)
+    expect(line).toMatch(/simplicity 5\.0/)
+    expect(line).toMatch(/words 3\.0/)
+  })
+})
+
+describe('runRoutineEval: the judge models', () => {
+  it('names the judge model in the report beside the writer\'s', async () => {
+    const { run, files } = setup()
+
+    await run()
+
+    expect(reportOf(files)).toMatchObject({ model: WRITER_MODEL, judgeModel: JUDGE_MODEL })
+  })
+
+  it('says so, in one line of codes only, when the judge runs on the same model as the writer: a model grading its own routines shares its blind spots', async () => {
+    const { run, logs } = setup({ judgeModel: WRITER_MODEL })
+
+    await run()
+
+    const notes = logs.filter((l) => l.includes('judge-routine') && l.includes('write-routine'))
+    expect(notes).toHaveLength(1)
+    expect(notes[0]).toContain(WRITER_MODEL)
+    expect(notes[0]).not.toMatch(/https?:\/\//)
+  })
+
+  it('says nothing of the kind when the models differ', async () => {
+    const { run, logs } = setup()
+
+    await run()
+
+    expect(logs.filter((l) => l.includes('judge-routine') && l.includes('write-routine'))).toEqual([])
+  })
+})
+
+describe('runRoutineEval: the page-support judge', () => {
+  it('checks each grounding link of each entry once, with the step, the entry\'s reason and the link, in case and entry order', async () => {
+    const { run, grounding } = setup()
+
+    await run()
+
+    expect(grounding.calls).toHaveLength(3 * LINKS_PER_CASE)
+    expect(grounding.calls[0]).toEqual({ step: 'cleanse', reason: `${REASON_SENTINEL} for cleanse`, sourceUrl: `https://shop.example/${URL_SENTINEL}/c-a` })
+    expect(grounding.calls.slice(0, 3).map((r) => r.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+    expect(grounding.calls.slice(3, 6).map((r) => r.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+  })
+
+  it('checks nothing for a case with no routine, or with an entry that has no grounding link', async () => {
+    const { run, grounding } = setup({
+      answer: (call, skeleton) => {
+        if (call === 1) throw new FakeWriterError(ERROR_SENTINEL)
+        if (call === 2) {
+          const routine = goodRoutine(skeleton)
+          return { ...routine, steps: routine.steps.map((e) => ({ ...e, grounding: [] })) }
+        }
+        return undefined
+      },
+    })
+
+    await run()
+
+    // Case 1 has no routine, case 2's entries cite nothing, case 3 has its 3 links.
+    expect(grounding.calls).toHaveLength(LINKS_PER_CASE)
+  })
+
+  it('stops asking at --max-grounding for the whole run: 3 cases of 3 links with a cap of 4 is 4 checks, the first 4 in order', async () => {
+    const { run, grounding, files } = setup({ maxGrounding: 4 })
+
+    await run()
+
+    expect(grounding.calls).toHaveLength(4)
+    expect(grounding.calls.map((r) => r.step)).toEqual(['cleanse', 'moisturise', 'protect', 'cleanse'])
+    const { summary } = reportOf(files)
+    expect(summary.groundingChecked).toBe(4)
+    expect(summary.groundingSkipped).toBe(5)
+  })
+
+  it('asks for no check at all with --max-grounding 0, and has no support score', async () => {
+    const { run, grounding, files, logs } = setup({ maxGrounding: 0 })
+
+    const { exitCode } = await run()
+
+    expect(grounding.calls).toEqual([])
+    expect(reportOf(files).summary).toMatchObject({ groundingSupport: null, groundingChecked: 0, groundingSkipped: 9 })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('checks every link when the cap is as big as the links: the boundary, 9 of 9', async () => {
+    const { run, grounding, files } = setup({ maxGrounding: 9 })
+
+    await run()
+
+    expect(grounding.calls).toHaveLength(9)
+    expect(reportOf(files).summary.groundingSkipped).toBe(0)
+  })
+
+  it('scores the share of links checked that are supported, counting a link it could not verify as not supported', async () => {
+    // Cap 4: the verdicts are supported, not supported, unverifiable and supported: 2 of 4 = 50%. One of the four was unverifiable.
+    const verdicts: GroundingVerdict[] = [
+      { fetched: true, supports: 'yes' },
+      { fetched: true, supports: 'no' },
+      { fetched: false, supports: 'unclear', reason: 'not-fetched' },
+      { fetched: true, supports: 'yes' },
+    ]
+    const { run, files, logs } = setup({ maxGrounding: 4, groundingAnswer: (call) => verdicts[call - 1] })
+
+    await run()
+
+    const { summary, cases } = reportOf(files)
+    expect(summary).toMatchObject({ groundingSupport: 50, groundingChecked: 4, groundingSupported: 2, groundingUnverifiable: 1 })
+    expect(cases[0]!.grounding.map((g) => g.verdict)).toEqual(verdicts.slice(0, 3))
+    expect(cases[1]!.grounding.map((g) => g.verdict.supports)).toEqual(['yes'])
+    expect(logs.find((l) => /ground/i.test(l))).toMatch(/2 of 4/)
+  })
+
+  it('does not put the support score in the bar: every link unsupported still PASSES a run that is otherwise clean', async () => {
+    const { run, logs, files } = setup({ groundingAnswer: () => ({ fetched: true, supports: 'no' }) })
+
+    const { exitCode } = await run()
+
+    expect(reportOf(files).summary.groundingSupport).toBe(0)
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('never prints a link\'s address or a reason on the console', async () => {
+    const { run, logs } = setup()
+
+    await run()
+
+    const console_ = logs.join('\n')
+    expect(console_).not.toContain(URL_SENTINEL)
+    expect(console_).not.toContain(REASON_SENTINEL)
+    expect(console_).not.toMatch(/https?:\/\//)
+  })
+
+  it('stops the run, exits 2, and asks for nothing more when the page-support judge is refused by Claude', async () => {
+    const { run, grounding, memory } = setup({
+      groundingAnswer: () => {
+        throw new AnthropicConfigError(ERROR_SENTINEL)
+      },
+    })
+
+    const { exitCode } = await run()
+
+    expect(exitCode).toBe(2)
+    expect(grounding.calls).toHaveLength(1)
+    expect(memory.calls).toHaveLength(1)
+  })
+
+  it('asks about no link of a routine that failed the grounding gate, and counts them apart from the ones the cap left out', async () => {
+    // Case 2 cites a link that is not its candidate's own (the grounding gate), so none of its 3 links is fetched; cases 1 and 3 are checked as usual.
+    const { run, grounding, files } = setup({
+      answer: (call, skeleton) => {
+        if (call !== 2) return undefined
+        const routine = goodRoutine(skeleton)
+        return { ...routine, steps: routine.steps.map((e) => (e.grounding.length > 0 ? { ...e, grounding: ['https://elsewhere.example/not-its-own'] } : e)) }
+      },
+    })
+
+    await run()
+
+    expect(grounding.calls).toHaveLength(2 * LINKS_PER_CASE)
+    const { summary, cases } = reportOf(files)
+    expect(summary).toMatchObject({ groundingChecked: 6, groundingSkipped: 0, groundingSkippedGate: LINKS_PER_CASE })
+    expect(cases[1]!.grounding).toEqual([])
+  })
+
+  it('treats a page-support judge that fails some other way as an unverifiable link, and goes on', async () => {
+    const { run, grounding, files } = setup({
+      groundingAnswer: (call) => {
+        if (call === 2) throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+        return undefined
+      },
+    })
+
+    await run()
+
+    expect(grounding.calls).toHaveLength(9)
+    const { summary } = reportOf(files)
+    expect(summary).toMatchObject({ groundingChecked: 9, groundingSupported: 8, groundingUnverifiable: 1 })
+    expect(files.get(REPORT_PATH)).not.toContain(JUDGE_ERROR_SENTINEL)
+  })
+})

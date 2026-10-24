@@ -23,6 +23,8 @@ export const MODELS: Record<AiJob, string> = {
   'read-mentions': MODEL,
   'draft-catalog-row': MODEL,
   'judge-draft': MODEL,
+  'judge-routine': MODEL,
+  'judge-grounding': MODEL,
   'write-routine': MODEL,
 }
 /** A different priced model per job, so a test can tell which model a job was routed to. */
@@ -39,6 +41,8 @@ export const ROUTED_MODELS: Record<AiJob, string> = {
   'read-mentions': 'claude-haiku-5-5',
   'draft-catalog-row': 'claude-opus-5-5',
   'judge-draft': 'claude-sonnet-5-5',
+  'judge-routine': 'claude-opus-5-5',
+  'judge-grounding': 'claude-haiku-5-5',
   'write-routine': 'claude-sonnet-5-5',
 }
 /** A cap no test comes near, for tests that are not about the cap. */

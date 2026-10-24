@@ -7,7 +7,7 @@ import type { GateFailure, Routine } from '../../src/modules/routines/routines.t
 import type { GapLabel } from './routine-labels'
 import type { RoutineSet } from './routine-cases'
 
-/** What an Opus judge said of one routine (D2 adds the judge). */
+/** What the rubric judge said of one routine, as the score takes it: picks agreed of judged, and the three scores. */
 export type JudgeResult = { picksAgreed: number; picksJudged: number; fit: number; simplicity: number; words: number }
 
 export type RoutineCaseInput = {
@@ -67,19 +67,28 @@ const sameCodes = (a: readonly string[], b: readonly string[]): boolean => a.len
 const withCandidates = (gapCodes: RoutineCaseInput['gapCodes']): [RoutineStep, string[]][] =>
   (Object.entries(gapCodes) as [RoutineStep, string[]][]).filter(([, codes]) => codes.length > 0).map(([step, codes]) => [step, [...codes].sort()])
 
-const needsRelabelOf = ({ gapCodes, labels }: RoutineCaseInput): boolean => {
+export const needsRelabelOf = ({ gapCodes, labels }: Pick<RoutineCaseInput, 'gapCodes' | 'labels'>): boolean => {
   if (labels === null) return false
   const now = withCandidates(gapCodes)
   const labelled = (Object.entries(labels) as [RoutineStep, GapLabel][]).filter(([, label]) => label !== undefined)
   return now.length !== labelled.length || now.some(([step, codes]) => labels[step] === undefined || !sameCodes(codes, [...labels[step]!.candidates].sort()))
 }
 
+/**
+ * The gaps a case is scored on: labelled, at least 2 candidates, and the labels not out of date. Both the picks and the judge's agreement count over exactly these,
+ * so a gap the labels cannot speak for is never in one and not the other.
+ */
+export const scoredGapsOf = (input: Pick<RoutineCaseInput, 'gapCodes' | 'labels'>): [RoutineStep, GapLabel][] => {
+  const { labels } = input
+  if (labels === null || needsRelabelOf(input)) return []
+  return withCandidates(input.gapCodes).flatMap(([step]) => (labels[step] !== undefined && labels[step]!.candidates.length >= 2 ? [[step, labels[step]!] as [RoutineStep, GapLabel]] : []))
+}
+
 export const scoreRoutineCase = (input: RoutineCaseInput): CaseScore => {
   const gatesPassed = input.routine !== null && input.writerError === null && input.failures.length === 0
   const forbiddenWording = input.failures.filter((failure) => failure.gate === 'wording').length
   const needsRelabel = needsRelabelOf(input)
-  const scored: [RoutineStep, GapLabel][] =
-    input.labels === null || needsRelabel ? [] : withCandidates(input.gapCodes).flatMap(([step]) => (input.labels![step] !== undefined && input.labels![step]!.candidates.length >= 2 ? [[step, input.labels![step]!] as [RoutineStep, GapLabel]] : []))
+  const scored = scoredGapsOf(input)
   let rightGaps = 0
   let bestGaps = 0
   for (const [step, label] of scored) {

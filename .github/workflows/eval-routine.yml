@@ -1,0 +1,82 @@
+# Measures the routine writer against fixed synthetic people, with the rubric judge and the page-support judge.
+# See "Routine eval" in docs/architecture.md.
+#
+# This makes real, billed Claude calls (about 30 writer calls, 30 Opus judge calls and up to 40 Haiku page checks for a 30-case set), so it is never part of tests.yml
+# and never runs on a pull request: only on a weekly schedule or by hand. It is report-only. The job cannot fail the build (continue-on-error), a red run
+# just means the bar did not hold, and the JSON report is uploaded as an artifact.
+#
+# Needs the repository secret ANTHROPIC_API_KEY, and the owner's catalog snapshot at eval-data/routine/catalog-snapshot.xlsx. The snapshot and the label
+# sets name catalog products, are gitignored and never committed (this repository is public), so they are local until it goes private: without the
+# snapshot the run says so and stops without failing.
+name: Eval routine
+
+on:
+  schedule:
+    # Mondays, 07:00 UTC.
+    - cron: '0 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      set:
+        description: Which cases to run (hints is built from the label set, so it needs a labels version)
+        type: choice
+        options: [holdout, dev, hints]
+        default: holdout
+      labels:
+        description: The label set version in eval-data/routine/labels/ that scores the picks (such as v1), or empty for none
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  eval:
+    name: Eval routine
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: package.json
+          cache: npm
+      - run: npm ci
+      - name: Check for the snapshot and the API key
+        id: ready
+        # The key is scoped to the steps that need it, so `npm ci` and dependency lifecycle scripts never see it.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ ! -f eval-data/routine/catalog-snapshot.xlsx ]; then
+            echo "::notice::eval-data/routine/catalog-snapshot.xlsx is not here, so the routine eval was skipped. The snapshot and the label sets are local (gitignored, never committed) while the repository is public."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::notice::ANTHROPIC_API_KEY is not set as a repository secret, so the routine eval was skipped."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Run the eval
+        if: steps.ready.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Through the environment, never spliced into the script: a dispatch input is text anyone with write access types.
+          EVAL_SET: ${{ inputs.set || 'holdout' }}
+          EVAL_LABELS: ${{ inputs.labels }}
+        run: |
+          if [ -n "$EVAL_LABELS" ]; then
+            npm run eval:routine -- --set "$EVAL_SET" --labels "$EVAL_LABELS"
+          else
+            npm run eval:routine -- --set "$EVAL_SET"
+          fi
+      - name: Upload the report
+        if: always() && steps.ready.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: routine-eval
+          path: .eval/
+          # `.eval/` is a dot-folder, which upload-artifact v4 skips unless told otherwise.
+          include-hidden-files: true
+          # The step only runs when the eval did, so a missing report is worth a warning.
+          if-no-files-found: warn

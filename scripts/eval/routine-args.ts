@@ -1,5 +1,6 @@
 import { AI_JOBS, type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
 import { priceOf } from '../../src/providers/anthropic/anthropic.provider'
+import { DEFAULT_MODELS } from './models'
 import type { RoutineSet } from './routine-cases'
 import { isLabelVersion, LABEL_STATUSES, type LabelStatus } from './routine-labels'
 import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
@@ -7,22 +8,28 @@ import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
 /** A bad command line: the CLI prints the message, which holds the usage, and exits 2 before anything is spent. */
 export class RoutineUsageError extends Error {}
 
+/** What a run is over: the dev or holdout cases, or the hint cases built from a label set. */
+export type RoutineRunSet = RoutineSet | 'hints'
+
 export type RoutineArgs = {
-  set: RoutineSet
+  set: RoutineRunSet
   limit: number | undefined
   models: Partial<Record<AiJob, string>>
   labels: string | undefined
   maxUsd: number
+  /** The most page-support checks (fetch calls) for the whole run. */
+  maxGrounding: number
   snapshot: string
   outDir: string | undefined
   compare: string | undefined
 }
 
 const DEFAULT_MAX_USD = 5
+const DEFAULT_MAX_GROUNDING = 40
 
 export const USAGE =
-  'Usage: npm run eval:routine -- [--set dev|holdout] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
-  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars and the snapshot ${DEFAULT_SNAPSHOT_PATH})`
+  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
+  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
 
 type Reading = { flag: string; value: string }
 
@@ -48,6 +55,8 @@ const read = (argv: string[], known: readonly string[], repeatable: readonly str
   return readings
 }
 
+const wholeNumber = (value: string): boolean => /^\d+$/.test(value)
+
 const dollars = (value: string, flag: string, usage: string): number => {
   if (!/^\d+(\.\d+)?$/.test(value) || !(Number(value) > 0) || !Number.isFinite(Number(value))) throw new RoutineUsageError(`${flag} must be a number of dollars above 0. ${usage}`)
   return Number(value)
@@ -58,11 +67,11 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${USAGE}`)
   }
-  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
-  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
+  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
+  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--max-grounding', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
     if (flag === '--set') {
-      if (value !== 'dev' && value !== 'holdout') fail(`Unknown set "${value}" (dev or holdout)`)
-      args.set = value as RoutineSet
+      if (value !== 'dev' && value !== 'holdout' && value !== 'hints') fail(`Unknown set "${value}" (dev, holdout or hints)`)
+      args.set = value as RoutineRunSet
     } else if (flag === '--limit') {
       if (!/^\d+$/.test(value) || Number(value) < 1) fail('--limit must be a whole number of at least 1')
       args.limit = Number(value)
@@ -76,16 +85,25 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
       if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
       args.labels = value
     } else if (flag === '--max-usd') args.maxUsd = dollars(value, flag, USAGE)
+    // 0 is allowed: it runs the whole eval without the page-support checks.
+    else if (flag === '--max-grounding') {
+      if (!wholeNumber(value)) fail('--max-grounding must be a whole number of fetch calls (0 for none)')
+      args.maxGrounding = Number(value)
+    }
     else if (flag === '--snapshot') args.snapshot = value
     else if (flag === '--out-dir') args.outDir = value
     else args.compare = value
   }
+  if (args.set === 'hints' && args.labels === undefined) fail('--set hints is built from a label set, so it needs --labels VERSION')
   return args
 }
 
-/** The model the writer will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
-export const requirePricedWriterModel = (model: string): void => {
-  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the write-routine job), so its spend could not be capped. Use a model with a price. ${USAGE}`)
+/** The models of a run: the eval defaults, with the rubric judge on Opus (it grades the writer, so it should be the stronger model; `--model judge-routine=...` moves it), then the `--model` overrides. */
+export const resolveRoutineModels = (overrides: Partial<Record<AiJob, string>>): Record<AiJob, string> => ({ ...DEFAULT_MODELS, 'judge-routine': 'claude-opus-5-5', ...overrides })
+
+/** The model a job will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
+export const requirePricedModel = (job: AiJob, model: string): void => {
+  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the ${job} job), so its spend could not be capped. Use a model with a price. ${USAGE}`)
 }
 
 export const SHEET_USAGE = `Usage: npm run eval:routine:sheet -- [--set dev|holdout|all] [--snapshot PATH] [--out PATH] (default: all cases, the snapshot ${DEFAULT_SNAPSHOT_PATH}, out eval-data/routine/label-sheet-<set>.xlsx)`
@@ -130,4 +148,32 @@ export const parseLabelsArgs = (argv: string[]): LabelsArgs => {
   if (sheet === undefined) fail('--sheet is needed')
   if (version === undefined) fail('--version is needed')
   return { sheet: sheet!, version: version!, status }
+}
+
+export const OUTCOMES_USAGE = 'Usage: npm run eval:routine:outcomes -- --counts FILE.json --labels VERSION --out NEWVERSION (reads eval-data/routine/labels/VERSION.json, writes NEWVERSION.json with status outcome and NEWVERSION.note.md beside it)'
+
+export type OutcomesArgs = { counts: string; labels: string; out: string }
+
+export const parseOutcomesArgs = (argv: string[]): OutcomesArgs => {
+  const fail = (reason: string): never => {
+    throw new RoutineUsageError(`${reason}. ${OUTCOMES_USAGE}`)
+  }
+  let counts: string | undefined
+  let labels: string | undefined
+  let out: string | undefined
+  for (const { flag, value } of read(argv, ['--counts', '--labels', '--out'], [], OUTCOMES_USAGE)) {
+    if (flag === '--counts') counts = value
+    else if (flag === '--labels') {
+      if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
+      labels = value
+    } else {
+      if (!isLabelVersion(value)) fail('--out must be a plain version name such as v2')
+      out = value
+    }
+  }
+  if (counts === undefined) fail('--counts is needed')
+  if (labels === undefined) fail('--labels is needed')
+  if (out === undefined) fail('--out is needed')
+  if (out === labels) fail('--out must be a new version: a label set is never overwritten')
+  return { counts: counts!, labels: labels!, out: out! }
 }

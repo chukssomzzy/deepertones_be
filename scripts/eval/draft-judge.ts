@@ -8,7 +8,7 @@ import { comparableUrl } from '../../src/lib/url-safety'
 import { draftJudgeJudgeDraftPrompt } from '../../src/prompts/prompts.generated'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 import type { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
-import { AnthropicConfigError, lastJsonObjectIn, textOf } from '../../src/providers/anthropic/anthropic.provider'
+import { AnthropicConfigError, lastJsonObjectIn, type Message, textOf } from '../../src/providers/anthropic/anthropic.provider'
 import type { ProductIdentity } from '../../src/providers/product-research/product-researcher.provider'
 import type { Column, UnverifiableReason, Verdict } from './draft-score'
 
@@ -41,7 +41,7 @@ const ANSWER_SCHEMA = z.object({
 
 const CURRENCY_CODE = /^[A-Z]{3}$/
 
-const hostOf = (address: string): string | undefined => {
+export const hostOf = (address: string): string | undefined => {
   try {
     return new URL(address).hostname
   } catch {
@@ -49,12 +49,35 @@ const hostOf = (address: string): string | undefined => {
   }
 }
 
+// The page was cited, so one fetch is the job; the second is for a retry. A fetched page is billed as input tokens, so what a fetch may bring in is bounded too.
+const MAX_FETCHES = 2
+const MAX_PAGE_TOKENS = 20_000
+
+/** The web fetch tool of a judge that reads one cited page: restricted to that page's host, so it cannot read another site. */
+export const pageFetchTool = (host: string) => ({
+  type: 'web_fetch_20260318',
+  name: 'web_fetch',
+  max_uses: MAX_FETCHES,
+  max_content_tokens: MAX_PAGE_TOKENS,
+  allowed_domains: [host],
+  // One plain fetch is the job. By default this tool version runs through code execution (dynamic filtering), whose fetch results may not come back as top-level blocks for the check below.
+  allowed_callers: ['direct'],
+})
+
+/**
+ * Whether a reply holds a successful fetch of exactly the cited page (compared by `comparableUrl`), and if it does not, why: 'fetch-failed' when fetches were made
+ * and none succeeded, 'not-fetched' when none was made or only other pages were fetched. A judge that says it read the page without a result like this is not taken at its word.
+ */
+export const fetchOutcomeOf = (message: Message, cited: string): 'fetched' | 'fetch-failed' | 'not-fetched' => {
+  const results = message.content.flatMap((block) => (block.type === 'web_fetch_tool_result' ? [block.content as { type?: unknown; url?: unknown } | null | undefined] : []))
+  const pages = results.filter((result) => result?.type === 'web_fetch_result')
+  if (pages.length === 0) return results.length > 0 ? 'fetch-failed' : 'not-fetched'
+  return pages.some((page) => typeof page?.url === 'string' && comparableUrl(page.url) === cited) ? 'fetched' : 'not-fetched'
+}
+
 /** Checks one drafted value against its cited page with Claude and its web fetch tool. */
 export class AnthropicDraftJudge implements DraftJudge {
   private static readonly MAX_TOKENS = 4096
-  // The page was cited, so one fetch is the job; the second is for a retry. A fetched page is billed as input tokens, so what a fetch may bring in is bounded too.
-  private static readonly MAX_FETCHES = 2
-  private static readonly MAX_PAGE_TOKENS = 20_000
 
   private readonly client: AnthropicClient
 
@@ -76,17 +99,7 @@ export class AnthropicDraftJudge implements DraftJudge {
           system: draftJudgeJudgeDraftPrompt.text,
           // The fetch tool only fetches a page it has already seen in the conversation, so the address goes in the message as the drafter gave it.
           messages: [{ role: 'user', content: `Judge this drafted value:\n${JSON.stringify(request)}` }],
-          tools: [
-            {
-              type: 'web_fetch_20260318',
-              name: 'web_fetch',
-              max_uses: AnthropicDraftJudge.MAX_FETCHES,
-              max_content_tokens: AnthropicDraftJudge.MAX_PAGE_TOKENS,
-              allowed_domains: [host],
-              // One plain fetch is the job. By default this tool version runs through code execution (dynamic filtering), whose fetch results may not come back as top-level blocks for the `fetched` check below.
-              allowed_callers: ['direct'],
-            },
-          ],
+          tools: [pageFetchTool(host)],
         },
         { job: draftJudgeJudgeDraftPrompt.job },
       )
@@ -99,10 +112,8 @@ export class AnthropicDraftJudge implements DraftJudge {
     // A reply cut off or refused is not an answer. Neither is one the judge gives without having read the page: it is not taken at its word.
     if (message.stop_reason === 'refusal') return unverifiable('refused')
     if (message.stop_reason === 'max_tokens') return unverifiable('cut-off')
-    const results = message.content.flatMap((block) => (block.type === 'web_fetch_tool_result' ? [block.content as { type?: unknown; url?: unknown } | null | undefined] : []))
-    const pages = results.filter((result) => result?.type === 'web_fetch_result')
-    if (pages.length === 0) return unverifiable(results.length > 0 ? 'fetch-failed' : 'not-fetched')
-    if (!pages.some((page) => typeof page?.url === 'string' && comparableUrl(page.url) === cited)) return unverifiable('not-fetched')
+    const outcome = fetchOutcomeOf(message, cited)
+    if (outcome !== 'fetched') return unverifiable(outcome)
 
     const answer = lastJsonObjectIn(textOf(message), ANSWER_SCHEMA)
     if (!answer) return unverifiable('unreadable-answer')
