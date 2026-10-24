@@ -146,6 +146,7 @@ describe('the OpenAPI document', () => {
         'PATCH /api/v1/me/notification-settings',
         'PUT /api/v1/me/goal',
         'GET /api/v1/me/goal',
+        'GET /api/v1/me/goal/switch-preview',
         'GET /api/v1/me/onboarding',
         'PUT /api/v1/me/safety',
         'GET /api/v1/me/safety',
