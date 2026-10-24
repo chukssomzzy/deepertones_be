@@ -200,14 +200,17 @@ export class FaceScanService {
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
-    const now = this.now()
-    // Read before the due rule, not after: the write below guards against a scan stored since by checking this same `latest` is still the
+    // `latest` first, before the due rule: the write below guards against a scan stored since by checking this same `latest` is still the
     // profile's latest at write time. Reading it after the due rule would let two requests, each catching the other's write in a fresh
-    // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote.
+    // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote. `now` comes after the reads, so a
+    // rival scan stored in the middle of them is stamped no later than `now` and still counts (the policy has no upper bound either).
     const latest = await this.repository.latestForProfile(profileId)
     const history = await this.goals.history()
-    const since = chaseStartFor(history, goal, now) ?? now
+    // The chase start only needs a time to measure the resume window from; the verdict and the stored scan use the later `now`.
+    const readAt = this.now()
+    const since = chaseStartFor(history, goal, readAt) ?? readAt
     const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
+    const now = this.now()
     const verdict = mayScanNow({ goal, history, scans, at: now })
     if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
 
@@ -287,10 +290,12 @@ export class FaceScanService {
     const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
-    const history = this.goals.history()
+    // A profile with no goal has no chase to rank scans against, so the history is read only when there is a goal.
+    const goal = await this.currentGoal()
+    const history = goal === null ? undefined : this.goals.history()
     // Its first reader awaits it only after that scan's photo links, so a failed read is caught here meanwhile; each reader still sees it fail.
-    history.catch(() => undefined)
-    const rescanSuggested = await this.rescanSuggested(profileId, history)
+    history?.catch(() => undefined)
+    const rescanSuggested = await this.rescanSuggested(profileId, goal, history)
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
     return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
@@ -908,18 +913,22 @@ export class FaceScanService {
     return read
   }
 
-  /**
-   * Whether the due rule would allow a scan right now, under the profile's current goal (issue #145): the policy's own "a scan is allowed",
-   * reused as the app's rescan hint. No goal, or typed words nobody sorted into one, suggests nothing.
-   */
-  private async rescanSuggested(profileId: string, history?: Promise<GoalRow[]>): Promise<boolean> {
-    const goal = await this.goals.current().then(
+  private async currentGoal(): Promise<Goal | null> {
+    return this.goals.current().then(
       (view) => view.goal,
       (error: unknown) => {
         if (error instanceof NotFoundError) return null
         throw error
       },
     )
+  }
+
+  /**
+   * Whether the due rule would allow a scan right now, under the profile's current goal (issue #145): the policy's own "a scan is allowed",
+   * reused as the app's rescan hint. No goal, or typed words nobody sorted into one, suggests nothing.
+   */
+  private async rescanSuggested(profileId: string, known?: Goal | null, history?: Promise<GoalRow[]>): Promise<boolean> {
+    const goal = known === undefined ? await this.currentGoal() : known
     if (goal === null) return false
     const rows = await (history ?? this.goals.history())
     const now = this.now()

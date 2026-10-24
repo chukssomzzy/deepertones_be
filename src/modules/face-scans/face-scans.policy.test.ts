@@ -178,4 +178,18 @@ describe('mayScanNow', () => {
 
     expect(mayScanNow({ goal: 'glow', history: rows, scans, at: on(11 * DAY + REVIEW) })).toEqual({ allowed: true, checkIn: true })
   })
+
+  // Requests race, and clocks differ a little: a scan stamped after this one's `at` is still a scan of the chase. The rule counts from the chase
+  // start onward, with no upper bound.
+  it('counts a scan stamped after `at`: a second scan is refused as already scanned for the goal', () => {
+    const scans = [scan('glow', 1, { state: 'analysing' })]
+
+    expect(mayScanNow({ goal: 'glow', history: history(['glow', 0]), scans, at: on(0) })).toEqual({ allowed: false, reason: 'already-scanned-for-goal' })
+  })
+
+  it('counts a check-in stamped after `at`: a second check-in is refused as taken', () => {
+    const scans = [scan('glow', 0), scan('glow', REVIEW + 1, { checkIn: true, state: 'analysing' })]
+
+    expect(mayScanNow({ goal: 'glow', history: history(['glow', 0]), scans, at: on(REVIEW) })).toEqual({ allowed: false, reason: 'check-in-taken' })
+  })
 })
