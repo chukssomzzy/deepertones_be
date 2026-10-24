@@ -1742,6 +1742,56 @@ describe('FaceScanService.sendDueCheckIns: the check-in due push', () => {
     expect(await sweep(ctx)).toBe(0)
   })
 
+  // A profile with no goal-history rows at all (a state the sweep must cope with): its ready day one is taken straight through the repository, since the
+  // service will not scan without a goal. The D1 candidate query leaves such a profile unfiltered, so the sweep itself must settle it.
+  const goalLessDayOne = async (ctx: Ctx, n: number, takenAt: Date): Promise<{ id: string; who: Who }> => {
+    const who = person(n)
+    const id = `goalless-${String(n).padStart(3, '0')}`
+    const { userId, profileId } = as(who)
+    await ctx.repository.createFaceScan({ id, userId, profileId, goalAtScan: 'glow', createdAt: takenAt }, [])
+    await ctx.repository.completeFaceScan(id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: 'tables-under-test', updatedAt: new Date(takenAt.getTime() + HOUR) })
+    return { id, who }
+  }
+
+  it('settles a day one whose profile has no goal history: recorded as handled, no push queued, and not counted', async () => {
+    const ctx = setup()
+    const { id, who } = await goalLessDayOne(ctx, 1, T0)
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
+
+    expect(await sweep(ctx)).toBe(0)
+
+    expect(await ctx.repository.checkInPushFor(as(who).profileId, id)).not.toBeNull()
+    expect(ctx.checkInPushes).toEqual([])
+  })
+
+  it('does not let day ones without goal history starve the 200-a-run cap: the sendable day one behind 200 of them is pushed within two sweeps', async () => {
+    const ctx = setup()
+    // 200 goal-less day ones, all taken before the sendable one, so they sort first.
+    const stuck: { id: string; who: Who }[] = []
+    for (let n = 0; n < 200; n++) stuck.push(await goalLessDayOne(ctx, 100 + n, new Date(T0.getTime() - 2 * DAY + n * SECOND)))
+    const sendable = await dayOneUnder(ctx, 'glow', person(1))
+    advanceTo(ctx, new Date(T0.getTime() + REVIEW_POINT + DAY))
+
+    await sweep(ctx)
+    await sweep(ctx)
+
+    expect(ctx.checkInPushes.map((push) => push.dayOneScanId)).toEqual([sendable.id])
+    expect(await ctx.repository.checkInPushFor(as(stuck[0]!.who).profileId, stuck[0]!.id)).not.toBeNull()
+  })
+
+  it('does not record a day one whose goal was switched away from (history exists): it is told if the goal is taken up again within 90 days', async () => {
+    const ctx = setup()
+    const dayOne = await atReviewPoint(ctx, 'glow')
+    await setGoal(ctx, 'brighter')
+
+    expect(await sweep(ctx)).toBe(0)
+    expect(await ctx.repository.checkInPushFor(PROFILE, dayOne.id)).toBeNull()
+
+    await setGoal(ctx, 'glow')
+    expect(await sweep(ctx)).toBe(1)
+    expect(ctx.checkInPushes).toEqual([{ userId: USER, profileId: PROFILE, dayOneScanId: dayOne.id }])
+  })
+
   describe('when a push cannot be queued', () => {
     afterEach(() => {
       vi.restoreAllMocks()
