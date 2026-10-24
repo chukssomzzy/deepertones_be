@@ -26,6 +26,19 @@ export type RoutineCaseInput = {
   costMicros: number
 }
 
+/** One rubric judge over a whole run: its agreement with the labels and its means (null when it produced nothing to average), and what its calls cost. */
+export type JudgeComparison = {
+  name: string
+  model: string
+  agreement: number | null
+  fit: number | null
+  simplicity: number | null
+  words: number | null
+  costMicros: number
+  /** Agreement % per dollar spent; null when the judge has no agreement or cost nothing. */
+  agreementPerDollar: number | null
+}
+
 export type CasePicks = 'right' | 'wrong' | 'unscored'
 
 export type CaseScore = {
@@ -59,6 +72,8 @@ export type RunScore = {
   bar: Bar
 }
 
+/** The agreement with the labels at which a judge is trusted: the bar's own rule, and the line selectJudge draws. */
+export const JUDGE_AGREEMENT_MIN = 80
 const percent = (n: number, d: number): number | null => (d === 0 ? null : (n * 100) / d)
 const mean = (values: number[]): number | null => (values.length === 0 ? null : values.reduce((a, b) => a + b, 0) / values.length)
 const sameCodes = (a: readonly string[], b: readonly string[]): boolean => a.length === b.length && a.every((code, i) => code === b[i])
@@ -82,6 +97,37 @@ export const scoredGapsOf = (input: Pick<RoutineCaseInput, 'gapCodes' | 'labels'
   const { labels } = input
   if (labels === null || needsRelabelOf(input)) return []
   return withCandidates(input.gapCodes).flatMap(([step]) => (labels[step] !== undefined && labels[step]!.candidates.length >= 2 ? [[step, labels[step]!] as [RoutineStep, GapLabel]] : []))
+}
+
+/** A judge's row from its result on each case (null where it judged nothing) and what its calls cost: agreement is pooled over the picks judged, the means are over the cases judged. */
+export const judgeComparisonOf = (judge: { name: string; model: string }, results: (JudgeResult | null)[], costMicros: number): JudgeComparison => {
+  const judged = results.flatMap((result) => (result === null ? [] : [result]))
+  const agreement = percent(
+    judged.reduce((total, j) => total + j.picksAgreed, 0),
+    judged.reduce((total, j) => total + j.picksJudged, 0),
+  )
+  return {
+    ...judge,
+    agreement,
+    fit: mean(judged.map((j) => j.fit)),
+    simplicity: mean(judged.map((j) => j.simplicity)),
+    words: mean(judged.map((j) => j.words)),
+    costMicros,
+    agreementPerDollar: agreement === null || costMicros === 0 ? null : agreement / (costMicros / 1_000_000),
+  }
+}
+
+/**
+ * The judge whose numbers feed the bar: the cheapest one whose agreement is at least the bar's 80% (higher agreement on a cost tie), else the one with the highest
+ * agreement (cheaper on a tie). A judge with no agreement produced no result and is never picked; with none that did, null.
+ */
+export const selectJudge = (rows: JudgeComparison[]): JudgeComparison | null => {
+  const withResults = rows.filter((row) => row.agreement !== null)
+  const agreementOf = (row: JudgeComparison) => row.agreement!
+  const trusted = withResults.filter((row) => agreementOf(row) >= JUDGE_AGREEMENT_MIN)
+  const best = (candidates: JudgeComparison[], order: (a: JudgeComparison, b: JudgeComparison) => number) => [...candidates].sort(order)[0] ?? null
+  if (trusted.length > 0) return best(trusted, (a, b) => a.costMicros - b.costMicros || agreementOf(b) - agreementOf(a))
+  return best(withResults, (a, b) => agreementOf(b) - agreementOf(a) || a.costMicros - b.costMicros)
 }
 
 export const scoreRoutineCase = (input: RoutineCaseInput): CaseScore => {
@@ -122,7 +168,6 @@ const missingOf = (inputs: RoutineCaseInput[], scores: CaseScore[], judgeAgreeme
 }
 
 const RIGHT_PRODUCT_MIN = 85
-const JUDGE_AGREEMENT_MIN = 80
 
 export const scoreRun = (inputs: RoutineCaseInput[], { set, partial }: { set: RoutineSet; partial: boolean }): RunScore => {
   const scores = inputs.map(scoreRoutineCase)

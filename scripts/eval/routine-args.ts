@@ -8,6 +8,11 @@ import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
 /** A bad command line: the CLI prints the message, which holds the usage, and exits 2 before anything is spent. */
 export class RoutineUsageError extends Error {}
 
+/** The rubric judges there can be, and the model each runs on. Nothing else judges a routine. */
+export const JUDGE_MODELS = { haiku: 'claude-haiku-5-5', opus: 'claude-opus-5-5' } as const
+export type JudgeName = keyof typeof JUDGE_MODELS
+const JUDGE_NAMES = Object.keys(JUDGE_MODELS) as JudgeName[]
+
 /** What a run is over: the dev or holdout cases, or the hint cases built from a label set. */
 export type RoutineRunSet = RoutineSet | 'hints'
 
@@ -19,6 +24,8 @@ export type RoutineArgs = {
   maxUsd: number
   /** The most page-support checks (fetch calls) for the whole run. */
   maxGrounding: number
+  /** The rubric judges, in the order given: each judges every routine, and the run compares them. */
+  judges: JudgeName[]
   snapshot: string
   outDir: string | undefined
   compare: string | undefined
@@ -28,8 +35,8 @@ const DEFAULT_MAX_USD = 5
 const DEFAULT_MAX_GROUNDING = 40
 
 export const USAGE =
-  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
-  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
+  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--judges haiku,opus] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
+  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, the rubric judges haiku and opus (a model never judges its own routines), and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
 
 type Reading = { flag: string; value: string }
 
@@ -67,8 +74,8 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${USAGE}`)
   }
-  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
-  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--max-grounding', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
+  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, judges: [...JUDGE_NAMES], snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
+  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--max-grounding', '--judges', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
     if (flag === '--set') {
       if (value !== 'dev' && value !== 'holdout' && value !== 'hints') fail(`Unknown set "${value}" (dev, holdout or hints)`)
       args.set = value as RoutineRunSet
@@ -80,6 +87,7 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
       const job = value.slice(0, split)
       const model = value.slice(split + 1)
       if (split === -1 || !AI_JOBS.includes(job as AiJob) || model === '') fail('--model must be JOB=MODEL with a known job')
+      if (job === 'judge-routine') fail('--model cannot move the rubric judge: choose the judges with --judges haiku, --judges opus or --judges haiku,opus')
       args.models[job as AiJob] = model
     } else if (flag === '--labels') {
       if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
@@ -90,16 +98,30 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
       if (!wholeNumber(value)) fail('--max-grounding must be a whole number of fetch calls (0 for none)')
       args.maxGrounding = Number(value)
     }
-    else if (flag === '--snapshot') args.snapshot = value
+    else if (flag === '--judges') {
+      const names = value.split(',')
+      if (names.some((name) => !JUDGE_NAMES.includes(name as JudgeName))) fail(`--judges must be a comma list of ${JUDGE_NAMES.join(' and ')} with no empty name`)
+      if (new Set(names).size !== names.length) fail('--judges names a judge twice')
+      args.judges = names as JudgeName[]
+    } else if (flag === '--snapshot') args.snapshot = value
     else if (flag === '--out-dir') args.outDir = value
     else args.compare = value
+  }
+  // A hint run asks the writer alone, so nothing judges and nothing can judge itself.
+  const writer = args.models['write-routine'] ?? DEFAULT_MODELS['write-routine']
+  if (args.set !== 'hints' && args.judges.some((name) => JUDGE_MODELS[name] === writer)) {
+    const others = JUDGE_NAMES.filter((name) => JUDGE_MODELS[name] !== writer)
+    fail(`A model never judges its own routines: write-routine runs on ${writer}, which is also a judge in --judges. Pass --judges ${others.join(',')}`)
   }
   if (args.set === 'hints' && args.labels === undefined) fail('--set hints is built from a label set, so it needs --labels VERSION')
   return args
 }
 
-/** The models of a run: the eval defaults, with the rubric judge on Opus (it grades the writer, so it should be the stronger model; `--model judge-routine=...` moves it), then the `--model` overrides. */
-export const resolveRoutineModels = (overrides: Partial<Record<AiJob, string>>): Record<AiJob, string> => ({ ...DEFAULT_MODELS, 'judge-routine': 'claude-opus-5-5', ...overrides })
+/** The models of a run: the eval defaults, then the `--model` overrides. The rubric judges' models come from `--judges` (resolveRoutineJudges), one client each. */
+export const resolveRoutineModels = (overrides: Partial<Record<AiJob, string>>): Record<AiJob, string> => ({ ...DEFAULT_MODELS, ...overrides })
+
+/** The judges of a run with their models, in the order given. */
+export const resolveRoutineJudges = (names: readonly JudgeName[]): { name: JudgeName; model: string }[] => names.map((name) => ({ name, model: JUDGE_MODELS[name] }))
 
 /** The model a job will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
 export const requirePricedModel = (job: AiJob, model: string): void => {

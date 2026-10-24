@@ -25,6 +25,13 @@ import { caseOf, offer, row, snapshotOf } from './routine.fixture'
 // product with labels, judge agreement) is a FAIL and exits 1, with what could not be evaluated listed beside it. A run with nothing failing and something missing
 // is a trial: not evaluated, exit 0. A rejected key exits 2. A judge that fails in any other way leaves the case unjudged (the bar then says no-judge); it never
 // stops the run. The page-support score is reported and is not in the bar.
+//
+// PR 4c: the run takes a LIST of rubric judges (haiku and opus, in --judges order) instead of one. Each case's routine is written once and judged by every judge, on the
+// same { skeleton, routine } and the same ledger; the cost of each judge's calls is recorded per case and per judge. The summary compares the judges, and the cheapest
+// one whose agreement is at least 80% (else the highest agreement) is the one whose agreement, fit, simplicity and words feed the bar. The shapes the tests expect:
+//   RunArgs.judges: { name: string; model: string }[]                  (replaces RunArgs.judgeModel)
+//   RunDeps.judges: { name: string; model: string; judge: RoutineJudge }[]   (replaces RunDeps.judge), in the same order
+//   report.judges, case.judgements / judgeErrors / judgeCostMicros keyed by name, summary.judgeComparison, summary.selectedJudge (a name or null)
 
 /** The one day every date in this file hangs from. */
 const BASE = new Date('2030-06-15T00:00:00.000Z')
@@ -46,7 +53,8 @@ class FakeJudgeError extends Error {}
 const PROBLEMS = ['vague-reason', 'poor-fit'] as const
 const JUDGE_ERROR_SENTINEL = 'SENTINEL-JUDGE-ERROR-MESSAGE'
 const WRITER_MODEL = 'claude-test-model'
-const JUDGE_MODEL = 'claude-judge-test-model'
+const JUDGE_MODELS = { haiku: 'claude-haiku-5-5', opus: 'claude-opus-5-5' } as const
+type JudgeName = keyof typeof JUDGE_MODELS
 
 // --- the snapshot, the cases and the labels --------------------------------------------------------------------------------------------------
 
@@ -138,6 +146,7 @@ const agreeingJudgement = (): RoutineJudgement => ({
 class SpendingJudge implements RoutineJudge {
   readonly calls: { skeleton: RoutineSkeleton; routine: Routine }[] = []
   constructor(
+    private readonly name: string,
     private readonly ledger: MemoryAiSpendLedger,
     private readonly micros: number,
     private readonly answer: (call: number, input: { skeleton: RoutineSkeleton; routine: Routine }) => RoutineJudgement | undefined,
@@ -145,7 +154,7 @@ class SpendingJudge implements RoutineJudge {
   ) {}
   async judge(input: { skeleton: RoutineSkeleton; routine: Routine }): Promise<RoutineJudgement> {
     this.calls.push(input)
-    this.order.push('judge')
+    this.order.push(`judge:${this.name}`)
     await spend(this.ledger, 'judge-routine' as AiJob, this.micros)
     return this.answer(this.calls.length, input) ?? agreeingJudgement()
   }
@@ -177,18 +186,21 @@ type Setup = {
   previous?: { summary: { rightProduct: number | null; fit: number | null; simplicity: number | null; words: number | null } } | null
   /** What the writer answers on the n-th call (1-based); the good routine when it returns undefined. Throw to fail that call. */
   answer?: (call: number, skeleton: RoutineSkeleton) => Routine | undefined
-  /** What the rubric judge answers on its n-th call; the agreeing judgement when it returns undefined. Throw to fail that call. */
+  /** The judges of the run, in order (default haiku then opus, as --judges' default). */
+  judgeNames?: JudgeName[]
+  /** What each rubric judge answers on its n-th call (each judge counts its own calls); the agreeing judgement when it returns undefined. Throw to fail that call. */
   judgeAnswer?: (call: number, input: { skeleton: RoutineSkeleton; routine: Routine }) => RoutineJudgement | undefined
+  /** The same, for one judge; it takes the place of judgeAnswer for that judge. */
+  judgeAnswers?: Partial<Record<JudgeName, (call: number, input: { skeleton: RoutineSkeleton; routine: Routine }) => RoutineJudgement | undefined>>
   /** What the page-support judge answers on its n-th call; a supported page when it returns undefined. */
   groundingAnswer?: (call: number, request: GroundingRequest) => GroundingVerdict | undefined
-  /** What each judge call costs on the ledger (0: nothing, so the writer's arithmetic stays the only spend). */
-  judgeMicros?: number
+  /** What each rubric judge call costs on the ledger (0: nothing, so the writer's arithmetic stays the only spend): one number for both judges, or one per judge. */
+  judgeMicros?: number | Partial<Record<JudgeName, number>>
   groundingMicros?: number
   maxGrounding?: number
-  judgeModel?: string
 }
 
-const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_CAP_MICROS, previous, answer = () => undefined, judgeAnswer = () => undefined, groundingAnswer = () => undefined, judgeMicros = 0, groundingMicros = 0, maxGrounding = 100, judgeModel = JUDGE_MODEL }: Setup = {}) => {
+const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_CAP_MICROS, previous, answer = () => undefined, judgeNames = ['haiku', 'opus'], judgeAnswer = () => undefined, judgeAnswers = {}, groundingAnswer = () => undefined, judgeMicros = 0, groundingMicros = 0, maxGrounding = 100 }: Setup = {}) => {
   const ledger = new MemoryAiSpendLedger({ capMicros })
   const memory = new MemoryRoutineWriter()
   const order: string[] = []
@@ -198,7 +210,10 @@ const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_
     return answer(++call, skeleton) ?? goodRoutine(skeleton)
   })
   const writer = new SpendingWriter(memory, ledger, MICROS_PER_CALL)
-  const judge = new SpendingJudge(ledger, judgeMicros, judgeAnswer, order)
+  const judgeFakes = judgeNames.map((name) => ({ name, model: JUDGE_MODELS[name], judge: new SpendingJudge(name, ledger, typeof judgeMicros === 'number' ? judgeMicros : (judgeMicros[name] ?? 0), judgeAnswers[name] ?? judgeAnswer, order) }))
+  const judges = Object.fromEntries(judgeFakes.map((j) => [j.name, j.judge])) as Record<JudgeName, SpendingJudge>
+  /** The first judge of the list: most tests are about what a judge is asked, and both are asked the same. */
+  const judge = judgeFakes[0]!.judge
   const grounding = new SpendingGrounding(ledger, groundingMicros, groundingAnswer, order)
   const logs: string[] = []
   const dirs: string[] = []
@@ -211,21 +226,23 @@ const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_
       outDir: OUT,
       startedAt: BASE,
       model: WRITER_MODEL,
-      judgeModel,
+      judges: judgeFakes.map(({ name, model }) => ({ name, model })),
       maxGrounding,
       promptHash: 'prompt-hash-123',
       snapshot: SNAPSHOT,
       labels: labels === undefined ? LABELS_FOR_ALL(cases) : labels,
       ...(previous === undefined ? {} : { previous }),
-      deps: { writer, judge, grounding, ledger },
+      deps: { writer, judges: judgeFakes, grounding, ledger },
       io: {
         log: (line) => logs.push(line),
         mkdir: async (dir) => void dirs.push(dir),
         writeFile: async (path, text) => void files.set(path, text),
       },
     })
-  return { ledger, memory, writer, judge, grounding, order, logs, dirs, files, run }
+  return { ledger, memory, writer, judge, judges, grounding, order, logs, dirs, files, run }
 }
+
+type JudgeRow = { name: string; model: string; agreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null }
 
 type Reported = {
   startedAt: string
@@ -234,23 +251,24 @@ type Reported = {
   labelVersion: string | null
   labelSnapshotSha256: string | null
   model: string
-  judgeModel: string
+  judges: { name: string; model: string }[]
   promptHash: string
   partial: boolean
   cases: {
     id: string
     state: string
     writerError?: string
-    judgeError?: string
     skeleton?: RoutineSkeleton
     routine: Routine | null
     failures: { gate: string; step: RoutineStep | null }[]
     costMicros: number
     score: { picks: string; gatesPassed: boolean }
-    /** What the rubric judge said, whole (its problem codes are here and only here), or null. */
-    judgement: RoutineJudgement | null
-    /** The judge's result as the score takes it: picks agreed of judged, and the three means' inputs. Null when not judged. */
-    judge: { picksAgreed: number; picksJudged: number; fit: number; simplicity: number; words: number } | null
+    /** What each rubric judge said, whole (its problem codes are here and only here), or null. Every judge of the run has a key. */
+    judgements: Record<string, RoutineJudgement | null>
+    /** The class name of each judge's error, for the judges that had one. */
+    judgeErrors: Record<string, string>
+    /** What each judge's calls cost on this case. */
+    judgeCostMicros: Record<string, number>
     grounding: { step: string; sourceUrl: string; verdict: GroundingVerdict }[]
   }[]
   summary: {
@@ -263,6 +281,8 @@ type Reported = {
     fit: number | null
     simplicity: number | null
     words: number | null
+    judgeComparison: JudgeRow[]
+    selectedJudge: string | null
     groundingSupport: number | null
     groundingChecked: number
     groundingSupported: number
@@ -407,7 +427,7 @@ describe('runRoutineEval: the report', () => {
     await run()
 
     const report = reportOf(files)
-    expect(report).toMatchObject({ startedAt: BASE.toISOString(), set: 'holdout', snapshotSha256: SNAPSHOT.sha256, labelVersion: 'v1', model: WRITER_MODEL, judgeModel: JUDGE_MODEL, promptHash: 'prompt-hash-123', partial: false })
+    expect(report).toMatchObject({ startedAt: BASE.toISOString(), set: 'holdout', snapshotSha256: SNAPSHOT.sha256, labelVersion: 'v1', model: WRITER_MODEL, judges: [{ name: 'haiku', model: 'claude-haiku-5-5' }, { name: 'opus', model: 'claude-opus-5-5' }], promptHash: 'prompt-hash-123', partial: false })
   })
 
   it('records every case\'s skeleton, routine, gate failures, cost and score', async () => {
@@ -495,6 +515,9 @@ describe('runRoutineEval: the bar', () => {
     expect(logs.join('\n')).toMatch(/trial/i)
     expect(exitCode).toBe(0)
     expect(reportOf(files).summary.bar).toEqual({ status: 'not-evaluated', reasons: ['no-judge'] })
+    // Neither judge produced a result, so there is no judge to take the bar's numbers from.
+    expect(reportOf(files).summary.selectedJudge).toBeNull()
+    expect(reportOf(files).summary.judgeAgreement).toBeNull()
   })
 
   it('is not evaluated without labels, and says so', async () => {
@@ -712,24 +735,27 @@ describe('runRoutineEval: the label set it was scored with', () => {
 const LINKS_PER_CASE = 3
 
 describe('runRoutineEval: the rubric judge', () => {
-  it('judges each case that has a routine once, after the writer wrote it and before the next case is written', async () => {
-    const { run, judge, order } = setup()
+  it('judges each case that has a routine once with each judge, in the order of the list, after the writer wrote it and before the next case is written', async () => {
+    const { run, judges, order } = setup()
 
     await run()
 
-    expect(judge.calls).toHaveLength(3)
-    expect(order.filter((e) => e === 'write' || e === 'judge')).toEqual(['write', 'judge', 'write', 'judge', 'write', 'judge'])
+    expect(judges.haiku.calls).toHaveLength(3)
+    expect(judges.opus.calls).toHaveLength(3)
+    expect(order.filter((e) => e === 'write' || e.startsWith('judge:'))).toEqual(['write', 'judge:haiku', 'judge:opus', 'write', 'judge:haiku', 'judge:opus', 'write', 'judge:haiku', 'judge:opus'])
   })
 
-  it('gives the judge exactly the skeleton the writer was given and the routine it wrote, and nothing else: no label, no gap code list, no score', async () => {
-    const { run, judge, memory } = setup()
+  it('gives each judge exactly the skeleton the writer was given and the routine it wrote, and nothing else: no label, no gap code list, no score', async () => {
+    const { run, judges, memory } = setup()
 
     await run()
 
-    for (const [i, input] of judge.calls.entries()) {
-      expect(Object.keys(input).sort()).toEqual(['routine', 'skeleton'])
-      expect(input.skeleton).toBe(memory.calls[i])
-      expect(input.routine).toEqual(goodRoutine(memory.calls[i]!))
+    for (const judge of [judges.haiku, judges.opus]) {
+      for (const [i, input] of judge.calls.entries()) {
+        expect(Object.keys(input).sort()).toEqual(['routine', 'skeleton'])
+        expect(input.skeleton).toBe(memory.calls[i])
+        expect(input.routine).toEqual(goodRoutine(memory.calls[i]!))
+      }
     }
   })
 
@@ -740,11 +766,12 @@ describe('runRoutineEval: the rubric judge', () => {
     await labelled.run()
     await unlabelled.run()
 
-    expect(unlabelled.judge.calls).toEqual(labelled.judge.calls)
+    expect(unlabelled.judges.haiku.calls).toEqual(labelled.judges.haiku.calls)
+    expect(unlabelled.judges.opus.calls).toEqual(labelled.judges.opus.calls)
   })
 
   it('does not judge a case whose writer failed, and judges the others', async () => {
-    const { run, judge, files } = setup({
+    const { run, judges, files } = setup({
       answer: (call) => {
         if (call === 2) throw new FakeWriterError(ERROR_SENTINEL)
         return undefined
@@ -753,25 +780,29 @@ describe('runRoutineEval: the rubric judge', () => {
 
     await run()
 
-    expect(judge.calls).toHaveLength(2)
+    expect(judges.haiku.calls).toHaveLength(2)
+    expect(judges.opus.calls).toHaveLength(2)
     const [one, two, three] = reportOf(files).cases
-    expect(one!.judgement).not.toBeNull()
-    expect(two).toMatchObject({ state: 'writer-error', judgement: null, judge: null })
-    expect(three!.judgement).not.toBeNull()
+    expect(one!.judgements.haiku).not.toBeNull()
+    expect(one!.judgements.opus).not.toBeNull()
+    // Every judge has a key, with null where it judged nothing and a cost of 0.
+    expect(two).toMatchObject({ state: 'writer-error', judgements: { haiku: null, opus: null }, judgeErrors: {}, judgeCostMicros: { haiku: 0, opus: 0 } })
+    expect(three!.judgements.haiku).not.toBeNull()
   })
 
   it('does not judge a case the run never reached (cut off by the spend cap)', async () => {
     // The cap of 2500 lets writer calls 1 and 2 through (1000 each) and stops the third.
-    const { run, judge, files } = setup({ capMicros: 2500 })
+    const { run, judges, files } = setup({ capMicros: 2500 })
 
     await run()
 
     expect(reportOf(files).cases.map((c) => c.state)).toEqual(['done', 'done', 'cut-off'])
-    expect(judge.calls).toHaveLength(2)
+    expect(judges.haiku.calls).toHaveLength(2)
+    expect(judges.opus.calls).toHaveLength(2)
   })
 
   it('judges a routine that broke a gate: the gates and the judge are different checks', async () => {
-    const { run, judge } = setup({
+    const { run, judges } = setup({
       answer: (call, skeleton) => {
         if (call !== 1) return undefined
         const routine = goodRoutine(skeleton)
@@ -781,18 +812,23 @@ describe('runRoutineEval: the rubric judge', () => {
 
     await run()
 
-    expect(judge.calls).toHaveLength(3)
+    expect(judges.haiku.calls).toHaveLength(3)
+    expect(judges.opus.calls).toHaveLength(3)
   })
 
-  it('records the judgement whole in the report, and the result the score takes from it', async () => {
+  it('records each judge\'s judgement whole in the report, and the agreement the comparison takes from them', async () => {
     const { run, files } = setup()
 
     await run()
 
-    const [first] = reportOf(files).cases
-    expect(first!.judgement).toEqual(agreeingJudgement())
-    // Scored gaps: cleanse only (the other two gaps have one candidate). The judge said "best" and the labels say the pick (C-A) is the best: 1 of 1.
-    expect(first!.judge).toEqual({ picksAgreed: 1, picksJudged: 1, fit: 4, simplicity: 5, words: 3 })
+    const report = reportOf(files)
+    const [first] = report.cases
+    expect(first!.judgements).toEqual({ haiku: agreeingJudgement(), opus: agreeingJudgement() })
+    // Scored gaps: cleanse only (the other two gaps have one candidate). Both judges said "best" and the labels say the pick (C-A) is the best: 3 of 3 over the run.
+    expect(report.summary.judgeComparison.map((row) => [row.name, row.agreement, row.fit, row.simplicity, row.words])).toEqual([
+      ['haiku', 100, 4, 5, 3],
+      ['opus', 100, 4, 5, 3],
+    ])
   })
 
   it('pools the agreement over all picks judged and averages fit, simplicity and words over the cases judged', async () => {
@@ -835,8 +871,8 @@ describe('runRoutineEval: the rubric judge', () => {
     expect(logs.at(-1)).toBe('Bar: FAIL (judge-agreement)')
   })
 
-  it('keeps going when the judge fails on one case (not the key, not the cap): the case is reported unjudged, with the error\'s class name and never its message', async () => {
-    const { run, judge, files, logs } = setup({
+  it('keeps going when the judges fail on one case (not the key, not the cap): the case is reported unjudged, with each error\'s class name and never its message', async () => {
+    const { run, judges, files, logs } = setup({
       judgeAnswer: (call) => {
         if (call === 2) throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
         return undefined
@@ -845,11 +881,12 @@ describe('runRoutineEval: the rubric judge', () => {
 
     const { exitCode } = await run()
 
-    expect(judge.calls).toHaveLength(3)
+    expect(judges.haiku.calls).toHaveLength(3)
+    expect(judges.opus.calls).toHaveLength(3)
     const report = reportOf(files)
     expect(report.cases.map((c) => c.state)).toEqual(['done', 'done', 'done'])
-    expect(report.cases[1]).toMatchObject({ judgement: null, judge: null, judgeError: 'FakeJudgeError' })
-    expect(report.cases[0]!.judgeError).toBeUndefined()
+    expect(report.cases[1]).toMatchObject({ judgements: { haiku: null, opus: null }, judgeErrors: { haiku: 'FakeJudgeError', opus: 'FakeJudgeError' } })
+    expect(report.cases[0]!.judgeErrors).toEqual({})
     expect(files.get(REPORT_PATH)).not.toContain(JUDGE_ERROR_SENTINEL)
     expect(logs.join('\n')).not.toContain(JUDGE_ERROR_SENTINEL)
     // One case is unjudged, so the bar cannot pass: it is a trial, with the judge named as the missing piece.
@@ -857,8 +894,8 @@ describe('runRoutineEval: the rubric judge', () => {
     expect(exitCode).toBe(0)
   })
 
-  it('stops, exits 2 and asks for no more calls when the judge is refused by Claude (key, billing or permission), like a writer', async () => {
-    const { run, judge, memory, logs, files } = setup({
+  it('stops, exits 2 and asks for no more calls, of the other judge too, when a judge is refused by Claude (key, billing or permission), like a writer', async () => {
+    const { run, judges, memory, logs, files } = setup({
       judgeAnswer: () => {
         throw new AnthropicConfigError(ERROR_SENTINEL)
       },
@@ -867,46 +904,50 @@ describe('runRoutineEval: the rubric judge', () => {
     const { exitCode } = await run()
 
     expect(exitCode).toBe(2)
-    expect(judge.calls).toHaveLength(1)
+    expect(judges.haiku.calls).toHaveLength(1)
+    expect(judges.opus.calls).toHaveLength(0)
     expect(memory.calls).toHaveLength(1)
-    expect(reportOf(files).cases[0]).toMatchObject({ judgement: null, judgeError: 'AnthropicConfigError' })
+    expect(reportOf(files).cases[0]).toMatchObject({ judgements: { haiku: null }, judgeErrors: { haiku: 'AnthropicConfigError' } })
     expect(reportOf(files).partial).toBe(true)
     expect(reportOf(files).cases.map((c) => c.state)).toEqual(['done', 'cut-off', 'cut-off'])
     expect(logs.join('\n')).toMatch(/key/i)
     expect(logs.join('\n')).not.toContain(ERROR_SENTINEL)
   })
 
-  it('shares the spend cap with the writer: when the judge\'s call would pass the cap the run stops, the rest are cut off, and it is a trial', async () => {
-    // Cap 1500, writer 1000 and judge 1000 a call: case 1's writer call fits (1000), its judge call would make 2000.
-    const { run, judge, memory, grounding, files, logs } = setup({
+  it('shares the spend cap with the writer: when a judge\'s call would pass the cap the run stops, the rest are cut off, and it is a trial', async () => {
+    // Cap 1500; the writer takes 1000 a call, haiku 100 and opus 500. Case 1: writer 1000, haiku 1100 fits, opus would make 1600 and is stopped.
+    const { run, judges, memory, grounding, files, logs } = setup({
       capMicros: 1500,
-      judgeMicros: 1000,
+      judgeMicros: { haiku: 100, opus: 500 },
     })
 
     const { exitCode } = await run()
 
     expect(memory.calls).toHaveLength(1)
-    expect(judge.calls).toHaveLength(1)
+    expect(judges.haiku.calls).toHaveLength(1)
+    expect(judges.opus.calls).toHaveLength(1)
     expect(grounding.calls).toHaveLength(0)
     const report = reportOf(files)
     expect(report.partial).toBe(true)
     expect(report.cases.map((c) => c.state)).toEqual(['done', 'cut-off', 'cut-off'])
-    expect(report.cases[0]!.judgement).toBeNull()
+    expect(report.cases[0]!.judgements.haiku).not.toBeNull()
+    expect(report.cases[0]!.judgements.opus).toBeNull()
+    expect(report.cases[0]!.judgeErrors).toEqual({ opus: 'AiBudgetExceededError' })
     expect(logs.join('\n')).toMatch(/spend cap/i)
     expect(logs.at(-1)).toMatch(/^Bar: not evaluated \(.*partial-run.*\)$/)
     expect(exitCode).toBe(0)
   })
 
-  it('counts the judges\' spend in each case\'s cost and in the total: writer 1000 + rubric judge 500 + 3 grounding checks of 100 = 1800 a case', async () => {
-    const { run, logs, files, ledger } = setup({ judgeMicros: 500, groundingMicros: 100 })
+  it('counts the judges\' spend in each case\'s cost and in the total: writer 1000 + haiku 100 + opus 500 + 3 grounding checks of 100 = 1900 a case', async () => {
+    const { run, logs, files, ledger } = setup({ judgeMicros: { haiku: 100, opus: 500 }, groundingMicros: 100 })
 
     await run()
 
     const report = reportOf(files)
-    expect(report.cases.map((c) => c.costMicros)).toEqual([1800, 1800, 1800])
-    expect(report.summary.costMicros).toBe(5400)
-    expect(ledger.spentMicros()).toBe(5400)
-    expect(lineOf(logs, 'hold-01')[0]).toContain('$0.0018')
+    expect(report.cases.map((c) => c.costMicros)).toEqual([1900, 1900, 1900])
+    expect(report.summary.costMicros).toBe(5700)
+    expect(ledger.spentMicros()).toBe(5700)
+    expect(lineOf(logs, 'hold-01')[0]).toContain('$0.0019')
   })
 })
 
@@ -923,46 +964,333 @@ describe('runRoutineEval: what the console never prints from the judges', () => 
     for (const id of ['hold-01', 'hold-02', 'hold-03']) expect(lineOf(logs, id), id).toHaveLength(1)
   })
 
-  it('prints the judge\'s numbers (agreement, fit, simplicity, words) as scores', async () => {
-    const { run, logs } = setup()
+  it('prints one line per judge with its numbers (agreement, fit, simplicity, words) as scores, its cost in dollars and its agreement per dollar', async () => {
+    // Both judges agree on 3 of 3 (100%), fit 4, simplicity 5, words 3. haiku costs 100 a call and opus 500: 300 micros = $0.0003 and 1500 micros = $0.0015.
+    // Agreement per dollar: 100 / 0.0003 = 333333.3 and 100 / 0.0015 = 66666.7.
+    const { run, logs } = setup({ judgeMicros: { haiku: 100, opus: 500 } })
 
     await run()
 
-    const line = logs.find((l) => /agreement/i.test(l))
-    expect(line).toBeDefined()
-    expect(line).toContain('100.0%')
-    expect(line).toMatch(/fit 4\.0/)
-    expect(line).toMatch(/simplicity 5\.0/)
-    expect(line).toMatch(/words 3\.0/)
+    const haiku = logs.filter((l) => l.startsWith('Judge haiku'))
+    const opus = logs.filter((l) => l.startsWith('Judge opus'))
+    expect(haiku).toHaveLength(1)
+    expect(opus).toHaveLength(1)
+    for (const line of [haiku[0]!, opus[0]!]) {
+      expect(line).toContain('100.0%')
+      expect(line).toMatch(/fit 4\.0/)
+      expect(line).toMatch(/simplicity 5\.0/)
+      expect(line).toMatch(/words 3\.0/)
+    }
+    expect(haiku[0]).toContain('$0.0003')
+    expect(haiku[0]).toContain('333333.3')
+    expect(opus[0]).toContain('$0.0015')
+    expect(opus[0]).toContain('66666.7')
+    // They come in the order of the list.
+    expect(logs.indexOf(haiku[0]!)).toBeLessThan(logs.indexOf(opus[0]!))
+  })
+
+  it('prints n/a, not a number, for a judge that produced nothing, and for an agreement per dollar when the judge cost nothing', async () => {
+    const { run, logs } = setup({
+      judgeAnswers: {
+        haiku: () => {
+          throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+        },
+      },
+    })
+
+    await run()
+
+    const haiku = logs.find((l) => l.startsWith('Judge haiku'))!
+    const opus = logs.find((l) => l.startsWith('Judge opus'))!
+    expect(haiku).toContain('n/a')
+    // opus agrees at 100% and cost nothing here, so its agreement per dollar is n/a too.
+    expect(opus).toContain('100.0%')
+    expect(opus).toContain('n/a')
+    for (const line of [haiku, opus]) expect(line).not.toMatch(/NaN|Infinity|null|undefined/)
   })
 })
 
 describe('runRoutineEval: the judge models', () => {
-  it('names the judge model in the report beside the writer\'s', async () => {
+  it('names both judges and their models in the report, in the order of the list, beside the writer\'s model', async () => {
     const { run, files } = setup()
 
     await run()
 
-    expect(reportOf(files)).toMatchObject({ model: WRITER_MODEL, judgeModel: JUDGE_MODEL })
+    expect(reportOf(files)).toMatchObject({ model: WRITER_MODEL, judges: [{ name: 'haiku', model: 'claude-haiku-5-5' }, { name: 'opus', model: 'claude-opus-5-5' }] })
   })
 
-  it('says so, in one line of codes only, when the judge runs on the same model as the writer: a model grading its own routines shares its blind spots', async () => {
-    const { run, logs } = setup({ judgeModel: WRITER_MODEL })
+  it('names only the judges that were asked for, and keys each case\'s judgements by them', async () => {
+    const { run, files, judges } = setup({ judgeNames: ['opus'] })
 
     await run()
 
-    const notes = logs.filter((l) => l.includes('judge-routine') && l.includes('write-routine'))
-    expect(notes).toHaveLength(1)
-    expect(notes[0]).toContain(WRITER_MODEL)
-    expect(notes[0]).not.toMatch(/https?:\/\//)
+    const report = reportOf(files)
+    expect(report.judges).toEqual([{ name: 'opus', model: 'claude-opus-5-5' }])
+    expect(Object.keys(report.cases[0]!.judgements)).toEqual(['opus'])
+    expect(judges.opus.calls).toHaveLength(3)
+    expect(report.summary.judgeComparison.map((row) => row.name)).toEqual(['opus'])
+    expect(report.summary.selectedJudge).toBe('opus')
   })
 
-  it('says nothing of the kind when the models differ', async () => {
+  it('prints no same-model note any more: a judge that equals the writer is refused with the arguments, before a run starts', async () => {
     const { run, logs } = setup()
 
     await run()
 
     expect(logs.filter((l) => l.includes('judge-routine') && l.includes('write-routine'))).toEqual([])
+    expect(logs.filter((l) => /blind spot|grading its own/i.test(l))).toEqual([])
+  })
+})
+
+// --- two judges on the same routines (#152, PR 4c) ---------------------------------------------------------------------------------------------------
+
+/** Cases hold-01 to hold-20, each with one scored gap (cleanse), so a judge's agreement moves in steps of 5 points: 17 of 20 is 85. */
+const TWENTY: RoutineCase[] = Array.from({ length: 20 }, (_, i) => caseOf({ id: `hold-${String(i + 1).padStart(2, '0')}` }))
+
+/** A judge that gets cleanse wrong (says "not" where the labels say best) on its first `wrong` calls, and scores what it is given. */
+const wrongOn =
+  (wrong: number, scores: { fit: number; simplicity: number; words: number } = { fit: 4, simplicity: 5, words: 3 }) =>
+  (call: number): RoutineJudgement => {
+    const base = agreeingJudgement()
+    return { ...base, ...scores, picks: base.picks.map((p) => (call <= wrong && p.step === 'cleanse' ? { ...p, pickClass: 'not' as const } : p)) }
+  }
+
+const HAIKU_SCORES = { fit: 4, simplicity: 5, words: 3 }
+const OPUS_SCORES = { fit: 2, simplicity: 3, words: 4 }
+
+describe('runRoutineEval: two judges on the same routines', () => {
+  it('writes each routine once and gives both judges the same skeleton and routine: no writer call is repeated', async () => {
+    const { run, memory, writer, judges } = setup()
+
+    await run()
+
+    expect(memory.calls).toHaveLength(3)
+    expect(writer.events).toEqual(['start', 'end', 'start', 'end', 'start', 'end'])
+    for (const [i, skeleton] of memory.calls.entries()) {
+      expect(judges.haiku.calls[i]!.skeleton).toBe(skeleton)
+      expect(judges.opus.calls[i]!.skeleton).toBe(skeleton)
+      expect(judges.haiku.calls[i]!.routine).toEqual(goodRoutine(skeleton))
+      expect(judges.opus.calls[i]!.routine).toEqual(judges.haiku.calls[i]!.routine)
+    }
+  })
+
+  it('records each judge\'s cost per case and per judge, and compares them: worked by hand', async () => {
+    // 3 cases. haiku costs 200 a call, opus 900, the writer 1000, no grounding cost. A case costs 1000 + 200 + 900 = 2100; the run 6300.
+    // haiku: disagrees on case 2 (cleanse 'acceptable'), so 2 of 3 = 66.667%; fit (5 + 3 + 1) / 3 = 3, simplicity (5 + 4 + 3) / 3 = 4, words (2 + 3 + 4) / 3 = 3.
+    //   cost 3 * 200 = 600 micros = $0.0006; agreement per dollar 66.667 / 0.0006 = 111111.1.
+    // opus: agrees on all 3 = 100%, fit 4, simplicity 5, words 3 (the default answer). cost 3 * 900 = 2700 micros = $0.0027; agreement per dollar 100 / 0.0027 = 37037.04.
+    // opus is the only judge at 80% or more, so opus is selected and its numbers are the run's.
+    const scores = [
+      { fit: 5, simplicity: 5, words: 2 },
+      { fit: 3, simplicity: 4, words: 3 },
+      { fit: 1, simplicity: 3, words: 4 },
+    ]
+    const { run, files, ledger } = setup({
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: {
+        haiku: (call) => {
+          const base = agreeingJudgement()
+          return { ...base, ...scores[call - 1]!, picks: base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p)) }
+        },
+      },
+    })
+
+    await run()
+
+    const report = reportOf(files)
+    for (const c of report.cases) {
+      expect(c.judgeCostMicros).toEqual({ haiku: 200, opus: 900 })
+      expect(c.costMicros).toBe(2100)
+    }
+    expect(report.summary.costMicros).toBe(6300)
+    expect(ledger.spentMicros()).toBe(6300)
+    const [haiku, opus] = report.summary.judgeComparison
+    expect(haiku).toMatchObject({ name: 'haiku', model: 'claude-haiku-5-5', fit: 3, simplicity: 4, words: 3, costMicros: 600 })
+    expect(haiku!.agreement).toBeCloseTo(66.667, 2)
+    expect(haiku!.agreementPerDollar).toBeCloseTo(111111.1, 0)
+    expect(opus).toMatchObject({ name: 'opus', model: 'claude-opus-5-5', agreement: 100, fit: 4, simplicity: 5, words: 3, costMicros: 2700 })
+    expect(opus!.agreementPerDollar).toBeCloseTo(37037.04, 1)
+    expect(report.summary.judgeComparison).toHaveLength(2)
+    expect(report.summary.selectedJudge).toBe('opus')
+    expect(report.summary).toMatchObject({ judgeAgreement: 100, fit: 4, simplicity: 5, words: 3 })
+  })
+
+  it('has no agreement per dollar for a judge that cost nothing: the division by zero is null', async () => {
+    const { run, files } = setup()
+
+    await run()
+
+    for (const row of reportOf(files).summary.judgeComparison) {
+      expect(row.costMicros).toBe(0)
+      expect(row.agreement).toBe(100)
+      expect(row.agreementPerDollar).toBeNull()
+    }
+  })
+
+  it('selects the cheaper judge when both reach 80%, feeds its numbers to the bar and PASSES: haiku 17 of 20 = 85%, opus 19 of 20 = 95%', async () => {
+    // Haiku (200 a call) gets cleanse wrong on its first 3 calls: 17 of 20 = 85%. Opus (900 a call) on its first 1: 19 of 20 = 95%. Both are trusted; haiku is cheaper.
+    // haiku: 20 * 200 = 4000 micros = $0.0040, 85 / 0.0040 = 21250. opus: 20 * 900 = 18000 micros = $0.0180, 95 / 0.0180 = 5277.78.
+    // The bar takes haiku's numbers: agreement 85 (not opus's 95), fit 4 (not opus's 2).
+    const { run, files, logs } = setup({
+      cases: TWENTY,
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: { haiku: wrongOn(3, HAIKU_SCORES), opus: wrongOn(1, OPUS_SCORES) },
+    })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    const [haiku, opus] = summary.judgeComparison
+    expect(haiku).toMatchObject({ name: 'haiku', agreement: 85, fit: 4, simplicity: 5, words: 3, costMicros: 4000 })
+    expect(haiku!.agreementPerDollar).toBeCloseTo(21250, 2)
+    expect(opus).toMatchObject({ name: 'opus', agreement: 95, fit: 2, simplicity: 3, words: 4, costMicros: 18000 })
+    expect(opus!.agreementPerDollar).toBeCloseTo(5277.78, 2)
+    expect(summary.selectedJudge).toBe('haiku')
+    expect(summary).toMatchObject({ judgeAgreement: 85, fit: 4, simplicity: 5, words: 3 })
+    expect(summary.bar).toEqual({ status: 'pass' })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('selects the dearer judge when only it reaches 80%, and that is what lets the bar PASS: haiku 15 of 20 = 75%, opus 18 of 20 = 90%', async () => {
+    const { run, files, logs } = setup({
+      cases: TWENTY,
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: { haiku: wrongOn(5, HAIKU_SCORES), opus: wrongOn(2, OPUS_SCORES) },
+    })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.selectedJudge).toBe('opus')
+    expect(summary).toMatchObject({ judgeAgreement: 90, fit: 2, simplicity: 3, words: 4 })
+    expect(summary.bar).toEqual({ status: 'pass' })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('counts exactly 80% as trusted and passing: haiku 16 of 20 = 80% is selected over opus at 100%', async () => {
+    const { run, files, logs } = setup({
+      cases: TWENTY,
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: { haiku: wrongOn(4, HAIKU_SCORES), opus: wrongOn(0, OPUS_SCORES) },
+    })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.judgeComparison.map((row) => row.agreement)).toEqual([80, 100])
+    expect(summary.selectedJudge).toBe('haiku')
+    expect(summary.judgeAgreement).toBe(80)
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('uses the judge with the highest agreement when neither reaches 80%, and the bar FAILS on judge-agreement: haiku 14 of 20 = 70%, opus 15 of 20 = 75%', async () => {
+    const { run, files, logs } = setup({
+      cases: TWENTY,
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: { haiku: wrongOn(6, HAIKU_SCORES), opus: wrongOn(5, OPUS_SCORES) },
+    })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.selectedJudge).toBe('opus')
+    expect(summary.judgeAgreement).toBe(75)
+    expect(summary.bar).toMatchObject({ status: 'fail', rules: ['judge-agreement'] })
+    expect(logs.at(-1)).toBe('Bar: FAIL (judge-agreement)')
+    expect(exitCode).toBe(1)
+  })
+
+  it('leaves the other judge selected when one fails on every case, and the bar PASSES on it; the failed judge is reported with its errors, and its billed calls still count', async () => {
+    // haiku throws on every call (after taking its 200 micros), so it has no result: agreement n/a, and it is not selected however cheap it is. Opus agrees on 3 of 3.
+    const { run, memory, judges, files, logs } = setup({
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: {
+        haiku: () => {
+          throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+        },
+      },
+    })
+
+    const { exitCode } = await run()
+
+    expect(memory.calls).toHaveLength(3)
+    expect(judges.haiku.calls).toHaveLength(3)
+    expect(judges.opus.calls).toHaveLength(3)
+    const report = reportOf(files)
+    for (const c of report.cases) {
+      expect(c.judgements.haiku).toBeNull()
+      expect(c.judgements.opus).not.toBeNull()
+      expect(c.judgeErrors).toEqual({ haiku: 'FakeJudgeError' })
+    }
+    const [haiku, opus] = report.summary.judgeComparison
+    expect(haiku).toMatchObject({ name: 'haiku', agreement: null, fit: null, simplicity: null, words: null, agreementPerDollar: null, costMicros: 600 })
+    expect(opus).toMatchObject({ name: 'opus', agreement: 100, costMicros: 2700 })
+    expect(report.summary.selectedJudge).toBe('opus')
+    expect(report.summary.bar).toEqual({ status: 'pass' })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+    expect(files.get(REPORT_PATH)).not.toContain(JUDGE_ERROR_SENTINEL)
+    expect(logs.join('\n')).not.toContain(JUDGE_ERROR_SENTINEL)
+  })
+
+  it('has no selected judge, and the bar says no-judge, when both judges failed on every case', async () => {
+    const fail = () => {
+      throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+    }
+    const { run, files, logs } = setup({ judgeAnswers: { haiku: fail, opus: fail } })
+
+    const { exitCode } = await run()
+
+    expect(reportOf(files).summary.selectedJudge).toBeNull()
+    expect(reportOf(files).summary.judgeComparison.map((row) => row.agreement)).toEqual([null, null])
+    expect(logs.find((l) => l.startsWith('Selected judge'))).toMatch(/none/i)
+    expect(logs.at(-1)).toBe('Bar: not evaluated (no-judge)')
+    expect(exitCode).toBe(0)
+  })
+
+  it('shows the comparison on the console, and names the selected judge after the judge lines and before the bar line', async () => {
+    const { run, logs } = setup({
+      cases: TWENTY,
+      judgeMicros: { haiku: 200, opus: 900 },
+      judgeAnswers: { haiku: wrongOn(3, HAIKU_SCORES), opus: wrongOn(1, OPUS_SCORES) },
+    })
+
+    await run()
+
+    const haiku = logs.findIndex((l) => l.startsWith('Judge haiku'))
+    const opus = logs.findIndex((l) => l.startsWith('Judge opus'))
+    const selected = logs.findIndex((l) => l.startsWith('Selected judge'))
+    const bar = logs.findIndex((l) => l.startsWith('Bar:'))
+    expect(logs.filter((l) => l.startsWith('Selected judge'))).toHaveLength(1)
+    expect(haiku).toBeGreaterThan(-1)
+    expect(opus).toBeGreaterThan(haiku)
+    expect(selected).toBeGreaterThan(opus)
+    expect(bar).toBeGreaterThan(selected)
+    expect(logs[selected]).toContain('haiku')
+    expect(logs[selected]).not.toContain('opus')
+    // haiku: 85.0%, fit 4.0, simplicity 5.0, words 3.0, $0.0040, 21250.0 per dollar. opus: 95.0%, fit 2.0, simplicity 3.0, words 4.0, $0.0180, 5277.8 per dollar.
+    expect(logs[haiku]).toContain('85.0%')
+    expect(logs[haiku]).toMatch(/fit 4\.0/)
+    expect(logs[haiku]).toContain('$0.0040')
+    expect(logs[haiku]).toContain('21250.0')
+    expect(logs[opus]).toContain('95.0%')
+    expect(logs[opus]).toMatch(/fit 2\.0/)
+    expect(logs[opus]).toContain('$0.0180')
+    expect(logs[opus]).toContain('5277.8')
+  })
+
+  it('never prints a judge\'s problem codes or any other text of a judge, with two judges, and starts no line with a case id but the case\'s own', async () => {
+    const { run, logs, files } = setup({ judgeMicros: { haiku: 100, opus: 500 } })
+
+    await run()
+
+    const console_ = logs.join('\n')
+    for (const code of PROBLEMS) expect(console_, code).not.toContain(code)
+    for (const code of PROBLEMS) expect(files.get(REPORT_PATH)!, code).toContain(code)
+    for (const id of ['hold-01', 'hold-02', 'hold-03']) expect(lineOf(logs, id), id).toHaveLength(1)
   })
 })
 

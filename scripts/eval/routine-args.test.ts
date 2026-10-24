@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
 import { DEFAULT_MODELS } from './models'
-import { parseLabelsArgs, parseOutcomesArgs, parseRoutineArgs, parseSheetArgs, requirePricedModel, resolveRoutineModels, RoutineUsageError, USAGE } from './routine-args'
+import { parseLabelsArgs, parseOutcomesArgs, parseRoutineArgs, parseSheetArgs, requirePricedModel, resolveRoutineJudges, resolveRoutineModels, RoutineUsageError, USAGE } from './routine-args'
 
 // The arguments of `npm run eval:routine`. Strict on purpose, as `eval:catalog`'s are: a misspelt flag must stop the run before it spends money. Every
 // refusal is a RoutineUsageError, which the CLI turns into exit 2. Accepts `--flag value` and `--flag=value`.
@@ -15,6 +15,7 @@ describe('parseRoutineArgs: defaults', () => {
       labels: undefined,
       maxUsd: 5,
       maxGrounding: 40,
+      judges: ['haiku', 'opus'],
       snapshot: DEFAULT_SNAPSHOT_PATH,
       outDir: undefined,
       compare: undefined,
@@ -22,7 +23,7 @@ describe('parseRoutineArgs: defaults', () => {
   })
 
   it('reads every flag together, in any order', () => {
-    const argv = ['--compare', 'prev/report.json', '--out-dir', 'out/run-1', '--snapshot', 'snap.xlsx', '--max-usd', '3', '--labels', 'v1', '--model', 'write-routine=claude-opus-5', '--limit', '2', '--set', 'dev', '--max-grounding', '12']
+    const argv = ['--compare', 'prev/report.json', '--out-dir', 'out/run-1', '--snapshot', 'snap.xlsx', '--max-usd', '3', '--labels', 'v1', '--model', 'write-routine=claude-opus-5', '--limit', '2', '--set', 'dev', '--max-grounding', '12', '--judges', 'haiku']
 
     expect(parseRoutineArgs(argv)).toEqual({
       set: 'dev',
@@ -31,6 +32,7 @@ describe('parseRoutineArgs: defaults', () => {
       labels: 'v1',
       maxUsd: 3,
       maxGrounding: 12,
+      judges: ['haiku'],
       snapshot: 'snap.xlsx',
       outDir: 'out/run-1',
       compare: 'prev/report.json',
@@ -115,31 +117,19 @@ describe('parseRoutineArgs: the hint set, the grounding cap and the judge models
     expect(() => parseRoutineArgs(['--max-grounding'])).toThrow(RoutineUsageError)
   })
 
-  it('takes --model for the two new jobs', () => {
-    expect(parseRoutineArgs(['--model', 'judge-routine=claude-sonnet-5-5', '--model=judge-grounding=claude-haiku-5-5']).models).toEqual({
-      'judge-routine': 'claude-sonnet-5-5',
-      'judge-grounding': 'claude-haiku-5-5',
-    })
+  it('takes --model for the page-support judge (the rubric judges are chosen with --judges, not --model)', () => {
+    expect(parseRoutineArgs(['--model=judge-grounding=claude-haiku-5-5']).models).toEqual({ 'judge-grounding': 'claude-haiku-5-5' })
   })
 
-  it('names the hint set, the grounding cap and the judge jobs in the usage, so a refusal shows them', () => {
+  it('names the hint set, the grounding cap and the rubric judges in the usage, so a refusal shows them', () => {
     expect(USAGE).toContain('hints')
     expect(USAGE).toContain('--max-grounding')
-    expect(USAGE).toContain('judge-routine')
+    expect(USAGE).toContain('--judges')
     expect(() => parseRoutineArgs(['--set', 'main'])).toThrow(/--max-grounding/)
   })
 })
 
 describe('resolveRoutineModels: the models an eval:routine run uses', () => {
-  it('runs the rubric judge on Opus by default: it grades the writer, so it is a stronger model than the writer', () => {
-    expect(resolveRoutineModels({})['judge-routine']).toBe('claude-opus-5-5')
-  })
-
-  it('lets --model move the rubric judge, so the owner can compare judges', () => {
-    expect(resolveRoutineModels(parseRoutineArgs(['--model', 'judge-routine=claude-sonnet-5-5']).models)['judge-routine']).toBe('claude-sonnet-5-5')
-    expect(resolveRoutineModels({ 'judge-routine': 'claude-haiku-5-5' })['judge-routine']).toBe('claude-haiku-5-5')
-  })
-
   it('keeps the page-support judge on Haiku, like the catalog eval\'s page judge', () => {
     expect(resolveRoutineModels({})['judge-grounding']).toBe('claude-haiku-5-5')
   })
@@ -149,6 +139,7 @@ describe('resolveRoutineModels: the models an eval:routine run uses', () => {
 
     expect(models['write-routine']).toBe('claude-opus-5-5')
     for (const job of Object.keys(DEFAULT_MODELS) as (keyof typeof DEFAULT_MODELS)[]) {
+      // judge-routine is left out on purpose: the rubric judges now come from --judges, and what this table holds for that job is not specified.
       if (job !== 'judge-routine' && job !== 'write-routine') expect(models[job], job).toBe(DEFAULT_MODELS[job])
     }
     expect(Object.keys(models).sort()).toEqual(Object.keys(DEFAULT_MODELS).sort())
@@ -158,6 +149,125 @@ describe('resolveRoutineModels: the models an eval:routine run uses', () => {
     resolveRoutineModels({})
 
     expect(DEFAULT_MODELS['judge-routine']).toBe('claude-haiku-5-5')
+  })
+})
+
+// --judges (#152, PR 4c): the rubric judge is Haiku or Opus and nothing else, both by default, and a model never judges its own routines. The writer is the
+// model `--model write-routine=...` names, else the eval default (Sonnet), so parseRoutineArgs resolves it to make the check. A hint run (--set hints) does not
+// judge, so the check does not apply to it.
+
+describe('parseRoutineArgs: --judges', () => {
+  it('judges with haiku and then opus by default', () => {
+    expect(parseRoutineArgs([]).judges).toEqual(['haiku', 'opus'])
+  })
+
+  it.each([
+    [['--judges', 'opus'], ['opus']],
+    [['--judges', 'haiku'], ['haiku']],
+    [['--judges', 'haiku,opus'], ['haiku', 'opus']],
+    [['--judges=haiku,opus'], ['haiku', 'opus']],
+    [['--judges=opus,haiku'], ['opus', 'haiku']],
+  ])('takes %j as the judges %j, in the order given', (argv, judges) => {
+    expect(parseRoutineArgs(argv).judges).toEqual(judges)
+  })
+
+  it.each([
+    ['an unknown name', 'sonnet'],
+    ['a model id instead of a name', 'claude-haiku-5-5'],
+    ['a name in capitals', 'Opus'],
+    ['a known name beside an unknown one', 'haiku,sonnet'],
+    ['a trailing comma, which is an empty name', 'haiku,'],
+    ['a leading comma', ',opus'],
+    ['an empty name between two', 'haiku,,opus'],
+    ['a list that is only a comma', ','],
+    ['a duplicate', 'haiku,haiku'],
+    ['a duplicate after another name', 'haiku,opus,haiku'],
+  ])('refuses %s (--judges %s)', (_label, list) => {
+    expect(() => parseRoutineArgs(['--judges', list])).toThrow(RoutineUsageError)
+    expect(() => parseRoutineArgs(['--judges', list])).toThrow(/npm run eval:routine/)
+  })
+
+  it('refuses an empty list, given as --judges= or as an empty word', () => {
+    expect(() => parseRoutineArgs(['--judges='])).toThrow(RoutineUsageError)
+    expect(() => parseRoutineArgs(['--judges', ''])).toThrow(RoutineUsageError)
+  })
+
+  it('refuses --judges given twice', () => {
+    expect(() => parseRoutineArgs(['--judges', 'haiku', '--judges', 'opus'])).toThrow(RoutineUsageError)
+  })
+
+  it('names the two judges in the usage, so a refusal shows them', () => {
+    expect(USAGE).toMatch(/haiku/)
+    expect(USAGE).toMatch(/opus/)
+  })
+})
+
+describe('parseRoutineArgs: a model never judges its own routines', () => {
+  it('lets the default Sonnet writer be judged by both judges', () => {
+    expect(() => parseRoutineArgs([])).not.toThrow()
+    expect(parseRoutineArgs(['--model', 'write-routine=claude-sonnet-5-5']).judges).toEqual(['haiku', 'opus'])
+  })
+
+  it('refuses the Opus writer with the default list, with the fixed message, and says to pass --judges haiku', () => {
+    const argv = ['--model', 'write-routine=claude-opus-5-5']
+
+    expect(() => parseRoutineArgs(argv)).toThrow(RoutineUsageError)
+    expect(() => parseRoutineArgs(argv)).toThrow(/a model never judges its own routines/)
+    expect(() => parseRoutineArgs(argv)).toThrow(/--judges haiku/)
+  })
+
+  it('refuses the Opus writer with --judges opus, and with --judges haiku,opus', () => {
+    expect(() => parseRoutineArgs(['--model', 'write-routine=claude-opus-5-5', '--judges', 'opus'])).toThrow(/a model never judges its own routines/)
+    expect(() => parseRoutineArgs(['--judges', 'haiku,opus', '--model=write-routine=claude-opus-5-5'])).toThrow(RoutineUsageError)
+  })
+
+  it('lets the Opus writer be judged by Haiku: the other side of the line', () => {
+    expect(parseRoutineArgs(['--model', 'write-routine=claude-opus-5-5', '--judges', 'haiku']).judges).toEqual(['haiku'])
+  })
+
+  it('refuses the Haiku writer with --judges haiku, and with the default list', () => {
+    expect(() => parseRoutineArgs(['--model', 'write-routine=claude-haiku-5-5', '--judges', 'haiku'])).toThrow(RoutineUsageError)
+    expect(() => parseRoutineArgs(['--model', 'write-routine=claude-haiku-5-5', '--judges', 'haiku'])).toThrow(/a model never judges its own routines/)
+    expect(() => parseRoutineArgs(['--model', 'write-routine=claude-haiku-5-5'])).toThrow(/a model never judges its own routines/)
+  })
+
+  it('lets the Haiku writer be judged by Opus: a bigger model judging a smaller one is fine', () => {
+    expect(parseRoutineArgs(['--model', 'write-routine=claude-haiku-5-5', '--judges', 'opus']).judges).toEqual(['opus'])
+  })
+
+  it('lets a writer that is neither judge (any other model id) be judged by both', () => {
+    expect(parseRoutineArgs(['--model', 'write-routine=claude-sonnet-5-5', '--judges', 'haiku,opus']).judges).toEqual(['haiku', 'opus'])
+  })
+
+  it('does not apply to a hint run, which asks the writer alone and judges nothing', () => {
+    expect(() => parseRoutineArgs(['--set', 'hints', '--labels', 'v1', '--model', 'write-routine=claude-opus-5-5'])).not.toThrow()
+  })
+})
+
+describe('parseRoutineArgs: --model judge-routine is no longer accepted', () => {
+  it.each([['judge-routine=claude-sonnet-5-5'], ['judge-routine=x'], ['judge-routine=claude-opus-5-5']])('refuses --model %s and points to --judges', (value) => {
+    expect(() => parseRoutineArgs(['--model', value])).toThrow(RoutineUsageError)
+    expect(() => parseRoutineArgs(['--model', value])).toThrow(/--judges/)
+  })
+
+  it('refuses it beside other --model flags, and in the --model=JOB=MODEL form', () => {
+    expect(() => parseRoutineArgs(['--model', 'write-routine=claude-sonnet-5-5', '--model', 'judge-routine=x'])).toThrow(/--judges/)
+    expect(() => parseRoutineArgs(['--model=judge-routine=x'])).toThrow(/--judges/)
+  })
+})
+
+describe('resolveRoutineJudges: the judges of a run, with their models', () => {
+  it('maps haiku to claude-haiku-5-5 and opus to claude-opus-5-5, in the order given', () => {
+    expect(resolveRoutineJudges(['haiku', 'opus'])).toEqual([
+      { name: 'haiku', model: 'claude-haiku-5-5' },
+      { name: 'opus', model: 'claude-opus-5-5' },
+    ])
+    expect(resolveRoutineJudges(['opus'])).toEqual([{ name: 'opus', model: 'claude-opus-5-5' }])
+    expect(resolveRoutineJudges(['opus', 'haiku']).map((j) => j.name)).toEqual(['opus', 'haiku'])
+  })
+
+  it('gives the judges of the default args', () => {
+    expect(resolveRoutineJudges(parseRoutineArgs([]).judges).map((j) => j.model)).toEqual(['claude-haiku-5-5', 'claude-opus-5-5'])
   })
 })
 
@@ -190,7 +300,7 @@ describe('parseRoutineArgs: refusals, each a RoutineUsageError that shows the us
     expect(() => parseRoutineArgs(argv)).toThrow(/npm run eval:routine/)
   })
 
-  it.each(['--set', '--limit', '--model', '--labels', '--max-usd', '--snapshot', '--out-dir', '--compare'])('refuses %s with no value, followed by a flag, or with an empty value', (flag) => {
+  it.each(['--set', '--limit', '--model', '--labels', '--max-usd', '--snapshot', '--out-dir', '--compare', '--judges'])('refuses %s with no value, followed by a flag, or with an empty value', (flag) => {
     expect(() => parseRoutineArgs([flag])).toThrow(RoutineUsageError)
     expect(() => parseRoutineArgs([flag, '--limit', '2'])).toThrow(RoutineUsageError)
     expect(() => parseRoutineArgs([`${flag}=`])).toThrow(RoutineUsageError)

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import type { GateFailure } from '../../src/modules/routines/routines.types'
-import { barExitCode, compare, formatBarLine, scoreRoutineCase, scoreRun, type RoutineCaseInput } from './routine-score'
+import { barExitCode, compare, formatBarLine, type JudgeComparison, scoreRoutineCase, scoreRun, selectJudge, type RoutineCaseInput } from './routine-score'
 import { routineOf } from './routine.fixture'
 
 // The pure half of `npm run eval:routine` (routine-run.ts is the orchestration): a case's gate result, its picks against the labels, and the run's
@@ -451,5 +451,86 @@ describe('compare', () => {
     expect(compare(scores({ fit: null }), scores({ fit: 5, simplicity: 3 }))).toEqual({ verdict: 'worse', decidedBy: 'simplicity' })
     // The right product is null now (nothing was scored): it is skipped, and fit decides.
     expect(compare(scores(), scores({ rightProduct: null, fit: 5 }))).toEqual({ verdict: 'better', decidedBy: 'fit' })
+  })
+})
+
+// --- selectJudge (#152, PR 4c) -------------------------------------------------------------------------------------------------------------------
+// The run judges every routine with each judge on the list and compares them. The one that feeds the bar is the CHEAPEST judge whose agreement with the labels is at
+// least 80% (80 itself counts: the bar's own rule fails only below 80). When none reaches 80, the judge with the highest agreement; a judge with no agreement
+// (it produced no result) is neither trusted nor highest. With no judge that produced results: null. It returns the whole comparison row, because the run
+// feeds that row's agreement, fit, simplicity and words to scoreRun.
+
+const judgeRow = (name: string, agreement: number | null, costMicros: number, over: Partial<JudgeComparison> = {}): JudgeComparison => ({
+  name,
+  model: `claude-${name}-5-5`,
+  agreement,
+  fit: agreement === null ? null : 4,
+  simplicity: agreement === null ? null : 4,
+  words: agreement === null ? null : 4,
+  costMicros,
+  agreementPerDollar: agreement === null || costMicros === 0 ? null : agreement / (costMicros / 1_000_000),
+  ...over,
+})
+
+describe('selectJudge: the cheapest judge that is trusted', () => {
+  it('picks the cheaper of two judges that both reach 80% (85 at 4000 micros beats 95 at 18000), whichever order they are listed in', () => {
+    const haiku = judgeRow('haiku', 85, 4000)
+    const opus = judgeRow('opus', 95, 18000)
+
+    expect(selectJudge([haiku, opus])?.name).toBe('haiku')
+    expect(selectJudge([opus, haiku])?.name).toBe('haiku')
+  })
+
+  it('picks the dearer judge when only it reaches 80% (haiku 75 is not trusted, opus 90 is)', () => {
+    expect(selectJudge([judgeRow('haiku', 75, 4000), judgeRow('opus', 90, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 90, 18000), judgeRow('haiku', 75, 4000)])?.name).toBe('opus')
+  })
+
+  it('counts exactly 80% as trusted: the boundary, with 79.99 on the other side of it', () => {
+    // 80 at the lower cost is trusted and wins over 100 at the higher cost.
+    expect(selectJudge([judgeRow('haiku', 80, 4000), judgeRow('opus', 100, 18000)])?.name).toBe('haiku')
+    // 79.99 is not trusted: the dearer judge that is trusted (exactly 80) wins.
+    expect(selectJudge([judgeRow('haiku', 79.99, 4000), judgeRow('opus', 80, 18000)])?.name).toBe('opus')
+  })
+
+  it('returns the whole comparison row of the judge it picked, so the run can feed its agreement, fit, simplicity and words to the bar', () => {
+    const haiku = judgeRow('haiku', 85, 4000, { fit: 3.5, simplicity: 4.5, words: 2.5 })
+
+    expect(selectJudge([haiku, judgeRow('opus', 95, 18000)])).toEqual(haiku)
+  })
+
+  it('picks the only judge there is when it is trusted, and when it is not', () => {
+    expect(selectJudge([judgeRow('opus', 90, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 40, 18000)])?.name).toBe('opus')
+  })
+})
+
+describe('selectJudge: when neither judge is trusted, the highest agreement', () => {
+  it('picks the judge with the higher agreement, though it costs more (haiku 70 at 4000, opus 75 at 18000)', () => {
+    expect(selectJudge([judgeRow('haiku', 70, 4000), judgeRow('opus', 75, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('haiku', 79.99, 4000), judgeRow('opus', 60, 18000)])?.name).toBe('haiku')
+  })
+})
+
+describe('selectJudge: ties and missing results', () => {
+  it('picks the higher agreement when the two trusted judges cost the same (90 beats 85 at 5000 micros each)', () => {
+    expect(selectJudge([judgeRow('haiku', 85, 5000), judgeRow('opus', 90, 5000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 90, 5000), judgeRow('haiku', 85, 5000)])?.name).toBe('opus')
+  })
+
+  it('picks the higher agreement when neither is trusted and they cost the same', () => {
+    expect(selectJudge([judgeRow('haiku', 50, 5000), judgeRow('opus', 60, 5000)])?.name).toBe('opus')
+  })
+
+  it('returns null when no judge produced results: an empty list, and judges whose agreement is null', () => {
+    expect(selectJudge([])).toBeNull()
+    expect(selectJudge([judgeRow('haiku', null, 4000), judgeRow('opus', null, 18000)])).toBeNull()
+  })
+
+  it('never picks a judge with no result, however cheap: it is neither trusted nor the highest', () => {
+    // The failed judge is the cheapest (0 micros) and would win a plain sort by cost.
+    expect(selectJudge([judgeRow('haiku', null, 0), judgeRow('opus', 85, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('haiku', null, 0), judgeRow('opus', 40, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 40, 18000), judgeRow('haiku', null, 0)])?.name).toBe('opus')
   })
 })
