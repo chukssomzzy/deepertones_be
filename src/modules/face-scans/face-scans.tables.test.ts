@@ -3,6 +3,7 @@ import { GOALS } from '../goals/goals.vocabulary'
 import {
   CHANGE_VERSION,
   CONCERN_IDS,
+  LOW_CONFIDENCE_CONCERNS,
   GOAL_CONCERNS_VERSION,
   NOTHING_STANDS_OUT,
   SKIN_TYPE_VERSION,
@@ -1212,5 +1213,21 @@ describe('resultView: change since day one', () => {
     const text = JSON.stringify(result!.concerns)
     expect(text).not.toMatch(LIGHTNESS)
     expect(text).not.toMatch(/\d/)
+  })
+})
+
+describe('LOW_CONFIDENCE_CONCERNS', () => {
+  // Written out from the calibration note (research-visibility-thresholds.md): redness was at chance on the darker half, texture and moisture barely tracked the ratings.
+  it('is exactly redness, texture and moisture: the three concerns the first calibration could not stand behind', () => {
+    expect([...LOW_CONFIDENCE_CONCERNS].sort()).toEqual(['hd_moisture', 'hd_redness', 'hd_texture'])
+  })
+
+  it.each(['hd_redness', 'hd_texture', 'hd_moisture'])('has %s as a concern that is shown', (concern) => {
+    expect(EXPORTED_SHOWN_CONCERNS).toContain(concern)
+    expect(LOW_CONFIDENCE_CONCERNS).toContain(concern)
+  })
+
+  it('is typed as a read-only list of shown concerns, so it can be compared against a scan result without a cast', () => {
+    expectTypeOf(LOW_CONFIDENCE_CONCERNS).toEqualTypeOf<readonly ShownConcern[]>()
   })
 })

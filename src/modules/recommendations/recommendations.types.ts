@@ -1,5 +1,6 @@
 import type { ProductSummary } from '../catalog/catalog.service'
 import type { Frequency, Origin } from '../catalog/catalog.vocabulary'
+import type { ShownConcern } from '../face-scans/face-scans.tables'
 import type { profileShopping } from './recommendations.table'
 
 export type ShoppingRow = typeof profileShopping.$inferSelect
@@ -21,6 +22,11 @@ export type SharedWithReaction = { productId: string; ingredients: string[] }
 export type Candidate = {
   code: string
   product: ProductSummary
+  skinConcerns: ShownConcern[]
+  ingredients: string[]
+  /** Context for the AI that writes the routine and for the team. Never in a response or on a screen. */
+  evidenceUrls: string[]
+  ingredientsSourceUrl: string | null
   passed: CandidateRule[]
   sharedWithReaction: SharedWithReaction[]
   origin: Origin

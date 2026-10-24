@@ -24,6 +24,8 @@ export type Recommendation = {
   steps: RoutineStep[]
   frequency: Frequency
   ownCautions: ConcernKind[]
+  evidenceUrls: string[]
+  ingredientsSourceUrl: string | null
   origin: Origin
   priceMin: number
   priceMax: number
@@ -219,6 +221,8 @@ export class D1CatalogWorkbookRepository {
       steps: row.steps,
       frequency: row.frequency,
       ownCautions: row.ownCautions,
+      evidenceUrls: row.evidenceUrls,
+      ingredientsSourceUrl: row.ingredientsSourceUrl,
       origin: row.origin,
       priceMin: availability.priceMin,
       priceMax: availability.priceMax,
