@@ -34,7 +34,7 @@ export type RoutineCase = {
   /** The ticked choices, and the ingredients the parse found in the words typed beside "reaction" and "prescription" (resolved ingredient mentions). */
   safety: { choices: SafetyChoice[]; reactionIngredients: string[]; prescriptionIngredients: string[] }
   cautions: CautionState[]
-  /** Synthetic shelf products with the rules' verdicts. */
+  /** Synthetic shelf products with the rules' verdicts. A prescribed product is always kept: the app checks what else is suggested against it and never says to stop a prescription. */
   shelf: SkeletonShelfProduct[]
 }
 
@@ -51,12 +51,13 @@ type Template = Omit<SkeletonShelfProduct, 'id'>
 const keep: ShelfVerdict = { kind: 'keep' }
 const reduce = (maxFrequency: Frequency): ShelfVerdict => ({ kind: 'reduce', maxFrequency })
 const stop = (taperTemplateId: string): ShelfVerdict => ({ kind: 'stop', taperTemplateId })
+const drop: ShelfVerdict = { kind: 'drop' }
 
 const PRODUCTS = {
   'gentle-cleanser': { brand: 'Calm Water', name: 'Gentle Cream Cleanser', ingredients: ['Aqua', 'Glycerin', 'Cocamidopropyl Betaine', 'Panthenol'], step: 'cleanse', verdict: keep, sourceUrls: [] },
   'foaming-cleanser': { brand: 'Fresh Start', name: 'Foaming Face Wash', ingredients: ['Aqua', 'Sodium Laureth Sulfate', 'Cocamidopropyl Betaine', 'Parfum', 'Menthol'], step: 'cleanse', verdict: reduce('pm'), sourceUrls: [] },
   'black-soap': { brand: null, name: 'African black soap bar', ingredients: ['Sodium Cocoate', 'Plantain Ash', 'Butyrospermum Parkii Butter'], step: 'cleanse', verdict: keep, sourceUrls: [] },
-  'lemon-scrub': { brand: null, name: 'Homemade lemon and sugar scrub', ingredients: ['Citrus Limon Juice', 'Sucrose', 'Cocos Nucifera Oil'], step: 'cleanse', verdict: reduce('weekly'), sourceUrls: [] },
+  'lemon-scrub': { brand: null, name: 'Homemade lemon and sugar scrub', ingredients: ['Citrus Limon Juice', 'Sucrose', 'Cocos Nucifera Oil'], step: 'cleanse', verdict: drop, sourceUrls: [] },
   'kojic-soap': { brand: 'Glow Queen', name: 'Kojic Acid Brightening Soap', ingredients: ['Sodium Palmate', 'Aqua', 'Kojic Acid', 'Parfum'], step: 'cleanse', verdict: stop('tpl-lightening-soap'), sourceUrls: ['https://rules.example/kojic-acid'] },
   'lightening-cream': { brand: null, name: 'Market lightening cream (no label)', ingredients: ['Aqua', 'Hydroquinone', 'Glycerin', 'Parfum'], step: 'treat', verdict: stop('tpl-lightening-cream'), sourceUrls: ['https://rules.example/hydroquinone'] },
   'steroid-cream': { brand: null, name: 'Strong steroid cream (tube with no brand)', ingredients: ['Clobetasol Propionate', 'Petrolatum'], step: 'treat', verdict: stop('tpl-steroid-cream'), sourceUrls: ['https://rules.example/topical-steroids'] },
@@ -136,32 +137,32 @@ export const ROUTINE_DEV: RoutineCase[] = [
   // Ngozi: reads ingredient lists, reacts to fragrance.
   person('dev-02', 'ngozi', 'even-tone', 'GB', 'high', 'normal', ['clear', 'faint', 'some'], [['hd_acne', 'a-little']], reaction('fragrance'), 'gentle-cleanser', 'vitamin-c-serum', 'mineral-spf'),
   // Tolu: nine TikTok products at once and something stings.
-  person('dev-03', 'tolu', 'fade-dark-marks', 'NG', 'low', 'oily', ['clear', 'some', 'a-little'], [['hd_pore', 'some'], ['hd_oiliness', 'clear']], NONE, 'lemon-scrub', 'kojic-soap', 'glycolic-toner', 'vitamin-c-serum', 'niacinamide-serum', 'snail-essence', 'rice-toner', 'cocoa-lotion', 'chemical-spf'),
+  person('dev-03', 'tolu', 'fade-dark-marks', 'NG', 'low', 'oily', ['clear', 'some', 'a-little'], [['hd_pore', 'some'], ['hd_oiliness', 'clear']], NONE, 'lemon-scrub', 'kojic-soap', 'glycolic-toner', 'vitamin-c-serum', 'niacinamide-serum', ['snail-essence', drop], ['rice-toner', drop], 'cocoa-lotion', 'chemical-spf'),
   // Chidi: razor bumps along the jaw, an aftershave that stings.
-  person('dev-04', 'chidi', 'clear-skin', 'NG', 'low', 'oily', ['some', 'a-little', 'some'], [['hd_age_spot', 'a-little']], reaction('fragrance', 'alcohol'), 'aftershave', 'salicylic-gel', 'black-soap'),
+  person('dev-04', 'chidi', 'clear-skin', 'NG', 'low', 'oily', ['some', 'a-little', 'some'], [['hd_age_spot', 'a-little']], reaction('fragrance', 'alcohol'), ['aftershave', drop], 'salicylic-gel', 'black-soap'),
   person('dev-05', null, 'glow', 'GB', 'mid', 'dry', ['a-little', 'clear', 'some'], [], NONE),
   person('dev-06', null, 'brighter', 'NG', 'high', 'normal', ['some', 'clear', 'a-little'], [['hd_oiliness', 'a-little']], NONE, 'mineral-spf'),
   person('dev-07', 'amara', 'even-tone', 'NG', null, 'oily', ['some', 'clear', 'faint'], [], NONE, 'steroid-cream', 'gentle-cleanser'),
   person('dev-08', 'ngozi', 'glow', 'GB', 'high', 'combination', ['some', 'a-little', 'faint'], [['hd_pore', 'a-little']], PREGNANT, 'gel-moisturiser', 'mineral-spf', 'niacinamide-serum'),
   person('dev-09', null, 'clear-skin', 'GB', 'low', null, ['clear', 'some', 'a-little'], [], NONE),
-  person('dev-10', 'tolu', 'calm-repair', 'NG', 'low', 'dry', ['some', 'clear', 'clear'], [['hd_acne', 'a-little']], reaction('glycolic acid'), 'glycolic-toner', 'foaming-cleanser', 'snail-essence', 'shea-butter'),
+  person('dev-10', 'tolu', 'calm-repair', 'NG', 'low', 'dry', ['some', 'clear', 'clear'], [['hd_acne', 'a-little']], reaction('glycolic acid'), ['glycolic-toner', drop], 'foaming-cleanser', 'snail-essence', 'shea-butter'),
   person('dev-11', 'chidi', 'fade-dark-marks', 'NG', 'mid', 'combination', ['clear', 'some', 'a-little'], [['hd_pore', 'a-little']], NONE, 'gentle-cleanser', 'salicylic-gel', 'aftershave'),
   person('dev-12', null, 'brighter', 'GB', 'mid', 'dry', ['a-little', 'some', 'faint'], [], BREASTFEEDING),
-  person('dev-13', 'amara', 'fade-dark-marks', 'NG', null, 'dry', ['clear', 'faint', 'some'], [['hd_oiliness', 'a-little']], prescription('hydroquinone'), 'lightening-cream', 'shea-butter'),
+  person('dev-13', 'amara', 'fade-dark-marks', 'NG', null, 'dry', ['clear', 'faint', 'some'], [['hd_oiliness', 'a-little']], prescription('azelaic acid'), 'lightening-cream', 'shea-butter'),
   person('dev-14', 'ngozi', 'brighter', 'GB', 'high', 'oily', ['clear', 'a-little', 'some'], [['hd_acne', 'some']], NONE, 'retinol-serum', 'mineral-spf', 'gentle-cleanser', 'hydrating-cream'),
   person('dev-15', null, 'glow', 'NG', 'low', 'normal', ['faint', 'faint', 'a-little'], [], NONE),
-  person('dev-16', 'tolu', 'even-tone', 'NG', 'low', 'combination', ['some', 'a-little', 'some'], [['hd_acne', 'some']], NONE, 'lemon-scrub', 'rice-toner', 'cocoa-lotion', 'vitamin-c-serum'),
-  person('dev-17', 'chidi', 'calm-repair', 'NG', null, 'normal', ['some', 'a-little', 'clear'], [['hd_age_spot', 'a-little']], reaction('fragrance'), 'black-soap', 'aftershave', 'petroleum-jelly'),
+  person('dev-16', 'tolu', 'even-tone', 'NG', 'low', 'combination', ['some', 'a-little', 'some'], [['hd_acne', 'some']], NONE, 'lemon-scrub', ['rice-toner', drop], 'cocoa-lotion', 'vitamin-c-serum'),
+  person('dev-17', 'chidi', 'calm-repair', 'NG', null, 'normal', ['some', 'a-little', 'clear'], [['hd_age_spot', 'a-little']], reaction('fragrance'), 'black-soap', ['aftershave', drop], 'petroleum-jelly'),
   person('dev-18', null, 'clear-skin', 'NG', 'mid', 'oily', ['some', 'a-little', 'clear'], [], NONE, 'foaming-cleanser', 'salicylic-gel', 'clay-mask'),
   person('dev-19', 'ngozi', 'fade-dark-marks', 'GB', 'mid', null, ['clear', 'a-little', 'some'], [['hd_pore', 'a-little'], ['hd_oiliness', 'some']], prescription('tretinoin'), 'tretinoin-rx', 'gentle-cleanser', 'mineral-spf'),
   person('dev-20', 'amara', 'brighter', 'NG', 'low', 'combination', ['a-little', 'faint', 'some'], [], NONE, 'lightening-cream', 'kojic-soap', 'petroleum-jelly'),
   person('dev-21', null, 'even-tone', 'GB', 'low', 'dry', ['some', 'some', 'a-little'], [], BREASTFEEDING, 'gentle-cleanser', 'hydrating-cream'),
-  person('dev-22', 'tolu', 'glow', 'NG', 'mid', 'oily', ['a-little', 'faint', 'some'], [['hd_acne', 'clear'], ['hd_oiliness', 'some']], NONE, 'foaming-cleanser', 'niacinamide-serum', 'cocoa-lotion', 'chemical-spf', 'snail-essence'),
-  person('dev-23', null, 'calm-repair', 'GB', 'high', 'combination', ['clear', 'some', 'some'], [], reaction('essential oils', 'fragrance'), 'gentle-cleanser', 'gel-moisturiser', 'glycolic-toner'),
+  person('dev-22', 'tolu', 'glow', 'NG', 'mid', 'oily', ['a-little', 'faint', 'some'], [['hd_acne', 'clear'], ['hd_oiliness', 'some']], NONE, 'foaming-cleanser', 'niacinamide-serum', 'cocoa-lotion', 'chemical-spf', ['snail-essence', drop]),
+  person('dev-23', null, 'calm-repair', 'GB', 'high', 'combination', ['clear', 'some', 'some'], [], reaction('essential oils', 'fragrance'), 'gentle-cleanser', 'gel-moisturiser', ['glycolic-toner', drop]),
   person('dev-24', 'chidi', 'clear-skin', 'NG', 'mid', 'combination', ['clear', 'some', 'a-little'], [['hd_age_spot', 'some']], NONE),
   person('dev-25', 'ngozi', 'glow', 'GB', null, 'normal', ['some', 'some', 'faint'], [], NONE, 'vitamin-c-serum', 'mineral-spf'),
   person('dev-26', null, 'fade-dark-marks', 'NG', 'high', 'oily', ['some', 'clear', 'a-little'], [['hd_pore', 'clear']], PREGNANT, 'black-soap', 'gentle-cleanser'),
-  person('dev-27', 'amara', 'calm-repair', 'NG', 'low', 'dry', ['clear', 'clear', 'some'], [['hd_age_spot', 'some']], reactionAndPrescription(['kojic acid'], ['clobetasol propionate']), 'steroid-cream', 'shea-butter', 'black-soap'),
+  person('dev-27', 'amara', 'calm-repair', 'NG', 'low', 'dry', ['clear', 'clear', 'some'], [['hd_age_spot', 'some']], reactionAndPrescription(['kojic acid'], ['adapalene']), 'steroid-cream', 'shea-butter', 'black-soap'),
   person('dev-28', null, 'brighter', 'NG', 'low', 'combination', ['some', 'some', 'a-little'], [], NONE),
   person('dev-29', 'tolu', 'clear-skin', 'NG', 'low', 'oily', ['clear', 'clear', 'clear'], [['hd_age_spot', 'a-little']], NONE, 'foaming-cleanser', 'lemon-scrub', 'glycolic-toner', 'salicylic-gel', 'clay-mask', 'chemical-spf'),
   person('dev-30', 'chidi', 'even-tone', 'NG', 'mid', 'normal', ['some', 'a-little', 'a-little'], [], NONE, 'gentle-cleanser', 'mineral-spf'),
@@ -171,14 +172,14 @@ export const ROUTINE_HOLDOUT: RoutineCase[] = [
   person('hold-01', 'ngozi', 'fade-dark-marks', 'GB', 'high', 'dry', ['clear', 'a-little', 'some'], [['hd_pore', 'a-little']], reaction('fragrance'), 'gentle-cleanser', 'niacinamide-serum', 'hydrating-cream', 'mineral-spf'),
   person('hold-02', 'amara', 'calm-repair', 'NG', null, 'combination', ['clear', 'some', 'a-little'], [], NONE, 'steroid-cream', 'black-soap'),
   person('hold-03', null, 'glow', 'NG', 'mid', 'oily', ['some', 'a-little', 'faint'], [['hd_acne', 'a-little']], NONE),
-  person('hold-04', 'tolu', 'brighter', 'NG', 'low', 'dry', ['a-little', 'clear', 'some'], [['hd_acne', 'some']], NONE, 'foaming-cleanser', 'black-soap', 'lightening-cream', 'retinol-serum', 'salicylic-gel', 'clay-mask', 'astringent-toner', 'shea-butter', 'mineral-spf'),
+  person('hold-04', 'tolu', 'brighter', 'NG', 'low', 'dry', ['a-little', 'clear', 'some'], [['hd_acne', 'some']], NONE, 'foaming-cleanser', ['black-soap', drop], 'lightening-cream', ['retinol-serum', reduce('alternate-days')], 'salicylic-gel', ['clay-mask', drop], ['astringent-toner', drop], 'shea-butter', 'mineral-spf'),
   person('hold-05', 'chidi', 'fade-dark-marks', 'NG', 'low', 'oily', ['some', 'clear', 'some'], [['hd_pore', 'clear'], ['hd_oiliness', 'some']], NONE, 'aftershave', 'salicylic-gel', 'black-soap'),
   person('hold-06', null, 'clear-skin', 'GB', 'mid', 'normal', ['a-little', 'some', 'faint'], [], PREGNANT, 'gentle-cleanser', 'mineral-spf'),
-  person('hold-07', 'amara', 'even-tone', 'NG', 'low', 'dry', ['clear', 'some', 'a-little'], [['hd_acne', 'some']], reaction('fragrance'), 'lightening-cream', 'shea-butter', 'foaming-cleanser'),
+  person('hold-07', 'amara', 'even-tone', 'NG', 'low', 'dry', ['clear', 'some', 'a-little'], [['hd_acne', 'some']], reaction('fragrance'), 'lightening-cream', 'shea-butter', ['foaming-cleanser', drop]),
   person('hold-08', 'ngozi', 'clear-skin', 'GB', 'high', 'combination', ['some', 'some', 'a-little'], [['hd_age_spot', 'clear']], prescription('tretinoin'), 'tretinoin-rx', 'gentle-cleanser', 'mineral-spf'),
   person('hold-09', null, 'calm-repair', 'GB', 'low', 'dry', ['some', 'clear', 'some'], [], BREASTFEEDING),
-  person('hold-10', 'tolu', 'glow', 'NG', 'mid', 'combination', ['some', 'a-little', 'clear'], [['hd_acne', 'some']], NONE, 'black-soap', 'vitamin-c-serum', 'snail-essence', 'petroleum-jelly', 'chemical-spf'),
-  person('hold-11', 'chidi', 'calm-repair', 'NG', 'mid', 'normal', ['some', 'some', 'a-little'], [], reaction('alcohol denat', 'fragrance'), 'aftershave', 'gel-moisturiser', 'gentle-cleanser'),
+  person('hold-10', 'tolu', 'glow', 'NG', 'mid', 'combination', ['some', 'a-little', 'clear'], [['hd_acne', 'some']], NONE, 'black-soap', 'vitamin-c-serum', ['snail-essence', drop], 'petroleum-jelly', 'chemical-spf'),
+  person('hold-11', 'chidi', 'calm-repair', 'NG', 'mid', 'normal', ['some', 'some', 'a-little'], [], reaction('alcohol denat', 'fragrance'), ['aftershave', drop], 'gel-moisturiser', 'gentle-cleanser'),
   person('hold-12', null, 'fade-dark-marks', 'NG', 'high', 'combination', ['clear', 'some', 'some'], [['hd_pore', 'a-little']], NONE, 'vitamin-c-serum', 'mineral-spf', 'retinol-serum'),
   person('hold-13', 'ngozi', 'brighter', 'GB', 'mid', 'oily', ['some', 'some', 'clear'], [['hd_acne', 'a-little'], ['hd_oiliness', 'some']], NONE),
   person('hold-14', 'amara', 'glow', 'NG', 'low', 'normal', ['faint', 'a-little', 'some'], [], NONE, 'lightening-cream', 'kojic-soap', 'shea-butter'),
@@ -189,10 +190,10 @@ export const ROUTINE_HOLDOUT: RoutineCase[] = [
   person('hold-19', null, 'brighter', 'NG', 'high', 'dry', ['a-little', 'clear', 'some'], [], NONE, 'mineral-spf'),
   person('hold-20', 'amara', 'calm-repair', 'NG', 'low', 'oily', ['clear', 'a-little', 'clear'], [['hd_age_spot', 'a-little']], reaction('fragrance'), 'steroid-cream', 'petroleum-jelly', 'black-soap'),
   person('hold-21', null, 'glow', 'GB', 'low', 'combination', ['a-little', 'some', 'a-little'], [], NONE),
-  person('hold-22', 'tolu', 'even-tone', 'NG', 'mid', 'dry', ['some', 'a-little', 'clear'], [['hd_oiliness', 'a-little']], NONE, 'black-soap', 'glycolic-toner', 'niacinamide-serum', 'cocoa-lotion', 'mineral-spf', 'rice-toner'),
+  person('hold-22', 'tolu', 'even-tone', 'NG', 'mid', 'dry', ['some', 'a-little', 'clear'], [['hd_oiliness', 'a-little']], NONE, 'black-soap', 'glycolic-toner', 'niacinamide-serum', 'cocoa-lotion', 'mineral-spf', ['rice-toner', drop]),
   person('hold-23', 'chidi', 'glow', 'NG', 'high', 'combination', ['a-little', 'clear', 'some'], [['hd_pore', 'some']], NONE, 'gentle-cleanser', 'gel-moisturiser'),
   person('hold-24', null, 'fade-dark-marks', 'GB', 'mid', 'normal', ['some', 'a-little', 'some'], [], BREASTFEEDING, 'gentle-cleanser', 'mineral-spf'),
-  person('hold-25', 'ngozi', 'calm-repair', 'GB', 'mid', 'combination', ['some', 'some', 'clear'], [['hd_acne', 'a-little']], reaction('fragrance', 'essential oils'), 'gentle-cleanser', 'hydrating-cream', 'glycolic-toner'),
+  person('hold-25', 'ngozi', 'calm-repair', 'GB', 'mid', 'combination', ['some', 'some', 'clear'], [['hd_acne', 'a-little']], reaction('fragrance', 'essential oils'), 'gentle-cleanser', 'hydrating-cream', ['glycolic-toner', drop]),
   person('hold-26', null, 'clear-skin', 'GB', 'high', 'oily', ['some', 'clear', 'some'], [], NONE, 'retinol-serum', 'foaming-cleanser'),
   person('hold-27', 'amara', 'brighter', 'NG', null, 'dry', ['some', 'a-little', 'clear'], [], NONE, 'steroid-cream', 'gentle-cleanser', 'petroleum-jelly'),
   person('hold-28', 'tolu', 'calm-repair', 'NG', 'low', 'normal', ['clear', 'some', 'a-little'], [['hd_pore', 'a-little']], NONE, 'foaming-cleanser', 'glycolic-toner', 'vitamin-c-serum', 'lemon-scrub', 'cocoa-lotion'),

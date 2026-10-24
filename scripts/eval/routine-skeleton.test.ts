@@ -44,6 +44,15 @@ describe('buildSkeleton: the steps and the gaps', () => {
     expect(skeleton.gaps.map((gap) => gap.step)).toEqual(['treat', 'protect'])
   })
 
+  it('leaves a step a gap when the only shelf product for it is dropped: a dropped product is left out of the routine and fills nothing', async () => {
+    const shelf = [shelfProduct('toner', { step: 'treat', verdict: { kind: 'drop' } }), shelfProduct('cleanser', { step: 'cleanse', verdict: { kind: 'keep' } })]
+
+    const { skeleton } = await build(caseOf({ shelf }))
+
+    expect(skeleton.gaps.map((gap) => gap.step)).toEqual(['treat', 'moisturise', 'protect'])
+    expect(skeleton.shelf).toEqual(shelf)
+  })
+
   it('leaves a step a gap when the only shelf product for it is stopped', async () => {
     const shelf = [shelfProduct('steroid', { step: 'treat', verdict: { kind: 'stop', taperTemplateId: 'tpl-steroid' } })]
 

@@ -100,8 +100,8 @@ const serviceFor = async (c: RoutineCase, snapshot: Snapshot): Promise<Recommend
 
 export const buildSkeleton = async (c: RoutineCase, snapshot: Snapshot, { hintsShown }: { hintsShown: boolean }): Promise<BuiltSkeleton> => {
   const service = await serviceFor(c, snapshot)
-  // A step is filled when a shelf product the rules keep (as it is or reduced) is used for it; a stopped product fills nothing.
-  const filled = new Set(c.shelf.filter((p) => p.step !== null && p.verdict.kind !== 'stop').map((p) => p.step))
+  // A step is filled when a shelf product the rules keep (as it is or reduced) is used for it; a stopped or dropped product fills nothing.
+  const filled = new Set(c.shelf.filter((p) => p.step !== null && (p.verdict.kind === 'keep' || p.verdict.kind === 'reduce')).map((p) => p.step))
   const gaps: SkeletonGap[] = []
   for (const step of ROUTINE_STEPS) {
     if (filled.has(step)) continue
