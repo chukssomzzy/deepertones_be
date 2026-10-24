@@ -57,6 +57,11 @@ describe('wrangler.jsonc product catalog config', () => {
     expect(block?.vars?.ANTHROPIC_MODEL_RECOGNIZE_SHELF).toBe('claude-haiku-5-5')
   })
 
+  // The routine writer's words reach users, so it is Sonnet by the AI cost rule.
+  it.each(blocks)('%s sets the better model for the routine writer', (_, block) => {
+    expect(block?.vars?.ANTHROPIC_MODEL_ROUTINE).toBe('claude-sonnet-5-5')
+  })
+
   it.each(blocks)('%s no longer sets the single ANTHROPIC_MODEL', (_, block) => {
     expect(block?.vars).not.toHaveProperty('ANTHROPIC_MODEL')
   })

@@ -985,7 +985,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`, `draft-judge.judge-draft.md` (the eval's own). The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`, `draft-judge.judge-draft.md` (the eval's own), `routine-writer.write-routine.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -1179,8 +1179,8 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   shows these.
   Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`, `judge-draft`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal, read-mentions and judge-draft, the eval's own job), `_VISION`
-  (image-check, recognize and read-label) and `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`, `judge-draft`, `write-routine`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal, read-mentions and judge-draft, the eval's own job), `_VISION`
+  (image-check, recognize and read-label), `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone) and `_ROUTINE` (write-routine, Sonnet, because its words reach users). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
@@ -2555,13 +2555,14 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 
 ### Routines
 
-`src/modules/routines` is pure code for the routine stage (#152): no service, repository, route or provider yet; the routine-stage spec adds those. It imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`.
+`src/modules/routines` is pure code for the routine stage (#152): no service, repository or route yet; the routine-stage spec adds those. It imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`. The writer is a provider (below).
 
 - **Contracts.** `routines.types.ts` holds `RoutineSkeleton` (what the rules decided: shelf verdicts, gaps with their safe candidates, limits) and `Routine` (what the AI writer answers). They are the seam between the rules, the writer, the eval and, later, production. `SkeletonCandidate` has no `origin` field on purpose: who paid for a review must never reach a choice.
-- **Schema.** `RoutineSchema` (`routines.schema.ts`) is made of closed zod objects; an extra field is a parse failure.
+- **Schema.** `RoutineSchema` (`routines.schema.ts`) is made of closed zod objects; an extra field is a parse failure. Its product is a `z.union` so the JSON Schema sent to Claude has `anyOf`.
 - **Gates.** `checkRoutine(skeleton, routine: unknown)` (`routines.gates.ts`) returns `[]` or every `GateFailure` (a fixed code and a step, never model text), gate by gate in a fixed order (parse, unknown-product, stopped-product, over-reduced, taper, too-many-new, frequency, order, gap, grounding, wording), and within a gate in entry order. A routine that does not parse fails `parse` alone. `FREQUENCY_RANK` ranks frequencies for the over-reduced check.
 - **Wording.** `FORBIDDEN_WORDING` (`routines.wording.ts`) is a starter list of condition names, diagnosis phrasing, lightness-as-outcome and grades/scores (CONTEXT.md, Safety). Its patterns are never global or sticky.
 - **Grounding is internal only.** `RoutineEntry.grounding` lists the links a reason drew on and is checked against the chosen product's own links; it must never appear in an API response or on a screen.
+- **The writer.** `RoutineWriter` (`providers/routine-writing/`, `write(skeleton): Promise<Routine>`) is implemented by `AnthropicRoutineWriter` (job `write-routine`, model `ANTHROPIC_MODEL_ROUTINE`, prompt `src/prompts/routine-writer.write-routine.md`, `max_tokens` 8192 because Sonnet's adaptive thinking counts against it) and faked by `MemoryRoutineWriter` (`respondWith`, `calls`, `failNextWith`). The skeleton goes in the user message as JSON, never in the system prompt. `RoutineSchema` is sent to Claude as it is: its product is a plain `z.union` (not a `discriminatedUnion`), because the structured-outputs docs list `anyOf`, which `z.union` emits, and do not list `oneOf`, which a `discriminatedUnion` emits; a test keeps `oneOf` out of the schema sent. `client.structured` parses the reply with it; a reply that does not fit is `AnthropicRequestError`, never a partial routine. **The adapter does not run the gates: the caller runs `checkRoutine` on what it returns before anything uses it.** It logs nothing.
 
 ### Admin access
 The `/api/v1/admin` routes change shared data (today the catalog workbook, see below), so they are not a user's to call. A user's token, guest or

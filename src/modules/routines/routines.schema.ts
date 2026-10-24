@@ -2,7 +2,8 @@ import { z } from 'zod'
 import { FREQUENCIES, ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
 
 // Every object is strict: a field the writer invents is a parse failure, not something silently dropped.
-const ProductSchema = z.discriminatedUnion('kind', [
+// A plain union, not a discriminatedUnion: Anthropic structured outputs document anyOf, not oneOf, and z.union emits anyOf.
+const ProductSchema = z.union([
   z.strictObject({ kind: z.literal('shelf'), id: z.string() }),
   z.strictObject({ kind: z.literal('candidate'), code: z.string() }),
   z.strictObject({ kind: z.literal('none') }),
