@@ -6,11 +6,23 @@ const request = (goalId: FitRequest['goal']['id']): FitRequest => ({
   goal: { id: goalId, skinConcerns: ['hd_age_spot'] },
   skinType: null,
   scan: null,
-  shelf: [{ id: 'p1', brand: null, name: 'Serum', variant: null, step: 'treat', ingredients: ['Aqua'], cautions: [], skinConcerns: [], floor: { status: 'open' } }],
+  shelf: [{ id: 'p1', brand: null, name: 'Serum', variant: null, step: 'treat', form: null, ingredients: ['Aqua'], cautions: [], skinConcerns: [], floor: { status: 'open' } }],
   clashes: [],
 })
 
 const result = (reason: string): FitResult => ({ products: [{ id: 'p1', label: 'helping', reason, sameJobAs: null }], clashes: [] })
+
+describe('MemoryVerdictFitter identity', () => {
+  it('says a fixed model and prompt hash, the same for every fitter and every call, so a fingerprint made with it is stable', async () => {
+    const first = new MemoryVerdictFitter()
+    const second = new MemoryVerdictFitter()
+    second.respondWith(() => result('x'))
+    await second.fit(request('even-tone'))
+
+    expect(first.identity).toEqual({ model: 'memory-model', promptHash: 'memory-prompt-hash' })
+    expect(second.identity).toEqual(first.identity)
+  })
+})
 
 describe('MemoryVerdictFitter', () => {
   it('fails with a clear "no answer set" error until told how to answer, and records nothing for it', async () => {
