@@ -2,6 +2,7 @@ import { env } from 'cloudflare:workers'
 import { createExecutionContext, createScheduledController, waitOnExecutionContext } from 'cloudflare:test'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
+import { buildContainer } from '../../src/container'
 import { createDb } from '../../src/lib/db'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { parseEmailAddress } from '../../src/lib/email-address'
@@ -14,6 +15,7 @@ import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
+import { D1VerdictsRepository } from '../../src/modules/verdicts/verdicts.repository'
 import { queueRecorder, stubPerfectCorp } from './perfect-corp.stub'
 
 // The Worker's scheduled handler is one export for every cron in wrangler.jsonc. Each cron runs its own job and no other:
@@ -522,5 +524,119 @@ describe('the Worker scheduled handler: check-in due pushes', () => {
     await fireWithPushes(GUEST_CLEANUP_CRON).catch(() => undefined)
 
     expect(requeue).toHaveBeenCalledTimes(1)
+  })
+})
+
+// --- the second try of a shelf verdict's fit that failed ---
+
+// A verdict whose fit judge failed three times is shown without the fit and given one more try 24 hours on: the row carries the due time, and the daily
+// cron queues it with VerdictService.requeueDueFits (the rules are pinned in its unit tests). The Worker's verdicts producer is a recorder here. The sweep is
+// spied on through the service the container builds, not by importing the class, so a Worker without the service fails these tests and no others of this file.
+describe('the Worker scheduled handler: verdict fit retries due', () => {
+  const verdictRows = new D1VerdictsRepository(createDb(env.DB))
+  const verdictQueue = queueRecorder()
+  const pushes = queueRecorder()
+  const fireWithVerdicts = async (cron: string) => {
+    const ctx = createExecutionContext()
+    await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), { ...env, VERDICTS_QUEUE: verdictQueue.queue, PUSH_DELIVERY_QUEUE: pushes.queue } as typeof env, ctx)
+    await waitOnExecutionContext(ctx)
+  }
+  const verdictsServicePrototype = () => Object.getPrototypeOf(buildContainer(env).verdicts) as { requeueDueFits(now: Date): Promise<number> }
+  afterEach(() => {
+    verdictQueue.messages.length = 0
+    pushes.messages.length = 0
+  })
+
+  /** A guest whose verdict is ready without its fit, with the retry due `dueInMs` from now (negative: it was due that long ago), or no retry due when null. */
+  const verdictWithRetry = async (dueInMs: number | null) => {
+    const userId = crypto.randomUUID()
+    const profileId = crypto.randomUUID()
+    const fingerprint = `fingerprint-${profileId}`
+    await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    await verdictRows.requestBuild(profileId, fingerprint, new Date(NOW - 2 * DAY), new Date(NOW - 3 * DAY))
+    await verdictRows.setFitState(profileId, { fitAttempts: 3, fitRetried: dueInMs !== null, fitRetryDueAt: dueInMs === null ? null : new Date(NOW + dueInMs) })
+    return { userId, profileId, fingerprint }
+  }
+  const queuedFor = (profileId: string) => verdictQueue.messages.filter((message) => (message as { profileId: string }).profileId === profileId)
+
+  it('on the daily cron, queues the retry of a verdict whose retry is due, marked as the retry', async () => {
+    const due = await verdictWithRetry(-HOUR)
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON)
+
+    expect(queuedFor(due.profileId)).toEqual([{ profileId: due.profileId, fingerprint: due.fingerprint, requestedAt: expect.any(Number), waits: 0, retry: true }])
+  })
+
+  it('on the daily cron, leaves a verdict whose retry is not due yet, and one with no retry scheduled, alone', async () => {
+    const later = await verdictWithRetry(DAY)
+    const none = await verdictWithRetry(null)
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON)
+
+    expect(queuedFor(later.profileId)).toEqual([])
+    expect(queuedFor(none.profileId)).toEqual([])
+  })
+
+  it('on the reaper cron, which runs every 10 minutes, queues nothing: the retry is a once-a-day job', async () => {
+    const due = await verdictWithRetry(-HOUR)
+
+    await fireWithVerdicts(SCAN_REAPER_CRON)
+
+    expect(queuedFor(due.profileId)).toEqual([])
+  })
+
+  it('calls the sweep with the time of the run', async () => {
+    const sweep = vi.spyOn(verdictsServicePrototype(), 'requeueDueFits').mockResolvedValue(0)
+    const before = Date.now()
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON)
+
+    expect(sweep).toHaveBeenCalledTimes(1)
+    const when = sweep.mock.calls[0]![0]
+    expect(when).toBeInstanceOf(Date)
+    expect(when.getTime()).toBeGreaterThanOrEqual(before)
+    expect(when.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('still queues the due verdict retries when the safety requeue throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(SafetyService.prototype, 'requeueDueParses').mockRejectedValue(new Error('the sweep exploded'))
+    const due = await verdictWithRetry(-HOUR)
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(queuedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('still queues the due verdict retries when deleting the abandoned guests throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(UsersService.prototype, 'purgeUnreachableGuests').mockRejectedValue(new Error('the cleanup exploded'))
+    const due = await verdictWithRetry(-HOUR)
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(queuedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('still queues the due verdict retries when the check-in sweep throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockRejectedValue(new Error('the check-in sweep exploded'))
+    const due = await verdictWithRetry(-HOUR)
+
+    await fireWithVerdicts(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(queuedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('still deletes the abandoned guests and sends the check-in pushes when the verdict sweep throws, and the run still fails with its error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(verdictsServicePrototype(), 'requeueDueFits').mockRejectedValue(new Error('the verdict sweep exploded'))
+    const sweep = vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockResolvedValue(0)
+    const guest = await abandonedGuest()
+
+    await expect(fireWithVerdicts(GUEST_CLEANUP_CRON)).rejects.toThrow('the verdict sweep exploded')
+
+    expect(await users.findById(guest)).toBeNull()
+    expect(sweep).toHaveBeenCalledTimes(1)
   })
 })

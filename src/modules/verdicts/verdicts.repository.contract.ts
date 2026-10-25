@@ -10,7 +10,9 @@ import type { VerdictsRepository } from './verdicts.repository'
 //   find(profileId)                     row | null. A row has: profileId, status, fingerprint, requestedAt, fit, products, builtAt, rulesVersion,
 //                                       catalogVersion, model, promptHash, inputs, fitAttempts, fitRetried, fitRetryDueAt.
 //   requestBuild(profileId, fp, now, staleBefore)   boolean. A new row is pending with products [], fit null and every build column null.
-//   save(profileId, built)              UPDATE only; `built` has every column after the first four above (fingerprint included) plus the fit columns.
+//   releaseClaim(profileId, requestedAt)  gives back the claim made at exactly that time on a pending row (the next requestBuild may claim at once); a no-op
+//                                       for any other requestedAt, a ready row or a missing row. Resolves to undefined.
+//   save(profileId, built)             UPDATE only; `built` has every column after the first four above (fingerprint included) plus the fit columns.
 //   setFitState(profileId, state)       { fitAttempts, fitRetried, fitRetryDueAt }, nothing else of the row changes.
 //   fitDue(now, limit)                  rows whose fitRetryDueAt <= now, longest overdue first (ties by profileId), at most `limit`.
 
@@ -253,6 +255,84 @@ export const verdictsRepositoryContract = (name: string, make: () => VerdictsCon
         await repository.requestBuild(profileId, FP_1, at(HOUR), at(MINUTE))
 
         expect(await found(repository, profileId)).toMatchObject({ fitAttempts: 0, fitRetried: false, fitRetryDueAt: null })
+      })
+    })
+
+    describe('releaseClaim', () => {
+      // The claim a caller made (its requestedAt) is given back when the build it claimed could not be queued; the next requestBuild may then claim at once.
+      const FRESH_FOR = 30 * MINUTE
+
+      it('makes the pending row it claimed claimable by the very next requestBuild', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.requestBuild(profileId, FP_1, BASE, at(-HOUR))
+        const next = at(MINUTE)
+        // Before the release the claim is fresh: the same asker one minute on is refused.
+        expect(await repository.requestBuild(profileId, FP_1, next, new Date(next.getTime() - FRESH_FOR))).toBe(false)
+
+        await repository.releaseClaim(profileId, BASE)
+
+        expect(await repository.requestBuild(profileId, FP_1, next, new Date(next.getTime() - FRESH_FOR))).toBe(true)
+        expect(await found(repository, profileId)).toMatchObject({ status: 'pending', fingerprint: FP_1, requestedAt: next })
+      })
+
+      it('lets a different fingerprint claim straight away too', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.requestBuild(profileId, FP_1, BASE, at(-HOUR))
+
+        await repository.releaseClaim(profileId, BASE)
+
+        expect(await repository.requestBuild(profileId, FP_2, at(MINUTE), at(MINUTE - FRESH_FOR))).toBe(true)
+        expect(await found(repository, profileId)).toMatchObject({ status: 'pending', fingerprint: FP_2 })
+      })
+
+      it('keeps the previous build of a rebuild it releases, so the last verdict is still there', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await readyRow(repository, profileId)
+        await repository.requestBuild(profileId, FP_2, at(HOUR), at(-HOUR))
+
+        await repository.releaseClaim(profileId, at(HOUR))
+
+        const row = await found(repository, profileId)
+        expect(row.products).toEqual(productsOf())
+        expect(row.builtAt).toEqual(at(5 * MINUTE))
+      })
+
+      it('does nothing when the row\'s request is not the one given, a millisecond either side: another claim has taken over', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.requestBuild(profileId, FP_1, BASE, at(-HOUR))
+        const before = await found(repository, profileId)
+
+        await repository.releaseClaim(profileId, at(-1))
+        await repository.releaseClaim(profileId, at(1))
+
+        expect(await found(repository, profileId)).toEqual(before)
+        expect(await repository.requestBuild(profileId, FP_1, at(MINUTE), at(MINUTE - FRESH_FOR))).toBe(false)
+      })
+
+      it('does nothing to a ready row, even when its request time is the one given', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await readyRow(repository, profileId, {}, BASE)
+        const before = await found(repository, profileId)
+
+        await repository.releaseClaim(profileId, BASE)
+
+        expect(await found(repository, profileId)).toEqual(before)
+        // Still built from FP_1, so asking for FP_1 again claims nothing.
+        expect(await repository.requestBuild(profileId, FP_1, at(MINUTE), at(MINUTE - FRESH_FOR))).toBe(false)
+      })
+
+      it('ignores a profile with no row', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        await expect(repository.releaseClaim(profileId, BASE)).resolves.toBeUndefined()
+
+        expect(await repository.find(profileId)).toBeNull()
       })
     })
 

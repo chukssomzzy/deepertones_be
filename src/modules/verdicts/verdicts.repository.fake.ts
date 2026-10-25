@@ -36,6 +36,11 @@ export class FakeVerdictsRepository implements VerdictsRepository {
     return true
   }
 
+  async releaseClaim(profileId: string, requestedAt: Date): Promise<void> {
+    const row = this.rows.get(profileId)
+    if (row && row.status === 'pending' && row.requestedAt.getTime() === requestedAt.getTime()) this.rows.set(profileId, { ...row, requestedAt: new Date(0) })
+  }
+
   async save(profileId: string, built: SavedVerdict): Promise<void> {
     const row = this.rows.get(profileId)
     if (row) this.rows.set(profileId, { ...row, ...structuredClone(built), status: 'ready' })

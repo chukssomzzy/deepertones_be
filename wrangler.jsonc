@@ -72,6 +72,8 @@
   //   npx wrangler queues create deepertones-email-dlq-development
   //   npx wrangler queues create deepertones-face-scans-development
   //   npx wrangler queues create deepertones-face-scans-dlq-development
+  //   npx wrangler queues create deepertones-verdicts-development
+  //   npx wrangler queues create deepertones-verdicts-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
     "producers": [
@@ -81,7 +83,8 @@
       { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-development" },
       { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" },
       { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-development" },
-      { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-development" }
+      { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-development" },
+      { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-development" }
     ],
     "consumers": [
       {
@@ -150,7 +153,16 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-face-scans-dlq-development"
       },
-      { "queue": "deepertones-face-scans-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-face-scans-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-verdicts-development",
+        // One message at a time: a message is one call to the fit judge, and a batch is retried or acked as a whole.
+        "max_batch_size": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the fit one more try the next day.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-verdicts-dlq-development"
+      },
+      { "queue": "deepertones-verdicts-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -316,6 +328,8 @@
       //   npx wrangler queues create deepertones-email-dlq-staging
       //   npx wrangler queues create deepertones-face-scans-staging
       //   npx wrangler queues create deepertones-face-scans-dlq-staging
+      //   npx wrangler queues create deepertones-verdicts-staging
+      //   npx wrangler queues create deepertones-verdicts-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -325,7 +339,8 @@
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-staging" },
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" },
           { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-staging" },
-          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-staging" }
+          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-staging" },
+          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-staging" }
         ],
         "consumers": [
           {
@@ -394,7 +409,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-face-scans-dlq-staging"
           },
-          { "queue": "deepertones-face-scans-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-face-scans-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-verdicts-staging",
+            // One message at a time: a message is one call to the fit judge, and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the fit one more try the next day.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-verdicts-dlq-staging"
+          },
+          { "queue": "deepertones-verdicts-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -524,6 +548,8 @@
       //   npx wrangler queues create deepertones-email-dlq-production
       //   npx wrangler queues create deepertones-face-scans-production
       //   npx wrangler queues create deepertones-face-scans-dlq-production
+      //   npx wrangler queues create deepertones-verdicts-production
+      //   npx wrangler queues create deepertones-verdicts-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -533,7 +559,8 @@
           { "binding": "PUSH_RECEIPTS_QUEUE", "queue": "deepertones-push-receipts-production" },
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" },
           { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-production" },
-          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-production" }
+          { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-production" },
+          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-production" }
         ],
         "consumers": [
           {
@@ -602,7 +629,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-face-scans-dlq-production"
           },
-          { "queue": "deepertones-face-scans-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-face-scans-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-verdicts-production",
+            // One message at a time: a message is one call to the fit judge, and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the fit one more try the next day.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-verdicts-dlq-production"
+          },
+          { "queue": "deepertones-verdicts-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that

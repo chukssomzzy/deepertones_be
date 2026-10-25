@@ -45,6 +45,17 @@ export class D1VerdictsRepository {
     return claimed.length === 1
   }
 
+  /**
+   * Gives back the claim made at exactly `requestedAt` (the build it claimed could not be queued): the pending row's request moves to the epoch, so the next
+   * `requestBuild` finds it stale and claims at once. One statement; a row claimed since by another request, a ready row and a missing row are left alone.
+   */
+  async releaseClaim(profileId: string, requestedAt: Date): Promise<void> {
+    await this.db
+      .update(shelfVerdicts)
+      .set({ requestedAt: new Date(0) })
+      .where(and(eq(shelfVerdicts.profileId, profileId), eq(shelfVerdicts.status, 'pending'), eq(shelfVerdicts.requestedAt, requestedAt)))
+  }
+
   /** Stores a build and makes the row ready, whatever fingerprint it carries. An UPDATE only: a profile with no row is ignored, never created. */
   async save(profileId: string, built: SavedVerdict): Promise<void> {
     await this.db

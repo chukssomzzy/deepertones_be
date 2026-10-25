@@ -552,6 +552,10 @@ stopped using it.
    npx wrangler queues create deepertones-face-scans-dlq-staging
    npx wrangler queues create deepertones-face-scans-production
    npx wrangler queues create deepertones-face-scans-dlq-production
+   npx wrangler queues create deepertones-verdicts-staging
+   npx wrangler queues create deepertones-verdicts-dlq-staging
+   npx wrangler queues create deepertones-verdicts-production
+   npx wrangler queues create deepertones-verdicts-dlq-production
    ```
 
 4. Set `CORS_ORIGINS` for staging and production in `wrangler.jsonc` to the frontend origins
