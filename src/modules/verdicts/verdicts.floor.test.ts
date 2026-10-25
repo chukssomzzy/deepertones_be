@@ -117,7 +117,7 @@ describe('floorVerdicts', () => {
         group: 'likely-the-problem',
         verdict: { kind: 'drop' },
         escalate: true,
-        facts: [{ kind: 'ingredient-group', group: 'mercury', ingredient: 'Mercuric Chloride' }],
+        facts: [{ kind: 'ingredient-group', group: 'mercury', ingredient: 'Mercuric Chloride', ruleName: 'mercury' }],
       })
     })
 
@@ -130,7 +130,7 @@ describe('floorVerdicts', () => {
         group: 'likely-the-problem',
         verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' },
         escalate: false,
-        facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol Propionate 0.05%' }],
+        facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol Propionate 0.05%', ruleName: 'clobetasol propionate' }],
       })
     })
 
@@ -143,7 +143,7 @@ describe('floorVerdicts', () => {
         group: 'likely-the-problem',
         verdict: { kind: 'stop', taperTemplateId: 'TPR-LIGHTENING-1' },
         escalate: false,
-        facts: [{ kind: 'ingredient-group', group: 'lightening-agent', ingredient: 'Skin Complex (Quinol)' }],
+        facts: [{ kind: 'ingredient-group', group: 'lightening-agent', ingredient: 'Skin Complex (Quinol)', ruleName: 'hydroquinone' }],
       })
     })
 
@@ -163,7 +163,7 @@ describe('floorVerdicts', () => {
           group: 'likely-the-problem',
           verdict: { kind: 'drop' },
           escalate: false,
-          facts: [{ kind: 'banned-substance', ingredient: 'Zzyzx Musk' }],
+          facts: [{ kind: 'banned-substance', ingredient: 'Zzyzx Musk', ruleName: 'zzyzx musk' }],
         })
       })
 
@@ -180,7 +180,7 @@ describe('floorVerdicts', () => {
           group: 'likely-the-problem',
           verdict: { kind: 'drop' },
           escalate: false,
-          facts: [{ kind: 'banned-substance', ingredient: 'Tretinoin' }],
+          facts: [{ kind: 'banned-substance', ingredient: 'Tretinoin', ruleName: 'tretinoin' }],
         })
       })
 
@@ -196,7 +196,7 @@ describe('floorVerdicts', () => {
       it('is not made by a banned substance that has a group: that one is a group fact (mercury, steroid), not a second fact', () => {
         const result = floor([product('cream', ['Mercury'])])
 
-        expect(entryOf(result, 'cream')).toMatchObject({ facts: [{ kind: 'ingredient-group', group: 'mercury', ingredient: 'Mercury' }] })
+        expect(entryOf(result, 'cream')).toMatchObject({ facts: [{ kind: 'ingredient-group', group: 'mercury', ingredient: 'Mercury', ruleName: 'mercury' }] })
       })
 
       it('is not made by a rule that is not banned: the same ingredient with another kind and no group decides nothing', () => {
@@ -215,7 +215,7 @@ describe('floorVerdicts', () => {
         const entry = entryOf(floor([product('cream', [STEROID, MERCURY])]), 'cream')
 
         expect(entry).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'drop' }, escalate: true })
-        expect(entry).toMatchObject({ facts: expect.arrayContaining([{ kind: 'ingredient-group', group: 'mercury', ingredient: MERCURY }]) })
+        expect(entry).toMatchObject({ facts: expect.arrayContaining([{ kind: 'ingredient-group', group: 'mercury', ingredient: MERCURY, ruleName: 'mercury' }]) })
       })
 
       it('mercury wins over a lightening agent', () => {
@@ -249,7 +249,7 @@ describe('floorVerdicts', () => {
         const result = floor([product('perfume', ['Zzyzx Musk'])], { mentions: [reactedTo('prod-perfume')] })
 
         expect(entryOf(result, 'perfume')).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'drop' }, escalate: false })
-        expect(entryOf(result, 'perfume')).toMatchObject({ facts: expect.arrayContaining([{ kind: 'banned-substance', ingredient: 'Zzyzx Musk' }]) })
+        expect(entryOf(result, 'perfume')).toMatchObject({ facts: expect.arrayContaining([{ kind: 'banned-substance', ingredient: 'Zzyzx Musk', ruleName: 'zzyzx musk' }]) })
       })
 
       describe('and it is also the product the user reacted to (the reaction does not force a stop at once and adds no escalation)', () => {
@@ -403,7 +403,7 @@ describe('floorVerdicts', () => {
           group: 'likely-the-problem',
           missingTaper: 'steroid',
           escalate: false,
-          facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol' }],
+          facts: [{ kind: 'ingredient-group', group: 'steroid', ingredient: 'Clobetasol', ruleName: 'clobetasol propionate' }],
         })
       })
 

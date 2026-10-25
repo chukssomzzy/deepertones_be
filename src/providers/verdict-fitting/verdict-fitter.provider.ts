@@ -1,4 +1,4 @@
-import type { ConcernKind, IngredientGroup, RoutineStep } from '../../modules/catalog/catalog.vocabulary'
+import type { ConcernKind, IngredientGroup, ProductForm, RoutineStep } from '../../modules/catalog/catalog.vocabulary'
 import type { ShownConcern, SkinTypeLabel } from '../../modules/face-scans/face-scans.tables'
 import type { Goal } from '../../modules/goals/goals.vocabulary'
 import type { SeenConcern } from '../../modules/routines/routines.types'
@@ -13,7 +13,10 @@ export type FitProduct = {
   brand: string | null
   name: string
   variant: string | null
-  step: RoutineStep
+  /** The routine step the recommendation catalog gives it; null when the product is not there. */
+  step: RoutineStep | null
+  /** What the product is (cream, serum, ...), when it is known. */
+  form: ProductForm | null
   ingredients: string[]
   /** The kinds of caution the rules found in its ingredients. */
   cautions: ConcernKind[]
@@ -55,6 +58,9 @@ export type FitResult = {
  * the caller can act on, and never return a partial result.
  */
 export interface VerdictFitter {
+  /** The model and prompt this fitter judges with, known before any call so a saved verdict's fingerprint can name them. */
+  readonly identity: { model: string; promptHash: string }
+
   /**
    * Judges the shelf. The caller keeps the floor's fixed verdicts whatever this returns, and skips the call when no product is open and there are no clashes.
    * The floor's `taper-missing` entries are passed as fixed, in the group likely-the-problem, since the product is the likely problem.

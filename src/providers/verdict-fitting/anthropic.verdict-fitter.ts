@@ -28,9 +28,11 @@ export class AnthropicVerdictFitter implements VerdictFitter {
   private static readonly LEAD_IN = 'Judge the fit of this shelf:'
 
   private readonly client: AnthropicClient
+  readonly identity: VerdictFitter['identity']
 
   constructor(client: AnthropicClient) {
     this.client = client
+    this.identity = { model: client.modelFor(verdictFitterFitVerdictPrompt.job), promptHash: verdictFitterFitVerdictPrompt.hash }
   }
 
   async fit(request: FitRequest): Promise<FitResult> {

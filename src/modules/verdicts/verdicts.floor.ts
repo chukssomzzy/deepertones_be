@@ -42,8 +42,9 @@ export type FloorInput = {
 }
 
 export type FloorFact =
-  | { kind: 'ingredient-group'; group: IngredientGroup; ingredient: string }
-  | { kind: 'banned-substance'; ingredient: string }
+  /** `ruleName` is the matched rule's own name, which an alias match shares: the label `ingredient` can be long or a brand's wording, the name is not. */
+  | { kind: 'ingredient-group'; group: IngredientGroup; ingredient: string; ruleName: string }
+  | { kind: 'banned-substance'; ingredient: string; ruleName: string }
   | { kind: 'claim-phrase'; phrase: string }
   | { kind: 'no-label-purpose'; purpose: NoLabelPurpose }
   | { kind: 'reaction-product' }
@@ -108,10 +109,19 @@ const contextOf = (input: FloorInput): Context => ({
 
 const uniqueIngredients = <T extends { ingredient: string }>(facts: T[]): T[] => facts.filter((fact, at) => facts.findIndex((other) => other.ingredient === fact.ingredient) === at)
 
+/** The name of the first of `rules` that flags `ingredient`, found by the same matcher that flagged it, so the two cannot disagree about what matched. */
+const ruleNameOf = (ingredient: string, rules: readonly FloorRule[]): string => {
+  const matched = rules.find((rule) => flagFacts([ingredient], [rule]).length > 0)
+  if (!matched) throw new Error(`No rule flags ${ingredient}, which was flagged`)
+  return matched.name
+}
+
 const heldGroups = (product: FloorProduct, byGroup: Map<IngredientGroup, FloorRule[]>): Held => {
   const held: Held = new Map()
   for (const [group, rules] of byGroup) {
-    const facts = uniqueIngredients(flagFacts(product.ingredients, rules)).map(({ ingredient }): FloorFact => ({ kind: 'ingredient-group', group, ingredient }))
+    const facts = uniqueIngredients(flagFacts(product.ingredients, rules)).map(
+      ({ ingredient }): FloorFact => ({ kind: 'ingredient-group', group, ingredient, ruleName: ruleNameOf(ingredient, rules) }),
+    )
     if (facts.length > 0) held.set(group, facts)
   }
   return held
@@ -131,7 +141,9 @@ const claimFacts = (product: FloorProduct, claimPhrases: readonly string[]): Flo
 }
 
 const bannedFacts = (product: FloorProduct, strayBanned: FloorRule[]): FloorFact[] =>
-  uniqueIngredients(flagFacts(product.ingredients, strayBanned).filter((fact) => fact.kind === 'banned-substance')).map(({ ingredient }): FloorFact => ({ kind: 'banned-substance', ingredient }))
+  uniqueIngredients(flagFacts(product.ingredients, strayBanned).filter((fact) => fact.kind === 'banned-substance')).map(
+    ({ ingredient }): FloorFact => ({ kind: 'banned-substance', ingredient, ruleName: ruleNameOf(ingredient, strayBanned) }),
+  )
 
 const isNamedProduct = (product: FloorProduct, mentions: readonly FloorMention[], rules: readonly FloorRule[]): boolean => {
   const { productIds } = namedIn(mentions, rules)

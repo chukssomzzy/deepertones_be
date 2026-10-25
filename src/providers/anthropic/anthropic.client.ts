@@ -68,6 +68,11 @@ export class AnthropicClient {
     })
   }
 
+  /** The model `job` is sent to, from the configuration alone: nothing is reserved or sent. */
+  modelFor(job: AiJob): string {
+    return this.models[job]
+  }
+
   /**
    * One logical turn. A `pause_turn` reply (server tools such as web search ran long) is continued
    * by re-sending the paused content, and every block from every round is returned in order.
@@ -118,7 +123,7 @@ export class AnthropicClient {
   private async send(body: MessageRequest & { output_config?: unknown }, job: AiJob): Promise<Message> {
     // Empty until someone copies it into the environment; fail here (a bug to fix) rather than send a bad request.
     if (!this.#apiKey) throw new Error('ANTHROPIC_API_KEY is not set')
-    const model = this.models[job]
+    const model = this.modelFor(job)
     // A call we cannot price is a call we cannot cap, so it is not made.
     if (!priceOf(model)) throw new AnthropicConfigError(`No price is known for the model "${model}" configured for the ${job} job`)
 

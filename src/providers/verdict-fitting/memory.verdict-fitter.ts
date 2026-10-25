@@ -2,6 +2,7 @@ import type { FitRequest, FitResult, VerdictFitter } from './verdict-fitter.prov
 
 /** Answers from a function you set (a clear "no answer set" error until then), and records the requests it was given. For tests. */
 export class MemoryVerdictFitter implements VerdictFitter {
+  readonly identity = { model: 'memory-model', promptHash: 'memory-prompt-hash' }
   readonly calls: FitRequest[] = []
   private answer: (request: FitRequest) => FitResult = () => {
     throw new Error('MemoryVerdictFitter: no answer set; call respondWith() first')
