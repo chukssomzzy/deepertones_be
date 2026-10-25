@@ -7,8 +7,11 @@ import type { GateFailure, Routine } from '../../src/modules/routines/routines.t
 import type { GapLabel } from './routine-labels'
 import type { RoutineSet } from './routine-cases'
 
-/** What the rubric judge said of one routine, as the score takes it: picks agreed of judged, and the three scores. */
-export type JudgeResult = { picksAgreed: number; picksJudged: number; fit: number; simplicity: number; words: number }
+/**
+ * What the rubric judge said of one routine, as the score takes it: picks judged, how many the judge agreed with the label on (right against not: best and acceptable are
+ * one side) and how many exactly (the same class), and the three scores.
+ */
+export type JudgeResult = { picksAgreed: number; picksAgreedExactly: number; picksJudged: number; fit: number; simplicity: number; words: number }
 
 export type RoutineCaseInput = {
   id: string
@@ -30,7 +33,10 @@ export type RoutineCaseInput = {
 export type JudgeComparison = {
   name: string
   model: string
+  /** Right against not, pooled over the picks judged: the figure the 80% rule, selectJudge and agreementPerDollar use. */
   agreement: number | null
+  /** The same picks, counted only where the judge's class is the label's class. Reported beside agreement; it is not in the bar. */
+  exactAgreement: number | null
   fit: number | null
   simplicity: number | null
   words: number | null
@@ -67,6 +73,7 @@ export type RunScore = {
   exactlyBest: number | null
   needsRelabel: string[]
   judgeAgreement: number | null
+  judgeExactAgreement: number | null
   fit: number | null
   simplicity: number | null
   words: number | null
@@ -108,9 +115,14 @@ export const judgeComparisonOf = (judge: { name: string; model: string }, result
     judged.reduce((total, j) => total + j.picksAgreed, 0),
     judged.reduce((total, j) => total + j.picksJudged, 0),
   )
+  const exactAgreement = percent(
+    judged.reduce((total, j) => total + j.picksAgreedExactly, 0),
+    judged.reduce((total, j) => total + j.picksJudged, 0),
+  )
   return {
     ...judge,
     agreement,
+    exactAgreement,
     fit: mean(judged.map((j) => j.fit)),
     simplicity: mean(judged.map((j) => j.simplicity)),
     words: mean(judged.map((j) => j.words)),
@@ -189,6 +201,10 @@ export const scoreRun = (inputs: RoutineCaseInput[], { set, partial, judgeSelfLa
     judged.reduce((total, j) => total + j.picksAgreed, 0),
     pickedJudged,
   )
+  const judgeExactAgreement = percent(
+    judged.reduce((total, j) => total + j.picksAgreedExactly, 0),
+    pickedJudged,
+  )
 
   const missing = missingOf(inputs, scores, judgeAgreement, scoredGaps, partial, judgeSelfLabelled)
   // One rule for the whole bar: a rule that can be evaluated and fails is a FAIL, whatever else is missing, and a trial (a partial run) can fail but never pass.
@@ -210,6 +226,7 @@ export const scoreRun = (inputs: RoutineCaseInput[], { set, partial, judgeSelfLa
     exactlyBest: percent(sum((s) => s.bestGaps), scoredGaps),
     needsRelabel: inputs.filter((_, i) => scores[i]!.needsRelabel).map((input) => input.id),
     judgeAgreement,
+    judgeExactAgreement,
     fit: mean(judged.map((j) => j.fit)),
     simplicity: mean(judged.map((j) => j.simplicity)),
     words: mean(judged.map((j) => j.words)),
