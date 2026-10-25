@@ -23,9 +23,10 @@ export const faceConsents = sqliteTable(
 )
 
 /**
- * One face scan of one profile. `goal_at_scan` is the goal it was taken under, which is what "a rescan is suggested" is worked out
- * from when it is read. The `pc_*` columns are Perfect Corp's task ids and the Perfect Corp environment the tasks were made in (a
- * webhook for another environment's task is ignored); the skin age, skin type and tables version are written when a result comes back.
+ * One face scan of one profile. `goal_at_scan` is the goal it was taken under; the due rule (issue #145) reads it, with `check_in` and the
+ * profile's goal history, to decide whether a scan is due and to work out "a rescan is suggested" when read. The `pc_*` columns are Perfect
+ * Corp's task ids and the Perfect Corp environment the tasks were made in (a webhook for another environment's task is ignored); the skin
+ * age, skin type and tables version are written when a result comes back.
  */
 export const faceScans = sqliteTable(
   'face_scans',
@@ -49,8 +50,11 @@ export const faceScans = sqliteTable(
     tablesVersion: text('tables_version'),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
-    // When the reaper queued its one check of this scan; null until it has. Last, because createFaceScan's INSERT ... SELECT lists the columns by position.
+    // When the reaper queued its one check of this scan; null until it has.
     reaperCheckedAt: integer('reaper_checked_at', { mode: 'timestamp_ms' }),
+    // Whether this was the chase's wider check-in scan, taken at the review point (issue #145). Last, because createFaceScan's INSERT ... SELECT
+    // lists the columns by position.
+    checkIn: integer('check_in', { mode: 'boolean' }).notNull().default(false),
   },
   (t) => [
     // (profile_id, created_at) serves "the latest scan of this profile".
@@ -121,4 +125,23 @@ export const profileFitzpatrick = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   },
   (t) => [index('profile_fitzpatrick_user_id_idx').on(t.userId)],
+)
+
+/**
+ * The "check-in due" push of a chase, recorded once and keyed by the chase's day-one scan (issue #145). The row is written BEFORE the push is queued and only
+ * the write that lands queues it, so a chase is told at most once. It is not tied to the scan by a foreign key: deleting the day one (or the check-in) must
+ * not make the push due again. `goal` is the chase's goal; the row goes with its profile.
+ */
+export const faceCheckInPushes = sqliteTable(
+  'face_check_in_pushes',
+  {
+    profileId: text('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    userId: text('user_id').notNull(),
+    goal: text('goal', { enum: GOALS }).notNull(),
+    dayOneScanId: text('day_one_scan_id').notNull(),
+    sentAt: integer('sent_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.profileId, t.dayOneScanId] }), index('face_check_in_pushes_user_id_idx').on(t.userId)],
 )

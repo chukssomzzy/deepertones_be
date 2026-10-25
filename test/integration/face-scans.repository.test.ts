@@ -85,6 +85,36 @@ describe('the face tables in D1', () => {
     expect(await repository.consentOf(kept.profileId)).not.toBeNull()
   })
 
+  it('removes a profile\'s check-in push records with the profile (and with the user, for the cleanup), and leaves other profiles\'', async () => {
+    const account = await newGuest()
+    const otherProfile = await newProfile(account.userId)
+    const stranger = await newGuest()
+    const mine = await withFaceData(account)
+    const kept = await withFaceData({ userId: account.userId, profileId: otherProfile })
+    const strangers = await withFaceData(stranger)
+    const record = (who: { userId: string; profileId: string }, scan: { id: string }) =>
+      repository.recordCheckInPush({ profileId: who.profileId, userId: who.userId, goal: 'glow', dayOneScanId: scan.id, sentAt: BASE })
+    await record(account, mine)
+    await record({ userId: account.userId, profileId: otherProfile }, kept)
+    await record(stranger, strangers)
+
+    await env.DB.prepare('DELETE FROM profiles WHERE id = ?').bind(account.profileId).run()
+
+    expect(await repository.checkInPushFor(account.profileId, mine.id)).toBeNull()
+    expect(await repository.checkInPushFor(otherProfile, kept.id)).not.toBeNull()
+
+    expect(await users.deleteUsers([account.userId])).toBe(1)
+
+    expect(await repository.checkInPushFor(otherProfile, kept.id)).toBeNull()
+    expect(await repository.checkInPushFor(stranger.profileId, strangers.id)).not.toBeNull()
+  })
+
+  it('refuses a check-in push record for a profile that does not exist', async () => {
+    const { userId } = await newGuest()
+
+    await expect(repository.recordCheckInPush({ profileId: crypto.randomUUID(), userId, goal: 'glow', dayOneScanId: crypto.randomUUID(), sentAt: BASE })).rejects.toThrow()
+  })
+
   it('refuses a consent for a profile that does not exist', async () => {
     const { userId } = await newGuest()
 

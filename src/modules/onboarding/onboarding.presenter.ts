@@ -11,4 +11,5 @@ export const toOnboardingContentResponse = (content: OnboardingContent): z.infer
   answers: content.answers,
   colourNote: content.colourNote,
   safetyScreen: content.safetyScreen,
+  switchScreen: content.switchScreen,
 })

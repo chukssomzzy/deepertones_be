@@ -1,4 +1,4 @@
-import type { Goal } from '../goals/goals.vocabulary'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
 
 // The face-scan rules: pure, versioned tables over what Perfect Corp measures. No I/O, no clock, no model, so the same results always give
 // the same words, and a change to any of them is a reviewed change to this file. Each table has a version that a stored result carries,
@@ -15,9 +15,18 @@ export const VISIBILITY_VERSION = 3
 export const WORDING_VERSION = 2
 export const SKIN_TYPE_VERSION = 1
 export const CHANGE_VERSION = 1
+export const CHASE_VERSION = 1
+export const REVIEW_VERSION = 1
+export const SPACING_VERSION = 1
+export const NEXT_GOAL_VERSION = 1
+/** A new chase's first scan waits this many days after the profile's last day-one scan, under any goal. */
+export const SCAN_SPACING_DAYS = 30
 
 /** Every table's version as one text. A stored result carries it (face_scans.tables_version), so a client can tell which rules were in force when it was read. */
-export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION}`
+export const TABLES_VERSION = `concerns:${GOAL_CONCERNS_VERSION},visibility:${VISIBILITY_VERSION},wording:${WORDING_VERSION},skin-type:${SKIN_TYPE_VERSION},change:${CHANGE_VERSION},chase:${CHASE_VERSION},review:${REVIEW_VERSION},spacing:${SPACING_VERSION},next-goal:${NEXT_GOAL_VERSION}`
+
+/** A goal left and taken up again within this many days of leaving continues its chase; any longer and the goal starts fresh (issue #145). */
+export const RESUME_DAYS = 90
 
 /** The concerns a goal can show. `hd_skin_type` is also asked for, but it is the skin type label and never a seen-words concern. */
 export const SHOWN_CONCERNS = ['hd_acne', 'hd_pore', 'hd_oiliness', 'hd_age_spot', 'hd_redness', 'hd_radiance', 'hd_texture', 'hd_dark_circle', 'hd_moisture'] as const
@@ -64,6 +73,13 @@ export const measuredConcernsForGoal = (goal: Goal): ShownConcern[] => {
 
 /** What to ask Perfect Corp for: everything measured for the goal and the skin type, which is 5 to 8 actions (the HD 5 to 8 tier, 16 units). */
 export const hdActionsForGoal = (goal: Goal): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...measuredConcernsForGoal(goal), HD_SKIN_TYPE]
+
+/**
+ * What to ask Perfect Corp for at a chase's review point: every concern any goal can show, plus the skin type, whatever the goal is. Ten
+ * actions (the HD 9 to 12 tier, 20 units), against 5 to 8 for a normal scan: the extra reads feed the next-goal rule, though the result still
+ * shows only the goal's own three. A fresh list each time.
+ */
+export const hdActionsForCheckIn = (): (ShownConcern | typeof HD_SKIN_TYPE)[] => [...SHOWN_CONCERNS, HD_SKIN_TYPE]
 
 // A concern is visible at or below `visible`, and the band is how far below: (some, visible] is a-little, (clear, some] is some, and
 // clear or less is clear. Above `visible` is faint. Each concern has its own cut-offs because Perfect Corp's raw_score sits on a different range for each
@@ -369,3 +385,98 @@ export const resultView = (input: {
     tablesVersion: TABLES_VERSION,
   }
 }
+
+const RESUME_WINDOW_MS = RESUME_DAYS * 24 * 60 * 60 * 1000
+
+/**
+ * The start of the chase of `goal` that `at` falls in, read from the profile's goal history alone (oldest first), or null when `goal` was not
+ * current at `at`. A row is current from its `createdAt`, inclusive; a run of consecutive rows of the same goal is one chase so far, and a row
+ * of any other goal, or a null goal (typed words nobody sorted yet), counts as leaving. Walking back from the chase that holds `at`: each time
+ * the chase's start is reached, the detour just before it (every row back to the last row of `goal`, however many different goals it crossed)
+ * is one step away, and the chase swallows it when the return is no more than RESUME_DAYS after the detour began; a longer gap stops the walk
+ * with the chase as found so far. Exactly RESUME_DAYS continues it; a millisecond more starts a new chase.
+ */
+export const chaseStartFor = (history: readonly { goal: Goal | null; createdAt: Date }[], goal: Goal, at: Date): Date | null => {
+  const atMs = at.getTime()
+  let i = -1
+  for (let row = 0; row < history.length; row++) {
+    if (history[row]!.createdAt.getTime() > atMs) break
+    i = row
+  }
+  if (i === -1 || history[i]!.goal !== goal) return null
+
+  for (;;) {
+    while (i > 0 && history[i - 1]!.goal === goal) i--
+    const chaseStart = history[i]!.createdAt
+    if (i === 0) return chaseStart
+    // The detour right before this run: every row back to (but not including) the last time `goal` was current, whatever goals it crossed.
+    let detourStart = i - 1
+    while (detourStart > 0 && history[detourStart - 1]!.goal !== goal) detourStart--
+    if (detourStart === 0) return chaseStart // nothing of `goal` earlier than the detour to merge with
+    if (chaseStart.getTime() - history[detourStart]!.createdAt.getTime() > RESUME_WINDOW_MS) return chaseStart
+    i = detourStart - 1
+  }
+}
+
+// What a visible concern adds to a candidate goal's score: the plainer it is in the check-in, the more it counts. Faint and missing add nothing.
+const NEXT_GOAL_WEIGHTS: Record<Band, number> = { clear: 3, some: 2, 'a-little': 1, faint: 0 }
+
+/**
+ * The goal to suggest at a chase's check-in, or null for none. Nothing is suggested until at least one of the goal's own concerns is fainter than on day
+ * one (the same `concernChange` and noise as the result view; a concern read from different regions on the two scans, or missing on either, does not count,
+ * as `sinceDayOne` skips it). Then every other goal is scored by the concerns it has that the current goal does not, each weighted by its band in the check-in
+ * (clear 3, some 2, a-little 1, faint or missing 0), and the highest wins; a tie goes to the earlier goal in GOALS, and if every score is 0 there is
+ * none. `brighter` is a candidate only when the profile ever wanted lighter: it is never offered unasked. Pure: the inputs are only read.
+ */
+export const nextGoalFor = (input: {
+  goal: Goal
+  results: readonly ScoreRow[]
+  dayOneResults: readonly ScoreRow[]
+  everWantedLighter: boolean
+}): Goal | null => {
+  const { goal, results, dayOneResults, everWantedLighter } = input
+  const own = concernsForGoal(goal)
+
+  const fainter = own.some((concern) => {
+    const now = rowFor(results, concern)
+    const before = rowFor(dayOneResults, concern)
+    return now !== null && before !== null && now.region === before.region && concernChange(before.rawScore, now.rawScore) === 'fainter'
+  })
+  if (!fainter) return null
+
+  let best: Goal | null = null
+  let bestScore = 0
+  for (const candidate of GOALS) {
+    if (candidate === goal || (candidate === 'brighter' && !everWantedLighter)) continue
+    let score = 0
+    for (const concern of concernsForGoal(candidate)) {
+      if (own.includes(concern)) continue
+      const row = rowFor(results, concern)
+      if (row) score += NEXT_GOAL_WEIGHTS[bandFor(concern, row.rawScore)]
+    }
+    // Strictly greater, so an equal score keeps the earlier goal.
+    if (score > bestScore) {
+      best = candidate
+      bestScore = score
+    }
+  }
+  return best
+}
+
+/**
+ * Each goal's review week: how long after day one its chase is looked at again (issue #145, "Review point"). Every goal starts at 6, a
+ * placeholder to tune per goal later as a reviewed change.
+ */
+export const REVIEW_WEEKS: Record<Goal, number> = {
+  'clear-skin': 6,
+  'even-tone': 6,
+  'fade-dark-marks': 6,
+  brighter: 6,
+  glow: 6,
+  'calm-repair': 6,
+}
+
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000
+
+/** A goal's review point: day one plus its review week, keeping day one's time of day. Does not mutate `dayOneAt`. */
+export const reviewPointFor = (dayOneAt: Date, goal: Goal): Date => new Date(dayOneAt.getTime() + REVIEW_WEEKS[goal] * WEEK_MS)
