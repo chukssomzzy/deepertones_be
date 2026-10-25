@@ -180,6 +180,21 @@ export class D1ScansRepository {
   }
 
   /**
+   * Whether any item of any scan of the profile (whatever the scan's kind) is in one of `states` and was last updated at or after `since`. A profile's scans are the ones
+   * whose `profile_id` it is: a scan not yet given one (see `adoptOrphanScans`) belongs to no profile here.
+   */
+  async hasItemsInStates(profileId: string, states: ItemState[], since: Date): Promise<boolean> {
+    if (states.length === 0) return false
+    const [found] = await this.db
+      .select({ id: scanItems.id })
+      .from(scanItems)
+      .innerJoin(scans, eq(scans.id, scanItems.scanId))
+      .where(and(eq(scans.profileId, profileId), inArray(scanItems.state, states), gte(scanItems.updatedAt, since)))
+      .limit(1)
+    return found !== undefined
+  }
+
+  /**
    * Items that still hold a front photo key although their state no longer needs the photo (anything but `recognising` and
    * `needs-confirmation`), oldest `updated_at` first, at most `limit`. These are the keys a release missed. Read through the partial
    * index on `updated_at` for items with a key, so it never reads the items whose photo is already gone.

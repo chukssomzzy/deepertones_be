@@ -2207,6 +2207,52 @@ export const scansRepositoryContract = (name: string, make: () => ScansContractS
       })
     })
 
+    describe('hasItemsInStates', () => {
+      const WORKING: ItemState[] = ['recognising', 'matching']
+      /** A scan of the profile with one item per entry, each moved to its state at its time. */
+      const scanWith = async (repository: ScansRepository, userId: string, profileId: string, entries: [ItemState, number][], scanOver: Partial<NewScan> = {}) => {
+        const scan = newScan(userId, { profileId, createdAt: at(-24 * HOUR), ...scanOver })
+        const items = entries.map((_, position) => newItem(scan, position))
+        await createWithPhotos(repository, scan, items)
+        for (const [i, [state, updatedAt]] of entries.entries()) await repository.updateItem(items[i]!.id, 'recognising', { state, updatedAt: at(updatedAt) })
+      }
+
+      it('is true when an item of the profile is in one of the states, whatever the kind of its scan, and false when none is', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const [product, shelf, idle] = [freshId(), freshId(), freshId()]
+        await scanWith(repository, userId, product, [['matching', -MINUTE]])
+        await scanWith(repository, userId, shelf, [['recognising', -MINUTE]], { kind: 'shelf' })
+        await scanWith(repository, userId, idle, [['ready', -MINUTE], ['needs-back-photo', -MINUTE]])
+
+        expect(await repository.hasItemsInStates(product, WORKING, at(-HOUR))).toBe(true)
+        expect(await repository.hasItemsInStates(shelf, WORKING, at(-HOUR))).toBe(true)
+        expect(await repository.hasItemsInStates(idle, WORKING, at(-HOUR))).toBe(false)
+        expect(await repository.hasItemsInStates(freshId(), WORKING, at(-HOUR))).toBe(false)
+      })
+
+      it('counts an item updated at the given time and not one updated before it', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const [atSince, before] = [freshId(), freshId()]
+        await scanWith(repository, userId, atSince, [['matching', -HOUR]])
+        await scanWith(repository, userId, before, [['matching', -HOUR - 1]])
+
+        expect(await repository.hasItemsInStates(atSince, WORKING, at(-HOUR))).toBe(true)
+        expect(await repository.hasItemsInStates(before, WORKING, at(-HOUR))).toBe(false)
+      })
+
+      it('asks about the profile given: an item of another profile of the same user does not count, and no states answers false', async () => {
+        const { repository, newUser } = await make()
+        const userId = await newUser()
+        const [mine, other] = [freshId(), freshId()]
+        await scanWith(repository, userId, other, [['matching', -MINUTE]])
+
+        expect(await repository.hasItemsInStates(mine, WORKING, at(-HOUR))).toBe(false)
+        expect(await repository.hasItemsInStates(other, [], at(-HOUR))).toBe(false)
+      })
+    })
+
     describe('settledScansNotDone', () => {
       const FINAL: ItemState[] = ['ready', 'rejected', 'failed', 'unidentified']
       // Far enough back to take in every scan these tests make, so only the test about the bound narrows it.

@@ -8417,3 +8417,174 @@ describe('ScanService.createTyped', () => {
     })
   })
 })
+
+// ---- the reads the shelf verdict builds on (spec #171, slice D1): by item or profile id, with no session, because the build is a job ----
+
+describe('ScanService.noLabelFacts', () => {
+  const answered = async (ctx: Ctx, purpose: 'lighten' | 'moisturise' | 'treat-spots' | 'not-sure') => {
+    const { scanId, itemId } = await failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+    await asUser(() => ctx.service.noLabel(scanId, itemId, { source: 'market-vendor', purpose, usedFor: '1-6-months' }))
+    return { scanId, itemId }
+  }
+
+  it('gives what the floor reads of a no-label item, by item id: what the user said it is for, and the category (skin when the item has none)', async () => {
+    const ctx = setup()
+    const { itemId } = await answered(ctx, 'lighten')
+    expect((await ctx.repository.findItem(itemId))!.recognisedCategory).toBeNull()
+
+    const facts = await ctx.service.noLabelFacts([itemId])
+
+    expect(facts.get(itemId)).toEqual({ purpose: 'lighten', category: 'skin' })
+  })
+
+  it('gives the purpose each item was answered with, in one call for many items', async () => {
+    const ctx = setup()
+    const one = await answered(ctx, 'moisturise')
+    ctx.advance(SECOND)
+    const two = await answered(ctx, 'not-sure')
+
+    const facts = await ctx.service.noLabelFacts([one.itemId, two.itemId, one.itemId])
+
+    expect([...facts.keys()].sort()).toEqual([one.itemId, two.itemId].sort())
+    expect(facts.get(one.itemId)).toMatchObject({ purpose: 'moisturise' })
+    expect(facts.get(two.itemId)).toMatchObject({ purpose: 'not-sure' })
+  })
+
+  it('leaves out an item that has not said it has no label, an item that does not exist, and a product that was identified', async () => {
+    const ctx = setup()
+    const waiting = await failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])
+    const identified = await analysingItem(ctx)
+
+    const facts = await ctx.service.noLabelFacts([waiting.itemId, identified.itemId, 'no-such-item'])
+
+    expect(facts.size).toBe(0)
+  })
+
+  it('answers an empty map for no items, and needs no session', async () => {
+    const ctx = setup()
+    const { itemId } = await answered(ctx, 'lighten')
+
+    expect((await ctx.service.noLabelFacts([])).size).toBe(0)
+    // Called here with no actor at all: it is the profile's shelf that decided whose items these are.
+    expect((await ctx.service.noLabelFacts([itemId])).get(itemId)).toMatchObject({ purpose: 'lighten' })
+  })
+})
+
+describe('ScanService.hasShelfWorkInFlight', () => {
+  const working = (ctx: Ctx, profileId = PROFILE) => ctx.service.hasShelfWorkInFlight(profileId)
+  /** A shelf photo whose recognition has run and found one product, which is now matching (so the item and not the photo is what is in flight). */
+  const matchingShelf = async (ctx: Ctx, over: { profileId?: string } = {}) => {
+    answerShelf(ctx, shelfRead(shelfList(1)))
+    const scan = await shelfScan(ctx, [markedJpeg(1)], over)
+    await asJob(() => ctx.service.advance(scan.itemId, 'recognise'))
+    return scan
+  }
+
+  it('is false for a profile that has no scan at all', async () => {
+    expect(await working(setup())).toBe(false)
+  })
+
+  it('is true right after shelf photos are uploaded: the photos are being recognised', async () => {
+    const ctx = setup()
+    await shelfScan(ctx, [markedJpeg(1), markedJpeg(2)])
+
+    expect(await working(ctx)).toBe(true)
+  })
+
+  it('is true while a product the photo showed is being matched, and false once it is ready', async () => {
+    const ctx = setup()
+    await catalogued(ctx, { brand: 'Glow Co', name: 'Product 0', category: 'skin' })
+    const { scanId, itemId } = await matchingShelf(ctx)
+    expect((await ctx.repository.itemsOf(scanId)).map((item) => item.state)).toEqual(['matching'])
+    expect(await working(ctx)).toBe(true)
+
+    await run(ctx, itemId, 'match')
+
+    expect((await ctx.repository.itemsOf(scanId)).map((item) => item.state)).toEqual(['ready'])
+    expect(await working(ctx)).toBe(false)
+  })
+
+  it('is true for a product scan that is still being worked on, because its product reaches the shelf when it is ready', async () => {
+    const ctx = setup()
+    await reach(ctx, 'researching')
+
+    expect(await working(ctx)).toBe(true)
+  })
+
+  it.each([
+    ['an item waiting for the user to confirm it', (ctx: Ctx) => reach(ctx, 'needs-confirmation')],
+    ['an item waiting for a photo of the back', (ctx: Ctx) => reach(ctx, 'needs-back-photo')],
+    ['an item waiting for a retaken photo', (ctx: Ctx) => failedFront(ctx, [BLURRY])],
+    ['an item waiting to be identified', (ctx: Ctx) => failedFront(ctx, [BLURRY, TURNED_AWAY, BLURRY])],
+  ])('is false for %s, however fresh: the system owes it nothing, and the build must not wait on the user', async (_name, make) => {
+    const ctx = setup()
+    await make(ctx)
+
+    expect(await working(ctx)).toBe(false)
+  })
+
+  it('is false once the photos were read and nothing is left to read: a photo with no product, and a photo the model rejected', async () => {
+    const ctx = setup()
+    answerShelf(ctx, NOTHING_READ('face-or-person'))
+    const { itemId } = await shelfScan(ctx)
+
+    await run(ctx, itemId, 'recognise')
+
+    expect(await working(ctx)).toBe(false)
+  })
+
+  it('is about the profile asked about: work of another profile of the same account, or of another account, does not count', async () => {
+    const ctx = setup()
+    await matchingShelf(ctx, { profileId: OTHER_PROFILE })
+
+    expect(await working(ctx, OTHER_PROFILE)).toBe(true)
+    expect(await working(ctx, PROFILE)).toBe(false)
+    expect(await working(ctx, 'profile-of-another-account')).toBe(false)
+  })
+
+  it('needs no session: it answers for a profile id from a job, and a session of another profile changes nothing', async () => {
+    const ctx = setup()
+    await shelfScan(ctx)
+
+    expect(await working(ctx)).toBe(true)
+    expect(await asUser(() => working(ctx), OTHER_USER, OTHER_PROFILE)).toBe(true)
+  })
+
+  // The window is the reaper's own: an item it would fail as unavailable (unchanged for over 2 hours) is no longer in flight, so a build never waits on
+  // a stuck one. The reaper fails an item whose last change is strictly more than two hours old.
+  describe('the window of the reaper', () => {
+    it('still counts work that last changed exactly 2 hours ago, and stops counting it one millisecond later', async () => {
+      const ctx = setup()
+      await shelfScan(ctx)
+
+      ctx.advance(2 * HOUR)
+      expect(await working(ctx)).toBe(true)
+
+      ctx.advance(1)
+      expect(await working(ctx)).toBe(false)
+    })
+
+    it('does the same for a matching item', async () => {
+      const ctx = setup()
+      await matchingShelf(ctx)
+      ctx.advance(2 * HOUR)
+      expect(await working(ctx)).toBe(true)
+
+      ctx.advance(1)
+
+      expect(await working(ctx)).toBe(false)
+    })
+
+    it('counts work from its last change, not from when the scan began', async () => {
+      const ctx = setup()
+      answerShelf(ctx, shelfRead(shelfList(1)))
+      const { itemId } = await shelfScan(ctx)
+      ctx.advance(3 * HOUR)
+      expect(await working(ctx)).toBe(false)
+
+      await asJob(() => ctx.service.advance(itemId, 'recognise'))
+
+      expect(await working(ctx)).toBe(true)
+    })
+  })
+})

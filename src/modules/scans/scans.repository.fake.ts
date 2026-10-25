@@ -241,6 +241,10 @@ export class FakeScansRepository implements ScansRepository {
       .map(copyItem)
   }
 
+  async hasItemsInStates(profileId: string, states: ItemState[], since: Date): Promise<boolean> {
+    return [...this.items.values()].some((i) => states.includes(i.state) && i.updatedAt.getTime() >= since.getTime() && this.scans.get(i.scanId)?.profileId === profileId)
+  }
+
   /** Items that hold a front photo key although their state is not `recognising` or `needs-confirmation`, oldest `updatedAt` first, at most `limit`. */
   async itemsWithReleasablePhoto(limit: number): Promise<ScanItem[]> {
     return [...this.items.values()]
