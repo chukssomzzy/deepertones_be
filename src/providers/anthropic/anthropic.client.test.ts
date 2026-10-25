@@ -659,6 +659,34 @@ describe('AnthropicClient job routing', () => {
   })
 })
 
+describe('AnthropicClient.modelFor', () => {
+  it.each(JOBS)('gives the model configured for the %s job, which is the model that job is sent to', async (job) => {
+    const { calls, fetch } = stubFetch(ok())
+    const client = make(fetch, { models: ROUTED_MODELS })
+
+    await client.createMessage(BODY, { job })
+
+    expect(client.modelFor(job)).toBe(ROUTED_MODELS[job])
+    expect(client.modelFor(job)).toBe(calls[0]!.body.model)
+  })
+
+  it('answers from the configuration alone: it sends nothing and reserves nothing', () => {
+    const { calls, fetch } = stubFetch(ok())
+    const ledger = newLedger()
+
+    make(fetch, { models: ROUTED_MODELS, ledger }).modelFor('fit-verdict')
+
+    expect(calls).toHaveLength(0)
+    expect(ledger.entries).toHaveLength(0)
+  })
+
+  it('tells jobs apart: two jobs routed to different models get different answers', () => {
+    const client = make(stubFetch(ok()).fetch, { models: ROUTED_MODELS })
+
+    expect(client.modelFor('analysis')).not.toBe(client.modelFor('same-product'))
+  })
+})
+
 describe('AnthropicClient reserving before a request', () => {
   it('reserves the worst case of the request, in the job and model of the call, BEFORE sending it', async () => {
     const { calls, fetch } = stubFetch(ok())
