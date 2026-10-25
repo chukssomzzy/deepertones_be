@@ -7,8 +7,8 @@ import { formulations, productAliases, products } from './catalog.table'
 import type { NewProduct } from './catalog.types'
 import type { ReferenceEntry } from './catalog.reference'
 import type { ConcernKind, Frequency, Origin, RoutineStep } from './catalog.vocabulary'
-import type { AvailabilityRow, CountryRow, IngredientRule, ProductRow, Workbook } from './catalog.workbook.schema'
-import { catalogVersions, countries, ingredientRules, productAvailability, recommendedProducts } from './catalog.workbook.table'
+import type { AvailabilityRow, ClaimWordRow, CountryRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
+import { catalogVersions, claimWords, countries, ingredientRules, productAvailability, recommendedProducts, tapers } from './catalog.workbook.table'
 
 /** The approved ingredient rules in the shape the matcher reads, and the rules version they are under. */
 export type LiveRules = { version: string; entries: ReferenceEntry[] }
@@ -54,6 +54,10 @@ export type WorkbookChanges = {
   retiredProducts: string[]
   retiredIngredients: string[]
   retiredCountries: string[]
+  claimWords: ClaimWordRow[]
+  tapers: TaperRow[]
+  retiredClaimWords: string[]
+  retiredTapers: string[]
 }
 
 /**
@@ -80,14 +84,17 @@ export const STATEMENT_ROWS = {
   formulations: 12, // 7
   recommended: 3, // at most 25
   availability: 15, // 6
-  rules: 6, // 14
+  rules: 6, // 16
+  claimWords: 11, // 9
+  tapers: 9, // 11
   codes: 90, // one parameter a code, and two more for the values set
 } as const
 
 export class D1CatalogWorkbookRepository {
-  // A rules version names exactly one set of approved rules (it is a hash of them), so the entries are kept per isolate and read again
-  // only when the version moves. The version itself is read on every call, so a newly published one is seen at once.
-  private static cached: LiveRules | null = null
+  // The entries are kept per isolate and read again only when the catalog version moves, which every applied upload does. The rules version alone
+  // would do for the entries, but the rule metadata (group, clashes_with) changes under the same rules version, so anything cached from the rules
+  // is keyed on the catalog version number. The number is read on every call, so a newly published one is seen at once.
+  private static cached: { catalogVersion: number; live: LiveRules } | null = null
 
   constructor(private readonly db: Db) {}
 
@@ -97,7 +104,7 @@ export class D1CatalogWorkbookRepository {
     // The migration seeds catalog version 1, so none at all means the database was not migrated.
     if (!latest) throw new Error('no catalog version')
     const held = D1CatalogWorkbookRepository.cached
-    if (held?.version === latest.rulesVersion) return held
+    if (held?.catalogVersion === latest.version) return held.live
 
     // The version and the rules are read in one batch, so an upload cannot land between them: the entries are stored under the version they
     // were read with, never under an older one (which would serve the new rules as the old version until the next upload).
@@ -115,7 +122,7 @@ export class D1CatalogWorkbookRepository {
       version: current.rulesVersion,
       entries: rows.map((row) => ({ name: row.name, aliases: row.aliases, kind: row.kind, rule: row.statement, source: row.sourceUrl })),
     }
-    D1CatalogWorkbookRepository.cached = live
+    D1CatalogWorkbookRepository.cached = { catalogVersion: current.version, live }
     return live
   }
 
@@ -128,12 +135,14 @@ export class D1CatalogWorkbookRepository {
 
   /** Every row of every tab as the last applied upload left it, retired rows included, in code order, with the catalog version they are at. Read in one batch, so the rows belong to that version. */
   async readWorkbook(): Promise<{ catalogVersion: number; workbook: Workbook }> {
-    const [versions, productRows, availabilityRows, ruleRows, countryRows] = await this.db.batch([
+    const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows] = await this.db.batch([
       this.latestVersion(),
       this.db.select().from(recommendedProducts).orderBy(asc(recommendedProducts.code)),
       this.db.select().from(productAvailability).orderBy(asc(productAvailability.productCode), asc(productAvailability.country)),
       this.db.select().from(ingredientRules).orderBy(asc(ingredientRules.code)),
       this.db.select().from(countries).orderBy(asc(countries.code)),
+      this.db.select().from(claimWords).orderBy(asc(claimWords.code)),
+      this.db.select().from(tapers).orderBy(asc(tapers.code)),
     ])
     const [latest] = versions
     if (!latest) throw new Error('no catalog version')
@@ -176,6 +185,8 @@ export class D1CatalogWorkbookRepository {
             statement: row.statement,
             sourceUrl: row.sourceUrl,
             helps: row.helps,
+            group: row.group,
+            clashesWith: row.clashesWith,
             status: row.status,
             approvedBy: row.approvedBy,
             approvedOn: dateOf(row.approvedOn),
@@ -184,6 +195,32 @@ export class D1CatalogWorkbookRepository {
           }),
         ),
         countries: countryRows.map((row): CountryRow => ({ code: row.code, currency: row.currency, lowMax: row.lowMax, midMax: row.midMax, status: row.status })),
+        claimWords: claimWordRows.map(
+          (row): ClaimWordRow => ({
+            code: row.code,
+            phrase: row.phrase,
+            claim: row.claim,
+            status: row.status,
+            approvedBy: row.approvedBy,
+            approvedOn: dateOf(row.approvedOn),
+            auditedBy: row.auditedBy,
+            auditedOn: dateOf(row.auditedOn),
+          }),
+        ),
+        tapers: taperRows.map(
+          (row): TaperRow => ({
+            code: row.code,
+            kind: row.kind,
+            schedule: row.schedule,
+            whatToExpect: row.whatToExpect,
+            seeAProfessionalIf: row.seeAProfessionalIf,
+            status: row.status,
+            approvedBy: row.approvedBy,
+            approvedOn: dateOf(row.approvedOn),
+            auditedBy: row.auditedBy,
+            auditedOn: dateOf(row.auditedOn),
+          }),
+        ),
       },
     }
   }
@@ -326,6 +363,9 @@ export class D1CatalogWorkbookRepository {
               statement: sql`excluded.statement`,
               sourceUrl: sql`excluded.source_url`,
               helps: sql`excluded.helps`,
+              // `group` is a keyword in SQL, so the column is quoted.
+              group: sql`excluded."group"`,
+              clashesWith: sql`excluded.clashes_with`,
               status: sql`excluded.status`,
               approvedBy: sql`excluded.approved_by`,
               approvedOn: sql`excluded.approved_on`,
@@ -338,6 +378,56 @@ export class D1CatalogWorkbookRepository {
     }
     for (const rows of chunked(plan.retiredIngredients, STATEMENT_ROWS.codes)) {
       statements.push(this.db.update(ingredientRules).set({ status: 'retired', updatedInVersion: version }).where(inArray(ingredientRules.code, rows)))
+    }
+
+    for (const rows of chunked(plan.claimWords, STATEMENT_ROWS.claimWords)) {
+      statements.push(
+        this.db
+          .insert(claimWords)
+          .values(rows.map((word) => ({ ...word, approvedOn: dayOf(word.approvedOn), auditedOn: dayOf(word.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: claimWords.code,
+            set: {
+              phrase: sql`excluded.phrase`,
+              claim: sql`excluded.claim`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredClaimWords, STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(claimWords).set({ status: 'retired', updatedInVersion: version }).where(inArray(claimWords.code, rows)))
+    }
+
+    for (const rows of chunked(plan.tapers, STATEMENT_ROWS.tapers)) {
+      statements.push(
+        this.db
+          .insert(tapers)
+          .values(rows.map((taper) => ({ ...taper, approvedOn: dayOf(taper.approvedOn), auditedOn: dayOf(taper.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: tapers.code,
+            set: {
+              kind: sql`excluded.kind`,
+              schedule: sql`excluded.schedule`,
+              whatToExpect: sql`excluded.what_to_expect`,
+              seeAProfessionalIf: sql`excluded.see_a_professional_if`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredTapers, STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(tapers).set({ status: 'retired', updatedInVersion: version }).where(inArray(tapers.code, rows)))
     }
     return statements
   }
@@ -438,7 +528,7 @@ export class D1CatalogWorkbookRepository {
   }
 
   private latestRulesVersion() {
-    return this.db.select({ rulesVersion: catalogVersions.rulesVersion }).from(catalogVersions).orderBy(desc(catalogVersions.version)).limit(1)
+    return this.db.select({ version: catalogVersions.version, rulesVersion: catalogVersions.rulesVersion }).from(catalogVersions).orderBy(desc(catalogVersions.version)).limit(1)
   }
 
   private latestVersion() {

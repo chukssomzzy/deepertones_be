@@ -1,4 +1,4 @@
-import { CONTRACT, type AvailabilityRow, type CountryRow, type IngredientRule, type ProductRow, type RawRow, type RawTab, type RawWorkbook, type TabKey, type Workbook } from './catalog.workbook.schema'
+import { CONTRACT, type AvailabilityRow, type ClaimWordRow, type CountryRow, type IngredientRule, type ProductRow, type RawRow, type RawTab, type RawWorkbook, type ScheduleStep, type TabKey, type TaperRow, type Workbook } from './catalog.workbook.schema'
 
 // A workbook as the export serves it and the import takes it back: lists joined with "; ", dates as YYYY-MM-DD, an empty cell null. Pure, so the
 // same rows always give the same text, and an export fed to the import changes nothing.
@@ -50,6 +50,36 @@ const ingredient = (row: IngredientRule): RawRow => ({
   statement: row.statement,
   source_url: row.sourceUrl,
   helps: list(row.helps),
+  group: row.group,
+  clashes_with: list(row.clashesWith),
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
+const claimWord = (row: ClaimWordRow): RawRow => ({
+  code: row.code,
+  phrase: row.phrase,
+  claim: row.claim,
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
+/** The one way a schedule is written: `1-2: alternate-days; 3: weekly; 4: stop`, a single week as `N` and a run as `N-M`. */
+const schedule = (steps: readonly ScheduleStep[]): string =>
+  steps.map((step) => `${step.fromWeek === step.toWeek ? step.fromWeek : `${step.fromWeek}-${step.toWeek}`}: ${step.frequency}`).join(LIST_SEPARATOR)
+
+const taper = (row: TaperRow): RawRow => ({
+  code: row.code,
+  kind: row.kind,
+  schedule: schedule(row.schedule),
+  what_to_expect: row.whatToExpect,
+  see_a_professional_if: row.seeAProfessionalIf,
   status: row.status,
   approved_by: row.approvedBy,
   approved_on: day(row.approvedOn),
@@ -69,4 +99,6 @@ export const toRawWorkbook = (workbook: Workbook): RawWorkbook => ({
   availability: tab('availability', workbook.availability, availability),
   ingredients: tab('ingredients', workbook.ingredients, ingredient),
   countries: tab('countries', workbook.countries, country),
+  claimWords: tab('claimWords', workbook.claimWords, claimWord),
+  tapers: tab('tapers', workbook.tapers, taper),
 })

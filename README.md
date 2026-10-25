@@ -228,18 +228,26 @@ To measure the routine writer, run `npm run eval:routine -- --set holdout` (real
 
 ## Catalog workbook
 
-The recommendation catalog (products, where they are sold and at what price, ingredient rules, countries) is edited as a spreadsheet, not in the
+The recommendation catalog (products, where they are sold and at what price, ingredient rules, countries, claim words, step-down templates) is edited as a spreadsheet, not in the
 database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.md](docs/catalog-workbook-contract.md) (written from the contract by
 `npm run catalog:contract-doc`), and the two commands below move the workbook in and out of an environment.
 
 1. **Export** the live catalog: `npm run catalog:export -- --env staging` (or `local`, `production`; `--out file.xlsx` to name the file). It writes
-   `catalog-<env>-v<version>.xlsx` with the four tabs (Products, Availability, Ingredients, Countries) and a hidden `_meta` sheet that remembers the
-   catalog version the file came from. Leave `_meta` alone.
+   `catalog-<env>-v<version>.xlsx` with the six tabs (Products, Availability, Ingredients, Countries, Claim words, Tapers) and a hidden `_meta` sheet that
+   remembers the catalog version and contract version the file came from. Leave `_meta` alone.
 2. **Edit** the workbook in Excel or Sheets. Keep the tab names and header rows as they are.
 3. **Upload as a dry run**: `npm run catalog:upload -- catalog-staging-v12.xlsx --env staging --by "Your name"`. The file is checked against the
    contract on your machine first, and every problem is listed by tab, row and column with nothing sent. If it passes, the server answers with what
    would change per tab (added, updated, retired, reactivated) and any product it would create as new. A different spelling of a product's name is a
    new product, so read that list. A dry run changes nothing.
+   - **Claim words** are lower-case phrases that say a product is sold for lightening ("whitening", "skin fairness"); status is `approved` or `retired`.
+     "Brightening" and "glow" never go here.
+   - **Tapers** are step-down templates for a steroid or a lightening product. The `schedule` cell is steps separated by `;`, each its weeks and a
+     frequency: `1-2: alternate-days; 3-4: weekly; 5: stop`. Weeks run on from 1 with no gap (a single week is `3`, several `1-2`), the frequency never goes
+     up (`am-pm`, `am` or `pm`, `alternate-days`, `weekly`, `as-needed`), and the last step is `stop`. Do not approve a template yourself in production: see
+     below.
+   - **Ingredients** has two new columns, `group` (mercury, steroid, lightening-agent, retinoid, exfoliating-acid, benzoyl-peroxide; empty for most rules)
+     and `clashes_with` (groups, which must clash both ways).
 4. **Apply** it by running the same command with `--apply`. This writes the new catalog version and archives the file. If someone else applied a
    change after your export, the upload is refused as `CATALOG_STALE`: export again and redo the edits on the new file.
 
@@ -253,6 +261,15 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
+- **Contract 2.0.0: export again after this is deployed.** The Claim words and Tapers tabs and the Ingredients `group` and `clashes_with` columns are a
+  new contract version. A file exported before it (stamped 1.0.0) is refused by `catalog:upload` with a message to export again, and by the server as
+  `409 CONTRACT_MISMATCH` (the upload sends the file's contract version). Export a fresh file and move your edits across; the old file's rows keep
+  working as they are. An old eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`) needs the same re-export.
+- **Who may approve a step-down template.** A template is shown to people, so in **production** the server refuses an approved Tapers row unless its
+  `approved_by` is one of the labels in the `QUALIFIED_APPROVERS` var (comma-separated, matched whole and exactly, spaces around a label ignored). It is set in
+  `wrangler.jsonc` for each environment and is **empty** until the first qualified approver is named, which refuses every approved template in production.
+  The refusal is `400 CATALOG_INVALID` with `UNQUALIFIED_APPROVER` for each row, and never repeats the name. Staging and local accept any approver, so the
+  owner or Claude can approve there. It is a process control, not authentication: the approver is only a name typed in a cell.
 - **Use Excel or LibreOffice.** Google Sheets and Numbers may drop the hidden `_meta` sheet when they save; a file without it is refused, so use Excel or
   LibreOffice, or export again.
 - **Keep the cells as text.** Excel may retype a date, or turn a code such as `007` into a number, when you paste over a cell. Dates are written

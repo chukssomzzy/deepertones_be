@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogWorkbookRepository, type WorkbookPlan } from '../../src/modules/catalog/catalog.workbook.repository'
-import { country, ruleRow, sale, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
+import { claimWordRow, country, ruleRow, sale, taperRow, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
 
 // How applyWorkbook meets D1 itself: what its one batch is made of, and what it does with a batch that fails. The behaviour a repository must have
 // is in catalogWorkbookRepositoryContract (catalog.workbook.repository.test.ts); these need the real driver to be spied on.
@@ -25,6 +25,10 @@ const planOf = async (over: Partial<WorkbookPlan> = {}): Promise<WorkbookPlan> =
   retiredProducts: [],
   retiredIngredients: [],
   retiredCountries: [],
+  claimWords: [],
+  tapers: [],
+  retiredClaimWords: [],
+  retiredTapers: [],
   ...over,
 })
 
@@ -49,6 +53,11 @@ describe('the batch applyWorkbook sends', () => {
       availability: products.map((one) => sale(one.row.code, where)),
       ingredients: rules,
       retiredProducts: Array.from({ length: 95 }, (_, i) => `PRD-NONE-${i}`),
+      // The new tabs are written in chunks too: a Tapers row binds the most of any row here (its steps are a list), and none may go over D1's 100.
+      claimWords: Array.from({ length: 40 }, () => claimWordRow()),
+      tapers: Array.from({ length: 40 }, () => taperRow({ auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      retiredClaimWords: Array.from({ length: 95 }, (_, i) => `CLM-NONE-${i}`),
+      retiredTapers: Array.from({ length: 95 }, (_, i) => `TPR-NONE-${i}`),
     })
     const count = repo.statementCount(plan)
     // After the plan is made: building it reads the rules in a batch of its own.

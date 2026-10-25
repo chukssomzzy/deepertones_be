@@ -253,6 +253,13 @@
       "when": 1792867268911,
       "tag": "0035_curved_wonder_man",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "6",
+      "when": 1792944192019,
+      "tag": "0036_daily_inhumans",
+      "breakpoints": true
     }
   ]
 }

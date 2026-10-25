@@ -2583,7 +2583,8 @@
           },
           "contractVersion": {
             "type": "string",
-            "example": "1.0.0"
+            "example": "2.0.0",
+            "description": "The contract version of the workbook: send it back as `contractVersion` when importing the edited workbook."
           },
           "workbook": {
             "$ref": "#/components/schemas/CatalogWorkbook"
@@ -2609,15 +2610,23 @@
           },
           "countries": {
             "$ref": "#/components/schemas/CatalogWorkbookTab"
+          },
+          "claimWords": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
+          },
+          "tapers": {
+            "$ref": "#/components/schemas/CatalogWorkbookTab"
           }
         },
         "required": [
           "products",
           "availability",
           "ingredients",
-          "countries"
+          "countries",
+          "claimWords",
+          "tapers"
         ],
-        "description": "The four tabs of the catalog workbook, in the shape the export gives them and the import takes them. The contract is in docs/catalog-workbook-contract.md."
+        "description": "The six tabs of the catalog workbook, in the shape the export gives them and the import takes them. The contract is in docs/catalog-workbook-contract.md."
       },
       "CatalogWorkbookTab": {
         "type": "object",
@@ -2682,6 +2691,12 @@
               "countries": {
                 "$ref": "#/components/schemas/CatalogTabDiff"
               },
+              "claimWords": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
+              "tapers": {
+                "$ref": "#/components/schemas/CatalogTabDiff"
+              },
               "newProducts": {
                 "type": "array",
                 "items": {
@@ -2725,6 +2740,8 @@
               "availability",
               "ingredients",
               "countries",
+              "claimWords",
+              "tapers",
               "newProducts"
             ]
           }
@@ -7526,7 +7543,7 @@
           "Admin"
         ],
         "summary": "Check, and optionally apply, an edited catalog workbook",
-        "description": "Multipart. The whole workbook is the upload: a product, rule or country code it leaves out is retired, never deleted. The server checks the workbook against the contract itself, refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and `CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). 503 `CATALOG_ARCHIVE_FAILED` means the file could not be archived and nothing was applied; try again.",
+        "description": "Multipart. The whole workbook is the upload: a product, rule or country code it leaves out is retired, never deleted. The server checks the workbook against the contract itself, refuses one made for another contract version (409 `CONTRACT_MISMATCH`, checked before anything else), refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. In production, an approved Tapers row whose `approved_by` is not on the server's list of qualified approvers is such a problem too (`UNQUALIFIED_APPROVER`). Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and `CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). 503 `CATALOG_ARCHIVE_FAILED` means the file could not be archived and nothing was applied; try again.",
         "security": [
           {
             "adminToken": []
@@ -7562,6 +7579,13 @@
                     "default": "true",
                     "description": "Only `false` applies the upload. The default reports what it would change and writes nothing."
                   },
+                  "contractVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 20,
+                    "description": "The `contractVersion` of the export the workbook was edited from. A workbook made for another contract version is refused with 409 `CONTRACT_MISMATCH`, before anything else is checked.",
+                    "example": "2.0.0"
+                  },
                   "uploadedBy": {
                     "type": "string",
                     "minLength": 1,
@@ -7572,6 +7596,7 @@
                 "required": [
                   "workbook",
                   "baseVersion",
+                  "contractVersion",
                   "uploadedBy"
                 ]
               }

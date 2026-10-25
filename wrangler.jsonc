@@ -40,6 +40,8 @@
     "AI_DAILY_BUDGET_USD": "1",
     // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
     "OPS_ALERT_EMAIL": "",
+    // Who may approve a step-down template (the Tapers tab) in production: labels as written in the workbook's approved_by cell, separated by commas. In production only, an upload with an approved template by anyone else is refused; empty refuses every approved template. Not a secret.
+    "QUALIFIED_APPROVERS": "",
     // Where deepertones-assets is served from. Empty locally: dev serves no public images, so product views show no image.
     "CATALOG_IMAGES_PUBLIC_URL": "",
     // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
@@ -283,6 +285,8 @@
         "AI_DAILY_BUDGET_USD": "5",
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
+        // Who may approve a step-down template (the Tapers tab) in production: labels as written in the workbook's approved_by cell, separated by commas. In production only, an upload with an approved template by anyone else is refused; empty refuses every approved template. Not a secret.
+        "QUALIFIED_APPROVERS": "",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
         // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
@@ -489,6 +493,8 @@
         "AI_DAILY_BUDGET_USD": "30",
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
         "OPS_ALERT_EMAIL": "",
+        // Who may approve a step-down template (the Tapers tab) in production: labels as written in the workbook's approved_by cell, separated by commas. In production only, an upload with an approved template by anyone else is refused; empty refuses every approved template. Not a secret.
+        "QUALIFIED_APPROVERS": "",
         // Where deepertones-assets is served from (its custom domain).
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
         // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.

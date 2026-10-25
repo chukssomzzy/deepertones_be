@@ -10,18 +10,22 @@ import {
   CATEGORIES,
   CONCERN_KINDS,
   FREQUENCIES,
+  INGREDIENT_GROUPS,
   ORIGINS,
   PRODUCT_FORMS,
   ROUTINE_STEPS,
+  TAPER_KINDS,
   type Category,
   type ConcernKind,
   type Frequency,
+  type IngredientGroup,
   type Origin,
   type ProductForm,
   type RoutineStep,
+  type TaperKind,
 } from './catalog.vocabulary'
 
-// The workbook contract: what the recommendation catalog's spreadsheet (four tabs: Products, Availability, Ingredients, Countries) may hold, as
+// The workbook contract: what the recommendation catalog's spreadsheet (six tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers) may hold, as
 // data, and the one function that checks a workbook against it. Pure: no I/O, no clock, so the same rows always give the same answer. The data
 // is plain JSON (a pattern is a string), so it can be fingerprinted, and `npm run catalog:contract-doc` writes it out for the people who fill the
 // workbook in. Change it, and the version, fingerprint and that document all have to move with it.
@@ -29,7 +33,7 @@ import {
 // The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
-export const CONTRACT_VERSION = '1.0.0'
+export const CONTRACT_VERSION = '2.0.0'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
@@ -37,7 +41,7 @@ export type Cell = string | number | boolean | null
 export type RawRow = Record<string, Cell | undefined>
 /** A tab as a spreadsheet library gives it: the header row, and the rows below it. The headers say what the columns are, whatever keys the rows have. */
 export type RawTab = { headers: string[]; rows: RawRow[] }
-export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab }
+export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab }
 export type TabKey = keyof RawWorkbook
 
 // --- the definitions ----------------------------------------------------------------------------------------------------------------------------
@@ -76,6 +80,20 @@ const RULES = {
   DUPLICATE_AVAILABILITY: 'A product has two rows for the same country. Keep one row with the price range for that country.',
   DUPLICATE_RULE:
     'Two ingredient rules of the same kind name the same ingredient, by name or by alias, in lower case. Draft rules count; retired rules do not. Keep one rule for each ingredient and kind.',
+  CLASH_NOT_SYMMETRIC:
+    'A rule says its group clashes with another group, but no rule of that group says the same back (or the other group has no rule at all). Both sides are reported. Retired rules neither ask for an answer nor give one; draft rules count.',
+  CLASH_WITHOUT_GROUP: 'A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with.',
+  SELF_CLASH: 'A rule lists its own group in clashes_with. A group does not clash with itself.',
+  DUPLICATE_PHRASE: 'Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one.',
+  NOT_LOWER_CASE: 'The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case.',
+  BAD_SCHEDULE:
+    'The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop. A schedule is at most 52 weeks long.',
+  SCHEDULE_NOT_CONTIGUOUS: 'The weeks of the schedule do not run on from week 1 one step after another: it starts after week 1, or leaves a gap, or two steps share a week, or the steps are out of order.',
+  SCHEDULE_MISSING_STOP: 'The schedule never says stop. A step-down ends with a step whose frequency is stop.',
+  SCHEDULE_STOP_NOT_LAST: 'A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step.',
+  SCHEDULE_FREQUENCY_INCREASES: 'A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop.',
+  UNQUALIFIED_APPROVER:
+    'In production only: a Tapers row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file.',
 } as const
 export type RuleCode = keyof typeof RULES
 
@@ -91,6 +109,11 @@ const VOCABULARIES = {
   cautionKinds: [...CONCERN_KINDS],
   productStatuses: ['draft', 'approved', 'retired'],
   countryStatuses: ['active', 'retired'],
+  claimWordStatuses: ['approved', 'retired'],
+  claims: ['lightening'],
+  ingredientGroups: [...INGREDIENT_GROUPS],
+  taperKinds: [...TAPER_KINDS],
+  scheduleFrequencies: [...FREQUENCIES, 'stop'],
 }
 type VocabularyName = keyof typeof VOCABULARIES
 
@@ -135,6 +158,7 @@ type ColumnType =
   | 'pattern'
   | 'reference'
   | 'draft-cells'
+  | 'schedule'
 
 export type ColumnDefinition = {
   name: string
@@ -156,6 +180,8 @@ export type ColumnDefinition = {
   itemMaxLength?: number
   /** Free text: no link and no markup. */
   plainText?: true
+  /** Text with no capital letter in it. */
+  lowerCase?: true
   /** The cell is a code of another tab, and must match one exactly. */
   refersTo?: { tab: TabKey; column: string; rule: 'UNKNOWN_PRODUCT' | 'UNKNOWN_COUNTRY' }
   /** No two rows of the tab have the same value. */
@@ -194,9 +220,16 @@ const CODE_ABOUT = 'Capital letters, digits and hyphens, 2 to 40 characters, sta
 const NAME_LENGTH = 120
 const SIGNER_LENGTH = 80
 
-const statusColumn = (about: string): ColumnDefinition => ({ name: 'status', type: 'vocabulary', required: 'always', vocabulary: 'productStatuses', about })
+const statusColumn = (about: string, vocabulary: VocabularyName = 'productStatuses'): ColumnDefinition => ({ name: 'status', type: 'vocabulary', required: 'always', vocabulary, about })
 
-// The sign-off columns are the same on Products and Ingredients.
+// The longest a step-down may run, in weeks, and the longest its cell may be: ten steps of `52-52: alternate-days` fit in 300 characters with room.
+const SCHEDULE_MAX_WEEKS = 52
+const SCHEDULE_LENGTH = 300
+const SCHEDULE_EXAMPLE = '1-2: alternate-days; 3-4: weekly; 5: stop'
+const PHRASE_LENGTH = 60
+const TAPER_TEXT_LENGTH = 400
+
+// The sign-off columns are the same on every tab but Availability and Countries.
 const signOff = (what: string): ColumnDefinition[] => [
   { name: 'approved_by', type: 'text', required: 'when-approved', maxLength: SIGNER_LENGTH, about: `Who approved this ${what}. Needed when the status is approved.` },
   { name: 'approved_on', type: 'date', required: 'when-approved', about: `The day it was approved. Needed when the status is approved.` },
@@ -214,6 +247,12 @@ export const CONTRACT: Contract = {
   vocabularies: VOCABULARIES,
   vocabularyWords: { skinConcerns: SKIN_CONCERN_WORDS, cautionKinds: CAUTION_WORDS },
   vocabularyNotes: {
+    scheduleFrequencies:
+      'The frequencies of a step-down schedule: the usual frequencies, and stop. A schedule goes only down the ladder, strongest first: am-pm, then am or pm (the same strength), then alternate-days, then weekly, then as-needed, then stop. It never goes back up, and it ends with stop.',
+    claims: 'What a claim word says about a product. For now there is one: a product whose brand, name or variant holds the phrase is sold for lightening.',
+    ingredientGroups:
+      'What an ingredient is, for the rules that look across a shelf, as opposed to what it does. Most ingredient rules have no group. Mercury is stopped at once; steroid and lightening-agent are stopped with a step-down plan.',
+    taperKinds: 'The groups that are stopped with a step-down plan and not at once. Mercury is not on the list: it is stopped at once.',
     budgetBands:
       'Not a column of any tab. A budget band is a rough answer about how much a person can spend on one new product, and where each band ends is set per country by low_max and mid_max in the Countries tab. It is used when shopping facts are matched to products.',
   },
@@ -299,12 +338,24 @@ export const CONTRACT: Contract = {
         { name: 'statement', type: 'text', required: 'always', maxLength: 600, plainText: true, about: 'What is said about the ingredient, in plain words a person can read. No links and no markup.' },
         { name: 'source_url', type: 'url', required: 'optional', about: 'A link to the regulation or listing behind the statement. Leave it empty for a commonly cited caution that no regulation lists.' },
         { name: 'helps', type: 'vocabulary-list', required: 'optional', vocabulary: 'skinConcerns', about: 'The skin concerns the ingredient helps with, separated by ;. Optional.' },
+        { name: 'group', type: 'vocabulary', required: 'optional', vocabulary: 'ingredientGroups', about: 'What kind of ingredient this is, where it matters for a shelf: for example retinoid or steroid. Empty for most rules. It does not change how the rule is matched.' },
+        {
+          name: 'clashes_with',
+          type: 'vocabulary-list',
+          required: 'optional',
+          vocabulary: 'ingredientGroups',
+          about:
+            'The groups that should not be used together with this rule\'s group, separated by ;. The relation goes both ways: if retinoid lists exfoliating-acid, a rule of the exfoliating-acid group lists retinoid. Needs a group on the rule.',
+        },
         statusColumn('draft: still being worked on, and applies to nothing. approved: in force. retired: no longer in force; the row stays so its code is never reused.'),
         ...signOff('rule'),
       ],
       checks: [
         { rule: 'DUPLICATE_RULE', about: 'One rule for each ingredient name or alias and kind among the rules that are not retired; a draft counts.' },
         { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
+        { rule: 'CLASH_WITHOUT_GROUP', about: 'A rule that lists clashes_with has a group.' },
+        { rule: 'SELF_CLASH', about: 'A rule does not list its own group in clashes_with.' },
+        { rule: 'CLASH_NOT_SYMMETRIC', about: 'If a rule\'s group lists another group, a rule of that group lists the first back. Retired rules are not counted; a draft is.' },
       ],
     },
     {
@@ -320,6 +371,46 @@ export const CONTRACT: Contract = {
         { name: 'status', type: 'vocabulary', required: 'always', vocabulary: 'countryStatuses', about: 'active: recommendations are made here. retired: no longer served; the row stays.' },
       ],
       checks: [{ rule: 'LOW_NOT_BELOW_MID', about: 'low_max is below mid_max.' }],
+    },
+    {
+      key: 'claimWords',
+      title: 'Claim words',
+      about:
+        'Phrases that say a product is sold for lightening or bleaching. A product whose brand, name or variant holds an approved phrase is flagged by the shelf verdict. "Brightening" and "glow" are never claim words. A claim word is retired, never deleted.',
+      columns: [
+        { name: 'code', type: 'pattern', required: 'always', pattern: CODE_PATTERN, patternRule: 'BAD_CODE', patternAbout: CODE_ABOUT, unique: true, about: 'Our own short code for the claim word, such as CLM-WHITENING. It never changes once the word is in the workbook.' },
+        { name: 'phrase', type: 'text', required: 'always', maxLength: PHRASE_LENGTH, plainText: true, lowerCase: true, about: 'The words, in lower case, as they appear in a product name: for example "whitening".' },
+        { name: 'claim', type: 'vocabulary', required: 'always', vocabulary: 'claims', about: 'What the phrase claims. Only lightening, for now.' },
+        statusColumn('approved: in force. retired: no longer in force; the row stays so its code is never reused. A claim word has no draft: leave a word you are unsure of out of the workbook.', 'claimWordStatuses'),
+        ...signOff('claim word'),
+      ],
+      checks: [
+        { rule: 'DUPLICATE_PHRASE', about: 'One claim word for each phrase among the words that are not retired.' },
+        { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
+      ],
+    },
+    {
+      key: 'tapers',
+      title: 'Tapers',
+      about:
+        'Step-down templates: how a person stops a steroid or a lightening product without the flare of stopping at once. A template is shown to people, so a qualified person approves it; in production the server refuses an approved template whose approver is not on its list. A template is retired, never deleted, so a past routine can still say which plan it used.',
+      columns: [
+        { name: 'code', type: 'pattern', required: 'always', pattern: CODE_PATTERN, patternRule: 'BAD_CODE', patternAbout: CODE_ABOUT, unique: true, about: 'Our own short code for the template, such as TPR-STEROID-1. It never changes once the template is in the workbook.' },
+        { name: 'kind', type: 'vocabulary', required: 'always', vocabulary: 'taperKinds', about: 'The kind of product the template is for.' },
+        {
+          name: 'schedule',
+          type: 'schedule',
+          required: 'always',
+          vocabulary: 'scheduleFrequencies',
+          maxLength: SCHEDULE_LENGTH,
+          about: `The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week ${SCHEDULE_MAX_WEEKS}. The frequency never goes up, and the last step is stop. For example: ${SCHEDULE_EXAMPLE}`,
+        },
+        { name: 'what_to_expect', type: 'text', required: 'always', maxLength: TAPER_TEXT_LENGTH, plainText: true, about: 'What a person should expect while stepping down, in plain words: for example that a flare after a step is expected and passes.' },
+        { name: 'see_a_professional_if', type: 'text', required: 'always', maxLength: TAPER_TEXT_LENGTH, plainText: true, about: 'When to stop and see a professional, in plain words.' },
+        statusColumn('draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its code is never reused.'),
+        ...signOff('template'),
+      ],
+      checks: [{ rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' }],
     },
   ],
   rules: { ...RULES },
@@ -367,6 +458,9 @@ export type IngredientRule = {
   statement: string
   sourceUrl: string | null
   helps: ShownConcern[]
+  /** Rule metadata for the shelf verdict, not part of what the matcher reads. */
+  group: IngredientGroup | null
+  clashesWith: IngredientGroup[]
   status: RowStatus
   approvedBy: string | null
   approvedOn: Date | null
@@ -376,12 +470,93 @@ export type IngredientRule = {
 
 export type CountryRow = { code: string; currency: string; lowMax: number; midMax: number; status: 'active' | 'retired' }
 
-export type Workbook = { products: ProductRow[]; availability: AvailabilityRow[]; ingredients: IngredientRule[]; countries: CountryRow[] }
+export type ClaimWordRow = {
+  code: string
+  phrase: string
+  claim: 'lightening'
+  status: 'approved' | 'retired'
+  approvedBy: string | null
+  approvedOn: Date | null
+  auditedBy: string | null
+  auditedOn: Date | null
+}
+
+/**
+ * One step of a step-down: `toWeek` is `fromWeek` for a single week. The frequency is one of the usual frequencies or `stop`, which the contract
+ * checks when it reads a schedule; it is typed as text so that a step read back from storage needs no cast.
+ */
+export type ScheduleStep = { fromWeek: number; toWeek: number; frequency: string }
+
+export type TaperRow = {
+  code: string
+  kind: TaperKind
+  schedule: ScheduleStep[]
+  whatToExpect: string
+  seeAProfessionalIf: string
+  status: RowStatus
+  approvedBy: string | null
+  approvedOn: Date | null
+  auditedBy: string | null
+  auditedOn: Date | null
+}
+
+export type Workbook = {
+  products: ProductRow[]
+  availability: AvailabilityRow[]
+  ingredients: IngredientRule[]
+  countries: CountryRow[]
+  claimWords: ClaimWordRow[]
+  tapers: TaperRow[]
+}
 
 /** Where in the workbook, and which rule: never what the cell held. `row` is the spreadsheet row, so the header is 1 and the first data row 2. */
 export type WorkbookProblem = { tab: TabKey; row: number; column: string; rule: RuleCode }
 
 export type WorkbookResult = { ok: true; workbook: Workbook } | { ok: false; problems: WorkbookProblem[] }
+
+// --- reading a schedule -------------------------------------------------------------------------------------------------------------------------
+
+/** How strong a step is, so that a schedule can be held to only ever going down. am and pm are the same strength. */
+const STRENGTH: Record<Frequency | 'stop', number> = { 'am-pm': 5, am: 4, pm: 4, 'alternate-days': 3, weekly: 2, 'as-needed': 1, stop: 0 }
+
+const SCHEDULE_ENTRY = /^(\d{1,3})(?:-(\d{1,3}))?\s*:\s*(\S+)$/
+
+/** The steps of a schedule cell, or null when any entry is not `<weeks>: <frequency>` (weeks from 1, a run written low to high). */
+const readSchedule = (text: string): ScheduleStep[] | null => {
+  const entries = text.split(';').map((entry) => entry.trim()).filter((entry) => entry !== '')
+  if (entries.length === 0) return null
+  const steps: ScheduleStep[] = []
+  for (const entry of entries) {
+    const found = SCHEDULE_ENTRY.exec(entry)
+    if (found === null) return null
+    const fromWeek = Number(found[1])
+    const toWeek = found[2] === undefined ? fromWeek : Number(found[2])
+    const frequency = found[3]!
+    if (fromWeek < 1 || toWeek < fromWeek || toWeek > SCHEDULE_MAX_WEEKS || !Object.hasOwn(STRENGTH, frequency)) return null
+    steps.push({ fromWeek, toWeek, frequency })
+  }
+  return steps
+}
+
+/** The rules a read schedule breaks. A schedule with one fault breaks one rule: a stop in the middle does not also count as a rise after it. */
+const scheduleFaults = (steps: ScheduleStep[]): RuleCode[] => {
+  const faults: RuleCode[] = []
+  let expected = 1
+  const contiguous = steps.every((step) => {
+    const here = step.fromWeek === expected
+    expected = step.toWeek + 1
+    return here
+  })
+  if (!contiguous) faults.push('SCHEDULE_NOT_CONTIGUOUS')
+  const firstStop = steps.findIndex((step) => step.frequency === 'stop')
+  if (firstStop < 0) faults.push('SCHEDULE_MISSING_STOP')
+  else if (firstStop < steps.length - 1 || steps.filter((step) => step.frequency === 'stop').length > 1) faults.push('SCHEDULE_STOP_NOT_LAST')
+  // Only the steps up to the first stop are compared: what follows a misplaced stop is already reported.
+  const until = firstStop < 0 ? steps : steps.slice(0, firstStop + 1)
+  const strength = (step: ScheduleStep) => STRENGTH[step.frequency as keyof typeof STRENGTH]
+  if (until.some((step, i) => i > 0 && strength(step) > strength(until[i - 1]!))) faults.push('SCHEDULE_FREQUENCY_INCREASES')
+  return faults
+}
 
 // --- reading one tab ----------------------------------------------------------------------------------------------------------------------------
 
@@ -651,7 +826,33 @@ class Sheet {
   private checkText(i: number, definition: ColumnDefinition, value: string): void {
     // The length is checked first, and a cell over it says only that: a huge cell is refused for what it costs to measure, not to read.
     if (definition.maxLength !== undefined && value.length > definition.maxLength) this.fail(i, definition.name, 'TOO_LONG')
-    else if (definition.plainText && hasLinkOrMarkup(value)) this.fail(i, definition.name, 'HAS_LINK_OR_MARKUP')
+    else {
+      if (definition.plainText && hasLinkOrMarkup(value)) this.fail(i, definition.name, 'HAS_LINK_OR_MARKUP')
+      if (definition.lowerCase && value !== value.toLowerCase()) this.fail(i, definition.name, 'NOT_LOWER_CASE')
+    }
+  }
+
+  /** A step-down schedule. A cell that is not in the format is one problem; a cell that is, but breaks a rule of schedules, gives each rule it breaks. */
+  schedule(i: number, column: string): ScheduleStep[] {
+    const definition = this.define(column, 'schedule')
+    if (!this.has(column)) return []
+    const value = this.value(i, column)
+    if (value === null) {
+      this.missing(i, definition)
+      return []
+    }
+    // The length first, as for any text: a huge cell is refused for its length alone.
+    if (definition.maxLength !== undefined && value.length > definition.maxLength) {
+      this.fail(i, column, 'TOO_LONG')
+      return []
+    }
+    const steps = readSchedule(value)
+    if (steps === null) {
+      this.fail(i, column, 'BAD_SCHEDULE')
+      return []
+    }
+    for (const fault of scheduleFaults(steps)) this.fail(i, column, fault)
+    return steps
   }
 
   /** Records that the cell is empty when its column needs it for this row, and gives null either way. */
@@ -685,6 +886,8 @@ class WorkbookValidator {
   private readonly availability: Sheet
   private readonly ingredients: Sheet
   private readonly countries: Sheet
+  private readonly claimWords: Sheet
+  private readonly tapers: Sheet
 
   constructor(raw: RawWorkbook) {
     const sheet = (key: TabKey) => new Sheet(key, raw[key], (problem) => this.report(problem))
@@ -692,15 +895,19 @@ class WorkbookValidator {
     this.availability = sheet('availability')
     this.ingredients = sheet('ingredients')
     this.countries = sheet('countries')
+    this.claimWords = sheet('claimWords')
+    this.tapers = sheet('tapers')
   }
 
   run(): WorkbookResult {
-    for (const sheet of [this.products, this.availability, this.ingredients, this.countries]) sheet.checkHeader()
+    for (const sheet of [this.products, this.availability, this.ingredients, this.countries, this.claimWords, this.tapers]) sheet.checkHeader()
     const workbook: Workbook = {
       products: this.products.rows.map((_, i) => this.product(i)),
       availability: this.availability.rows.map((_, i) => this.availabilityRow(i)),
       ingredients: this.ingredients.rows.map((_, i) => this.ingredient(i)),
       countries: this.countries.rows.map((_, i) => this.country(i)),
+      claimWords: this.claimWords.rows.map((_, i) => this.claimWord(i)),
+      tapers: this.tapers.rows.map((_, i) => this.taper(i)),
     }
     this.clashes()
     return this.problems.length === 0 ? { ok: true, workbook } : { ok: false, problems: this.problems }
@@ -765,6 +972,8 @@ class WorkbookValidator {
       statement: s.text(i, 'statement')!,
       sourceUrl: s.url(i, 'source_url'),
       helps: s.vocabularyList<ShownConcern>(i, 'helps'),
+      group: s.vocabulary<IngredientGroup>(i, 'group'),
+      clashesWith: s.vocabularyList<IngredientGroup>(i, 'clashes_with'),
       status: s.vocabulary<RowStatus>(i, 'status')!,
       approvedBy: s.text(i, 'approved_by'),
       approvedOn: s.date(i, 'approved_on'),
@@ -787,6 +996,38 @@ class WorkbookValidator {
     }
   }
 
+  private claimWord(i: number): ClaimWordRow {
+    const s = this.claimWords
+    s.checkAudit(i)
+    return {
+      code: s.pattern(i, 'code')!,
+      phrase: s.text(i, 'phrase')!,
+      claim: s.vocabulary<ClaimWordRow['claim']>(i, 'claim')!,
+      status: s.vocabulary<ClaimWordRow['status']>(i, 'status')!,
+      approvedBy: s.text(i, 'approved_by'),
+      approvedOn: s.date(i, 'approved_on'),
+      auditedBy: s.text(i, 'audited_by'),
+      auditedOn: s.date(i, 'audited_on'),
+    }
+  }
+
+  private taper(i: number): TaperRow {
+    const s = this.tapers
+    s.checkAudit(i)
+    return {
+      code: s.pattern(i, 'code')!,
+      kind: s.vocabulary<TaperKind>(i, 'kind')!,
+      schedule: s.schedule(i, 'schedule'),
+      whatToExpect: s.text(i, 'what_to_expect')!,
+      seeAProfessionalIf: s.text(i, 'see_a_professional_if')!,
+      status: s.vocabulary<RowStatus>(i, 'status')!,
+      approvedBy: s.text(i, 'approved_by'),
+      approvedOn: s.date(i, 'approved_on'),
+      auditedBy: s.text(i, 'audited_by'),
+      auditedOn: s.date(i, 'audited_on'),
+    }
+  }
+
   /** The Products columns a draft cell may name: every one but those that identify or sign off the row. */
   private draftableColumns(): Set<string> {
     const products = CONTRACT.tabs.find((tab) => tab.key === 'products')!
@@ -806,8 +1047,8 @@ class WorkbookValidator {
   // --- rules between rows: every row in a clash is reported, so the author sees both sides ------------------------------------------------------
 
   private clashes(): void {
-    const { products, availability, ingredients, countries } = this
-    for (const sheet of [products, ingredients, countries]) {
+    const { products, availability, ingredients, countries, claimWords, tapers } = this
+    for (const sheet of [products, ingredients, countries, claimWords, tapers]) {
       this.reportClash(sheet, 'DUPLICATE_CODE', (i) => {
         const code = sheet.has('code') ? sheet.value(i, 'code') : null
         return code === null ? [] : [{ key: code, column: 'code' }]
@@ -836,6 +1077,45 @@ class WorkbookValidator {
       const name = ingredients.has('name') && !ingredients.overCap(i, 'name') ? ingredients.value(i, 'name') : null
       return [...(name === null ? [] : [label(name, 'name')]), ...ingredients.itemsWithinCap(i, 'aliases').map((alias) => label(alias, 'aliases'))]
     })
+    this.reportClash(claimWords, 'DUPLICATE_PHRASE', (i) => {
+      // As for a rule: a retired word applies to nothing, and may be replaced by a new one for the same phrase.
+      if (!claimWords.has('phrase') || claimWords.overCap(i, 'phrase') || (claimWords.has('status') && claimWords.value(i, 'status') === 'retired')) return []
+      const phrase = claimWords.value(i, 'phrase')
+      return phrase === null ? [] : [{ key: phrase.toLowerCase(), column: 'phrase' }]
+    })
+    this.ruleClashes()
+  }
+
+  /**
+   * The clashes between ingredient groups: a rule lists the groups its own group clashes with, and the relation has to hold both ways. It is read
+   * from the cells as written, not from what the readers gave, so a bad item in a list is reported as that and nothing more. A retired rule neither
+   * asks for an answer nor gives one.
+   */
+  private ruleClashes(): void {
+    const s = this.ingredients
+    if (!s.has('group') || !s.has('clashes_with')) return
+    const known = (text: string): text is IngredientGroup => (INGREDIENT_GROUPS as readonly string[]).includes(text)
+    const rules: { i: number; group: IngredientGroup; clashes: IngredientGroup[] }[] = []
+    s.rows.forEach((_, i) => {
+      if (s.has('status') && s.value(i, 'status') === 'retired') return
+      const clashes = [...new Set((s.items(i, 'clashes_with') ?? []).filter(known))]
+      const written = s.value(i, 'group')
+      if (written === null) {
+        if (clashes.length > 0) s.fail(i, 'clashes_with', 'CLASH_WITHOUT_GROUP')
+        return
+      }
+      if (!known(written)) return
+      if (clashes.includes(written)) s.fail(i, 'clashes_with', 'SELF_CLASH')
+      rules.push({ i, group: written, clashes: clashes.filter((other) => other !== written) })
+    })
+    for (const rule of rules) {
+      for (const other of rule.clashes) {
+        const answering = rules.filter((candidate) => candidate.group === other)
+        if (answering.some((candidate) => candidate.clashes.includes(rule.group))) continue
+        s.fail(rule.i, 'clashes_with', 'CLASH_NOT_SYMMETRIC')
+        for (const candidate of answering) s.fail(candidate.i, 'group', 'CLASH_NOT_SYMMETRIC')
+      }
+    }
   }
 
   /** Reports every row that has a key (a row may have several, each with the column it sits in) another row has too. A row repeating its own key is no clash. */

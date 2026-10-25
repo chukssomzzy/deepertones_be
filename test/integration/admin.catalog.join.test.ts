@@ -408,7 +408,7 @@ describe('CatalogWorkbookService', () => {
     it('importWorkbook of an unchanged export is a dry run with an empty diff, and needs no file', async () => {
       const live = await exportLive()
 
-      const result = await workbookService().importWorkbook({ workbook: live.workbook, file: null, baseVersion: live.catalogVersion, dryRun: true, uploadedBy: 'Service Caller' })
+      const result = await workbookService().importWorkbook({ workbook: live.workbook, file: null, baseVersion: live.catalogVersion, dryRun: true, uploadedBy: 'Service Caller', contractVersion: live.contractVersion })
 
       expect(result).toEqual({ applied: false, catalogVersion: live.catalogVersion, diff: EMPTY_DIFF })
     })
@@ -421,8 +421,8 @@ describe('CatalogWorkbookService', () => {
       workbook.products.rows.push({ ...product })
       workbook.availability.rows.push(availabilityRow(product.code as string))
 
-      await expect(workbookService().importWorkbook({ workbook, file: null, baseVersion: live.catalogVersion, dryRun: false, uploadedBy: 'Service Caller' })).rejects.toMatchObject({ name: 'ValidationError' })
-      const result = await workbookService().importWorkbook({ workbook, file: xlsxBytes('service'), baseVersion: live.catalogVersion, dryRun: false, uploadedBy: 'Service Caller' })
+      await expect(workbookService().importWorkbook({ workbook, file: null, baseVersion: live.catalogVersion, dryRun: false, uploadedBy: 'Service Caller', contractVersion: live.contractVersion })).rejects.toMatchObject({ name: 'ValidationError' })
+      const result = await workbookService().importWorkbook({ workbook, file: xlsxBytes('service'), baseVersion: live.catalogVersion, dryRun: false, uploadedBy: 'Service Caller', contractVersion: live.contractVersion })
 
       expect(result).toMatchObject({ applied: true, catalogVersion: live.catalogVersion + 1 })
       expect(sorted(result.diff).products).toEqual(diffOf({ added: [product.code as string] }))
@@ -434,8 +434,8 @@ describe('CatalogWorkbookService', () => {
       const bad = structuredClone(live.workbook)
       bad.products.rows.push(productRow({ category: 'nonsense' }))
 
-      await expect(workbookService().importWorkbook({ workbook: live.workbook, file: null, baseVersion: live.catalogVersion - 1, dryRun: true, uploadedBy: 'Service Caller' })).rejects.toMatchObject({ code: 'CATALOG_STALE' })
-      await expect(workbookService().importWorkbook({ workbook: bad, file: null, baseVersion: live.catalogVersion, dryRun: true, uploadedBy: 'Service Caller' })).rejects.toMatchObject({
+      await expect(workbookService().importWorkbook({ workbook: live.workbook, file: null, baseVersion: live.catalogVersion - 1, dryRun: true, uploadedBy: 'Service Caller', contractVersion: live.contractVersion })).rejects.toMatchObject({ code: 'CATALOG_STALE' })
+      await expect(workbookService().importWorkbook({ workbook: bad, file: null, baseVersion: live.catalogVersion, dryRun: true, uploadedBy: 'Service Caller', contractVersion: live.contractVersion })).rejects.toMatchObject({
         code: 'CATALOG_INVALID',
         details: { problems: [{ tab: 'products', row: bad.products.rows.length + 1, column: 'category', rule: 'NOT_IN_VOCABULARY' }] },
       })
