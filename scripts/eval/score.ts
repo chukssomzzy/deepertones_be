@@ -169,8 +169,8 @@ export type Args = {
 const MODES: readonly Mode[] = ['analysis', 'research', 'goals', 'mentions', 'draft', 'all']
 export const JOBS: readonly AiJob[] = AI_JOBS
 const DEFAULT_MAX_USD = 2
-// A draft run drafts every case with web search and then fetches a page for each value it drafted.
-const DEFAULT_DRAFT_MAX_USD = 5
+// A draft run drafts every case with web search (up to three drafter calls for a case with a missing price) and then fetches a page for each value it drafted.
+const DEFAULT_DRAFT_MAX_USD = 10
 export const USAGE =
   'Usage: npm run eval:catalog -- [--mode analysis|research|goals|mentions|draft|all] [--limit N] [--max-usd N] [--model JOB=MODEL]... [--set main|holdout|dev (draft only)] [--out-dir DIR (draft only)] ' +
   `(JOB is one of ${JOBS.join(', ')})`

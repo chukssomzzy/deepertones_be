@@ -31,15 +31,20 @@ export interface DraftJudge {
 /** What a verdict that vouches for nothing looks like, with why. */
 export const unverifiable = (reason: UnverifiableReason): Verdict => ({ fetched: false, exactProduct: 'unclear', supports: 'unclear', currencyShown: null, reason })
 
-// What of the answer matters here: its four fields. Anything else the model wrote (reasoning, a quote from the page) is dropped by the parse.
+// What of the answer matters here: its five fields. Anything else the model wrote (reasoning, a quote from the page) is dropped by the parse.
 const ANSWER_SCHEMA = z.object({
   fetched: z.boolean(),
   exactProduct: z.enum(['yes', 'no', 'unclear']),
   supports: z.enum(['yes', 'no', 'unclear']),
   currencyShown: z.string().nullable().optional(),
+  // Kept loose and cleaned by hand below: a malformed list must cost only the prices, not the verdict.
+  pricesShown: z.unknown().optional(),
 })
 
 const CURRENCY_CODE = /^[A-Z]{3}$/
+
+/** The prices worth comparing: positive whole numbers small enough to be exact. Anything else the judge wrote in the list is dropped. */
+const pricesIn = (shown: unknown): number[] => (Array.isArray(shown) ? shown.filter((price): price is number => typeof price === 'number' && Number.isSafeInteger(price) && price > 0) : [])
 
 const hostOf = (address: string): string | undefined => {
   try {
@@ -109,12 +114,14 @@ export class AnthropicDraftJudge implements DraftJudge {
     if (!answer.fetched) return unverifiable('not-fetched')
 
     const shown = answer.currencyShown
+    const isPriceRow = request.column === 'availability'
     return {
       fetched: true,
       exactProduct: answer.exactProduct,
       supports: answer.supports,
       // Only a price row has a currency to check, and only a currency code can be compared with the country's.
-      currencyShown: request.column === 'availability' && typeof shown === 'string' && CURRENCY_CODE.test(shown) ? shown : null,
+      currencyShown: isPriceRow && typeof shown === 'string' && CURRENCY_CODE.test(shown) ? shown : null,
+      ...(isPriceRow ? { pricesShown: pricesIn(answer.pricesShown) } : {}),
     }
   }
 }

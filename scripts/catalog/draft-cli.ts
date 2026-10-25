@@ -10,7 +10,7 @@ export type DraftCliDeps = {
   /** Rejects with a DraftInputError when the key is missing, which is the person's to fix; any other rejection is hidden. */
   loadApiKey: () => Promise<string>
   /** The researcher, the drafter and the ledger they spend on, capped at `maxUsd`. */
-  clients: (settings: { apiKey: string; maxUsd: number }) => Omit<DraftDeps, 'countries'>
+  clients: (settings: { apiKey: string; maxUsd: number }) => Omit<DraftDeps, 'countries' | 'passes'>
   io: DraftIo
   log: (line: string) => void
   error: (line: string) => void
