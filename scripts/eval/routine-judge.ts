@@ -53,7 +53,7 @@ export interface RoutineJudge {
 /** Judges a written routine with Claude. It has no tools and no labels: it sees only what the writer saw and what the writer wrote. */
 export class AnthropicRoutineJudge implements RoutineJudge {
   // Room for the answer and for the model's thinking, which counts against max_tokens.
-  private static readonly MAX_TOKENS = 4096
+  private static readonly MAX_TOKENS = 12000
   private static readonly LEAD_IN = 'Judge this routine:'
 
   private readonly client: AnthropicClient

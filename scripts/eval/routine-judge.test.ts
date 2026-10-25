@@ -128,12 +128,12 @@ describe('AnthropicRoutineJudge: the request', () => {
     expect(JSON.stringify(calls[0]!.body.system)).not.toContain(CANDIDATE_NAME)
   })
 
-  it('leaves room for the answer and for the model\'s thinking: max_tokens of at least 4096', async () => {
+  it('leaves room for the answer and for the model\'s thinking: max_tokens of at least 12000, as the judge thinks through every candidate before it classes a pick', async () => {
     const { calls, judge } = judgeAnswering()
 
     await judge.judge(input)
 
-    expect(calls[0]!.body.max_tokens).toBeGreaterThanOrEqual(4096)
+    expect(calls[0]!.body.max_tokens).toBeGreaterThanOrEqual(12000)
   })
 
   it('asks for a json_schema structured output with exactly the five fields of a judgement, all required, and no oneOf', async () => {
