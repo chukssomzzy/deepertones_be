@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { z } from 'zod'
 import { FREQUENCIES, ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
+import { checkRoutine } from './routines.gates'
 import { RoutineSchema, routineSchemaFor } from './routines.schema'
 import type { RoutineSkeleton, ShelfVerdict, SkeletonCandidate, SkeletonShelfProduct } from './routines.types'
 
@@ -304,11 +305,21 @@ describe('routineSchemaFor', () => {
     expect(parsesFor(NO_KEPT_SHELF, routineOf([entry({ product: { kind: 'none' } })]))).toBe(true)
   })
 
-  it('builds a schema for a skeleton where nothing is stopped, accepts no tapers, and rejects any taper', () => {
+  it('builds a schema for a skeleton where nothing is stopped, and leaves any taper to the taper gate', () => {
+    const taper = { shelfProductId: 'keep-1', templateId: 'tpl-retinoid' }
+
     expect(() => routineSchemaFor(NOTHING_STOPPED)).not.toThrow()
     expect(parsesFor(NOTHING_STOPPED, routineOf([]))).toBe(true)
-    expect(parsesFor(NOTHING_STOPPED, routineOf([], [{ shelfProductId: 'keep-1', templateId: 'tpl-retinoid' }]))).toBe(false)
-    expect(parsesFor(NOTHING_STOPPED, routineOf([], [{ shelfProductId: 'drop-1', templateId: 'tpl-retinoid' }]))).toBe(false)
+    expect(checkRoutine(NOTHING_STOPPED, routineOf([], [taper])).map((f) => f.gate)).toContain('taper')
+  })
+
+  it('falls back to the full vocabularies when the skeleton has no steps or allows no frequency, because an enum cannot be empty', () => {
+    const bare = skeletonWith({ steps: [], limits: { allowed: { cleanse: [], treat: [], moisturise: [], protect: [] }, maxNewProducts: 0 } })
+    const json = JSON.stringify(z.toJSONSchema(routineSchemaFor(bare)))
+
+    expect(json).not.toContain('"enum":[]')
+    expect(parsesFor(bare, routineOf([entry({ step: 'cleanse', product: { kind: 'none' }, frequency: 'am' })]))).toBe(true)
+    expect(parsesFor(bare, routineOf([entry({ step: 'exfoliate', product: { kind: 'none' }, frequency: 'am' })]))).toBe(false)
   })
 
   describe('as JSON schema, which is what the writer sends', () => {
@@ -356,6 +367,15 @@ describe('routineSchemaFor', () => {
       expect(JSON.stringify(jsonOf(NO_KEPT_SHELF))).not.toContain('"shelf"')
       expect(JSON.stringify(jsonOf(SKELETON_A))).toContain('"candidate"')
       expect(JSON.stringify(jsonOf(SKELETON_A))).toContain('"shelf"')
+    })
+
+    it('uses no array keyword the API refused (prefixItems, maxItems, items: false), even when nothing is stopped', () => {
+      for (const skeleton of [SKELETON_A, NO_CANDIDATES, NO_KEPT_SHELF, NOTHING_STOPPED, EMPTY_SHELF_AND_GAPS]) {
+        const text = JSON.stringify(jsonOf(skeleton))
+        expect(text).not.toContain('prefixItems')
+        expect(text).not.toContain('maxItems')
+        expect(text).not.toContain('"items":false')
+      }
     })
 
     it('keeps the closed objects: no additional properties anywhere', () => {
