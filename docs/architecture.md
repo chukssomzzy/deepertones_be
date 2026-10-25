@@ -448,8 +448,10 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
   records the cron as failed.
 - **The same cron also sweeps the safety parses** (`createDailyJobs` in `jobs/scheduled.ts`): after the cleanup it calls `SafetyService.requeueDueParses`, which queues the
   parse-safety job for every pending parse whose due time has come (see "Safety facts (onboarding)"). Neither runs inside the other: a cleanup that throws does not stop the
-  sweep, nor a sweep that throws the cleanup, and the first failure is rethrown after both have run so Cloudflare records the cron as failed. The sweep logs
+  sweep, nor a sweep that throws the cleanup, and the first failure is rethrown after all have run so Cloudflare records the cron as failed. The sweep logs
   `{ job: 'safety-parse-requeue', outcome: 'done', queued }` (only when it queued something) or `{ ..., outcome: 'failed', error }`.
+- **A third step sends the check-in-due pushes** (own try, after the safety sweep): `FaceScanService.sendDueCheckIns(new Date())` (see "Face scans", "Check-in push"). It logs
+  `{ job: 'face-check-in-push', outcome: 'done', queued }` when it queued something, or `{ ..., outcome: 'failed', error }`, and a failure here is rethrown only if nothing before it failed.
 
 ### Tokens and the auth middleware
 `lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`
@@ -685,19 +687,19 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 `check-push-receipts` on `push-receipts`. That is four more queues per environment, in all three `wrangler.jsonc` blocks
 (env blocks do not inherit), created before the first deploy that binds them (README, "Before the first deploy").
 
-- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake` and `newSignIn` queue a `send-push` job
+- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake`, `faceCheckInDue` and `newSignIn` queue a `send-push` job
   and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId?, faceScanId? }` and return: a scan step or a sign-in must not fail
   because a push could not be queued. (Who calls them, and when, is in "What triggers a push".)
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
   `back-photo`, `confirm` or `identify`, optional `ask`), `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
-  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`).
+  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`) and `face-check-in-due` (user, profile, `dayOneScanId`).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
   `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
   first ask); `new-sign-in:<eventId>`; `face-scan-ready:<faceScanId>` (a scan becomes ready once);
-  `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
+  `face-check-in-due:<dayOneScanId>` (a chase is told once); `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
   notification). `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
   deduplicated by the key. The receipt job's key is its ticket ids.
@@ -713,6 +715,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   | `sendDone` | the call's `markScanDone` applied | `scanFinished({ readyCount })`, `readyCount` = the items in `ready` | `scan-finished:<scanId>` |
   | `FaceScanService.copyResults` | `completeFaceScan` returned true | `faceScanReady()` | `face-scan-ready:<faceScanId>` |
   | `FaceScanService.needRetake` | the conditional `analysing` to `needs-retake` update applied (upload or fetch step) | `faceScanNeedsRetake({ reason, at })` | `face-scan-needs-retake:<faceScanId>:<at>` |
+  | `FaceScanService.sendDueCheckIns` | the daily cron: a chase at its review point whose `recordCheckInPush` landed | `faceCheckInDue({ userId, profileId, dayOneScanId })` | `face-check-in-due:<dayOneScanId>` |
   | `AuthService.verifyOtp` | a guest signed in to an existing account | `newSignIn({ userId: <account>, platform, at })` | `new-sign-in:<eventId>` |
 
   A face scan that ends `failed` (any path) notifies nothing, nor does the Fitzpatrick step, a retake or a create. An item that ends `failed` after the last allowed back photo notifies nothing. Ten items needing a back photo are ONE push (the first item's key wins; the job system drops the
@@ -734,7 +737,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
     guest and the outcome is `existing`; promotion in place and a verified user signing in again do not.
 - **Targeting is decided at send time.** Scan and face scan notifications go to the phones on the scan's profile (`forProfile`, narrowed to the
   account the message names); the sign-in alert goes to the account's phones (`forUser`), on any profile, EXCEPT the phone that signed
-  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on): `scan-finished` and `face-scan-ready` follow `scanFinished`, `scan-needs-you` and `face-scan-needs-retake` follow `scanNeedsYou`; the sign-in alert has no switch.
+  in (below). No phone, no send and no receipt job. The two scan switches are read then too (a missing row means on): `scan-finished` and `face-scan-ready` follow `scanFinished`, `scan-needs-you`, `face-scan-needs-retake` and `face-check-in-due` follow `scanNeedsYou` (no new switch); the sign-in alert has no switch.
 - **The sign-in alert skips the phone that signed in, by time.** The body carries `at`, when the sign-in happened (epoch ms; `newSignIn`
   defaults it to now). `deliver` alerts only the account's rows with `createdAt < at`. Why: the signing-in phone gets a session first and
   registers its push token after, so any row created at or after `at` is that phone registering under the account (a guest's row is
@@ -746,7 +749,7 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
   iPhone, just now"). `data` is `{ url, kind, scanId?, itemId?, faceScanId?, reason?, profileId? }`; the sign-in alert has only `url` and `kind`. The face scan pushes say "Your face scan is ready" / "Open the app to see what we noticed"
   and "Your face photo needs a retake" with one line per retake reason ("Find more light and take it again", "We couldn't find a face. Take it again", ...): no condition word, score, digit or lightness word.
 - **Deep links are a JSON file.** `deep-links.json` maps each kind to an Expo Router path template (`/scans/{scanId}`,
-  `/scans/{scanId}/items/{itemId}`, `/settings/security`, `/scans/faces/{faceScanId}`, `/scans/faces/{faceScanId}/retake`), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
+  `/scans/{scanId}/items/{itemId}`, `/settings/security`, `/scans/faces/{faceScanId}`, `/scans/faces/{faceScanId}/retake`, and the static `/scans/faces/new` for `face-check-in-due`, which carries no scan id because a check-in is a scan that does not exist yet), bundled with the Worker; `deepLinkFor(kind, ids)` fills each `{placeholder}`
   with the URL-encoded id, so an id cannot add a path segment or a query. Changing a path is a PR and goes live with the next deploy.
   `deep-links.test.ts` fails when a kind has no path, a path starts without `/`, or it uses a placeholder its kind does not provide;
   adding a kind means updating that test's table on purpose.
@@ -825,6 +828,11 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Logs never carry the text.** The only log is `{ outcome: 'goal-read-failed', reason }` when the reader cannot read, with no words in it; a test spies on the console to keep it so. The words are user input and may be personal.
 - **Routes**, all bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /goal` `{ goal }` or `{ text }`, `GET /goal` and `GET /onboarding`, a third
   `.route('/me', ...)` in `src/app.ts`.
+- **Switch preview.** `GET /goal/switch-preview?goal=` (bearer, guests included, no middleware) answers `{ goal, outcome, dayOneAt, resumeUntil }` from `FaceScanService.switchPreview`, which lives
+  there because the day one comes from the face-scan tables. `outcome` is `resume` iff `chaseStartFor([...history, { goal, createdAt: now }], goal, now)` is before now, else `fresh`. `resumeUntil` is the
+  `createdAt` of the row that followed the goal's latest run plus `RESUME_DAYS` (90); `dayOneAt` is the chase's first ready scan (`dayOneFor`), null when it has none; both are null for `fresh`.
+  The goal the profile is on is 400 `GOAL_ALREADY_CURRENT`; a profile with no goal yet (the `NotFoundError` from `goals.current()`) starts every goal fresh. It only reads. The app's wording is
+  `switchScreen[outcome]` in the onboarding content (DRAFT copy).
 - **Not part of the goal.** The words typed beside the safety choices (a product that gave a reaction, a prescription) are read in the background by the parse job; see "Safety facts (onboarding)".
 
 ### Safety facts (onboarding)
@@ -1253,7 +1261,13 @@ results always give the same words. Everything reads `raw_score` (1 to 100, HIGH
   `hd_skin_type`, 5 to 8 actions, the 16-unit HD tier. Why every goal measures the core four: the routine stage needs the whole picture (a glow user with spots needs
   products that do not clog pores; on darker skin dark marks are the most common concern), and a concern not measured on day one can never show change since
   day one; the goals come from `goals.vocabulary.ts` and an unknown name throws), `VISIBILITY_VERSION` (`isVisible`, `bandFor`), `WORDING_VERSION` (`WORDING`, `seenWords`),
-  `SKIN_TYPE_VERSION` (`skinTypeLabel`) and `CHANGE_VERSION` (`concernChange`, `skinAgeChange`). Change a table, bump its version.
+  `SKIN_TYPE_VERSION` (`skinTypeLabel`), `CHANGE_VERSION` (`concernChange`, `skinAgeChange`), `CHASE_VERSION` (`chaseStartFor`, the 90-day
+  resume rule, `RESUME_DAYS`; issue #145) and `REVIEW_VERSION` (`REVIEW_WEEKS`, `reviewPointFor`, below; issue #145). Change a table, bump its version.
+- **The review table and the check-in scan's actions (issue #145).** `REVIEW_WEEKS: Record<Goal, number>` gives each goal its review week, 6 for
+  every goal today and every number a placeholder to tune later as a reviewed change. `reviewPointFor(dayOneAt, goal)` is day one plus that many
+  weeks, to the millisecond, keeping day one's time of day and never mutating it. `hdActionsForCheckIn()` is what the chase's wider check-in scan
+  asks Perfect Corp for: all nine `SHOWN_CONCERNS` plus `hd_skin_type`, ten actions, the HD 9-to-12 tier (20 units), against the 5 to 8 actions (16
+  units) of a normal scan.
 - **The visibility cut-offs are per concern (visibility v3).** Perfect Corp's `raw_score` sits on a different range for each concern, so each has its own
   three cut-offs (a score at or below one is in that band): `visible` (the `a-little` band's top), `some` and `clear`. Above `visible` is `faint` (`bandFor`
   returns it; `isVisible` means "not faint"). The values are in `THRESHOLDS` in `face-scans.tables.ts` (`face-scans.tables.test.ts` pins every boundary and
@@ -1279,19 +1293,31 @@ pipeline**: the job that sends the front photo to Perfect Corp and copies the re
 check, the live stream and the spend. The fourth is the **result view**: what a ready scan shows (see "The result view" below). This one (5 of 5) is the **push
 notifications** (see "Pushes" below).
 Face scans split by what a guest may do. A guest may **run the scan flow**: give consent (`PUT /me/face-consent`), start a scan, retake it and follow it live; those four routes use `signedIn()` as their early exit and their `FaceScanService` methods (`giveConsent`, `create`, `retake`, `watch`) need only `requireUser()`. Everything that shows or manages what the scan found is for **verified users**: reading and withdrawing the consent, the list, reading a scan and deleting one. Those five routes use `verifiedUser()` as their early exit (403 `VERIFICATION_REQUIRED` for a guest, 401 with no token) and their methods (`consent`, `withdrawConsent`, `listFaceScans`, `getFaceScan`, `deleteFaceScan`) start with `requireVerified()`, before the ownership check, so a guest gets 403 for any id, never 404. The live stream carries **status only**: every `face` frame is exactly `{ id, state, reason }` (plus `done`), for every state including `ready`, and never a result, score, skin age or type, overlay or photo link, or goal and rescan information, so a guest learns the next step (analysing, needs a retake and why, failed and why, ready) and must verify and `GET /scans/faces/{id}` to see the result. The create and retake `202` answers show no result either. `latestSkinType()` (read by the recommendations) stays `requireUser`. The photo link and the Perfect Corp webhook are credential-gated (a signed link, a signature), and the job-driven methods run as the system.
-`FaceScanService` takes the goals service (`requireGoal` and `current`, as a type-only `Pick`; services may depend on services), the photo
-store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>`) and the ops alerts (`Pick<OpsAlertsService,
+`FaceScanService` takes the goals service (`requireGoal`, `current`, `history` and `historyFor`, as a type-only `Pick`; services may depend on services), the photo
+store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage`), the scan events, the notifications (`Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>`) and the ops alerts (`Pick<OpsAlertsService,
 'raise'>`). The container builds one `RestPerfectCorpClient` from `PERFECT_CORP_API_KEY`, `PERFECT_CORP_WEBHOOK_SECRET` and `PERFECT_CORP_BASE_URL`.
 
 - **Tables (migration 0029).** All carry `user_id` (so the guest cleanup needs no join) and cascade from `profiles`; the children cascade
   from `face_scans`. `face_consents` (one row per profile: version, given and withdrawn times), `face_scans` (`state` `analysing` |
   `needs-retake` | `ready` | `failed`, `reason`, `goal_at_scan`, the Perfect Corp task ids and environment, `skin_age`, `skin_type`, `tables_version`,
   timestamps; indexed on `(profile_id, created_at)`; migration 0030 adds `reaper_checked_at` and indexes on both task-id columns and on
-  `(state, updated_at)`), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
+  `(state, updated_at)`; migration 0034 adds `check_in`, last, because the conditional `createFaceScan`'s `INSERT ... SELECT` lists columns by
+  position), `face_scan_photos` (one per scan and position `front` | `right` | `left`, the primary key),
   and, filled by the analysis, `face_results` (per concern and region: `raw_score`, `ui_score`), `face_masks` (an R2 key per concern) and
   `profile_fitzpatrick` (`I` to `VI` and the task id). The view shows the scores' words and the mask links, never the scores, and never the Fitzpatrick type. `reason` is `unavailable` or `consent-withdrawn` for a
   failed scan, and for a scan that needs a retake one of `REJECTED_PHOTO_REASONS` (`too-dark`, `turn-to-camera`, `move-closer`, `face-not-centred`,
   `no-face`, `image-size`); the column is plain text and the enum is the TypeScript table's.
+- **`face_check_in_pushes` (migration 0035)**: one row per chase that has been dealt with, primary key `(profile_id, day_one_scan_id)`, with `user_id`, `goal` and `sent_at`;
+  cascades from `profiles`, and `deleteForUsers` removes it for the cleaner. There is no foreign key to the scan, so deleting a scan never makes a push due again.
+- **Check-in push.** `FaceScanService.sendDueCheckIns(now)` runs from the daily cron with no actor and answers how many pushes it queued. `checkInPushCandidates` lists
+  (oldest first, at most 200) the ready, non-check-in scans taken at least the shortest review week ago whose chase has no recorded push and no check-in that is not
+  failed, and, when the profile has a goal history, only those taken under its current goal (so goals it left cannot fill the limit; they count again on return). The
+  repository joins `profile_goals` for that. Each candidate is then confirmed by the pure rule with `GoalsService.historyFor(profileId)` (the session-free twin of
+  `history`): `chaseStartFor` must find the goal current now, and the candidate must be the first ready scan of that chase (`dayOneFor`) with `now` at its
+  `reviewPointFor`. A candidate that is a day one of an earlier chase of the goal is recorded without a push so it leaves the list; so is one whose profile has an empty goal history (a switched-away goal, with history, is skipped unrecorded). `recordCheckInPush` is written BEFORE
+  `faceCheckInDue` is called and only a write that landed calls it, so a chase is told at most once; a queue that is down is logged `{ outcome: 'check-in-push-failed',
+  profileId, dayOneScanId }` and that chase is not tried again. The `scanNeedsYou` switch is read when the push is sent, not by the sweep: with it off the push is dropped there
+  and the chase stays recorded.
 - **Consent.** `CURRENT_FACE_CONSENT_VERSION` (1) is the version of the wording; bump it and every earlier consent stops counting.
   Consent belongs to the profile. `PUT /me/face-consent { version }` records it (any other version is 400 `FACE_CONSENT_VERSION_MISMATCH`
   with `details.current`; giving again starts it afresh and clears a withdrawal), `GET` shows it (404 `FACE_CONSENT_NOT_FOUND` until given; a
@@ -1311,15 +1337,35 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   non-failed scan (ordered as `latestForProfile` is, `created_at` then `rowid`) is still `expectLatestId` (null for none), and answers true or false. On D1
   that is one `db.batch` whose first statement is `INSERT ... SELECT ... WHERE (latest) IS ?` and whose photo inserts are `WHERE EXISTS` that scan row; the
   answer is the first statement's `meta.changes`. Writes in a batch are serialised, so exactly one of any number of simultaneous requests lands. The service
-  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` (`already-scanned-for-goal`). Without the
+  passes the id it read; on false it deletes the photos it put, queues nothing and throws 429 `FACE_SCAN_NOT_DUE` with the reason that fits the
+  verdict it already had (`check-in-taken` for a lost check-in, else `already-scanned-for-goal`). Without the
   option the write is unconditional. There is deliberately no unique index on (profile, goal): going back to an earlier goal is allowed once another scan came between.
-- **The policy** (`face-scans.policy.ts`, pure): `mayScanNow({ goal, latest })` allows a profile with no scan, or whose latest scan was
-  taken under another goal, and otherwise refuses with `already-scanned-for-goal`. The latest scan is the newest that has **not failed** (a
-  failed scan gave the profile nothing to look at), and ties go to the one written last. A later check-in schedule adds a third reason.
+- **The policy** (`face-scans.policy.ts`, pure; issue #145): `mayScanNow({ goal, history, scans, at })` is the due rule. A goal's chase (`chaseStartFor`,
+  read from `history`, the profile's goal rows oldest first) gets **one scan**, plus **one wider check-in scan** once it reaches its review point;
+  switching away and back inside the resume window can never unlock another. Only `scans` inside the current chase count (filtered by `goalAtScan`
+  and the chase start, with **no upper bound**: a scan stamped after `at`, by clock skew between isolates or a rival stored mid-read, still counts; `at` only
+  decides the chase start and whether the review point is reached); a scan that **failed** counts as nothing (not the chase's scan, not its day one, not its check-in). It answers:
+  - `{ allowed: true, checkIn: false }` when the chase has no non-failed scan yet (a first chase, or a fresh restart after the 90-day window);
+  - `{ allowed: true, checkIn: true }` when the chase has a day one (its first **ready** scan) and `at` is at or past `reviewPointFor(dayOne.createdAt,
+    goal)`, and the chase has no non-failed check-in yet;
+  - otherwise refused: `already-scanned-for-goal` when the chase has a non-failed scan but no ready day one yet (the first scan is still analysing or
+    needs a retake); `check-in-not-due` (carrying `due`, the review point) before the review point; `check-in-taken` once the chase has had its check-in
+    (an analysing or needs-retake check-in counts as taken; a failed one does not, so the user may take it again);
+  - `{ allowed: false, reason: 'scan-limit', nextScanAt }` when the chase has no non-failed scan but the profile's last **day-one** scan (`lastDayOneAt`: its newest
+    non-failed, non-check-in scan under any goal, from `latestDayOneForProfile`) was less than 30 days before `at` (`SCAN_SPACING_DAYS`); `nextScanAt` is `lastDayOneAt` + 30 days,
+    and exactly 30 days is allowed. So changing goal never unlocks a paid scan. Check-ins do not count towards the 30 days and are not limited by it; a profile's first scan is always allowed.
+  `FaceScanService.create` reads `latestForProfile` first (the double-submit guard's target), then `latestDayOneForProfile`, then the history and the scans, and takes `now` only after those
+  reads, so a rival scan stored in the middle is stamped no later than `now`; that `now` is also the time the scan is stored at and `checkInDueAt` is worked out from. It calls the policy with `history = goals.history()`, `since = chaseStartFor(history, goal, now)` and `scans =
+  repository.scansUnderGoalSince(profileId, goal, since)` (every scan under the goal since the chase start, whatever state, read without judging it:
+  the policy alone decides what it means). The 429's `details.reason` is one of the four above (`scan-limit` carries `details.nextScanAt`, an ISO string, instead); `check-in-not-due` alone also carries
+  `details.checkInDueAt`, the ISO date of `reviewPointFor(dayOne.createdAt, goal)` (`createdAt`, never `updatedAt`).
+- **`rescanSuggested`** is the due rule itself, reused: `mayScanNow(...).allowed` for the profile's current goal, worked out once per list (no
+  goal, or typed words nobody sorted into one, suggests nothing). It is **derived when read**, never stored, and so is true exactly when `create`
+  would allow a scan now, whether a first scan or the chase's check-in. It passes `lastDayOneAt` too, so inside the 30-day limit after another goal's day-one scan it is false.
+  It has no upper-bound filter of its own: it is the same policy call.
 - **Reading, deleting.** `GET /scans/faces/{id}` shows the scan (`id`, `state`, `reason`, `goal` it was taken under, `createdAt`, a signed link
-  per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. `rescanSuggested` is **derived when read**: true when the profile's latest scan was taken under
-  a goal other than its current one, and false with no goal or typed words nobody sorted into one. Nothing is stored for it, and the goals
-  service is unchanged. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
+  per photo, `rescanSuggested`) and `result`, which is null until the scan is `ready`. The stored `check_in` flag (below) is read by the policy
+  alone and never appears in the view. `DELETE /scans/faces/{id}` deletes the photos and masks from the bucket first, then the rows, then the keys a scan can have (its three photo positions and the
   `mask-<concern>.png` of every concern measured for its goal, the core extras too) once more, so a mask written by an analysis that committed between the key read and the row delete does not
   stay in the bucket (204). Another profile's
   scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.
@@ -1340,16 +1386,28 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     were measured has no rows for them, so its `alsoNoticed` is `[]`; it is `[]` too when no extra is visible. The never-rules hold for it as for `seen`.
   - **Overlays.** The mask key of every concern in `seen`, faint ones included, and of every concern in `alsoNoticed`, is signed with `signPhotoLink`, with the same 5-minute life and profile claim as a
     photo, so `GET /scans/faces/photos/{token}` serves it. A concern outside `seen` and `alsoNoticed` (a faint extra, or one not returned) gets no link, and none is signed; one with no stored mask has `overlay: null`.
-  - **Day one.** The day-one scan of a scan S is the earliest `ready` scan of S's profile under S's goal, taken at or before S, with no `ready` scan under
-    another goal between it and S. A goal change starts a new day one, going back starts another, and deleting the day-one scan makes the next one the
-    day one: nothing is stored. Scans that failed, need a retake or are analysing neither count nor cut. `FaceScansRepository.dayOneFor({ profileId, goal,
-    at, scanId })` is one query (the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`; the
-    `(profile_id, created_at)` index serves it) and answers S itself when S is its own day one. The service turns that into `sinceDayOne: null`. The
-    cut-off and the upper bound are by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a
-    millisecond in practice, and `scanId` is kept for the tie-break should one be needed.
+  - **Day one.** A goal's *chase* is a continuous run of working on it, read from the profile's own goal history, never from scan dates (issue #145).
+    Leaving a goal and taking it up again within `RESUME_DAYS` (90) of leaving continues its chase; a longer gap starts a new one. Day one is the first
+    `ready` scan of the chase that contains the scan's own time: a short detour to another goal is a break in the chase, not the end of it, so the
+    progress a user had on a goal they come back to within the window still counts, and a goal left for longer starts a fresh chase with its own
+    day one. (Whether that also makes a scan due is "The policy" below, unchanged by this rule.)
+    `chaseStartFor(history, goal, at)` (`face-scans.tables.ts`) is the pure rule: `history` is the profile's goal rows, oldest first (`GoalsService.history()`),
+    a row is current from its `createdAt` inclusive, consecutive rows of the same goal merge into one run, and a row of another goal or a null goal (typed
+    words nobody sorted yet) counts as leaving. `FaceScansRepository.dayOneFor({ profileId, goal, at, since, scanId })` then answers the earliest `ready`
+    scan under `goal` with `createdAt` between `since` (the chase start) and `at`, and S itself when S is its own day one (the service turns that into
+    `sinceDayOne: null`). A scan under another goal inside the window is no cut-off here: the chase already decided that. `since` and the upper bound are
+    by timestamp alone, and candidates that share a timestamp go to the lower id; two scans of one profile cannot share a millisecond in practice, and
+    `scanId` is kept for the tie-break should one be needed. Deleting the day-one scan makes the next one in the chase the day one: nothing is stored.
+    Scans that failed, need a retake or are analysing neither count nor cut.
   - **Since day one.** The row read for each of the goal's concerns on both scans (the `whole` one, else the first region by name), through `concernChange`,
     worded by `changeWords`; a concern missing on either scan, or read from different regions on the two (a cheek is not compared with the whole face), is left out, and the skin age through `skinAgeChange` and `skinAgeChangeWords` (null if either scan has none). The API spells the changes
     `fainter`, `more-visible`, `no-clear-change`; the tables keep their spaced values. The only number in a result is `skinAge.years`.
+  - **Next goal.** Every ready result carries `nextGoal`, a goal or null, added by `FaceScanService.result()` on top of `resultView`'s output (the view's own keys
+    stay as they are). Only a check-in scan (`scan.checkIn`) can have one; every other scan has null, in the list and in `getFaceScan` alike. `nextGoalFor`
+    suggests nothing unless at least one of the scan's own goal's concerns got `fainter` since the chase's day one (read from the same region on both scans). It
+    then scores each other goal by the bands of its concerns that are not the current goal's (clear 3, some 2, a little 1, faint or missing 0), the highest
+    wins, a tie goes to the earlier goal in `GOALS`, and all zeros means none. `brighter` is a candidate only when the profile ever wanted lighter
+    (`history.some((row) => row.wantsLighter)`): it is never offered unasked. With no day one, `nextGoal` is null.
   - **Never** in the view: a score (`raw_score`, `ui_score` or the overall `all`), a Perfect Corp concern name, a condition name, the Fitzpatrick type, or a
     word about lightness. The tables test scans every string, and the pipeline and route tests scan the serialised view.
 - **Photo links.** The view signs a 5-minute link per photo with the profile claim (see "Private photos"), only after the ownership check. `GET
@@ -1360,7 +1418,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   like the shelf), newest first by `created_at` then id, in every state, each the very view `getFaceScan` builds. It needs no consent and no goal, so it works after
   consent is withdrawn, and an empty profile gets `[]` with a 200. `FaceScansRepository.listForProfile(profileId, limit)` serves it; `rescanSuggested` is a fact
   about the profile, so the service works it out once and hands it to each `view`, together with a cache of the day-one scans' scores (scans under one goal share a day one, so each
-  is read once per list).
+  is read once per list) and the goal history (read only when the profile has a current goal, fetched once and shared: `rescanSuggested`'s own due check now needs it too, not only a ready scan's day one).
 - **The skin type.** `FaceScanService.latestSkinType()` answers the skin type of the profile's newest **ready** scan (`FaceScansRepository.latestReadyForProfile`, ordered by `created_at`
   then `rowid`), or null: no ready scan, or none sent a type. A newer scan that is analysing or needs a retake does not hide an older ready one; a newer ready scan with no type is the answer, and
   does not fall back to an older reading. It needs no consent and reads only. `RecommendationService` asks it for the skin-type rule (see "Shopping facts and candidates").
@@ -1376,9 +1434,9 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
   `job_runs` claim acks the repeat; there is no table of webhook ids).
   - `upload`: does nothing for a scan that is gone, not `analysing`, or that already has its analysis task (a message taken over after its lease must not
     pay twice). It re-checks consent (no current consent fails the scan as `consent-withdrawn` with no Perfect Corp call), reads the front photo (missing:
-    `failed` / `unavailable`), uploads it, creates the skin analysis for the goal's `hdActionsForGoal` and stores the task id and `pc_environment` at once.
-    A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a Fitzpatrick task; an error there is logged by name and
-    never fails the scan.
+    `failed` / `unavailable`), uploads it, creates the skin analysis for `hdActionsForGoal` (a normal scan) or `hdActionsForCheckIn` (`scan.checkIn`) and
+    stores the task id and `pc_environment` at once. A profile with no `profile_fitzpatrick` row and no Fitzpatrick task on the scan also gets a
+    Fitzpatrick task; an error there is logged by name and never fails the scan.
   - `fetch`: asks for the task (`running` does nothing; the webhook or the reaper comes back). On success it downloads the mask of each concern measured for the goal (its own three and the core extras)
     that has one (the `whole` region's if it has several, else the first), puts each in the private bucket as
     `faces/<env>/<user>/<profile>/<scan>/mask-<concern with _ as ->.png`, then `completeFaceScan` writes the `face_results` rows (every concern item and
@@ -1387,7 +1445,7 @@ store, the job queue, the Perfect Corp client, the vendor spend ledger (`aiUsage
     while the masks were downloading) the masks just written are deleted again, so nothing is left in the bucket for a scan that is gone. The spend is
     recorded **as soon as Perfect Corp reports success**, before the masks are downloaded (Perfect Corp bills on the task's success, not on our write, so a
     scan deleted or a download failing after that must not leave a charge off the books), as `face-analysis` with the units for the action count (1 to 4: 12,
-    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; every goal asks for 5 to 8 actions, so every scan is 16 units), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
+    5 to 8: 16, 9 to 12: 20, 13 to 16: 22; a normal scan asks 5 to 8, so 16 units, and a check-in asks 10, so 20), keyed by the task id; a ledger failure is logged (`spend-record-failed`, with the task id) and never fails the step. After
     the write, if the scan has a Fitzpatrick task and the profile still has no type, a `fitzpatrick` step is queued for it (a backstop for a lost webhook). Then
     Perfect Corp's copy is deleted (best effort; a failure logs the error's name only) and the stream gets the `ready` frame and `done`.
     The step also logs, to learn what Perfect Corp really sends (no address, score or pixel): `{ outcome: 'front-photo-read', faceScanId, width, height }` once

@@ -11,6 +11,8 @@ const FACE_READY = { kind: 'face-scan-ready', userId: 'user-1', profileId: 'prof
 // The instant a face scan went to needs-retake, and one minute after it (a second rejection of the same scan).
 const RETAKE_AT = SIGNED_IN_AT
 const SECOND_RETAKE_AT = SIGNED_IN_AT + 60 * 1000
+// The check-in-due push names the chase by its day-one scan: ids only, like every push (issue #145).
+const CHECK_IN_DUE = { kind: 'face-check-in-due', userId: 'user-1', profileId: 'profile-1', dayOneScanId: 'day-one-1' }
 const FACE_RETAKE = { kind: 'face-scan-needs-retake', userId: 'user-1', profileId: 'profile-1', faceScanId: 'face-1', reason: 'too-dark', at: RETAKE_AT }
 
 describe('the send-push job', () => {
@@ -20,8 +22,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the five notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'scan-finished', 'scan-needs-you'])
+  it('names the six notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'scan-finished', 'scan-needs-you'])
   })
 
   it.each([
@@ -40,6 +42,10 @@ describe('the send-push job', () => {
 
   it('accepts a face-scan-ready body', () => {
     expect(sendPushSpec.schema.safeParse(FACE_READY).success).toBe(true)
+  })
+
+  it('accepts a face-check-in-due body', () => {
+    expect(sendPushSpec.schema.safeParse(CHECK_IN_DUE).success).toBe(true)
   })
 
   it.each(REJECTED_PHOTO_REASONS)('accepts a face-scan-needs-retake body for the reason %s', (reason) => {
@@ -64,6 +70,9 @@ describe('the send-push job', () => {
     ['a face-scan-needs-retake body with no time', { ...FACE_RETAKE, at: undefined }],
     ['a face-scan-needs-retake body with a time that is not a number', { ...FACE_RETAKE, at: 'later' }],
     ['a face-scan-needs-retake body with no face scan id', { ...FACE_RETAKE, faceScanId: undefined }],
+    ['a face-check-in-due body with no day-one scan id', { ...CHECK_IN_DUE, dayOneScanId: undefined }],
+    ['a face-check-in-due body with no profile id', { ...CHECK_IN_DUE, profileId: undefined }],
+    ['a face-check-in-due body with no user id', { ...CHECK_IN_DUE, userId: undefined }],
     ['a kind that does not exist', { ...FINISHED, kind: 'marketing' }],
     ['a body with no kind', { userId: 'user-1' }],
   ])('rejects %s', (_name, body) => {
@@ -121,6 +130,17 @@ describe('the send-push job: face scan keys', () => {
 
   it('does not key a needs-retake message by its reason: the same rejection instant is the same notification', () => {
     expect(sendPushSpec.key({ ...FACE_RETAKE, reason: 'no-face' } as never)).toBe(sendPushSpec.key(FACE_RETAKE as never))
+  })
+})
+
+describe('the send-push job: check-in due key', () => {
+  it('keys a check-in-due message by the chase\'s day-one scan alone, so a chase is one notification however often it is queued', () => {
+    expect(sendPushSpec.key(CHECK_IN_DUE as never)).toBe('face-check-in-due:day-one-1')
+    expect(sendPushSpec.key({ ...CHECK_IN_DUE } as never)).toBe(sendPushSpec.key(CHECK_IN_DUE as never))
+  })
+
+  it('gives a fresh chase, which has another day-one scan, its own key', () => {
+    expect(sendPushSpec.key({ ...CHECK_IN_DUE, dayOneScanId: 'day-one-2' } as never)).toBe('face-check-in-due:day-one-2')
   })
 })
 

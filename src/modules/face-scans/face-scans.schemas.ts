@@ -103,6 +103,7 @@ const FaceScanResult = z
       .nullable()
       .openapi({ description: 'The skin age as a plain fact in whole years. It is never compared with a real age. Null when it could not be read.' }),
     sinceDayOne: FaceScanSinceDayOne.nullable().openapi({ description: 'The change since day one; null when this scan is its own day one.' }),
+    nextGoal: z.enum(GOALS).nullable().openapi({ description: 'The goal to suggest working on next, from this check-in scan. Null on every other scan.' }),
     tablesVersion: z.string().openapi({ description: 'The version of the rules that worded this result. The words are worked out each time the scan is read.' }),
   })
   .openapi('FaceScanResult', {
@@ -126,7 +127,7 @@ export const FaceScanResponse = z
     goal: z.enum(GOALS).openapi({ description: 'The goal the scan was taken under, whatever the goal is now.' }),
     createdAt: z.iso.datetime(),
     photos: z.object({ front: FacePhotoLink.optional(), right: FacePhotoLink.optional(), left: FacePhotoLink.optional() }).openapi({ description: 'A link for each photo that was sent.' }),
-    rescanSuggested: z.boolean().openapi({ description: 'True when the profile\'s latest scan was taken under another goal than its current one.' }),
+    rescanSuggested: z.boolean().openapi({ description: 'True when a face scan is due now for the profile\'s current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase\'s check-in at the review point.' }),
     // Not `FaceScanResult.nullable()`: that would make the registered component itself nullable and replace its never-list description.
     result: z.union([FaceScanResult, z.null()]).openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
   })

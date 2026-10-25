@@ -4,6 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import worker from '../../src/index'
 import { createDb } from '../../src/lib/db'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
+import { parseEmailAddress } from '../../src/lib/email-address'
+import { D1GoalsRepository } from '../../src/modules/goals/goals.repository'
 import { D1FaceScansRepository } from '../../src/modules/face-scans/face-scans.repository'
 import { FaceScanService } from '../../src/modules/face-scans/face-scans.service'
 import { D1SafetyRepository } from '../../src/modules/safety/safety.repository'
@@ -387,5 +389,138 @@ describe('the Worker scheduled handler: face scans stuck analysing', () => {
 
     expect(await scans.findItem(stuck)).toMatchObject({ state: 'failed', reason: 'unavailable' })
     expect(logged).toHaveBeenCalled()
+  })
+})
+
+// --- the "check-in due" push ---
+
+// A verified profile whose current goal's chase has a ready day one that reached its review point (six weeks after it was taken), with no check-in
+// taken, is sent one push by the daily cron: FaceScanService.sendDueCheckIns (the rules are pinned in its unit tests). The cron reads the real clock, so the
+// day ones here are aged from NOW with margins of days from the six-week line. The Worker's push producer is a recorder, so what the cron queues can be read back.
+describe('the Worker scheduled handler: check-in due pushes', () => {
+  const faces = new D1FaceScansRepository(createDb(env.DB))
+  const goalRows = new D1GoalsRepository(createDb(env.DB))
+  const pushes = queueRecorder()
+  const fireWithPushes = async (cron: string) => {
+    const ctx = createExecutionContext()
+    await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), { ...env, PUSH_DELIVERY_QUEUE: pushes.queue } as typeof env, ctx)
+    await waitOnExecutionContext(ctx)
+  }
+  afterEach(() => {
+    pushes.messages.length = 0
+    pushes.state.failing = false
+  })
+
+  /** A verified user whose glow goal was set 60 days ago and whose ready day-one scan was taken `takenAgoMs` ago. */
+  const dayOneTakenAgo = async (takenAgoMs: number) => {
+    const userId = crypto.randomUUID()
+    const profileId = crypto.randomUUID()
+    await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    await users.promote(userId, { kind: 'email', email: parseEmailAddress(`${userId}@example.com`) }, new Date(NOW))
+    await goalRows.append({ id: crypto.randomUUID(), profileId, text: null, goal: 'glow', wantsLighter: false, answersVersion: 1, createdAt: new Date(NOW - 60 * DAY) })
+    const id = crypto.randomUUID()
+    const createdAt = new Date(NOW - takenAgoMs)
+    await faces.createFaceScan(
+      { id, userId, profileId, goalAtScan: 'glow', checkIn: false, createdAt },
+      [{ faceScanId: id, userId, position: 'front', photoKey: `faces/${env.ENVIRONMENT}/${userId}/${profileId}/${id}/front.jpg`, createdAt }],
+    )
+    await faces.completeFaceScan(id, { results: [], masks: [], skinType: null, skinAge: null, tablesVersion: '1', updatedAt: new Date(createdAt.getTime() + HOUR) })
+    return { userId, profileId, id }
+  }
+  const pushedFor = (profileId: string) => (pushes.messages as { profileId?: string }[]).filter((message) => message.profileId === profileId)
+
+  it('on the daily cron, queues one check-in-due push, carrying only ids, for a day one past its review point', async () => {
+    const due = await dayOneTakenAgo(50 * DAY)
+
+    await fireWithPushes(GUEST_CLEANUP_CRON)
+
+    expect(pushedFor(due.profileId)).toEqual([{ kind: 'face-check-in-due', userId: due.userId, profileId: due.profileId, dayOneScanId: due.id }])
+  })
+
+  it('on the daily cron, leaves a day one that has not reached its review point alone', async () => {
+    const early = await dayOneTakenAgo(34 * DAY)
+
+    await fireWithPushes(GUEST_CLEANUP_CRON)
+
+    expect(pushedFor(early.profileId)).toEqual([])
+  })
+
+  it('on a second daily cron, sends nothing more for the same chase', async () => {
+    const due = await dayOneTakenAgo(50 * DAY)
+    await fireWithPushes(GUEST_CLEANUP_CRON)
+
+    await fireWithPushes(GUEST_CLEANUP_CRON)
+
+    expect(pushedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('on the reaper cron, which runs every 10 minutes, queues nothing: the check-in push is a once-a-day job', async () => {
+    const due = await dayOneTakenAgo(50 * DAY)
+
+    await fireWithPushes(SCAN_REAPER_CRON)
+
+    expect(pushedFor(due.profileId)).toEqual([])
+  })
+
+  it('calls the sweep with the time of the run', async () => {
+    const sweep = vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockResolvedValue(0)
+    const before = Date.now()
+
+    await fireWithPushes(GUEST_CLEANUP_CRON)
+
+    expect(sweep).toHaveBeenCalledTimes(1)
+    const when = sweep.mock.calls[0]![0]
+    expect(when).toBeInstanceOf(Date)
+    expect(when.getTime()).toBeGreaterThanOrEqual(before)
+    expect(when.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('still deletes the abandoned guests and queues the due safety parses when the check-in sweep throws, and the run still fails with its error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockRejectedValue(new Error('the check-in sweep exploded'))
+    const guest = await abandonedGuest()
+
+    await expect(fireWithPushes(GUEST_CLEANUP_CRON)).rejects.toThrow('the check-in sweep exploded')
+
+    expect(await users.findById(guest)).toBeNull()
+  })
+
+  it('logs a failed check-in sweep as { job, outcome: failed } with a scrubbed error', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockRejectedValue(new Error('the check-in sweep exploded'))
+
+    await fireWithPushes(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ job: 'face-check-in-push', outcome: 'failed' }))
+  })
+
+  it('still sends the check-in pushes when deleting the abandoned guests throws, and the run still fails with that error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(UsersService.prototype, 'purgeUnreachableGuests').mockRejectedValue(new Error('the cleanup exploded'))
+    const due = await dayOneTakenAgo(50 * DAY)
+
+    await expect(fireWithPushes(GUEST_CLEANUP_CRON)).rejects.toThrow('the cleanup exploded')
+
+    expect(pushedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('still sends the check-in pushes when the safety requeue throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(SafetyService.prototype, 'requeueDueParses').mockRejectedValue(new Error('the sweep exploded'))
+    const due = await dayOneTakenAgo(50 * DAY)
+
+    await fireWithPushes(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(pushedFor(due.profileId)).toHaveLength(1)
+  })
+
+  it('still requeues the due safety parses when the check-in sweep throws', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockRejectedValue(new Error('the check-in sweep exploded'))
+    const requeue = vi.spyOn(SafetyService.prototype, 'requeueDueParses')
+
+    await fireWithPushes(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    expect(requeue).toHaveBeenCalledTimes(1)
   })
 })
