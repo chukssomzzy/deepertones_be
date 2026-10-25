@@ -35,8 +35,8 @@ const DEFAULT_MAX_USD = 5
 const DEFAULT_MAX_GROUNDING = 40
 
 export const USAGE =
-  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--judges haiku,opus] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
-  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, the rubric judges haiku and opus (a model never judges its own routines), and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
+  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--judges haiku|opus|haiku,opus] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
+  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, the rubric judge haiku (opus can be added to compare; a model never judges its own routines), and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
 
 type Reading = { flag: string; value: string }
 
@@ -74,7 +74,7 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${USAGE}`)
   }
-  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, judges: [...JUDGE_NAMES], snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
+  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, judges: ['haiku'], snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
   for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--max-grounding', '--judges', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
     if (flag === '--set') {
       if (value !== 'dev' && value !== 'holdout' && value !== 'hints') fail(`Unknown set "${value}" (dev, holdout or hints)`)

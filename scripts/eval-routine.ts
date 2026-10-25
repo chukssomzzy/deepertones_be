@@ -1,12 +1,12 @@
 // Measures the routine writer against fixed synthetic people: `npm run eval:routine`. Needs ANTHROPIC_API_KEY (environment, else .dev.vars) and makes real,
-// billed calls (one Sonnet call per case, one Haiku and one Opus judge call per routine written, and up to --max-grounding Haiku page-support checks). It is never part of `npm test`,
+// billed calls (one Sonnet call per case, one Haiku judge call per routine written (and one Opus call each with --judges opus or haiku,opus), and up to --max-grounding Haiku page-support checks). It is never part of `npm test`,
 // and it never prints the key, a prompt, a routine's words, a judge's words or an error message: only case ids, gate codes, counts, scores and costs. The routines and the
 // judges' answers go to report.json.
 //   --set dev|holdout|hints   the cases to run (default holdout, the only set the bar is judged on; tune on dev; hints is built from the labels, so it needs --labels, and its
 //   follow-rate and ignore-rate are not in the bar)    --limit N   run the first N cases    --max-grounding N   at most N page-support checks for the run (default 40)
 //   --labels VERSION    the label set in eval-data/routine/labels/ that scores the picks    --snapshot PATH   the catalog snapshot (default eval-data/routine/catalog-snapshot.xlsx)
 //   --max-usd N   stop spending at N dollars (default 5)    --model JOB=MODEL   run a job on another model (repeatable; not judge-routine, see --judges)
-//   --judges haiku,opus   the rubric judges (default both): each judges every routine, the run compares them, and a model never judges its own routines
+//   --judges haiku|opus|haiku,opus   the rubric judges (default haiku; Opus is dearer, add it to compare): each judges every routine, the run compares them, and a model never judges its own routines
 //   --out-dir DIR   where report.json goes (default .eval/routine-<timestamp>)    --compare REPORT.json   say whether the scores are better or worse than an earlier report
 // The last line is `Bar: PASS`, `Bar: FAIL (<rules>)` or `Bar: not evaluated (<reasons>)` (see "Routine eval" in docs/architecture.md).
 // Exit: 0 the bar passes or the run was a trial (the bar was not evaluated), 1 the bar fails, 2 the run could not start (arguments, key, snapshot, labels) or Claude rejected the key.

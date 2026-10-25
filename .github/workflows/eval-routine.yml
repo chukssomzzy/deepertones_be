@@ -1,7 +1,7 @@
 # Measures the routine writer against fixed synthetic people, with the rubric judge and the page-support judge.
 # See "Routine eval" in docs/architecture.md.
 #
-# This makes real, billed Claude calls (about 30 writer calls, 30 Haiku and 30 Opus judge calls and up to 40 Haiku page checks for a 30-case set), so it is never part of tests.yml
+# This makes real, billed Claude calls (for a 30-case set about 30 Sonnet writer calls, 30 Haiku judge calls and up to 40 Haiku page checks, about $1.3; the default judge is Haiku, Opus is only added with --judges), so it is never part of tests.yml
 # and never runs on a pull request: only on a weekly schedule or by hand. It is report-only. The job cannot fail the build (continue-on-error), a red run
 # just means the bar did not hold, and the JSON report is uploaded as an artifact.
 #
