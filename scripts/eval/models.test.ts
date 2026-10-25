@@ -7,7 +7,7 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions, judge-draft, judge-routine, judge-grounding and label-routine; write-routine has its own variable, because the routine's words reach users.
+// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions, judge-draft, judge-routine, judge-grounding and label-routine; write-routine and fit-verdict share one variable (ANTHROPIC_MODEL_ROUTINE), because their words reach users.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
@@ -25,6 +25,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'label-routine': 'ANTHROPIC_MODEL_JUDGE',
   'judge-grounding': 'ANTHROPIC_MODEL_JUDGE',
   'write-routine': 'ANTHROPIC_MODEL_ROUTINE',
+  'fit-verdict': 'ANTHROPIC_MODEL_ROUTINE',
 }
 
 describe('the eval default models', () => {
@@ -55,6 +56,11 @@ describe('the eval default models', () => {
   it('run the routine writer on Sonnet: its words reach users, so it is not on the cheap model', () => {
     expect(AI_JOBS).toContain('write-routine')
     expect((DEFAULT_MODELS as Record<string, string>)['write-routine']).toBe('claude-sonnet-5-5')
+  })
+
+  it('run the verdict fit judge on Sonnet: its reasons reach users, so it is not on the cheap model', () => {
+    expect(AI_JOBS).toContain('fit-verdict')
+    expect((DEFAULT_MODELS as Record<string, string>)['fit-verdict']).toBe('claude-sonnet-5-5')
   })
 
   // judge-routine and judge-grounding are eval-only jobs on the shared judge variable. The eval:routine RUN moves judge-routine to Opus by itself
