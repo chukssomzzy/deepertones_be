@@ -73,6 +73,8 @@ const row = (code: string, over: Partial<Recommendation> = {}): Recommendation =
   steps: ['moisturise'],
   frequency: 'am-pm',
   ownCautions: [],
+  evidenceUrls: ['https://example.com/evidence'],
+  ingredientsSourceUrl: 'https://example.com/ingredients',
   origin: 'sourced',
   priceMin: 1000,
   priceMax: 2000,
@@ -997,6 +999,53 @@ describe('RecommendationService.candidatesFor: what a candidate carries', () => 
       priceMax: 2500,
       whereSold: 'Supermarkets and pharmacies',
     })
+  })
+
+  it('carries the row\'s skin concerns, ingredients, evidence links and ingredients source link, as the row lists them', async () => {
+    const ctx = setup()
+    stock(ctx, [
+      row('FACTS', {
+        skinConcerns: ['hd_moisture', 'hd_texture'],
+        ingredients: ['Aqua', 'Glycerin', 'Squalane'],
+        evidenceUrls: ['https://example.com/study-b', 'https://example.com/study-a'],
+        ingredientsSourceUrl: 'https://example.com/the-label',
+      }),
+    ])
+    await ready(ctx)
+
+    const [candidate] = await candidates(ctx)
+
+    expect(candidate).toMatchObject({
+      code: 'FACTS',
+      skinConcerns: ['hd_moisture', 'hd_texture'],
+      ingredients: ['Aqua', 'Glycerin', 'Squalane'],
+      evidenceUrls: ['https://example.com/study-b', 'https://example.com/study-a'],
+      ingredientsSourceUrl: 'https://example.com/the-label',
+    })
+  })
+
+  it('still offers a row with no evidence links and no ingredients source link, with an empty list and a null', async () => {
+    const ctx = setup()
+    stock(ctx, [row('NO-LINKS', { evidenceUrls: [], ingredientsSourceUrl: null })])
+    await ready(ctx)
+
+    const [candidate] = await candidates(ctx)
+
+    expect(candidate).toMatchObject({ code: 'NO-LINKS', evidenceUrls: [], ingredientsSourceUrl: null })
+  })
+
+  it('gives each candidate its own lists of facts: changing one candidate\'s leaves the row and the next candidate as they were', async () => {
+    const ctx = setup()
+    stock(ctx, [row('FIRST'), row('SECOND', { priceMin: 2000 })])
+    await ready(ctx)
+
+    const [first, second] = await candidates(ctx)
+    first!.skinConcerns.push('hd_acne')
+    first!.ingredients.push('Retinol')
+    first!.evidenceUrls.push('https://example.com/extra')
+
+    expect(second).toMatchObject({ skinConcerns: ['hd_radiance'], ingredients: ['Aqua', 'Glycerin'], evidenceUrls: ['https://example.com/evidence'] })
+    expect((await candidates(ctx))[0]).toMatchObject({ skinConcerns: ['hd_radiance'], ingredients: ['Aqua', 'Glycerin'], evidenceUrls: ['https://example.com/evidence'] })
   })
 
   it('lists the rules it passed: country, step, skin concern, skin type and ingredient rules, and no budget or reactions when the user gave none', async () => {

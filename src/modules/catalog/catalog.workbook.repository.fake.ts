@@ -96,6 +96,8 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
             steps: [...row.steps],
             frequency: row.frequency,
             ownCautions: [...row.ownCautions],
+            evidenceUrls: [...row.evidenceUrls],
+            ingredientsSourceUrl: row.ingredientsSourceUrl,
             origin: row.origin,
             priceMin: sold.priceMin,
             priceMax: sold.priceMax,

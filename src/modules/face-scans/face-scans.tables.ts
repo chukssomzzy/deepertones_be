@@ -87,7 +87,7 @@ export const hdActionsForCheckIn = (): (ShownConcern | typeof HD_SKIN_TYPE)[] =>
 //
 // Calibrated 2026-10-23 on 40 Chicago Face Database photos (mostly Black, some Indian and multiracial) against blind visual ratings by an AI rater. This
 // is a first calibration, to be re-checked by a human rater experienced with skin of colour and on real app selfies. Redness, texture and moisture are
-// low-confidence (redness was at chance on the darker half, texture and moisture barely tracked the ratings). Evidence:
+// low-confidence, see LOW_CONFIDENCE_CONCERNS (redness was at chance on the darker half, texture and moisture barely tracked the ratings). Evidence:
 // .humanlayer/tasks/face-scan/research-visibility-thresholds.md.
 type Thresholds = { visible: number; some: number; clear: number }
 const THRESHOLDS: ReadonlyMap<string, Thresholds> = new Map<ShownConcern, Thresholds>([
@@ -101,6 +101,9 @@ const THRESHOLDS: ReadonlyMap<string, Thresholds> = new Map<ShownConcern, Thresh
   ['hd_dark_circle', { visible: 60, some: 54, clear: 48 }],
   ['hd_moisture', { visible: 33, some: 30, clear: 28 }],
 ])
+
+/** The concerns the first calibration could not stand behind. */
+export const LOW_CONFIDENCE_CONCERNS: readonly ShownConcern[] = ['hd_redness', 'hd_texture', 'hd_moisture']
 
 /** Which band a raw_score is in for a concern: `faint` when it is above the visible cut-off. */
 export const bandFor = (concern: ShownConcern, rawScore: number): Band => {
