@@ -13,7 +13,7 @@ type GapLabel = Labels[RoutineStep] & object
 
 const label = (candidates: string[], best: string, acceptable: string[] = []): GapLabel => ({ candidates, best, acceptable })
 const WORDING: GateFailure = { gate: 'wording', step: 'cleanse' }
-const JUDGED = { picksAgreed: 4, picksJudged: 4, fit: 5, simplicity: 5, words: 5 }
+const JUDGED = { picksAgreed: 4, picksAgreedExactly: 4, picksJudged: 4, fit: 5, simplicity: 5, words: 5 }
 
 /**
  * A case whose routine passes every gate and picks A for its one scored gap (cleanse: A or B), where A is labelled best.
@@ -203,6 +203,7 @@ describe('scoreRun: the judge, which D1 does not have', () => {
     const run = holdout(perfect(2, () => ({ judge: null })))
 
     expect(run.judgeAgreement).toBeNull()
+    expect(run.judgeExactAgreement).toBeNull()
     expect(run.fit).toBeNull()
     expect(run.simplicity).toBeNull()
     expect(run.words).toBeNull()
@@ -210,17 +211,43 @@ describe('scoreRun: the judge, which D1 does not have', () => {
 
   it('pools agreement over all the picks judged, and averages fit, simplicity and words over the cases judged', () => {
     // 3 agreed of 4 judged + 1 of 1 = 4 of 5 = 80%. fit (4 + 3) / 2 = 3.5, simplicity (5 + 2) / 2 = 3.5, words (1 + 2) / 2 = 1.5.
+    // Changed in #152 follow-up: the exact matches are 2 of 4 + 0 of 1 = 2 of 5 = 40%, reported beside the 80%.
     const inputs = [
-      input('a', { judge: { picksAgreed: 3, picksJudged: 4, fit: 4, simplicity: 5, words: 1 } }),
-      input('b', { judge: { picksAgreed: 1, picksJudged: 1, fit: 3, simplicity: 2, words: 2 } }),
+      input('a', { judge: { picksAgreed: 3, picksAgreedExactly: 2, picksJudged: 4, fit: 4, simplicity: 5, words: 1 } }),
+      input('b', { judge: { picksAgreed: 1, picksAgreedExactly: 0, picksJudged: 1, fit: 3, simplicity: 2, words: 2 } }),
     ]
 
     const run = holdout(inputs)
 
     expect(run.judgeAgreement).toBe(80)
+    expect(run.judgeExactAgreement).toBe(40)
     expect(run.fit).toBe(3.5)
     expect(run.simplicity).toBe(3.5)
     expect(run.words).toBe(1.5)
+  })
+})
+
+describe('scoreRun: agreement is right against not, and exact agreement is reported beside it (#152 follow-up)', () => {
+  it('takes judgeAgreement from the right-vs-not count and judgeExactAgreement from the exact count of the same picks', () => {
+    // 17 of 20 picks are on the same side as the label; 10 of 20 are the exact class.
+    const run = holdout(perfect(1, () => ({ judge: { ...JUDGED, picksAgreed: 17, picksAgreedExactly: 10, picksJudged: 20 } })))
+
+    expect(run.judgeAgreement).toBe(85)
+    expect(run.judgeExactAgreement).toBe(50)
+  })
+
+  it('does not fail judge-agreement on a run at 85% right-vs-not and 50% exact: the exact figure is not in the bar', () => {
+    const run = holdout(perfect(1, () => ({ judge: { ...JUDGED, picksAgreed: 17, picksAgreedExactly: 10, picksJudged: 20 } })))
+
+    expect(run.bar).toEqual({ status: 'pass' })
+  })
+
+  it('still fails judge-agreement when right-vs-not is below 80%, however high the exact figure', () => {
+    // picksAgreed counts every exact match, so exact cannot exceed it in life; 15 of 20 right-vs-not is 75%.
+    const run = holdout(perfect(1, () => ({ judge: { ...JUDGED, picksAgreed: 15, picksAgreedExactly: 15, picksJudged: 20 } })))
+
+    expect(run.judgeAgreement).toBe(75)
+    expect(run.bar).toEqual({ status: 'fail', rules: ['judge-agreement'], notEvaluated: [] })
   })
 })
 
@@ -464,6 +491,7 @@ const judgeRow = (name: string, agreement: number | null, costMicros: number, ov
   name,
   model: `claude-${name}-5-5`,
   agreement,
+  exactAgreement: agreement,
   fit: agreement === null ? null : 4,
   simplicity: agreement === null ? null : 4,
   words: agreement === null ? null : 4,
@@ -545,7 +573,30 @@ describe('selectJudge: ties and missing results', () => {
 //   selectJudge(rows): reads the row's flag, so its signature is as it was
 //   scoreRun(inputs, { set, partial, judgeSelfLabelled?: boolean }): when true, the bar's reason for having no judge is 'judge-self-labelled' in place of 'no-judge'
 
-const RESULT = (agreed: number, judged: number) => ({ picksAgreed: agreed, picksJudged: judged, fit: 4, simplicity: 5, words: 3 })
+const RESULT = (agreed: number, judged: number, exactly = agreed) => ({ picksAgreed: agreed, picksAgreedExactly: exactly, picksJudged: judged, fit: 4, simplicity: 5, words: 3 })
+
+describe('judgeComparisonOf: exact agreement beside agreement (#152 follow-up)', () => {
+  const haiku = { name: 'haiku', model: 'claude-haiku-5-5' }
+
+  it('pools exactAgreement over the picks judged, as it pools agreement', () => {
+    // Agreed 3 of 4 + 1 of 1 = 4 of 5 = 80%. Exactly: 1 of 4 + 1 of 1 = 2 of 5 = 40%.
+    const row = judgeComparisonOf(haiku, [RESULT(3, 4, 1), RESULT(1, 1, 1)], 4000)
+
+    expect(row.agreement).toBe(80)
+    expect(row.exactAgreement).toBe(40)
+  })
+
+  it('has no exactAgreement when the judge produced no results, and none when it judged no picks', () => {
+    expect(judgeComparisonOf(haiku, [null, null], 900).exactAgreement).toBeNull()
+    expect(judgeComparisonOf(haiku, [], 0).exactAgreement).toBeNull()
+    expect(judgeComparisonOf(haiku, [RESULT(0, 0)], 900).exactAgreement).toBeNull()
+  })
+
+  it('does not feed exactAgreement to the agreementPerDollar: that is the right-vs-not figure over the cost', () => {
+    // 80% agreement at 4000 micros ($0.004) is 20000 per dollar; the 40% exact figure would give 10000.
+    expect(judgeComparisonOf(haiku, [RESULT(4, 5, 2)], 4000).agreementPerDollar).toBeCloseTo(20000, 6)
+  })
+})
 
 describe('judgeComparisonOf: self-agreement', () => {
   const opus = { name: 'opus', model: 'claude-opus-5-5' }

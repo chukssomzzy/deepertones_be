@@ -242,7 +242,7 @@ const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_
   return { ledger, memory, writer, judge, judges, grounding, order, logs, dirs, files, run }
 }
 
-type JudgeRow = { name: string; model: string; agreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null; selfAgreement: boolean }
+type JudgeRow = { name: string; model: string; agreement: number | null; exactAgreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null; selfAgreement: boolean }
 
 type Reported = {
   startedAt: string
@@ -280,6 +280,7 @@ type Reported = {
     needsRelabel: string[]
     costMicros: number
     judgeAgreement: number | null
+    judgeExactAgreement: number | null
     fit: number | null
     simplicity: number | null
     words: number | null
@@ -834,7 +835,8 @@ describe('runRoutineEval: the rubric judge', () => {
   })
 
   it('pools the agreement over all picks judged and averages fit, simplicity and words over the cases judged', async () => {
-    // Cleanse is the one scored gap of each case. Case 1: the judge says best (the label says best): agreed. Case 2: it says acceptable: not agreed. Case 3: best: agreed.
+    // Cleanse is the one scored gap of each case. Case 1: the judge says best (the label says best): agreed. Case 2: it says not: not agreed. Case 3: best: agreed.
+    // (Changed in #152 follow-up: case 2 said 'acceptable', which is now on the label's side of best and so would agree; 'not' keeps the disagreement this test is about.)
     // So 2 of 3 = 66.67%. fit (5 + 3 + 1) / 3 = 3, simplicity (5 + 4 + 3) / 3 = 4, words (2 + 3 + 4) / 3 = 3.
     const scores = [
       { fit: 5, simplicity: 5, words: 2 },
@@ -844,7 +846,7 @@ describe('runRoutineEval: the rubric judge', () => {
     const { run, files } = setup({
       judgeAnswer: (call) => {
         const base = agreeingJudgement()
-        const picks = base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p))
+        const picks = base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'not' as const } : p))
         return { ...base, ...scores[call - 1]!, picks }
       },
     })
@@ -853,9 +855,33 @@ describe('runRoutineEval: the rubric judge', () => {
 
     const { summary } = reportOf(files)
     expect(summary.judgeAgreement).toBeCloseTo(66.667, 2)
+    expect(summary.judgeExactAgreement).toBeCloseTo(66.667, 2)
     expect(summary.fit).toBe(3)
     expect(summary.simplicity).toBe(4)
     expect(summary.words).toBe(3)
+  })
+
+  it('counts "acceptable" against a label of best as agreement in the report, and reports the exact figure beside it, so the bar does not fail', async () => {
+    // Cleanse is the one scored gap of each case and every label says the pick is best. Case 2 the judges say acceptable: the same side, so agreed, but not exactly.
+    // Agreed 3 of 3 = 100%; exactly 2 of 3 = 66.67%. The bar takes the 100.
+    const { run, files } = setup({
+      judgeAnswer: (call) => {
+        const base = agreeingJudgement()
+        return { ...base, picks: base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p)) }
+      },
+    })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.judgeAgreement).toBe(100)
+    expect(summary.judgeExactAgreement).toBeCloseTo(66.667, 2)
+    expect(summary.judgeComparison.map((row) => [row.name, row.agreement, row.exactAgreement])).toEqual([
+      ['haiku', 100, expect.closeTo(66.667, 2)],
+      ['opus', 100, expect.closeTo(66.667, 2)],
+    ])
+    expect(summary.bar.status).toBe('pass')
+    expect(exitCode).toBe(0)
   })
 
   it('fails the bar on judge agreement below 80%, naming it, and exits 1', async () => {
@@ -978,7 +1004,7 @@ describe('runRoutineEval: what the console never prints from the judges', () => 
     expect(haiku).toHaveLength(1)
     expect(opus).toHaveLength(1)
     for (const line of [haiku[0]!, opus[0]!]) {
-      expect(line).toContain('100.0%')
+      expect(line).toContain('agreement 100.0% (exact 100.0%)')
       expect(line).toMatch(/fit 4\.0/)
       expect(line).toMatch(/simplicity 5\.0/)
       expect(line).toMatch(/words 3\.0/)
@@ -989,6 +1015,28 @@ describe('runRoutineEval: what the console never prints from the judges', () => 
     expect(opus[0]).toContain('66666.7')
     // They come in the order of the list.
     expect(logs.indexOf(haiku[0]!)).toBeLessThan(logs.indexOf(opus[0]!))
+  })
+
+  it('shows both figures on the judge line, agreement (right against not) first and the exact figure after it, and nothing of what a judge said', async () => {
+    // Every case's cleanse pick is labelled best. Case 2 the judges say acceptable: agreed 3 of 3 = 100.0%, exactly 2 of 3 = 66.7%.
+    const { run, logs } = setup({
+      judgeAnswer: (call) => {
+        const base = agreeingJudgement()
+        return { ...base, picks: base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p)) }
+      },
+    })
+
+    await run()
+
+    for (const name of ['haiku', 'opus']) expect(logs.find((l) => l.startsWith(`Judge ${name}`))!, name).toContain('agreement 100.0% (exact 66.7%)')
+  })
+
+  it('prints n/a for both figures of a judge that produced nothing', async () => {
+    const { run, logs } = setup({ judgeAnswers: { haiku: () => { throw new FakeJudgeError(JUDGE_ERROR_SENTINEL) } } })
+
+    await run()
+
+    expect(logs.find((l) => l.startsWith('Judge haiku'))!).toContain('agreement n/a (exact n/a)')
   })
 
   it('prints n/a, not a number, for a judge that produced nothing, and for an agreement per dollar when the judge cost nothing', async () => {
@@ -1078,7 +1126,7 @@ describe('runRoutineEval: two judges on the same routines', () => {
 
   it('records each judge\'s cost per case and per judge, and compares them: worked by hand', async () => {
     // 3 cases. haiku costs 200 a call, opus 900, the writer 1000, no grounding cost. A case costs 1000 + 200 + 900 = 2100; the run 6300.
-    // haiku: disagrees on case 2 (cleanse 'acceptable'), so 2 of 3 = 66.667%; fit (5 + 3 + 1) / 3 = 3, simplicity (5 + 4 + 3) / 3 = 4, words (2 + 3 + 4) / 3 = 3.
+    // haiku: disagrees on case 2 (cleanse 'not'; was 'acceptable' before #152 follow-up, which now agrees), so 2 of 3 = 66.667%; fit (5 + 3 + 1) / 3 = 3, simplicity (5 + 4 + 3) / 3 = 4, words (2 + 3 + 4) / 3 = 3.
     //   cost 3 * 200 = 600 micros = $0.0006; agreement per dollar 66.667 / 0.0006 = 111111.1.
     // opus: agrees on all 3 = 100%, fit 4, simplicity 5, words 3 (the default answer). cost 3 * 900 = 2700 micros = $0.0027; agreement per dollar 100 / 0.0027 = 37037.04.
     // opus is the only judge at 80% or more, so opus is selected and its numbers are the run's.
@@ -1092,7 +1140,7 @@ describe('runRoutineEval: two judges on the same routines', () => {
       judgeAnswers: {
         haiku: (call) => {
           const base = agreeingJudgement()
-          return { ...base, ...scores[call - 1]!, picks: base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'acceptable' as const } : p)) }
+          return { ...base, ...scores[call - 1]!, picks: base.picks.map((p) => (call === 2 && p.step === 'cleanse' ? { ...p, pickClass: 'not' as const } : p)) }
         },
       },
     })

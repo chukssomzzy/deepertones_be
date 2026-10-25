@@ -100,7 +100,7 @@ const gatesOf = (state: CaseState, writerError: string | undefined, failures: Ga
 }
 
 const judgeLine = (row: JudgeComparison): string =>
-  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`}, fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}`
+  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`} (exact ${row.exactAgreement === null ? 'n/a' : `${row.exactAgreement.toFixed(1)}%`}), fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}`
 
 type GroundingTally = { checked: number; supported: number; unverifiable: number; skipped: number; skippedGate: number }
 

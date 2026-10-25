@@ -85,15 +85,21 @@ export const classOfPick = (label: GapLabel, product: RoutineProduct): PickClass
 
 /**
  * The judge's judgement as the score takes it. A pick is judged on each scored gap (the scorer's own rule: labelled, 2 or more candidates, labels current), and
- * agreed when the judge's class is exactly the label's class for the pick. A scored gap the judge gave no class for is judged and not agreed, so leaving a gap out
+ * agreed when the judge's class and the label's class for the pick are on the same side (best and acceptable are right, not is not), and agreed exactly when they are the
+ * same class. The line between best and acceptable is unstable even between two labelling passes, and the writer's own score counts both as right. A scored gap the judge gave no class for is judged and not agreed, so leaving a gap out
  * cannot raise the agreement. Without labels nothing is judged, but the three scores still count.
  */
 export const judgeResultOf = (judgement: RoutineJudgement, { routine, gapCodes, labels }: { routine: Routine; gapCodes: RoutineCaseInput['gapCodes']; labels: RoutineCaseInput['labels'] }): JudgeResult => {
   const scored = scoredGapsOf({ gapCodes, labels })
   let picksAgreed = 0
+  let picksAgreedExactly = 0
   for (const [step, label] of scored) {
     const product = routine.steps.find((entry) => entry.step === step)?.product ?? { kind: 'none' as const }
-    if (judgement.picks.find((pick) => pick.step === step)?.pickClass === classOfPick(label, product)) picksAgreed++
+    const judged = judgement.picks.find((pick) => pick.step === step)?.pickClass
+    if (judged === undefined) continue
+    const labelled = classOfPick(label, product)
+    if (judged === labelled) picksAgreedExactly++
+    if ((judged === 'not') === (labelled === 'not')) picksAgreed++
   }
-  return { picksAgreed, picksJudged: scored.length, fit: judgement.fit, simplicity: judgement.simplicity, words: judgement.words }
+  return { picksAgreed, picksAgreedExactly, picksJudged: scored.length, fit: judgement.fit, simplicity: judgement.simplicity, words: judgement.words }
 }
