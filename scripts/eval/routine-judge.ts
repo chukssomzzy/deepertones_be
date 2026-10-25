@@ -8,6 +8,7 @@ import { ROUTINE_STEPS } from '../../src/modules/catalog/catalog.vocabulary'
 import type { Routine, RoutineProduct, RoutineSkeleton } from '../../src/modules/routines/routines.types'
 import { routineJudgeJudgeRoutinePrompt } from '../../src/prompts/prompts.generated'
 import type { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
+import { AnthropicRequestError } from '../../src/providers/anthropic/anthropic.provider'
 import type { GapLabel } from './routine-labels'
 import { type JudgeResult, type RoutineCaseInput, scoredGapsOf } from './routine-score'
 
@@ -52,7 +53,7 @@ export interface RoutineJudge {
 /** Judges a written routine with Claude. It has no tools and no labels: it sees only what the writer saw and what the writer wrote. */
 export class AnthropicRoutineJudge implements RoutineJudge {
   // Room for the answer and for the model's thinking, which counts against max_tokens.
-  private static readonly MAX_TOKENS = 4096
+  private static readonly MAX_TOKENS = 12000
   private static readonly LEAD_IN = 'Judge this routine:'
 
   private readonly client: AnthropicClient
@@ -71,6 +72,21 @@ export class AnthropicRoutineJudge implements RoutineJudge {
       JudgementSchema,
       { job: routineJudgeJudgeRoutinePrompt.job },
     )
+  }
+}
+
+/**
+ * Asks the judge, and once more with the same input when its answer was invalid (an AnthropicRequestError: off-schema JSON, not JSON, or out of tokens), because a
+ * case with a routine and no judgement blocks the bar. Any other error is thrown at once, and so is whatever the retry fails with, as it is. `onRetry` is called
+ * just before the second call, so a caller can record the retry even when it fails too.
+ */
+export const judgeOnce = async (judge: RoutineJudge, input: RoutineJudgeInput, onRetry?: () => void): Promise<{ judgement: RoutineJudgement; retried: boolean }> => {
+  try {
+    return { judgement: await judge.judge(input), retried: false }
+  } catch (error) {
+    if (!(error instanceof AnthropicRequestError)) throw error
+    onRetry?.()
+    return { judgement: await judge.judge(input), retried: true }
   }
 }
 
