@@ -152,6 +152,9 @@ export type ProductSummary = {
   imageUrl: string | null
 }
 
+/** What the shelf verdict reads of a shelf product: who it is and the ingredient list of the formulation the shelf holds, with no concerns, image or analysis. */
+export type ShelfFacts = Pick<ProductSummary, 'brand' | 'name' | 'variant' | 'form' | 'category'> & { productId: string; ingredients: string[] }
+
 export type ProductView = {
   product: ProductSummary
   formulation: {
@@ -693,6 +696,24 @@ export class ProductCatalogService {
       if (product) summaries.set(formulation.id, this.summaryOf(product))
     }
     return summaries
+  }
+
+  /**
+   * What the shelf verdict reads of each formulation, in two reads: the product's identity and that formulation's own ingredient list (not the product's latest).
+   * A formulation that does not resolve, or whose product is gone, is left out of the map. Reads no concerns and asks no researcher or model.
+   */
+  async shelfFacts(formulationIds: string[]): Promise<Map<string, ShelfFacts>> {
+    const facts = new Map<string, ShelfFacts>()
+    if (formulationIds.length === 0) return facts
+    const formulations = await this.repository.findFormulationsByIds([...new Set(formulationIds)])
+    const products = new Map((await this.repository.findProductsByIds([...new Set(formulations.map((f) => f.productId))])).map((p) => [p.id, p]))
+    for (const formulation of formulations) {
+      const product = products.get(formulation.productId)
+      if (product) {
+        facts.set(formulation.id, { productId: product.id, brand: product.brand, name: product.name, variant: product.variant, form: product.form, category: product.category, ingredients: formulation.ingredients })
+      }
+    }
+    return facts
   }
 
   /**

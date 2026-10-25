@@ -526,3 +526,243 @@ describe('diffWorkbooks and toRawWorkbook', () => {
     expect(diffWorkbooks(parse(workbook), parse(loose)).products).toEqual({ added: [], updated: [], retired: [], reactivated: [] })
   })
 })
+
+// ---- the reads the shelf verdict builds on (spec #171, slice D1): what the floor and the fit judge are given, read by the system with no session ----
+
+/** Applies `edit` to the live export and imports it, as an owner's upload does. */
+const applied = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void) => {
+  const result = await service.importWorkbook({ ...(await edited(service, edit)), file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+  expect(result.applied).toBe(true)
+  return result
+}
+
+describe('CatalogWorkbookService.verdictReference', () => {
+  const seeded = async () => {
+    const built = build()
+    await applied(built.service, (w) => {
+      w.ingredients.rows.push(
+        rule({ code: 'ING-ZZ-ONE', name: 'zzyzx extractum', aliases: 'zzyzx oil', kind: 'irritation', group: 'steroid', clashes_with: 'retinoid', helps: 'hd_redness; hd_texture', source_url: 'https://example.com/zz' }),
+        // A clash is listed on both sides, as the contract requires.
+        rule({ code: 'ING-ZZ-TWO', name: 'zzyzx retinoidum', kind: 'allergen', group: 'retinoid', clashes_with: 'steroid' }),
+        rule({ code: 'ING-ZZ-DRAFT', name: 'zzyzx draftum', status: 'draft', approved_by: null, approved_on: null }),
+        rule({ code: 'ING-ZZ-OLD', name: 'zzyzx retiredum', status: 'retired' }),
+      )
+      w.claimWords.rows.push(
+        claimWord({ code: 'CLM-WHITENING', phrase: 'whitening' }),
+        claimWord({ code: 'CLM-BLEACHING', phrase: 'bleaching' }),
+        claimWord({ code: 'CLM-OLD', phrase: 'toning', status: 'retired' }),
+      )
+    })
+    return built
+  }
+
+  it('gives the live rules version and catalog version together, the approved rules in code order with their group, clashes and what they help, and the approved claim phrases', async () => {
+    const { service, repository } = await seeded()
+
+    const reference = await service.verdictReference()
+
+    const live = await repository.liveRules()
+    expect(reference.rulesVersion).toBe(live.version)
+    expect(reference.catalogVersion).toBe(await repository.catalogVersion())
+    expect(reference.rules.map((r) => r.name)).toEqual(live.entries.map((entry) => entry.name))
+    expect(reference.rules.find((r) => r.name === 'zzyzx extractum')).toEqual({
+      name: 'zzyzx extractum',
+      aliases: ['zzyzx oil'],
+      kind: 'irritation',
+      rule: 'Commonly reported to sting.',
+      source: 'https://example.com/zz',
+      group: 'steroid',
+      clashesWith: ['retinoid'],
+      helps: ['hd_redness', 'hd_texture'],
+    })
+    expect(reference.claimPhrases).toEqual(['bleaching', 'whitening'])
+  })
+
+  it('leaves out a draft rule, a retired rule and a retired claim phrase: only what is approved applies', async () => {
+    const { service } = await seeded()
+
+    const { rules, claimPhrases } = await service.verdictReference()
+
+    expect(rules.map((r) => r.name)).not.toContain('zzyzx draftum')
+    expect(rules.map((r) => r.name)).not.toContain('zzyzx retiredum')
+    expect(claimPhrases).not.toContain('toning')
+  })
+
+  it('gives a rule with no group, no clash and nothing it helps an empty shape the floor can read: a null group, empty lists', async () => {
+    const { service } = await seeded()
+
+    const { rules } = await service.verdictReference()
+
+    expect(rules.find((r) => r.name === 'zzyzx extractum')).toBeDefined()
+    expect(rules.filter((r) => r.group === null).every((r) => Array.isArray(r.clashesWith) && Array.isArray(r.helps))).toBe(true)
+    expect(rules.some((r) => r.group === null && r.clashesWith.length === 0 && r.helps.length === 0)).toBe(true)
+  })
+
+  it('reads the verdict reference with one question to the repository, readVerdictReference, and never reads the whole workbook for it', async () => {
+    const { repository } = await seeded()
+    const asked: string[] = []
+    const spied = new Proxy(repository, {
+      get(target, property, receiver) {
+        const member = Reflect.get(target, property, receiver)
+        if (typeof member !== 'function') return member
+        return (...args: unknown[]) => {
+          asked.push(String(property))
+          return member.apply(target, args)
+        }
+      },
+    })
+    const service = new CatalogWorkbookService({ repository: spied, archive: new MemoryWorkbookArchive({ environment: 'test' }), now: () => new Date('2030-06-15T10:00:00Z'), newId: () => 'id', environment: 'test' })
+
+    const reference = await service.verdictReference()
+
+    expect(asked.filter((name) => name === 'readVerdictReference')).toHaveLength(1)
+    expect(asked).not.toContain('readWorkbook')
+    // The whole answer comes from that one read: no second question for the versions or the live rules.
+    expect(asked).toEqual(['readVerdictReference'])
+    expect(reference.rules.length).toBeGreaterThan(0)
+    expect(reference.claimPhrases).toEqual(['bleaching', 'whitening'])
+  })
+
+  it('reads the rules version and the catalog version in one consistent read, even when an upload lands between two questions to the repository', async () => {
+    const repository = new FakeCatalogWorkbookRepository()
+    // Every rules version here names its own catalog version (rv-N is catalog N), so a pair that does not match is a read made in two halves.
+    repository.publishRules('rv-2', [])
+    const racing = new Proxy(repository, {
+      get(target, property, receiver) {
+        const member = Reflect.get(target, property, receiver)
+        if (typeof member !== 'function' || property === 'publishRules') return member
+        return (...args: unknown[]) => {
+          const outcome = member.apply(target, args)
+          if (!(outcome instanceof Promise)) return outcome
+          // An upload lands as soon as any question to the repository has been answered.
+          return outcome.then(async (answer: unknown) => {
+            target.publishRules(`rv-${(await target.catalogVersion()) + 1}`, [])
+            return answer
+          })
+        }
+      },
+    })
+    const service = new CatalogWorkbookService({ repository: racing, archive: new MemoryWorkbookArchive({ environment: 'test' }), now: () => new Date('2030-06-15T10:00:00Z'), newId: () => 'id', environment: 'test' })
+
+    const reference = await service.verdictReference()
+
+    expect(reference.rulesVersion).toBe(`rv-${reference.catalogVersion}`)
+  })
+
+  describe('the step-down templates', () => {
+    const taperKinds = async (edit: (w: RawWorkbook) => void) => {
+      const { service } = build()
+      await applied(service, edit)
+      return (await service.verdictReference()).tapers
+    }
+
+    it('names the one approved template of each kind', async () => {
+      const tapers = await taperKinds((w) => w.tapers.rows.push(taper({ code: 'TPR-STEROID-1' }), taper({ code: 'TPR-LIGHTENING-1', kind: 'lightening-agent' })))
+
+      expect(tapers).toEqual({ steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' })
+    })
+
+    it('chooses the template approved most recently when a kind has more than one', async () => {
+      const tapers = await taperKinds((w) =>
+        w.tapers.rows.push(taper({ code: 'TPR-STEROID-1', approved_on: '2030-01-02' }), taper({ code: 'TPR-STEROID-2', approved_on: '2030-03-01' }), taper({ code: 'TPR-STEROID-0', approved_on: '2029-12-31' })),
+      )
+
+      expect(tapers).toEqual({ steroid: 'TPR-STEROID-2' })
+    })
+
+    it('chooses the lower code when two templates of a kind were approved on the same day', async () => {
+      const tapers = await taperKinds((w) =>
+        w.tapers.rows.push(
+          taper({ code: 'TPR-LIGHT-B', kind: 'lightening-agent', approved_on: '2030-02-02' }),
+          taper({ code: 'TPR-LIGHT-A', kind: 'lightening-agent', approved_on: '2030-02-02' }),
+          taper({ code: 'TPR-LIGHT-C', kind: 'lightening-agent', approved_on: '2030-02-02' }),
+        ),
+      )
+
+      expect(tapers).toEqual({ 'lightening-agent': 'TPR-LIGHT-A' })
+    })
+
+    it('never chooses a retired or draft template, however recently it was approved or drafted', async () => {
+      const tapers = await taperKinds((w) =>
+        w.tapers.rows.push(
+          taper({ code: 'TPR-STEROID-1', approved_on: '2030-01-02' }),
+          taper({ code: 'TPR-STEROID-NEW-RETIRED', approved_on: '2030-09-09', status: 'retired' }),
+          taper({ code: 'TPR-STEROID-NEW-DRAFT', approved_by: null, approved_on: null, status: 'draft' }),
+        ),
+      )
+
+      expect(tapers).toEqual({ steroid: 'TPR-STEROID-1' })
+    })
+
+    it('leaves out a kind that has no approved template, so the floor sees a step-down it cannot name', async () => {
+      const tapers = await taperKinds((w) => w.tapers.rows.push(taper({ code: 'TPR-STEROID-1' }), taper({ code: 'TPR-LIGHT-OLD', kind: 'lightening-agent', status: 'retired' })))
+
+      expect(tapers).toEqual({ steroid: 'TPR-STEROID-1' })
+      expect(tapers).not.toHaveProperty('lightening-agent')
+    })
+
+    it('is empty before any template exists', async () => {
+      expect(await taperKinds(() => {})).toEqual({})
+    })
+  })
+})
+
+describe('CatalogWorkbookService.tapersByCode', () => {
+  it('gives each template asked for by code, retired ones included, with the schedule as steps and everything the user is told', async () => {
+    const { service } = build()
+    await applied(service, (w) => w.tapers.rows.push(taper({ code: 'TPR-STEROID-1' }), taper({ code: 'TPR-STEROID-2', approved_on: '2030-03-01' })))
+    // The second upload leaves the first template out, which retires it in place.
+    await applied(service, (w) => (w.tapers.rows = w.tapers.rows.filter((row) => row.code !== 'TPR-STEROID-1')))
+
+    const found = await service.tapersByCode(['TPR-STEROID-1', 'TPR-STEROID-2', 'TPR-NO-SUCH'])
+
+    expect([...found.keys()].sort()).toEqual(['TPR-STEROID-1', 'TPR-STEROID-2'])
+    expect(found.get('TPR-STEROID-1')).toMatchObject({
+      code: 'TPR-STEROID-1',
+      kind: 'steroid',
+      status: 'retired',
+      schedule: [
+        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days' },
+        { fromWeek: 3, toWeek: 4, frequency: 'weekly' },
+        { fromWeek: 5, toWeek: 5, frequency: 'stop' },
+      ],
+      whatToExpect: 'Skin may flare for a few days after each step down. This is expected.',
+      seeAProfessionalIf: 'The redness spreads, or the skin weeps or blisters.',
+    })
+    expect(found.get('TPR-STEROID-2')).toMatchObject({ status: 'approved' })
+  })
+
+  it('answers an empty map for no codes', async () => {
+    const { service } = build()
+
+    expect((await service.tapersByCode([])).size).toBe(0)
+  })
+})
+
+describe('CatalogWorkbookService.stepsFor', () => {
+  it('gives the routine steps an approved recommended product fills, by the id of its catalog product', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product({ steps: 'cleanse; treat' })))
+    const [row] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+
+    const steps = await service.stepsFor([row!.productId, 'product-nobody-recommends'])
+
+    expect([...steps.keys()]).toEqual([row!.productId])
+    expect(steps.get(row!.productId)).toEqual(['cleanse', 'treat'])
+  })
+
+  it('leaves out a product whose recommended row was retired', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product()))
+    const [row] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+    await applied(service, (w) => Object.assign(w.products.rows.find((p) => p.code === 'PRD-ONE')!, { status: 'retired' }))
+
+    expect((await service.stepsFor([row!.productId])).size).toBe(0)
+  })
+
+  it('answers an empty map for no products', async () => {
+    const { service } = build()
+
+    expect((await service.stepsFor([])).size).toBe(0)
+  })
+})

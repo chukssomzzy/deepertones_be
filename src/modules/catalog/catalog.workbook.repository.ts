@@ -133,10 +133,13 @@ export class D1CatalogWorkbookRepository {
     return latest.version
   }
 
-  /** Every row of every tab as the last applied upload left it, retired rows included, in code order, with the catalog version they are at. Read in one batch, so the rows belong to that version. */
-  async readWorkbook(): Promise<{ catalogVersion: number; workbook: Workbook }> {
+  /**
+   * Every row of every tab as the last applied upload left it, retired rows included, in code order, with the catalog version they are at and the rules version of
+   * that same catalog version. Read in one batch, so the rows and both versions belong together.
+   */
+  async readWorkbook(): Promise<{ catalogVersion: number; rulesVersion: string; workbook: Workbook }> {
     const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows] = await this.db.batch([
-      this.latestVersion(),
+      this.latestRulesVersion(),
       this.db.select().from(recommendedProducts).orderBy(asc(recommendedProducts.code)),
       this.db.select().from(productAvailability).orderBy(asc(productAvailability.productCode), asc(productAvailability.country)),
       this.db.select().from(ingredientRules).orderBy(asc(ingredientRules.code)),
@@ -148,6 +151,7 @@ export class D1CatalogWorkbookRepository {
     if (!latest) throw new Error('no catalog version')
     return {
       catalogVersion: latest.version,
+      rulesVersion: latest.rulesVersion,
       workbook: {
         products: productRows.map(
           (row): ProductRow => ({
@@ -175,54 +179,61 @@ export class D1CatalogWorkbookRepository {
           }),
         ),
         availability: availabilityRows.map((row): AvailabilityRow => ({ productCode: row.productCode, country: row.country, priceMin: row.priceMin, priceMax: row.priceMax, whereSold: row.whereSold, sourceUrl: row.sourceUrl })),
-        ingredients: ruleRows.map(
-          (row): IngredientRule => ({
-            code: row.code,
-            name: row.name,
-            aliases: row.aliases,
-            kind: row.kind,
-            strengthLimit: row.strengthLimit,
-            statement: row.statement,
-            sourceUrl: row.sourceUrl,
-            helps: row.helps,
-            group: row.group,
-            clashesWith: row.clashesWith,
-            status: row.status,
-            approvedBy: row.approvedBy,
-            approvedOn: dateOf(row.approvedOn),
-            auditedBy: row.auditedBy,
-            auditedOn: dateOf(row.auditedOn),
-          }),
-        ),
+        ingredients: ruleRows.map((row) => D1CatalogWorkbookRepository.ruleOf(row)),
         countries: countryRows.map((row): CountryRow => ({ code: row.code, currency: row.currency, lowMax: row.lowMax, midMax: row.midMax, status: row.status })),
-        claimWords: claimWordRows.map(
-          (row): ClaimWordRow => ({
-            code: row.code,
-            phrase: row.phrase,
-            claim: row.claim,
-            status: row.status,
-            approvedBy: row.approvedBy,
-            approvedOn: dateOf(row.approvedOn),
-            auditedBy: row.auditedBy,
-            auditedOn: dateOf(row.auditedOn),
-          }),
-        ),
-        tapers: taperRows.map(
-          (row): TaperRow => ({
-            code: row.code,
-            kind: row.kind,
-            schedule: row.schedule,
-            whatToExpect: row.whatToExpect,
-            seeAProfessionalIf: row.seeAProfessionalIf,
-            status: row.status,
-            approvedBy: row.approvedBy,
-            approvedOn: dateOf(row.approvedOn),
-            auditedBy: row.auditedBy,
-            auditedOn: dateOf(row.auditedOn),
-          }),
-        ),
+        claimWords: claimWordRows.map((row) => D1CatalogWorkbookRepository.claimWordOf(row)),
+        tapers: taperRows.map((row) => D1CatalogWorkbookRepository.taperOf(row)),
       },
     }
+  }
+
+  /**
+   * The rules, claim words and step-down templates of every status, in code order, with the catalog version they are at and the rules version of that same
+   * catalog version: what the shelf verdict is judged by, without the products, availability or countries a whole-workbook read also carries. One batch, so the
+   * rows and both versions belong together.
+   */
+  async readVerdictReference(): Promise<{ catalogVersion: number; rulesVersion: string; rules: IngredientRule[]; claimWords: ClaimWordRow[]; tapers: TaperRow[] }> {
+    const [versions, ruleRows, claimWordRows, taperRows] = await this.db.batch([
+      this.latestRulesVersion(),
+      this.db.select().from(ingredientRules).orderBy(asc(ingredientRules.code)),
+      this.db.select().from(claimWords).orderBy(asc(claimWords.code)),
+      this.db.select().from(tapers).orderBy(asc(tapers.code)),
+    ])
+    const [latest] = versions
+    if (!latest) throw new Error('no catalog version')
+    return {
+      catalogVersion: latest.version,
+      rulesVersion: latest.rulesVersion,
+      rules: ruleRows.map((row) => D1CatalogWorkbookRepository.ruleOf(row)),
+      claimWords: claimWordRows.map((row) => D1CatalogWorkbookRepository.claimWordOf(row)),
+      tapers: taperRows.map((row) => D1CatalogWorkbookRepository.taperOf(row)),
+    }
+  }
+
+  /** The step-down templates with these codes, retired ones included, in code order. A code that names none is absent. */
+  async tapersByCode(codes: string[]): Promise<TaperRow[]> {
+    const found: TaperRow[] = []
+    for (const chunk of chunked([...new Set(codes)])) {
+      for (const row of await this.db.select().from(tapers).where(inArray(tapers.code, chunk))) found.push(D1CatalogWorkbookRepository.taperOf(row))
+    }
+    return found.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+  }
+
+  /**
+   * For each catalog product id, the routine steps its approved recommended rows fill (the steps of each row in code order, a step once). A product with no
+   * approved row is absent: a draft or retired row says nothing.
+   */
+  async stepsOf(productIds: string[]): Promise<Map<string, RoutineStep[]>> {
+    const found = new Map<string, RoutineStep[]>()
+    for (const chunk of chunked([...new Set(productIds)])) {
+      const rows = await this.db
+        .select({ productId: recommendedProducts.productId, steps: recommendedProducts.steps })
+        .from(recommendedProducts)
+        .where(and(eq(recommendedProducts.status, 'approved'), inArray(recommendedProducts.productId, chunk)))
+        .orderBy(asc(recommendedProducts.code))
+      for (const row of rows) found.set(row.productId, [...new Set([...(found.get(row.productId) ?? []), ...row.steps])])
+    }
+    return found
   }
 
   /** Every country, retired ones included, by code. */
@@ -525,6 +536,54 @@ export class D1CatalogWorkbookRepository {
       )
     }
     return statements
+  }
+
+  private static ruleOf(row: typeof ingredientRules.$inferSelect): IngredientRule {
+    return {
+      code: row.code,
+      name: row.name,
+      aliases: row.aliases,
+      kind: row.kind,
+      strengthLimit: row.strengthLimit,
+      statement: row.statement,
+      sourceUrl: row.sourceUrl,
+      helps: row.helps,
+      group: row.group,
+      clashesWith: row.clashesWith,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static claimWordOf(row: typeof claimWords.$inferSelect): ClaimWordRow {
+    return {
+      code: row.code,
+      phrase: row.phrase,
+      claim: row.claim,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static taperOf(row: typeof tapers.$inferSelect): TaperRow {
+    return {
+      code: row.code,
+      kind: row.kind,
+      schedule: row.schedule,
+      whatToExpect: row.whatToExpect,
+      seeAProfessionalIf: row.seeAProfessionalIf,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
   }
 
   private latestRulesVersion() {

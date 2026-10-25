@@ -11,16 +11,17 @@ export class D1ShelfRepository {
   constructor(private readonly db: Db) {}
 
   /**
-   * The profile's entries that are not removed, the most recently scanned first, at most `limit`. Entries scanned in the same
+   * The profile's entries that are not removed, the most recently scanned first, at most `limit` (all of them when none is given). Entries scanned in the same
    * millisecond come back by id, so the order is the same on every read (and in the fake).
    */
-  async activeFor(profileId: string, limit: number): Promise<ShelfEntryRow[]> {
-    return this.db
+  async activeFor(profileId: string, limit?: number): Promise<ShelfEntryRow[]> {
+    const query = this.db
       .select()
       .from(profileProducts)
       .where(and(eq(profileProducts.profileId, profileId), isNull(profileProducts.removedAt)))
       .orderBy(desc(profileProducts.lastScannedAt), asc(profileProducts.id))
-      .limit(limit)
+      .$dynamic()
+    return limit === undefined ? query : query.limit(limit)
   }
 
   /** The profile's entry for this product if it is on the shelf (not removed); a no-label entry is never one. */

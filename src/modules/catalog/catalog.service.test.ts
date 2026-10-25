@@ -1828,6 +1828,65 @@ describe('ProductCatalogService.productSummary', () => {
   })
 })
 
+// What the shelf verdict reads of each shelf product (spec #171, slice D1): by formulation, in one batched read, with the ingredient list of THAT formulation (not the
+// product's latest) and no concerns, since the floor reads the live rules and never the AI-written concerns (ADR 0001).
+describe('ProductCatalogService.shelfFacts', () => {
+  it('gives each formulation the product\'s identity and the ingredient list of that formulation, and no concerns, image or analysis', async () => {
+    const ctx = setup()
+    const { productId, formulationId } = await researched(ctx, { who: identity({ variant: 'Night', form: 'lotion' }), ingredients: WITH_MERCURY })
+    ctx.analyst.analyseWith(() => [draft()])
+    await ctx.service.analyse(formulationId)
+
+    const facts = await ctx.service.shelfFacts([formulationId])
+
+    expect(facts.get(formulationId)).toEqual({ productId, brand: 'CeraVe', name: 'Hydrating Facial Cleanser', variant: 'Night', form: 'lotion', category: 'skin', ingredients: WITH_MERCURY })
+  })
+
+  it('gives the list of the formulation it is asked about, not the product\'s latest, when the product has more than one', async () => {
+    const ctx = setup()
+    const { productId, formulationId: first } = await researched(ctx, { ingredients: CLEAN })
+    ctx.advance(MINUTE)
+    await ctx.service.addLabelIngredients(productId, [...CLEAN, 'Phenoxyethanol'])
+    const latest = (await ctx.repository.latestFormulation(productId))!.id
+    expect(latest).not.toBe(first)
+
+    const facts = await ctx.service.shelfFacts([first, latest])
+
+    expect(facts.get(first)?.ingredients).toEqual(CLEAN)
+    expect(facts.get(latest)?.ingredients).toEqual([...CLEAN, 'Phenoxyethanol'])
+  })
+
+  it('reads many formulations, of different products, in one call, each under its own id', async () => {
+    const ctx = setup()
+    const one = await researched(ctx, { who: identity({ name: 'Cleanser' }), ingredients: CLEAN })
+    const two = await researched(ctx, { who: identity({ name: 'Toner' }), ingredients: ['Aqua', 'Glycolic Acid'] })
+
+    const facts = await ctx.service.shelfFacts([one.formulationId, two.formulationId, one.formulationId])
+
+    expect([...facts.keys()].sort()).toEqual([one.formulationId, two.formulationId].sort())
+    expect(facts.get(one.formulationId)).toMatchObject({ productId: one.productId, name: 'Cleanser' })
+    expect(facts.get(two.formulationId)).toMatchObject({ productId: two.productId, name: 'Toner', ingredients: ['Aqua', 'Glycolic Acid'] })
+  })
+
+  it('leaves out a formulation that does not resolve, rather than failing the rest', async () => {
+    const ctx = setup()
+    const { formulationId } = await researched(ctx)
+
+    const facts = await ctx.service.shelfFacts([formulationId, 'no-such-formulation'])
+
+    expect([...facts.keys()]).toEqual([formulationId])
+  })
+
+  it('answers an empty map for no formulations, and asks no model and no researcher', async () => {
+    const ctx = setup()
+    ctx.researcher.respondWith(() => {
+      throw new Error('the researcher must not be asked')
+    })
+
+    expect((await ctx.service.shelfFacts([])).size).toBe(0)
+  })
+})
+
 describe('ProductCatalogService.latestIngredients', () => {
   it('gives the ingredient list of the product\'s only formulation, as it was stored', async () => {
     const ctx = setup()
