@@ -22,7 +22,7 @@ export type FloorRule = ReferenceEntry & {
 type FloorShelfBase = { id: string; brand: string | null; name: string; variant: string | null; category: Category }
 
 export type FloorShelfEntry =
-  | (FloorShelfBase & { kind: 'product'; productId: string; ingredients: string[]; ingredientsKey: string })
+  | (FloorShelfBase & { kind: 'product'; productId: string; ingredients: string[] })
   | (FloorShelfBase & { kind: 'no-label'; noLabelPurpose: NoLabelPurpose })
 
 export type FloorMention = NamedMention & {
@@ -64,7 +64,7 @@ export type FloorEntry =
 export type ClashPair = {
   ids: [string, string]
   groups: [IngredientGroup, IngredientGroup]
-  /** The product to reduce if the fit judge names neither. Never a prescribed one. */
+  /** The fixed tie-break, used only when the fit judge names none: never a prescribed product, then an exfoliant or benzoyl peroxide before a retinoid, then shelf order. */
   fallbackReduceId: string
   maxFrequency: 'alternate-days'
 }
@@ -135,7 +135,9 @@ const bannedFacts = (product: FloorProduct, strayBanned: FloorRule[]): FloorFact
 
 const isNamedProduct = (product: FloorProduct, mentions: readonly FloorMention[], rules: readonly FloorRule[]): boolean => {
   const { productIds } = namedIn(mentions, rules)
-  return productIds.has(product.productId) || mentions.some((mention) => mention.ingredients !== null && mention.ingredients.length > 0 && ingredientsKey(mention.ingredients) === product.ingredientsKey)
+  // The key is derived here from the same list the rest of the floor reads, so the match cannot drift from the ingredients.
+  const key = ingredientsKey(product.ingredients)
+  return productIds.has(product.productId) || mentions.some((mention) => mention.ingredients !== null && mention.ingredients.length > 0 && ingredientsKey(mention.ingredients) === key)
 }
 
 const pregnancyFacts = (product: FloorProduct, rules: readonly FloorRule[]): FloorFact[] =>
@@ -144,11 +146,13 @@ const pregnancyFacts = (product: FloorProduct, rules: readonly FloorRule[]): Flo
     .map(({ ingredient }): FloorFact => ({ kind: 'pregnancy-caution', ingredient }))
 
 const reactionIngredientFacts = (product: FloorProduct, mentions: readonly FloorMention[], rules: readonly FloorRule[]): FloorFact[] =>
-  mentions.flatMap((mention) => {
-    const { ingredientParts: named } = namedIn([mention], rules)
-    const ingredient = product.ingredients.find((candidate) => anyIn(ingredientParts(candidate), named))
-    return ingredient === undefined ? [] : [{ kind: 'reaction-ingredient', ingredient, named: mention.name } satisfies FloorFact]
-  })
+  uniqueIngredients(
+    mentions.flatMap((mention) => {
+      const { ingredientParts: named } = namedIn([mention], rules)
+      const ingredient = product.ingredients.find((candidate) => anyIn(ingredientParts(candidate), named))
+      return ingredient === undefined ? [] : [{ kind: 'reaction-ingredient' as const, ingredient, named: mention.name }]
+    }),
+  )
 
 const fixed = (id: string, group: FloorGroup, verdict: Extract<FloorEntry, { status: 'fixed' }>['verdict'], facts: FloorFact[], escalate = false): FloorEntry => ({
   id,
@@ -191,14 +195,20 @@ const conflicting = (product: FloorProduct, context: Context): FloorEntry | null
 
 const productEntry = (product: FloorProduct, held: Held, context: Context): FloorEntry => {
   if (isNamedProduct(product, context.prescribed, context.input.rules)) return fixed(product.id, 'prescribed', { kind: 'keep' }, [{ kind: 'prescription' }])
-  return likelyTheProblem(product, held, context) ?? conflicting(product, context) ?? { id: product.id, status: 'open' }
+  const decided = likelyTheProblem(product, held, context) ?? conflicting(product, context)
+  if (decided) return decided
+  // An empty list reads as "nothing flagged" but really means nothing is known, so it is never left open (never guess).
+  return product.ingredients.length === 0 ? cantTell(product.id) : { id: product.id, status: 'open' }
 }
 
-/** A no-label entry has no list to read: what the user said it is for decides, and otherwise it is set aside rather than guessed at. */
+const cantTell = (id: string): FloorEntry => fixed(id, 'cant-tell', { kind: 'drop' }, [{ kind: 'unknown-contents' }])
+
+/**
+ * A no-label entry has no list to read: what the user said it is for decides, and otherwise it is set aside rather than guessed at.
+ * The lighten case mirrors `cautionFor` in scans.cautions.ts, which warns about a lightener on the same answer.
+ */
 const noLabelEntry = (id: string, purpose: NoLabelPurpose, tapers: FloorInput['tapers']): FloorEntry =>
-  purpose === 'lighten'
-    ? stepDown(id, 'lightening-agent', [{ kind: 'no-label-purpose', purpose }], tapers)
-    : fixed(id, 'cant-tell', { kind: 'drop' }, [{ kind: 'unknown-contents' }])
+  purpose === 'lighten' ? stepDown(id, 'lightening-agent', [{ kind: 'no-label-purpose', purpose }], tapers) : cantTell(id)
 
 const clashRelation = (rules: readonly FloorRule[]): Map<IngredientGroup, Set<IngredientGroup>> => {
   const related = new Map<IngredientGroup, Set<IngredientGroup>>(INGREDIENT_GROUPS.map((group) => [group, new Set()]))
