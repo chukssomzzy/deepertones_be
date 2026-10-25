@@ -3,6 +3,7 @@ import { describeError } from '../../jobs/safe-error'
 import { requireUser } from '../../lib/context'
 import { ConflictError, UnavailableError } from '../../lib/errors'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
+import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { VerdictFitter } from '../../providers/verdict-fitting/verdict-fitter.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
@@ -20,11 +21,14 @@ import { buildVerdictSpec, type BuildVerdictMessage } from './verdicts.job-specs
 import { mergeVerdict, type MergedVerdict } from './verdicts.merge'
 import type { FitState, ShelfVerdictRow, VerdictsRepository } from './verdicts.repository'
 import type { SavedVerdictProduct } from './verdicts.types'
+import { toShelfVerdictResponse, type VerdictView } from './verdicts.view'
 
 export type VerdictServiceDeps = {
   repository: VerdictsRepository
   fitter: VerdictFitter
   jobs: JobQueue
+  /** Tells whoever follows a profile's verdict that it was built (`verdict:<profileId>`). */
+  events: ScanEvents
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>
   shelf: Pick<ShelfService, 'activeEntriesFor'>
@@ -34,9 +38,6 @@ export type VerdictServiceDeps = {
   faceScans: Pick<FaceScanService, 'latestConcernLevelsFor'>
   now?: () => Date
 }
-
-/** What GET /me/verdict answers: the build is on its way, or the saved verdict with the step-down templates its stopped products use (retired ones included). */
-export type VerdictView = { status: 'pending' } | { status: 'ready'; fit: 'ready' | 'not-ready'; products: SavedVerdictProduct[]; tapers: TaperRow[] }
 
 /** The saved verdict as the routine reads it. */
 export type SavedVerdictView = { fingerprint: string; fit: 'ready' | 'not-ready'; builtAt: Date; rulesVersion: string | null; products: SavedVerdictProduct[] }
@@ -70,6 +71,7 @@ export class VerdictService {
   private readonly repository: VerdictsRepository
   private readonly fitter: VerdictFitter
   private readonly jobs: JobQueue
+  private readonly events: ScanEvents
   private readonly workbook: VerdictServiceDeps['workbook']
   private readonly catalog: VerdictServiceDeps['catalog']
   private readonly shelf: VerdictServiceDeps['shelf']
@@ -83,6 +85,7 @@ export class VerdictService {
     this.repository = deps.repository
     this.fitter = deps.fitter
     this.jobs = deps.jobs
+    this.events = deps.events
     this.workbook = deps.workbook
     this.catalog = deps.catalog
     this.shelf = deps.shelf
@@ -100,14 +103,39 @@ export class VerdictService {
    */
   async current(): Promise<VerdictView> {
     const { profileId } = requireUser()
-    const reference = await this.workbook.verdictReference()
-    if (VerdictService.lacksTapers(reference)) throw new UnavailableError('VERDICT_UNAVAILABLE', 'The verdict is not available yet')
-    const goal = await this.goals.goalFor(profileId)
-    if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    const { reference, goal } = await this.gated(profileId)
+    return this.viewOf(await this.servable(profileId, reference, goal))
+  }
 
+  /**
+   * The caller's verdict followed live, as the `text/event-stream` of `verdict:<profileId>`. The gates, the claim and the queued build are `current`'s (nothing is
+   * subscribed or queued when a gate throws). It starts with the verdict `current` would answer, then carries each `verdict` a build saves, and ends with `done`
+   * once nothing more is coming soon: the fit is ready, or its day's attempts and its retry are spent (`fitRetried`). A verdict whose fit is not ready and still
+   * has an attempt coming leaves the stream open to see that land. The snapshot is read before the stream opens, so the verdict is read again once it is open:
+   * a build saved in between is sent, and a verdict that is finished gets `done` straight away. A failure to send is logged, and so is a failure of that
+   * re-read (`watch-reread-failed`), which still hands back the stream.
+   */
+  async watch(): Promise<Response> {
+    const { profileId } = requireUser()
+    const { reference, goal } = await this.gated(profileId)
     const row = await this.servable(profileId, reference, goal)
-    if (row) return { status: 'ready', fit: row.fit, products: row.products, tapers: await this.tapersOf(row.products) }
-    return { status: 'pending' }
+    const stream = await this.events.subscribe(VerdictService.streamKey(profileId), toShelfVerdictResponse(await this.viewOf(row)))
+    let latest: ReadyRow | null
+    try {
+      latest = (await this.lookup(profileId, reference, goal)).row ?? row
+    } catch {
+      console.error({ outcome: 'watch-reread-failed', profileId })
+      return stream
+    }
+    try {
+      if (latest) {
+        if (latest.builtAt.getTime() !== row?.builtAt.getTime()) await this.publishVerdict(profileId, latest.fit, latest.products)
+        if (VerdictService.isFinished(latest)) await this.publishDone(profileId)
+      }
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId })
+    }
+    return stream
   }
 
   /**
@@ -117,14 +145,12 @@ export class VerdictService {
    * those. A verdict already built from them with its fit ready is left alone, so a repeat costs no second call to the judge.
    *
    * When the judge fails, or its answer does not fit the shelf, the verdict is saved without its fit (see the class) and the attempt is counted: the first
-   * two throw for the queue to retry, the third, and the one retry the day after, return. Never logs a product's name, a reason or the words typed: ids and outcomes.
+   * two throw for the queue to retry, the third, and the one retry the day after, return. The stream is then sent the verdict, and `done` once it is finished
+   * (see `watch`); if the inputs changed while the judge worked it is sent `pending` instead and the build for the new inputs is queued. Never logs a product's name, a reason or the words typed: ids and outcomes.
    */
   async build(body: BuildVerdictMessage): Promise<void> {
     const { profileId } = body
-    const reference = await this.workbook.verdictReference()
-    if (VerdictService.lacksTapers(reference)) throw new PermanentJobError('A step-down template is no longer approved')
-    const goal = await this.goals.goalFor(profileId)
-    if (goal === null) throw new PermanentJobError('The profile has no goal')
+    const { reference, goal } = await this.buildGates(profileId)
 
     const safety = await this.safety.snapshotFor(profileId)
     if (body.waits < VerdictService.MAX_WAITS && (safety.parseState === 'pending' || (await this.scans.hasShelfWorkInFlight(profileId)))) {
@@ -160,11 +186,12 @@ export class VerdictService {
     merged ??= mergeVerdict({ floor, fit: null, entries: inputs.entries, choices })
 
     const now = this.now()
+    const products = merged.products.map((product) => ({ ...product, ...(inputs.perEntry.get(product.entryId) ?? { step: null, sourceUrls: [] }) }))
     const fitState = failed ? this.afterFailure(body, prior, now) : { fitAttempts: 0, fitRetried: false, fitRetryDueAt: null }
     await this.repository.save(profileId, {
       fingerprint,
       fit: merged.fit,
-      products: merged.products.map((product) => ({ ...product, ...(inputs.perEntry.get(product.entryId) ?? { step: null, sourceUrls: [] }) })),
+      products,
       builtAt: now,
       rulesVersion: reference.rulesVersion,
       catalogVersion: reference.catalogVersion,
@@ -173,8 +200,26 @@ export class VerdictService {
       inputs: provenanceOf(facts, floor),
       ...fitState,
     })
-    // Saved first, so the user has the verdict whether or not the queue tries again. Only the attempts before the day's last leave `fitRetried` false.
-    if (failed && !fitState.fitRetried) throw failure
+    // The judge can take a while, and the shelf, the safety words or the goal can change under it: what was just saved is then already out of date, and saying it
+    // is ready would be wrong. The stream is told it is pending, with no `done`, and the build for the inputs as they are now is queued as `current` queues it.
+    const asNow = await this.buildGates(profileId)
+    const fingerprintNow = (await this.assemble(profileId, asNow.reference, asNow.goal, await this.safety.snapshotFor(profileId))).fingerprint
+    const outdated = fingerprintNow !== fingerprint
+    if (outdated) await this.claimAndEnqueue(profileId, fingerprintNow)
+    // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream.
+    try {
+      if (outdated) {
+        await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict: toShelfVerdictResponse({ status: 'pending' }) })
+      } else {
+        await this.publishVerdict(profileId, merged.fit, products)
+        if (VerdictService.isFinished({ fit: merged.fit, fitRetried: fitState.fitRetried })) await this.publishDone(profileId)
+      }
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId })
+    }
+    // Saved first, so the user has the verdict whether or not the queue tries again. Only the attempts before the day's last leave `fitRetried` false. An
+    // outdated build is not retried: the build just queued for the inputs as they are now has its own attempts, and a retry of this one would bill twice.
+    if (failed && !fitState.fitRetried && !outdated) throw failure
   }
 
   /**
@@ -198,7 +243,8 @@ export class VerdictService {
   /**
    * Where the dead-letter queue lands a build whose retries ran out (an outage, not a failed fit). Like the safety parse it is given one more try the next day:
    * the row is marked retried and the retry due in 24 hours, for the daily sweep to queue; nothing is queued here. A second dead letter is final: nothing more is
-   * due. A row that has moved on (another fingerprint), has none, or is built with its fit ready is left alone.
+   * due. A row that has moved on (another fingerprint), has none, or is built with its fit ready is left alone. Otherwise the stream is told it is over: the row's
+   * verdict if it has one, and `done`.
    */
   async markFitFailed(body: BuildVerdictMessage): Promise<void> {
     const row = await this.repository.find(body.profileId)
@@ -209,6 +255,13 @@ export class VerdictService {
       fitRetried: true,
       fitRetryDueAt: final ? null : new Date(this.now().getTime() + VerdictService.DAY_MS),
     })
+    // Nothing more is coming soon, so a stream still open is told what the row holds and that it is over. Never throws: the retry above is already scheduled.
+    try {
+      if (isReady(row)) await this.publishVerdict(row.profileId, row.fit, row.products)
+      await this.publishDone(row.profileId)
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId: row.profileId })
+    }
   }
 
   /**
@@ -224,14 +277,48 @@ export class VerdictService {
     return row && { fingerprint: row.fingerprint, fit: row.fit, builtAt: row.builtAt, rulesVersion: row.rulesVersion, products: row.products }
   }
 
-  /** The ready row built from the inputs as they are now. Otherwise null, after claiming and queuing the build (a request still fresh is not queued twice). */
-  private async servable(profileId: string, reference: VerdictReference, goal: Goal): Promise<ReadyRow | null> {
+  /** The gates of the caller's verdict, in order: 503 while a step-down template is not approved, then 409 for a profile with no goal. */
+  private async gated(profileId: string): Promise<{ reference: VerdictReference; goal: Goal }> {
+    const reference = await this.workbook.verdictReference()
+    if (VerdictService.lacksTapers(reference)) throw new UnavailableError('VERDICT_UNAVAILABLE', 'The verdict is not available yet')
+    const goal = await this.goals.goalFor(profileId)
+    if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    return { reference, goal }
+  }
+
+  private async viewOf(row: ReadyRow | null): Promise<VerdictView> {
+    return row ? { status: 'ready', fit: row.fit, products: row.products, tapers: await this.tapersOf(row.products) } : { status: 'pending' }
+  }
+
+  /** The ready row built from the inputs as they are now, or null, and those inputs' fingerprint. Writes nothing. */
+  private async lookup(profileId: string, reference: VerdictReference, goal: Goal): Promise<{ fingerprint: string; row: ReadyRow | null }> {
     const { fingerprint } = await this.assemble(profileId, reference, goal, await this.safety.snapshotFor(profileId))
     const row = await this.repository.find(profileId)
-    if (isReady(row) && row.fingerprint === fingerprint) return row
+    return { fingerprint, row: isReady(row) && row.fingerprint === fingerprint ? row : null }
+  }
 
+  /** The verdict as the stream carries it: the public body GET answers. Throws when it cannot be sent; callers log that. */
+  private async publishVerdict(profileId: string, fit: 'ready' | 'not-ready', products: SavedVerdictProduct[]): Promise<void> {
+    const verdict = toShelfVerdictResponse({ status: 'ready', fit, products, tapers: await this.tapersOf(products) })
+    await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict })
+  }
+
+  private static streamKey(profileId: string): string {
+    return `verdict:${profileId}`
+  }
+
+  /** The ready row built from the inputs as they are now. Otherwise null, after claiming and queuing the build (a request still fresh is not queued twice). */
+  private async servable(profileId: string, reference: VerdictReference, goal: Goal): Promise<ReadyRow | null> {
+    const { fingerprint, row } = await this.lookup(profileId, reference, goal)
+    if (row) return row
+    await this.claimAndEnqueue(profileId, fingerprint)
+    return null
+  }
+
+  /** Claims the build of `fingerprint` and queues it, unless a request for it is still fresh. If the queue refuses, the claim is released and its error thrown. */
+  private async claimAndEnqueue(profileId: string, fingerprint: string): Promise<void> {
     const now = this.now()
-    if (!(await this.repository.requestBuild(profileId, fingerprint, now, new Date(now.getTime() - VerdictService.STALE_AFTER_MS)))) return null
+    if (!(await this.repository.requestBuild(profileId, fingerprint, now, new Date(now.getTime() - VerdictService.STALE_AFTER_MS)))) return
     try {
       await this.jobs.enqueue(buildVerdictSpec, { profileId, fingerprint, requestedAt: now.getTime(), waits: 0 })
     } catch (error) {
@@ -239,7 +326,24 @@ export class VerdictService {
       await this.repository.releaseClaim(profileId, now).catch(() => undefined)
       throw error
     }
-    return null
+  }
+
+  /** What the build job needs to run at all; a template withdrawn since the ask, or a profile with no goal, fails it for good. */
+  private async buildGates(profileId: string): Promise<{ reference: VerdictReference; goal: Goal }> {
+    const reference = await this.workbook.verdictReference()
+    if (VerdictService.lacksTapers(reference)) throw new PermanentJobError('A step-down template is no longer approved')
+    const goal = await this.goals.goalFor(profileId)
+    if (goal === null) throw new PermanentJobError('The profile has no goal')
+    return { reference, goal }
+  }
+
+  /** The stream ends after a verdict whose fit is ready, or one whose fit is not but has had its retry: nothing more is coming soon (the next try is a day away or none). */
+  private static isFinished(row: { fit: 'ready' | 'not-ready'; fitRetried: boolean }): boolean {
+    return row.fit === 'ready' || row.fitRetried
+  }
+
+  private async publishDone(profileId: string): Promise<void> {
+    await this.events.publish(VerdictService.streamKey(profileId), { type: 'done' })
   }
 
   /** Both step-down kinds must have an approved template, whatever this shelf needs: the shelf can change under a saved verdict, and a stop with no taper is never shown. */

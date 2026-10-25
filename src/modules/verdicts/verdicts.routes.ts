@@ -1,5 +1,6 @@
-import { defineRoute, errorResponses, ok, openapiApp, success } from '../../lib/openapi'
-import { toShelfVerdictResponse } from './verdicts.presenter'
+import { defineRoute, errorResponses, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
+import { signedIn } from '../../middleware/signed-in'
+import { toShelfVerdictResponse } from './verdicts.view'
 import { ShelfVerdictResponse } from './verdicts.schemas'
 
 const bearer = [{ bearerAuth: [] }]
@@ -21,4 +22,26 @@ const getVerdict = defineRoute({
   responses: { 200: success(ShelfVerdictResponse, 'The verdict, or pending'), ...errorResponses(401, 409, 503) },
 })
 
-export const verdictsRoutes = openapiApp().openapi(getVerdict, async (c) => ok(c, toShelfVerdictResponse(await c.var.services.verdicts.current()), 'Shelf verdict'))
+const watchVerdict = defineRoute({
+  method: 'get',
+  path: '/verdict/events',
+  operationId: 'watchShelfVerdict',
+  tags: ['Verdict'],
+  summary: 'Follow the shelf verdict live, as server-sent events',
+  description:
+    'Guests included. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). The gates and the build are those of `GET /api/v1/me/verdict`: ' +
+    '503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (checked first), then 409 `GOAL_REQUIRED` for a profile with no goal; ' +
+    'otherwise this ask queues the build when none is fresh. Frames: `snapshot` first, whose data is the body `GET /api/v1/me/verdict` answers now (`{ status: \'pending\' }` or the ready verdict); ' +
+    'then one `verdict` each time a build saves, whose data is the ready verdict in that same shape; then `done` (data `{}`) after a `verdict` whose `fit` is `ready`, or whose goal-fit check has had its retry (nothing more is coming soon), after which the server closes the stream. ' +
+    'A verdict whose `fit` is `not-ready` while a try is still to come is not followed by `done`: the check is tried again and its `verdict` arrives on the open stream. ' +
+    'A `verdict` of `{ status: \'pending\' }` (no `done`) means the shelf or answers changed while the verdict was being built: the new one is on its way on the same stream. A verdict that is already current and ' +
+    'finished gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, ' +
+    'the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body.',
+  security: bearer,
+  middleware: [signedIn()],
+  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 409, 503) },
+})
+
+export const verdictsRoutes = openapiApp()
+  .openapi(getVerdict, async (c) => ok(c, toShelfVerdictResponse(await c.var.services.verdicts.current()), 'Shelf verdict'))
+  .openapi(watchVerdict, async (c) => c.var.services.verdicts.watch())

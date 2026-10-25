@@ -24,6 +24,7 @@ const SNAPSHOT = { id: 'scan-snapshot', createdAt: '2030-06-15T12:00:00.000Z', i
 const itemEvent = (item: Record<string, unknown>) => ({ type: 'item', item }) as unknown as ScanEvent
 const photoEvent = (photo: Record<string, unknown>) => ({ type: 'photo', photo }) as unknown as ScanEvent
 const DONE = { type: 'done' } as ScanEvent
+const verdictEvent = (verdict: Record<string, unknown>) => ({ type: 'verdict', verdict }) as unknown as ScanEvent
 const faceEvent = (faceScan: Record<string, unknown>) => ({ type: 'face', faceScan }) as unknown as ScanEvent
 
 const stubFor = (scanId: string) => env.SCAN_STREAM.get(env.SCAN_STREAM.idFromName(scanId))
@@ -247,6 +248,60 @@ describe('ScanStream face scan frames', () => {
     await stubFor(scanId).publish(faceEvent({ id: scanId, state: 'ready', reason: null }))
 
     expect(parseFrame((await stream.read(1)).frames[0]!).event).toBe('face')
+  })
+})
+
+// A shelf verdict (spec #171, D3) is followed on the same Durable Object, keyed `verdict:<profileId>`. Its snapshot is the public verdict body, and each build that
+// saves is a `verdict` event carrying the body as GET /me/verdict would answer. The object only forwards: when the stream closes is the service's choice (it sends
+// `done` for a verdict whose fit is ready, and nothing for one whose fit is not).
+describe('ScanStream verdict frames', () => {
+  const PENDING = { status: 'pending' }
+  const READY = { status: 'ready', fit: 'ready', products: [{ entryId: 'entry-1', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }], tapers: [] }
+  const NOT_READY = { ...READY, fit: 'not-ready' }
+  const freshVerdictKey = () => `verdict:${crypto.randomUUID()}`
+
+  it('writes a verdict event as an event named verdict whose data is the verdict body, not as an item, after a pending snapshot', async () => {
+    const key = freshVerdictKey()
+    const { stream } = await subscribe(key, PENDING)
+
+    await stubFor(key).publish(verdictEvent(READY))
+
+    const { frames } = await stream.read(2)
+    expect(frames).toEqual([`event: snapshot\ndata: ${JSON.stringify(PENDING)}`, `event: verdict\ndata: ${JSON.stringify(READY)}`])
+  })
+
+  it('keeps the stream open after a verdict whose fit is not ready, delivers the retry\'s verdict, and ends on done', async () => {
+    const key = freshVerdictKey()
+    const { stream } = await subscribe(key, PENDING)
+    await stream.read(1)
+
+    await stubFor(key).publish(verdictEvent(NOT_READY))
+    const first = await stream.read(2, 300)
+    expect(first.frames).toEqual([`event: verdict\ndata: ${JSON.stringify(NOT_READY)}`])
+    expect(first.ended).toBe(false)
+
+    await stubFor(key).publish(verdictEvent(READY))
+    await stubFor(key).publish(DONE)
+
+    const { frames, ended } = await stream.read(3)
+    expect(frames).toEqual([`event: verdict\ndata: ${JSON.stringify(READY)}`, 'event: done\ndata: {}'])
+    expect(ended).toBe(true)
+  })
+
+  it('writes a profile\'s verdict to the clients of that profile only', async () => {
+    const mine = freshVerdictKey()
+    const theirs = freshVerdictKey()
+    const watching = await subscribe(mine, PENDING)
+    const other = await subscribe(theirs, PENDING)
+    await watching.stream.read(1)
+    await other.stream.read(1)
+
+    await stubFor(mine).publish(verdictEvent(READY))
+
+    expect((await watching.stream.read(1)).frames).toHaveLength(1)
+    const { frames, ended } = await other.stream.read(1, 200)
+    expect(frames).toEqual([])
+    expect(ended).toBe(false)
   })
 })
 
