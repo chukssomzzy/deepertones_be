@@ -759,13 +759,30 @@ describe('runRejudge: a rubric judge answer that is invalid is retried once', ()
 
   it('still makes no calls on --rescore, whether or not the source run had a retry', async () => {
     const source = await makeSource({ sourceJudge: { haiku: (call) => { if (call === 2) throw new AnthropicRequestError('SENTINEL-JUDGE-ERROR-MESSAGE'); return judgement() } } })
-    const { run, judges, ledger } = rejudgeOf(source, { mode: 'rescore' })
+    const { run, judges, ledger, files } = rejudgeOf(source, { mode: 'rescore' })
 
     await run()
 
     expect(judges.haiku.calls).toEqual([])
     expect(judges.opus.calls).toEqual([])
     expect(ledger.entries).toEqual([])
+    // The source's retries are carried over, not recounted: the source retried haiku once, on its second case.
+    const report = reportOf(files)
+    expect(report.cases.map((c) => c.judgeRetries)).toEqual(source.report.cases.map((c) => c.judgeRetries))
+    expect(report.cases.map((c) => c.judgeRetries?.haiku)).toEqual([0, 1, 0])
+    expect(report.summary.judgeComparison.find((row) => row.name === 'haiku')?.retries).toBe(1)
+  })
+
+  it('counts no retries on --rescore of an older report that has no judgeRetries', async () => {
+    const source = await makeSource()
+    for (const c of source.report.cases) delete (c as { judgeRetries?: unknown }).judgeRetries
+    const { run, files } = rejudgeOf(source, { mode: 'rescore' })
+
+    await run()
+
+    const report = reportOf(files)
+    expect(report.cases.every((c) => Object.values(c.judgeRetries ?? {}).every((n) => n === 0))).toBe(true)
+    expect(report.summary.judgeComparison.every((row) => row.retries === 0)).toBe(true)
   })
 })
 
