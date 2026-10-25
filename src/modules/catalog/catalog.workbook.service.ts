@@ -10,6 +10,7 @@ import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
 import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
 export type NewProductSummary = { code: string; brand: string; name: string; variant: string | null; form: string | null }
@@ -25,7 +26,8 @@ export const referenceEntriesOf = (rules: readonly Pick<IngredientRule, 'code' |
 
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
-export type ImportInput = { workbook: RawWorkbook; file: Uint8Array | null; baseVersion: number; dryRun: boolean; uploadedBy: string; contractVersion: string }
+/** The workbook is whatever JSON object was uploaded: its shape is checked by the import, after the contract version. */
+export type ImportInput = { workbook: unknown; file: Uint8Array | null; baseVersion: number; dryRun: boolean; uploadedBy: string; contractVersion: string }
 export type ImportResult = { applied: boolean; catalogVersion: number; diff: ImportDiff }
 export type ExportResult = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 
@@ -34,8 +36,8 @@ type Deps = {
   archive: WorkbookArchive
   now: () => Date
   newId: () => string
-  /** Which environment this is. Left out, no approver is checked. */
-  environment?: string
+  /** Which environment this is. Required, so that a wiring that forgets it fails to compile instead of skipping the approver check. */
+  environment: string
   /** The labels of the people who may approve a step-down template in production, separated by commas. Left out or empty, nobody may. */
   qualifiedApprovers?: string
 }
@@ -57,7 +59,7 @@ export class CatalogWorkbookService {
   private readonly archive: WorkbookArchive
   private readonly now: () => Date
   private readonly newId: () => string
-  private readonly environment: string | undefined
+  private readonly environment: string
   private readonly qualifiedApprovers: ReadonlySet<string>
 
   constructor(deps: Deps) {
@@ -76,8 +78,8 @@ export class CatalogWorkbookService {
   }
 
   /**
-   * Refuses a file made for another contract version, checks the workbook against the contract, refuses it if it was made from a catalog version
-   * that is not live, and works out what it would change. A
+   * Refuses a file made for another contract version, then checks the workbook has the tabs and cells the contract is written in (400
+   * `VALIDATION_FAILED`) and follows the contract, refuses it if it was made from a catalog version that is not live, and works out what it would change. A
    * dry run stops there and writes nothing. An apply needs the original file: it is archived first, under a key of its own, and then the whole
    * change is one atomic write, which loses cleanly to a concurrent upload from the same version.
    */
@@ -87,7 +89,16 @@ export class CatalogWorkbookService {
       console.info({ outcome: 'catalog-import-contract-mismatch' })
       throw new ConflictError('CONTRACT_MISMATCH', `The workbook was made for a different contract version than this server's (${CONTRACT_VERSION}); export it again and redo the edit`)
     }
-    const checked = validateWorkbook(input.workbook)
+    const shape = RawWorkbookSchema.safeParse(input.workbook)
+    if (!shape.success) {
+      console.info({ outcome: 'catalog-import-bad-shape' })
+      throw new ValidationError(
+        'VALIDATION_FAILED',
+        'Invalid workbook',
+        shape.error.issues.map((issue) => ({ path: ['workbook', ...issue.path].map(String).join('.'), message: issue.message })),
+      )
+    }
+    const checked = validateWorkbook(shape.data)
     if (!checked.ok) {
       console.info({ outcome: 'catalog-import-invalid', problems: checked.problems.length })
       throw new ValidationError('CATALOG_INVALID', 'The workbook does not follow the contract', { problems: checked.problems })

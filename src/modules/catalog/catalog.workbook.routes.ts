@@ -37,6 +37,7 @@ const importCatalog = defineRoute({
     'With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. ' +
     'Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. ' +
     'In production, an approved Tapers row whose `approved_by` is not on the server\'s list of qualified approvers is such a problem too (`UNQUALIFIED_APPROVER`). ' +
+    'A workbook of the current contract version that is not six tabs of a header row and rows is 400 `VALIDATION_FAILED`, checked after the contract version. ' +
     'Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and ' +
     '`CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). ' +
     '503 `CATALOG_ARCHIVE_FAILED` means the file could not be archived and nothing was applied; try again.',

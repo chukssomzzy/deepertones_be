@@ -1,6 +1,6 @@
 # Catalog workbook contract
 
-Version 2.0.0. Fingerprint `3fb1a7864d2688e8d6b33806332b927368d71c90e7b5e692390212ddc2c43e7a`.
+Version 2.0.0. Fingerprint `4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
@@ -138,6 +138,7 @@ Phrases that say a product is sold for lightening or bleaching. A product whose 
 Checks across cells and rows:
 
 - `DUPLICATE_PHRASE`: One claim word for each phrase among the words that are not retired.
+- `NOT_A_LIGHTENING_CLAIM`: No phrase, retired or not, holds "brightening" or "glow" as a whole word (any case).
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
 ### Tapers
@@ -322,6 +323,7 @@ Used by: `Tapers.schedule`
 | `CLASH_WITHOUT_GROUP` | A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with. |
 | `SELF_CLASH` | A rule lists its own group in clashes_with. A group does not clash with itself. |
 | `DUPLICATE_PHRASE` | Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one. |
+| `NOT_A_LIGHTENING_CLAIM` | The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out. |
 | `NOT_LOWER_CASE` | The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case. |
 | `BAD_SCHEDULE` | The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop. A schedule is at most 52 weeks long. |
 | `SCHEDULE_NOT_CONTIGUOUS` | The weeks of the schedule do not run on from week 1 one step after another: it starts after week 1, or leaves a gap, or two steps share a week, or the steps are out of order. |

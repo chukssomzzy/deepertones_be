@@ -34,7 +34,7 @@ const build = () => {
   const repository = new FakeCatalogWorkbookRepository()
   const archive = new MemoryWorkbookArchive({ environment: 'test' })
   let id = 0
-  const service = new CatalogWorkbookService({ repository, archive, now: () => new Date('2030-06-15T10:00:00Z'), newId: () => `id-${id++}` })
+  const service = new CatalogWorkbookService({ repository, archive, now: () => new Date('2030-06-15T10:00:00Z'), newId: () => `id-${id++}`, environment: 'test' })
   return { repository, archive, service }
 }
 
@@ -145,7 +145,7 @@ describe('CatalogWorkbookService.importWorkbook', () => {
   it('answers 503 CATALOG_ARCHIVE_FAILED as an UnavailableError when the file cannot be archived, and writes nothing', async () => {
     const { repository } = build()
     const archive = { put: async () => Promise.reject(new Error('r2 is down')) }
-    const service = new CatalogWorkbookService({ repository, archive, now: () => new Date('2030-06-15T10:00:00Z'), newId: () => 'id' })
+    const service = new CatalogWorkbookService({ repository, archive, now: () => new Date('2030-06-15T10:00:00Z'), newId: () => 'id', environment: 'test' })
     const { workbook, baseVersion } = await edited(service, (w) => addProduct(w, product()))
 
     await expect(service.importWorkbook({ workbook, file: FILE, baseVersion, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })).rejects.toMatchObject({ name: 'UnavailableError', code: 'CATALOG_ARCHIVE_FAILED' })

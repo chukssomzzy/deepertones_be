@@ -85,6 +85,8 @@ const RULES = {
   CLASH_WITHOUT_GROUP: 'A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with.',
   SELF_CLASH: 'A rule lists its own group in clashes_with. A group does not clash with itself.',
   DUPLICATE_PHRASE: 'Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one.',
+  NOT_A_LIGHTENING_CLAIM:
+    'The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out.',
   NOT_LOWER_CASE: 'The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case.',
   BAD_SCHEDULE:
     'The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop. A schedule is at most 52 weeks long.',
@@ -96,6 +98,9 @@ const RULES = {
     'In production only: a Tapers row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file.',
 } as const
 export type RuleCode = keyof typeof RULES
+
+/** The words that are never a claim word: a goal people have, not a claim to lighten skin. */
+const NOT_CLAIM_WORDS = /\b(?:brightening|glow)\b/
 
 const VOCABULARIES = {
   skinConcerns: [...SHOWN_CONCERNS],
@@ -386,6 +391,7 @@ export const CONTRACT: Contract = {
       ],
       checks: [
         { rule: 'DUPLICATE_PHRASE', about: 'One claim word for each phrase among the words that are not retired.' },
+        { rule: 'NOT_A_LIGHTENING_CLAIM', about: 'No phrase, retired or not, holds "brightening" or "glow" as a whole word (any case).' },
         { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
       ],
     },
@@ -1076,6 +1082,12 @@ class WorkbookValidator {
       const label = (text: string, column: string) => ({ key: JSON.stringify([kind, text.toLowerCase()]), column })
       const name = ingredients.has('name') && !ingredients.overCap(i, 'name') ? ingredients.value(i, 'name') : null
       return [...(name === null ? [] : [label(name, 'name')]), ...ingredients.itemsWithinCap(i, 'aliases').map((alias) => label(alias, 'aliases'))]
+    })
+    claimWords.rows.forEach((_, i) => {
+      // Whole words, so "glowing" is not caught; lower-cased first, so a phrase with a capital is told that too (NOT_LOWER_CASE) and this as well.
+      if (!claimWords.has('phrase') || claimWords.overCap(i, 'phrase')) return
+      const phrase = claimWords.value(i, 'phrase')
+      if (phrase !== null && NOT_CLAIM_WORDS.test(phrase.toLowerCase())) claimWords.fail(i, 'phrase', 'NOT_A_LIGHTENING_CLAIM')
     })
     this.reportClash(claimWords, 'DUPLICATE_PHRASE', (i) => {
       // As for a rule: a retired word applies to nothing, and may be replaced by a new one for the same phrase.

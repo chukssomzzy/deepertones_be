@@ -262,8 +262,9 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
 - **Contract 2.0.0: export again after this is deployed.** The Claim words and Tapers tabs and the Ingredients `group` and `clashes_with` columns are a
-  new contract version. A file exported before it (stamped 1.0.0) is refused by `catalog:upload` with a message to export again, and by the server as
-  `409 CONTRACT_MISMATCH` (the upload sends the file's contract version). Export a fresh file and move your edits across; the old file's rows keep
+  new contract version. A file exported before it (stamped 1.0.0) is refused by `catalog:upload` with a message to export again, before anything is sent. The
+  server refuses it too, as `409 CONTRACT_MISMATCH` whatever tabs the body has (the upload sends the file's contract version, and it is checked before the
+  tabs), so a 1.0.0 file posted by hand gets that and not a 400. Export a fresh file and move your edits across; the old file's rows keep
   working as they are. An old eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`) needs the same re-export.
 - **Who may approve a step-down template.** A template is shown to people, so in **production** the server refuses an approved Tapers row unless its
   `approved_by` is one of the labels in the `QUALIFIED_APPROVERS` var (comma-separated, matched whole and exactly, spaces around a label ignored). It is set in

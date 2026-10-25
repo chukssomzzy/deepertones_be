@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CatalogWorkbookRepository, PlannedProduct, WorkbookPlan } from './catalog.workbook.repository'
-import type { ConcernKind } from './catalog.vocabulary'
+import type { ConcernKind, IngredientGroup } from './catalog.vocabulary'
 import type { ProductRow } from './catalog.workbook.schema'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
 
@@ -16,8 +16,8 @@ export type RuleRow = {
   sourceUrl: string | null
   helps: ShownConcern[]
   /** Rule metadata the floor reads: null for most rules. Not part of what the matcher reads, so not part of the rules version. */
-  group: 'mercury' | 'steroid' | 'lightening-agent' | 'retinoid' | 'exfoliating-acid' | 'benzoyl-peroxide' | null
-  clashesWith: ('mercury' | 'steroid' | 'lightening-agent' | 'retinoid' | 'exfoliating-acid' | 'benzoyl-peroxide')[]
+  group: IngredientGroup | null
+  clashesWith: IngredientGroup[]
   status: 'draft' | 'approved' | 'retired'
   approvedBy: string | null
   approvedOn: string | null

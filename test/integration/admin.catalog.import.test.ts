@@ -623,6 +623,29 @@ describe('the contract version', () => {
     expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
   })
 
+  it('refuses a genuine 1.0.0 workbook, which has four tabs and no claimWords or tapers, with 409 CONTRACT_MISMATCH and not a 400 for its shape, as a dry run and as an apply', async () => {
+    const live = await exportLive()
+    const { claimWords: _claimWords, tapers: _tapers, ...fourTabs } = live.workbook
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const res = await importRaw({ workbook: fourTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun, file: dryRun ? null : xlsxBytes('four-tabs'), contractVersion: '1.0.0' })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await counts()).toEqual(before)
+  })
+
+  it('still refuses a workbook of the current contract version whose shape is wrong, with a 400 and not a 409', async () => {
+    const live = await exportLive()
+    const { tapers: _tapers, ...fiveTabs } = live.workbook
+
+    const res = await importRaw({ workbook: fiveTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: live.contractVersion })
+
+    expect(res.status).toBe(400)
+  })
+
   it('refuses an upload that does not say which contract it was made for with a 400', async () => {
     const live = await exportLive()
 

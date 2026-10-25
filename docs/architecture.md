@@ -2716,8 +2716,11 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
   0. `contractVersion` (the version of the export the file was edited from) must be the server's `CONTRACT_VERSION`: 409 `CONTRACT_MISMATCH`, before
      anything else and for a dry run too, because a file made for another contract cannot be judged by this one (its problems would only mislead). The
      upload script sends the file's own `_meta` stamp, and the file reader reads `_meta` before the tabs, so an old export is told to export again and
-     not "missing the Tapers tab".
-  1. `validateWorkbook` runs on the server whatever the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
+     not "missing the Tapers tab". The route's body schema reads `workbook` only as a JSON object (a bad JSON text is a 400 `VALIDATION_FAILED`), so a genuine
+     1.0.0 file, which has four tabs, reaches this check and gets the 409 instead of a 400 about its missing tabs, also when posted without the script.
+  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all six tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
+     `{ path, message }` details under `workbook`. Only a file of the current contract version gets this far. Then `validateWorkbook` runs on the server whatever
+     the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
   1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers row with status `approved` must have an `approved_by` that is
      exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved template).
      Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
@@ -2752,7 +2755,7 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
   benzoyl-peroxide; empty for most) and `clashes_with` (groups; the relation must hold both ways among the rules that are not retired). **Group and
   clashes_with are rule metadata, not part of the rules version:** the fingerprint hashes only what the matcher reads, and `liveRules().entries` stay
   exactly `{ name, aliases, kind, rule, source }`, so adding groups to the seeded rules re-analyses no formulation; they are read with the workbook
-  (`readWorkbook`), and the live-rules cache is keyed on the catalog version so they are never served stale. None of the three is ever deleted.
+  (`readWorkbook`). The live-rules cache (per isolate) is keyed on the catalog version, which is read on every call, so an isolate re-reads the rules on its first call after an upload lands; a call already in flight at that moment can still return the previous rules. None of the three is ever deleted.
 - **Statement budget.** The three new tables are written in chunks like the others (11 claim words, 9 tapers and 6 rules to a statement, rules now binding
   16 parameters a row), inside the same single batch.
 - **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
