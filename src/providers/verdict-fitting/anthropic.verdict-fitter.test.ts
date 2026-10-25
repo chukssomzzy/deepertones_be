@@ -40,6 +40,7 @@ const REQUEST: FitRequest = {
       name: 'Clobetasol cream',
       variant: null,
       step: 'treat',
+      form: 'cream',
       ingredients: ['Aqua', 'Clobetasol Propionate'],
       cautions: ['restricted-substance'],
       skinConcerns: [],
@@ -51,6 +52,7 @@ const REQUEST: FitRequest = {
       name: 'Prescribed cream',
       variant: '0.05%',
       step: 'treat',
+      form: 'cream',
       ingredients: ['Aqua', 'Tretinoin'],
       cautions: [],
       skinConcerns: ['hd_age_spot'],
@@ -62,6 +64,7 @@ const REQUEST: FitRequest = {
       name: 'Retinol night serum',
       variant: null,
       step: 'treat',
+      form: 'serum',
       ingredients: ['Aqua', 'Retinol', 'Glycerin'],
       cautions: ['irritation', 'pregnancy-caution'],
       skinConcerns: ['hd_age_spot', 'hd_texture'],
@@ -72,7 +75,8 @@ const REQUEST: FitRequest = {
       brand: null,
       name: 'Glycolic toner',
       variant: 'daily',
-      step: 'treat',
+      step: null,
+      form: 'liquid',
       ingredients: ['Aqua', 'Glycolic Acid'],
       cautions: ['irritation'],
       skinConcerns: ['hd_texture'],
@@ -83,7 +87,8 @@ const REQUEST: FitRequest = {
       brand: 'Brand D',
       name: 'Barrier moisturiser',
       variant: null,
-      step: 'moisturise',
+      step: null,
+      form: 'lotion',
       ingredients: ['Aqua', 'Glycerin', 'Ceramide NP'],
       cautions: [],
       skinConcerns: ['hd_moisture'],
@@ -95,6 +100,7 @@ const REQUEST: FitRequest = {
       name: 'Rich cream',
       variant: null,
       step: 'moisturise',
+      form: 'cream',
       ingredients: ['Aqua', 'Glycerin', 'Ceramide NP', 'Squalane'],
       cautions: [],
       skinConcerns: ['hd_moisture'],
@@ -127,16 +133,17 @@ const RESULT: FitResult = {
 const GUEST_RESULT: FitResult = { products: [{ id: 'moist-1', label: 'helping', reason: 'Glycerin and ceramide keep skin comfortable.', sameJobAs: null }], clashes: [] }
 
 /** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job the adapter uses shows in the model it sends. */
+const clientWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
+  new AnthropicClient({
+    apiKey: API_KEY,
+    models: { ...MODELS, ...(routed ? { [routed]: ROUTED_TO } : {}) },
+    ledger,
+    baseURL: 'https://anthropic.example',
+    fetch,
+  })
+
 const fitterWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
-  new AnthropicVerdictFitter(
-    new AnthropicClient({
-      apiKey: API_KEY,
-      models: { ...MODELS, ...(routed ? { [routed]: ROUTED_TO } : {}) },
-      ledger,
-      baseURL: 'https://anthropic.example',
-      fetch,
-    }),
-  )
+  new AnthropicVerdictFitter(clientWith(fetch, ledger, routed))
 
 /** A fetch whose model answers `result`; `calls` records the requests. */
 const answeringFetch = (result: unknown) => stubFetch(() => messageResponse({ content: [textBlock(JSON.stringify(result))] }))
@@ -172,6 +179,56 @@ describe('the fit-verdict AI job', () => {
   })
 })
 
+describe('AnthropicVerdictFitter identity', () => {
+  it('says synchronously which model the client routes fit-verdict to and the hash of its prompt, so a verdict can be fingerprinted before any call', () => {
+    const { fitter } = fitterAnswering()
+
+    expect(fitter.identity).toEqual({ model: MODEL, promptHash: verdictFitterFitVerdictPrompt.hash })
+    expect(fitter.identity.promptHash).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('reports the model the client routes fit-verdict to, not a default: a fitter over a client routed to another model says so', () => {
+    const stub = answeringFetch(RESULT)
+
+    expect(fitterWith(stub.fetch, undefined, 'fit-verdict').identity).toEqual({ model: ROUTED_TO, promptHash: verdictFitterFitVerdictPrompt.hash })
+  })
+})
+
+describe('AnthropicVerdictFitter identity comes from the client', () => {
+  const FIT_MODEL = 'claude-opus-5-5'
+  const OTHER_MODEL = 'claude-haiku-5-5'
+
+  it('names the model the client routes the fit-verdict job to, not the one it routes any other job to', async () => {
+    const models = Object.fromEntries(AI_JOBS.map((job) => [job, job === 'fit-verdict' ? FIT_MODEL : OTHER_MODEL])) as Record<AiJob, string>
+    const stub = answeringFetch(RESULT)
+    const client = new AnthropicClient({ apiKey: API_KEY, models, ledger: new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), baseURL: 'https://anthropic.example', fetch: stub.fetch })
+
+    const fitter = new AnthropicVerdictFitter(client)
+    await fitter.fit(REQUEST)
+
+    expect(fitter.identity).toEqual({ model: FIT_MODEL, promptHash: verdictFitterFitVerdictPrompt.hash })
+    expect(stub.calls[0]!.body.model).toBe(FIT_MODEL)
+  })
+})
+
+describe('AnthropicVerdictFitter identity and the call it makes', () => {
+  it('reports the model the call is actually made with, so a fingerprint built from the identity names the model that judged', async () => {
+    const stub = answeringFetch(RESULT)
+    const fitter = fitterWith(stub.fetch, undefined, 'fit-verdict')
+
+    await fitter.fit(REQUEST)
+
+    expect(stub.calls[0]!.body.model).toBe(ROUTED_TO)
+    expect(stub.calls[0]!.body.model).toBe(fitter.identity.model)
+  })
+
+  it('does not take another job\'s routing for its own: a model routed for a different job leaves the identity on the default', () => {
+    const stub = answeringFetch(RESULT)
+
+    expect(fitterWith(stub.fetch, undefined, 'research').identity.model).toBe(MODEL)
+  })
+})
+
 describe('AnthropicVerdictFitter request', () => {
   it('sends the verdict fitter prompt as the system prompt, with no forced tool choice', async () => {
     const { calls, fitter } = fitterAnswering()
@@ -190,6 +247,17 @@ describe('AnthropicVerdictFitter request', () => {
     const text = userText(calls[0]!.body)
     // Whatever words lead in, the JSON is everything from the first brace to the end.
     expect(JSON.parse(text.slice(text.indexOf('{')))).toEqual(REQUEST)
+  })
+
+  it('sends a product with no routine step, and every product\'s form, as they are', async () => {
+    const { calls, fitter } = fitterAnswering()
+
+    await fitter.fit(REQUEST)
+
+    const text = userText(calls[0]!.body)
+    const sent = JSON.parse(text.slice(text.indexOf('{'))) as FitRequest
+    expect(sent.shelf.find((p) => p.id === 'acid-1')).toMatchObject({ step: null, form: 'liquid' })
+    expect(sent.shelf.find((p) => p.id === 'retinol-1')).toMatchObject({ step: 'treat', form: 'serum' })
   })
 
   it('sends a guest request, with no skin type and no scan, as it is', async () => {
