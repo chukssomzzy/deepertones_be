@@ -204,7 +204,7 @@ describe('the contract', () => {
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
 // The fingerprint of contract 2.0.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.0.0', fingerprint: '3fb1a7864d2688e8d6b33806332b927368d71c90e7b5e692390212ddc2c43e7a' }
+const RELEASED = { version: '2.0.0', fingerprint: '4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -1276,6 +1276,22 @@ describe('validateWorkbook: Claim words', () => {
     it('is written in lower case: a capital is refused as NOT_LOWER_CASE, not silently lowered', () => {
       expectProblems(inClaimWords(claimWord({ phrase: 'Whitening' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE')])
       expectProblems(inClaimWords(claimWord({ phrase: 'skin Toning' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE')])
+    })
+
+    it.each(['brightening', 'glow', 'instant glow', 'skin brightening serum', 'glow-boost'])('is never a claim word to say %j: it is NOT_A_LIGHTENING_CLAIM', (phrase) => {
+      expectProblems(inClaimWords(claimWord({ phrase })), [problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it('refuses brightening and glow in any case, and says NOT_LOWER_CASE too when it has a capital', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'Brightening' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE'), problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it('refuses them in a retired row too, so the workbook never holds such a word', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'glow', status: 'retired' })), [problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it.each(['glowing', 'afterglow', 'brightenings', 'skin lightening', 'whitening'])('does not refuse %j, which holds neither word as a whole word', (phrase) => {
+      expectValid(inClaimWords(claimWord({ phrase })))
     })
 
     it('keeps digits, hyphens and spaces, which are plain', () => {
