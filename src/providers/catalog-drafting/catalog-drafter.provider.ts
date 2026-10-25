@@ -122,7 +122,7 @@ const wholePrice = (value: unknown): number | undefined => {
  * pounds written as 650) or in another currency, and a price that wrong would put the product in the wrong budget band. A currency with no entry
  * has no ceiling.
  */
-export const MAX_PLAUSIBLE_PRICE: Readonly<Record<string, number>> = { GBP: 500, NGN: 1_000_000 }
+const MAX_PLAUSIBLE_PRICE: Readonly<Record<string, number>> = { GBP: 500, NGN: 1_000_000 }
 
 // International storefronts show a price converted for a country they ship to, not a local shop's price, so a price row never cites one. Matched on
 // the registrable name like the listing sites; a cell may still cite one.
