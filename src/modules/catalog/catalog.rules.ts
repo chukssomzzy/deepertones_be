@@ -46,21 +46,29 @@ const labelMapOf = (rules: readonly ReferenceEntry[]): Map<string, ReferenceEntr
 }
 
 /**
+ * Every rule that flags `ingredient`, each once: by the ingredient's whole name and by the parts either side of a bracket, in the order the parts are tried
+ * and, for one label, strictest kind first. Unlike `flagFacts` it does not stop at one rule per kind, so two rules of the same kind both come back.
+ */
+export const rulesMatching = <T extends ReferenceEntry>(ingredient: string, rules: readonly T[]): T[] => {
+  const byLabel = labelMapOf(rules)
+  const matched = new Set<ReferenceEntry>()
+  for (const part of ingredientParts(ingredient)) for (const entry of byLabel.get(part) ?? []) matched.add(entry)
+  return [...matched] as T[]
+}
+
+/**
  * Checks each ingredient against `rules` (the live approved ones; REFERENCE is the seed and the eval's fixture), in label order. An
  * ingredient is matched by its whole name and by the parts either side of a bracket, and yields at most one fact per kind. `rules` is not
  * changed after it is passed (a new rules version is a new array).
  */
 export const flagFacts = (ingredients: string[], rules: readonly ReferenceEntry[]): FlaggedFact[] => {
-  const byLabel = labelMapOf(rules)
   const facts: FlaggedFact[] = []
   for (const ingredient of ingredients) {
     const seen = new Set<ConcernKind>()
-    for (const part of ingredientParts(ingredient)) {
-      for (const { kind, rule, source } of byLabel.get(part) ?? []) {
-        if (seen.has(kind)) continue
-        seen.add(kind)
-        facts.push({ kind, ingredient, rule, source })
-      }
+    for (const { kind, rule, source } of rulesMatching(ingredient, rules)) {
+      if (seen.has(kind)) continue
+      seen.add(kind)
+      facts.push({ kind, ingredient, rule, source })
     }
   }
   return facts
