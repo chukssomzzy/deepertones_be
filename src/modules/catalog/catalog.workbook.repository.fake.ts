@@ -59,8 +59,47 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     return this.catalogNumber
   }
 
-  async readWorkbook(): Promise<{ catalogVersion: number; workbook: Workbook }> {
-    const ingredients: IngredientRule[] = [...this.rules].sort(byCode).map((rule) => ({
+  async readWorkbook(): Promise<{ catalogVersion: number; rulesVersion: string; workbook: Workbook }> {
+    return {
+      catalogVersion: this.catalogNumber,
+      rulesVersion: this.version,
+      workbook: {
+        products: structuredClone([...this.products].sort(byCode)),
+        availability: structuredClone([...this.availability].sort((a, b) => (`${a.productCode}:${a.country}` < `${b.productCode}:${b.country}` ? -1 : 1))),
+        ingredients: this.ingredientRules(),
+        countries: structuredClone([...this.countryRows].sort(byCode)),
+        claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
+        tapers: structuredClone([...this.taperRows].sort(byCode)),
+      },
+    }
+  }
+
+  async readVerdictReference(): Promise<{ catalogVersion: number; rulesVersion: string; rules: IngredientRule[]; claimWords: ClaimWordRow[]; tapers: TaperRow[] }> {
+    return {
+      catalogVersion: this.catalogNumber,
+      rulesVersion: this.version,
+      rules: this.ingredientRules(),
+      claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
+      tapers: structuredClone([...this.taperRows].sort(byCode)),
+    }
+  }
+
+  async tapersByCode(codes: string[]): Promise<TaperRow[]> {
+    return structuredClone(this.taperRows.filter((row) => codes.includes(row.code)).sort(byCode))
+  }
+
+  async stepsOf(productIds: string[]): Promise<Map<string, RoutineStep[]>> {
+    const found = new Map<string, RoutineStep[]>()
+    for (const row of [...this.products].sort(byCode)) {
+      const productId = this.productOf.get(row.code)
+      if (row.status !== 'approved' || productId === undefined || !productIds.includes(productId)) continue
+      found.set(productId, [...new Set([...(found.get(productId) ?? []), ...row.steps])])
+    }
+    return found
+  }
+
+  private ingredientRules(): IngredientRule[] {
+    return [...this.rules].sort(byCode).map((rule) => ({
       ...rule,
       aliases: [...rule.aliases],
       helps: [...rule.helps],
@@ -68,17 +107,6 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       approvedOn: day(rule.approvedOn),
       auditedOn: day(rule.auditedOn),
     }))
-    return {
-      catalogVersion: this.catalogNumber,
-      workbook: {
-        products: structuredClone([...this.products].sort(byCode)),
-        availability: structuredClone([...this.availability].sort((a, b) => (`${a.productCode}:${a.country}` < `${b.productCode}:${b.country}` ? -1 : 1))),
-        ingredients,
-        countries: structuredClone([...this.countryRows].sort(byCode)),
-        claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
-        tapers: structuredClone([...this.taperRows].sort(byCode)),
-      },
-    }
   }
 
   async countries(): Promise<Country[]> {

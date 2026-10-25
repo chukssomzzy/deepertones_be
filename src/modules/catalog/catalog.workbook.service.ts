@@ -4,12 +4,12 @@ import { brandKey, identityKey, normaliseText } from './catalog.identity'
 import { ingredientsKey } from './catalog.ingredients'
 import type { ReferenceEntry } from './catalog.reference'
 import type { NewProduct } from './catalog.types'
-import type { RoutineStep } from './catalog.vocabulary'
+import type { IngredientGroup, RoutineStep, TaperKind } from './catalog.vocabulary'
 import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbook.diff'
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
@@ -23,6 +23,21 @@ export const referenceEntriesOf = (rules: readonly Pick<IngredientRule, 'code' |
   [...rules]
     .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
     .map((rule) => ({ name: rule.name, aliases: rule.aliases, kind: rule.kind, rule: rule.statement, source: rule.sourceUrl }))
+
+/** An approved rule as the shelf verdict reads it: what the matcher reads, and the metadata only the floor and the fit judge use. */
+export type VerdictRule = ReferenceEntry & { group: IngredientGroup | null; clashesWith: IngredientGroup[]; helps: IngredientRule['helps'] }
+
+/**
+ * What the shelf verdict is built against, from one read: the rules version and catalog version that read was at, the approved rules in code order, the approved
+ * claim phrases in code order, and for each kind of step-down the code of the approved template to use (a kind with none is absent).
+ */
+export type VerdictReference = {
+  rulesVersion: string
+  catalogVersion: number
+  rules: VerdictRule[]
+  claimPhrases: string[]
+  tapers: Partial<Record<TaperKind, string>>
+}
 
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
@@ -174,6 +189,42 @@ export class CatalogWorkbookService {
   }
 
   /**
+   * The rules, claim phrases and step-down templates a shelf verdict is judged by, with the versions it was judged at. One repository read, so the two versions and
+   * the rows belong together: two reads could straddle an upload and pair the new rules version with the old catalog version. A job reads this, so there is no actor.
+   */
+  async verdictReference(): Promise<VerdictReference> {
+    const { catalogVersion, rulesVersion, rules, claimWords, tapers } = await this.repository.readVerdictReference()
+    return {
+      rulesVersion,
+      catalogVersion,
+      rules: rules
+        .filter((rule) => rule.status === 'approved')
+        .map((rule) => ({
+          name: rule.name,
+          aliases: rule.aliases,
+          kind: rule.kind,
+          rule: rule.statement,
+          source: rule.sourceUrl,
+          group: rule.group,
+          clashesWith: rule.clashesWith,
+          helps: rule.helps,
+        })),
+      claimPhrases: claimWords.filter((word) => word.status === 'approved').map((word) => word.phrase),
+      tapers: CatalogWorkbookService.latestApprovedTapers(tapers),
+    }
+  }
+
+  /** The step-down templates with these codes, retired ones included: a saved verdict still shows the template it was built with. */
+  async tapersByCode(codes: string[]): Promise<Map<string, TaperRow>> {
+    return new Map((await this.repository.tapersByCode(codes)).map((taper) => [taper.code, taper]))
+  }
+
+  /** The routine steps each of these catalog products fills, for those an approved recommended row names. */
+  stepsFor(productIds: string[]): Promise<Map<string, RoutineStep[]>> {
+    return this.repository.stepsOf(productIds)
+  }
+
+  /**
    * In production only, the approved Tapers rows whose approver is not on the list: a template is shown to people, so a qualified person has to
    * have approved it. The approver is a label in a cell, so this is a process control and not authentication. The problem never holds the name.
    */
@@ -256,6 +307,19 @@ export class CatalogWorkbookService {
       searchText: normaliseText(`${row.brand} ${row.name} ${row.variant ?? ''}`),
       createdAt: this.now(),
     }
+  }
+
+  /** For each kind, the code of its approved template that was approved most recently, the lower code when two were approved on the same day. */
+  private static latestApprovedTapers(tapers: readonly TaperRow[]): Partial<Record<TaperKind, string>> {
+    const chosen = new Map<TaperKind, TaperRow>()
+    for (const taper of tapers) {
+      if (taper.status !== 'approved') continue
+      const held = chosen.get(taper.kind)
+      const day = taper.approvedOn?.getTime() ?? 0
+      const heldDay = held?.approvedOn?.getTime() ?? 0
+      if (!held || day > heldDay || (day === heldDay && taper.code < held.code)) chosen.set(taper.kind, taper)
+    }
+    return Object.fromEntries([...chosen].map(([kind, taper]) => [kind, taper.code]))
   }
 
   /** The approved rules an upload leaves in force, in code order, as the matcher reads them: the set the rules version names. */

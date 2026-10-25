@@ -6,7 +6,7 @@ import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
 export class FakeShelfRepository implements ShelfRepository {
   constructor(private readonly store: FakeShelfStore) {}
 
-  async activeFor(profileId: string, limit: number): Promise<ShelfEntryRow[]> {
+  async activeFor(profileId: string, limit?: number): Promise<ShelfEntryRow[]> {
     // Same-time entries come back by id, as D1's order does.
     return this.store.rows
       .filter((row) => row.profileId === profileId && row.removedAt === null)
