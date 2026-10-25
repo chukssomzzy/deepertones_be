@@ -81,7 +81,7 @@ const answerFor = (request: DraftRequest): DraftResult => {
       steps: { value: ['cleanse'], sourceUrl: CELL_PAGE('steps') },
       frequency: { value: 'am-pm', sourceUrl: CELL_PAGE('frequency') },
     },
-    availability: countries.map(({ code }) => ({ country: code, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies', sourceUrl: PRICE_PAGE(code) })),
+    availability: countries.map(({ code }) => ({ country: code, ...(code === 'GB' ? { priceMin: 9, priceMax: 12 } : { priceMin: 4000, priceMax: 6500 }), whereSold: 'Pharmacies', sourceUrl: PRICE_PAGE(code) })),
   }
 }
 
@@ -319,7 +319,7 @@ describe('runDraftEval: judging', () => {
     expect(rows.map((r) => r.value)).toEqual(
       expect.arrayContaining([
         { country: 'NG', currency: 'NGN', priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies' },
-        { country: 'GB', currency: 'GBP', priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies' },
+        { country: 'GB', currency: 'GBP', priceMin: 9, priceMax: 12, whereSold: 'Pharmacies' },
       ]),
     )
     expect(rows.find((r) => (r.value as { country: string }).country === 'NG')!.sourceUrl).toBe(PRICE_PAGE('NG'))

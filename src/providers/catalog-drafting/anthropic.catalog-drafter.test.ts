@@ -370,6 +370,13 @@ describe('AnthropicCatalogDrafter request', () => {
 
     expect(requestText(calls[0]!.body)).toMatch(/exact brand and product/i)
   })
+
+  it('tells the model prices are whole units of the currency, not minor units such as pence, so 6.50 pounds is not written 650', () => {
+    const prices = catalogDrafterDraftCatalogRowPrompt.text.split('\n').find((line) => line.startsWith('- Prices:'))
+
+    expect(prices).toBeDefined()
+    expect(prices).toMatch(/not (in )?pence|minor unit/i)
+  })
 })
 
 describe('AnthropicCatalogDrafter answers that were cut off or refused', () => {
@@ -587,7 +594,8 @@ describe('AnthropicCatalogDrafter.draft', () => {
       ['a country that was not asked for', row({ country: 'US' })],
       ['a lowest price above the highest', row({ priceMin: 6501, priceMax: 6500 })],
       ['a negative price', row({ priceMin: -1, priceMax: 6500 })],
-      ['a price with a fraction', row({ priceMin: 4000.5 })],
+      ['a negative price with a fraction', row({ priceMin: -1.5, priceMax: 6500 })],
+      ['a price that rounds to 0', row({ priceMin: 0.4, priceMax: 0.4 })],
       ['a price written as text', row({ priceMin: '4000' })],
       ['no price', row({ priceMax: null })],
       ['a price of 0, which no source gives', row({ priceMin: 0, priceMax: 0 })],
@@ -614,11 +622,11 @@ describe('AnthropicCatalogDrafter.draft', () => {
     })
 
     it('accepts a lowest price of 1 and a single price, at the boundaries of the price rule', async () => {
-      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 1, priceMax: 1 }), row({ country: 'GB', priceMin: 5000, priceMax: 5000 })))
+      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 1, priceMax: 1 }), row({ country: 'GB', priceMin: 15, priceMax: 15 })))
 
       expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
         ['NG', 1, 1],
-        ['GB', 5000, 5000],
+        ['GB', 15, 15],
       ])
     })
 
@@ -976,6 +984,196 @@ describe('AnthropicCatalogDrafter.draft', () => {
 
       expect(fetchedToo.availability.map((r) => r.sourceUrl)).toEqual([page])
       expect(searchedOnly.availability.map((r) => r.sourceUrl)).toEqual([page])
+    })
+  })
+
+  describe('prices with decimals', () => {
+    it('rounds a price with decimals to the nearest whole unit instead of dropping the row: 6.5 and 7.7 become 7 and 8', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 6.5, priceMax: 7.7 })))
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['GB', 7, 8]])
+    })
+
+    it('rounds half up: 2.5 becomes 3, 3.4999 becomes 3, and 0.5 becomes 1', async () => {
+      const result = await draftFetching(
+        rowsOf(row({ country: 'NG', priceMin: 2.5, priceMax: 3.4999 }), row({ country: 'GB', priceMin: 0.5, priceMax: 1.2 })),
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
+        ['NG', 3, 3],
+        ['GB', 1, 1],
+      ])
+    })
+
+    it.each([
+      ['a price that rounds down to 0', row({ priceMin: 0.49, priceMax: 0.49 })],
+      ['a price written as text, even a decimal one', row({ priceMin: '6.5', priceMax: '7.7' })],
+      ['a lowest price above the highest, before rounding', row({ priceMin: 7.7, priceMax: 6.5 })],
+    ])('still drops a row with %s', async (_label, bad) => {
+      const result = await draftFetching(rowsOf(bad))
+
+      expect(result.availability).toEqual([])
+    })
+
+    describe('in a currency with no ceiling', () => {
+      const NO_CEILING: DraftRequest = { ...REQUEST, countries: [{ code: 'ZZ', currency: 'ZZZ' }] }
+      const SAFE = Number.MAX_SAFE_INTEGER
+
+      it('keeps the largest whole number a price can hold exactly, and drops the next one', async () => {
+        const kept = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: SAFE - 1, priceMax: SAFE })), NO_CEILING)
+        const dropped = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: SAFE - 1, priceMax: SAFE + 1 })), NO_CEILING)
+
+        expect(kept.availability.map((r) => [r.priceMin, r.priceMax])).toEqual([[SAFE - 1, SAFE]])
+        expect(dropped.availability).toEqual([])
+      })
+    })
+  })
+
+  describe('a price too high for one face-skincare product in the currency', () => {
+    // Ceilings per the brief: GBP 500, NGN 1,000,000. Written out, not read from the code under test.
+    it('drops a GB row of 650 to 770, which is 6.50 to 7.70 pounds written in pence', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 650, priceMax: 770 })))
+
+      expect(result.availability).toEqual([])
+    })
+
+    it('keeps a GB row whose highest price is exactly 500, and drops one at 501', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 501 })))
+
+      expect(kept.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['GB', 400, 500]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('keeps an NG row whose highest price is exactly 1,000,000, and drops one at 1,000,001', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 800000, priceMax: 1000000 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 800000, priceMax: 1000001 })))
+
+      expect(kept.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['NG', 800000, 1000000]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('checks the ceiling after rounding: 500.4 becomes 500 and is kept, 500.5 becomes 501 and is dropped', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500.4 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500.5 })))
+
+      expect(kept.availability.map((r) => [r.priceMin, r.priceMax])).toEqual([[400, 500]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('limits the highest price, not the lowest: a lowest price over the ceiling is dropped with its row', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 600, priceMax: 700 })))
+
+      expect(result.availability).toEqual([])
+    })
+
+    it('does not limit a currency that has no ceiling', async () => {
+      const request: DraftRequest = { ...REQUEST, countries: [{ code: 'ZZ', currency: 'ZZZ' }] }
+
+      const result = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: 4000000, priceMax: 5000000 })), request)
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['ZZ', 4000000, 5000000]])
+    })
+
+    it('judges a country by its own currency: a price over the GBP ceiling is fine in NGN', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 650, priceMax: 770 })))
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['NG', 650, 770]])
+    })
+
+    it('does not use up the country: a later good row for it is kept, and the other country is untouched', async () => {
+      const result = await draftFetching(
+        rowsOf(
+          row({ country: 'GB', priceMin: 650, priceMax: 770 }),
+          row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: RETAILER_PAGE }),
+          row({ country: 'NG', priceMin: 4000, priceMax: 6500 }),
+        ),
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
+        ['GB', 9, 12],
+        ['NG', 4000, 6500],
+      ])
+    })
+  })
+
+  describe('price rows sourced from an international storefront', () => {
+    // These shops show a converted price for a country they ship to, not a local shop's price. The NG row cites `page`; the GB row is good.
+    const draftWithNgOn = (page: string) =>
+      draftFetching(rowsOf(row({ country: 'NG', sourceUrl: page }), row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: RETAILER_PAGE })), REQUEST, [page, RETAILER_PAGE])
+
+    it.each([
+      'https://www.iherb.com/pr/acme-gentle-wash/12345',
+      'https://iherb.com/pr/acme-gentle-wash/12345',
+      'https://uk.iherb.com/pr/acme-gentle-wash/12345',
+      'https://ng.iherb.com/pr/acme-gentle-wash/12345',
+      'https://www.iherb.co.uk/pr/acme-gentle-wash/12345',
+      'https://IHERB.COM/pr/acme-gentle-wash/12345',
+      'https://www.caretobeauty.com/products/acme-gentle-wash',
+      'https://www.sweetcare.com/products/acme-gentle-wash',
+      'https://www.lojaglamourosa.com.br/produto/acme-gentle-wash',
+      'https://www.stylevana.com/en_US/acme-gentle-wash.html',
+      'https://www.yesstyle.com/en/acme-gentle-wash/info.html/pid.123',
+      'https://www.cosmetis.com/en/acme-gentle-wash',
+      'https://www.ubuy.com.ng/product/acme-gentle-wash',
+      'https://www.ubuy.co.uk/product/acme-gentle-wash',
+      'https://www.desertcart.com.ng/products/acme-gentle-wash',
+      'https://www.desertcart.ae/products/acme-gentle-wash',
+    ])('drops a price row sourced from the international storefront %s, and keeps the other country', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+    })
+
+    it('does not use up the country: a later good row for it is kept', async () => {
+      const storefront = 'https://www.iherb.com/pr/acme-gentle-wash/12345'
+      const shop = 'https://shop.example/products/acme-gentle-wash'
+
+      const result = await draftFetching(
+        rowsOf(row({ country: 'NG', priceMin: 4000, priceMax: 5000, sourceUrl: storefront }), row({ country: 'NG', priceMin: 4100, priceMax: 5100, sourceUrl: shop })),
+        REQUEST,
+        [storefront, shop],
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.sourceUrl])).toEqual([['NG', 4100, shop]])
+    })
+
+    it.each([
+      'https://iherbal.shop.example/p/acme-gentle-wash/123',
+      'https://iherb.shop.example/p/acme-gentle-wash/123',
+      'https://notiherb.example/p/acme-gentle-wash/123',
+      'https://shop.example/iherb/acme-gentle-wash',
+      'https://shop.example/p/acme-gentle-wash/123?ref=iherb',
+      'https://www.ubuyer.example/p/acme-gentle-wash/123',
+      'https://www.yesstyles.example/p/acme-gentle-wash/123',
+    ])('keeps a price row sourced from %s, which only looks like an international storefront', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['NG', 'GB'])
+    })
+
+    it.each([
+      'https://www.iherb.com/pr/acme-gentle-wash/12345',
+      'https://www.yesstyle.com/en/acme-gentle-wash/info.html/pid.123',
+      'https://www.ubuy.com.ng/product/acme-gentle-wash',
+    ])('still keeps a cell whose source is %s, since only price rows need a local shop', async (page) => {
+      const result = await draftFetching(cellsOf({ frequency: { value: 'pm', sourceUrl: page } }), REQUEST, [page])
+
+      expect(result.cells.frequency).toEqual({ value: 'pm', sourceUrl: page })
+    })
+  })
+
+  describe('price rows sourced from a classified or auction listing', () => {
+    it.each([
+      'https://jiji.ng/lagos/health-beauty/acme-gentle-wash-abc123.html',
+      'https://jiji.com.gh/accra/health-beauty/acme-gentle-wash-abc123.html',
+      'https://www.ebay.co.uk/itm/1234567890',
+    ])('drops a price row sourced from %s whether the model fetched it or only the search returned it', async (page) => {
+      const fetchedToo = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page], [page])
+      const searchedOnly = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page])
+
+      expect(fetchedToo.availability).toEqual([])
+      expect(searchedOnly.availability).toEqual([])
     })
   })
 

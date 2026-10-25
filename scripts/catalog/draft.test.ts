@@ -87,7 +87,10 @@ const NG = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status:
 const GB = { code: 'GB', currency: 'GBP', low_max: 10, mid_max: 30, status: 'active' }
 const GH_RETIRED = { code: 'GH', currency: 'GHS', low_max: 100, mid_max: 400, status: 'retired' }
 
-const price = (product_code: string, country: string, over: Raw = {}): Raw => ({ product_code, country, price_min: 4000, price_max: 6500, where_sold: 'Pharmacies', ...over })
+// A price each country's currency could plausibly have for one product (the drafter refuses a GBP price above its ceiling as minor units).
+const PRICES: Record<string, { priceMin: number; priceMax: number }> = { NG: { priceMin: 4000, priceMax: 6500 }, GB: { priceMin: 9, priceMax: 12 } }
+const pricesOf = (country: string) => PRICES[country] ?? PRICES.NG!
+const price = (product_code: string, country: string, over: Raw = {}): Raw => ({ product_code, country, price_min: pricesOf(country).priceMin, price_max: pricesOf(country).priceMax, where_sold: 'Pharmacies', ...over })
 
 const RULE: Raw = {
   code: 'ING-RETINOL-SUN-SENSITIVITY',
@@ -132,7 +135,7 @@ const everything = (request: DraftRequest): DraftResult => ({
     steps: { value: ['cleanse'], sourceUrl: SRC.steps },
     frequency: { value: 'am-pm', sourceUrl: SRC.frequency },
   },
-  availability: request.countries.map(({ code: country }) => ({ country, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies and online', sourceUrl: SRC.price })),
+  availability: request.countries.map(({ code: country }) => ({ country, ...pricesOf(country), whereSold: 'Pharmacies and online', sourceUrl: SRC.price })),
 })
 
 const fakes = () => {
@@ -609,7 +612,7 @@ describe('draftWorkbook: availability', () => {
 
     expect(availabilityOf(outcome.workbook, 'PRD-CERAVE')).toEqual([
       { product_code: 'PRD-CERAVE', country: 'NG', price_min: 4000, price_max: 6500, where_sold: 'Pharmacies and online', source_url: SRC.price },
-      { product_code: 'PRD-CERAVE', country: 'GB', price_min: 4000, price_max: 6500, where_sold: 'Pharmacies and online', source_url: SRC.price },
+      { product_code: 'PRD-CERAVE', country: 'GB', price_min: 9, price_max: 12, where_sold: 'Pharmacies and online', source_url: SRC.price },
     ])
   })
 
@@ -716,7 +719,7 @@ describe('draftWorkbook: availability', () => {
       drafter.respondWith(() => ({ cells: {}, availability: rows as unknown as DraftResult['availability'] }))
       return drafter
     }
-    const good = (country: string) => ({ country, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies', sourceUrl: SRC.price })
+    const good = (country: string) => ({ country, ...pricesOf(country), whereSold: 'Pharmacies', sourceUrl: SRC.price })
     const rowsFor = async (...rows: Record<string, unknown>[]) => {
       const { outcome } = await run(workbook({ products: [CERAVE] }), { drafter: answeringRows(...rows) })
       return availabilityOf(outcome.workbook, 'PRD-CERAVE')
@@ -728,7 +731,7 @@ describe('draftWorkbook: availability', () => {
       ['a retired country', { ...good('GH') }],
       ['a lowest price above the highest', { ...good('NG'), priceMin: 6501 }],
       ['a negative price', { ...good('NG'), priceMin: -1 }],
-      ['a price with a fraction', { ...good('NG'), priceMax: 6500.5 }],
+      ['a price that rounds to 0', { ...good('NG'), priceMin: 0.4 }],
       ['a price that is text', { ...good('NG'), priceMin: '4000' }],
       ['a missing price', { ...good('NG'), priceMax: undefined }],
       ['a price of 0, which a source never gives (the workbook allows it for a price typed by hand)', { ...good('NG'), priceMin: 0, priceMax: 0 }],
@@ -752,7 +755,7 @@ describe('draftWorkbook: availability', () => {
 
       expect(availabilityOf(outcome.workbook, 'PRD-CERAVE').map((r) => [r.country, r.price_min])).toEqual([
         ['NG', 7],
-        ['GB', 4000],
+        ['GB', 9],
       ])
     })
 
@@ -1080,7 +1083,7 @@ describe('draftWorkbook: a call that fails because the setup is wrong', () => {
 // it can look more widely. The researcher is never asked again.
 describe('draftWorkbook: retry passes', () => {
   const attemptOf = (request: DraftRequest) => request.attempt ?? 1
-  const priceRow = (country: string, over: Record<string, unknown> = {}) => ({ country, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies', sourceUrl: SRC.price, ...over })
+  const priceRow = (country: string, over: Record<string, unknown> = {}) => ({ country, ...pricesOf(country), whereSold: 'Pharmacies', sourceUrl: SRC.price, ...over })
   /** A drafter that records every request, and answers from `answer` (nothing at all by default). */
   const scripted = (answer: (request: DraftRequest) => DraftResult = () => ({ cells: {}, availability: [] })) => {
     const calls: DraftRequest[] = []
@@ -1438,7 +1441,7 @@ describe('formatReport', () => {
         cells: {},
         availability: request.countries
           .filter((country) => PRICED[request.product.brand]!.includes(country.code))
-          .map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+          .map((country) => ({ country: country.code, ...pricesOf(country.code), sourceUrl: SRC.price })),
       }))
       return run(workbook({ products: [CERAVE, VANICREAM, AVEENO] }), { drafter, passes })
     }
@@ -1497,7 +1500,7 @@ describe('formatReport', () => {
       const made = fakes()
       made.drafter.respondWith((request) => ({
         cells: {},
-        availability: request.countries.filter((country) => country.code === 'NG').map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+        availability: request.countries.filter((country) => country.code === 'NG').map((country) => ({ country: country.code, ...pricesOf(country.code), sourceUrl: SRC.price })),
       }))
       const outcome = await draftWorkbook(workbook(), { researcher: new CostedResearcher(made.researcher, ledger, CALL_MICROS), drafter: new CostedDrafter(made.drafter, ledger, CALL_MICROS), ledger })
 
@@ -1661,7 +1664,7 @@ describe('runDraft', () => {
       cells: {},
       availability: request.countries
         .filter((country) => (request.attempt ?? 1) > 1 || country.code === 'NG')
-        .map((country) => ({ country: country.code, priceMin: 4000, priceMax: 6500, sourceUrl: SRC.price })),
+        .map((country) => ({ country: country.code, ...pricesOf(country.code), sourceUrl: SRC.price })),
     }))
     const ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS })
 
