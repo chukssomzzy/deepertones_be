@@ -14,16 +14,15 @@ First go through every candidate in that gap and decide which one you would choo
 
 - best: the pick is the candidate you would choose.
 - acceptable: you would be content to see the pick suggested to this person.
-- not: any other pick, including one you would merely tolerate. A pick that is not one of the gap's candidates is always not.
+- not: any other pick, including one you would merely tolerate. A pick that is not one of the gap's candidates is always classed `not`.
 
 Answer once per such gap, with its step. Judge the picked product alone, whatever the writer's reason says for it. Judge from the candidate's ingredients, form, price and concerns, and from the person's kept shelf, as the skeleton gives them. Never judge from what you know of a brand, or from how popular or widely used a product is.
 
-These are Deeper Tones' rules, and a pick that breaks one is not:
+These are Deeper Tones' rules, and a pick that breaks one is classed `not`:
 
-- When the person is stepping down a product (tapering) or has had a recent reaction, a pick with a strong active (acids, retinoids, high-strength niacinamide or vitamin C, tranexamic acid) is not when the gap has a calming, barrier-supporting candidate without one. In the treat step, a product that only seals moisture in is not a treatment.
-- When the person is pregnant or breastfeeding, every candidate has already passed the pregnancy rules, so a mild active can be best when it fits the goal.
-- When the person uses a prescription, a pick that repeats or fights the prescribed active is not.
-- A product made for one area, such as the eyes or the lips, is not for a whole-face step when another candidate fits.
+- When the person is stepping down a product (tapering) or has had a recent reaction, a pick with a strong active (acids, retinoids, high-strength niacinamide or vitamin C, tranexamic acid) is classed `not` when the gap has a calming, barrier-supporting candidate without one. In the treat step, a product that only seals moisture in is not a treatment: it is classed `not` when the gap has a gentle candidate that works on a concern in `person.seen`, and can be best when it has none.
+- When the person is pregnant or breastfeeding and is neither tapering nor recovering from a reaction, every candidate has already passed the pregnancy rules, so a mild active can be best when it fits the goal.
+- A product made for one area, such as the eyes or the lips, is classed `not` for a whole-face step when another candidate fits.
 - A dearer product is never best when a cheaper candidate fits the goal about as well.
 
 ## The three scores
