@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest'
-import { ingredientsKey } from '../catalog/catalog.ingredients'
 import type { Category } from '../catalog/catalog.vocabulary'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import { floorVerdicts, type FloorEntry, type FloorInput, type FloorMention, type FloorResult, type FloorRule, type FloorShelfEntry } from './verdicts.floor'
@@ -51,7 +50,6 @@ const product = (id: string, ingredients: string[], over: Partial<Extract<FloorS
   category: 'skin',
   productId: `prod-${id}`,
   ingredients,
-  ingredientsKey: ingredientsKey(ingredients),
   ...over,
 })
 
@@ -171,6 +169,28 @@ describe('floorVerdicts', () => {
 
       it('needs no step-down template to drop', () => {
         expect(entryOf(floor([product('perfume', ['Zzyzx Musk'])], { tapers: {} }), 'perfume')).toMatchObject({ status: 'fixed', verdict: { kind: 'drop' } })
+      })
+
+      it('also covers a banned substance whose group decides no outcome of its own (tretinoin in the retinoid group): drop, no escalation, a banned-substance fact', () => {
+        const rules = [...RULES, ruleOf({ name: 'tretinoin', kind: 'banned-substance', group: 'retinoid', clashesWith: ['exfoliating-acid'] })]
+
+        expect(entryOf(floor([product('cream', ['Aqua', 'Tretinoin'])], { rules }), 'cream')).toEqual({
+          id: 'cream',
+          status: 'fixed',
+          group: 'likely-the-problem',
+          verdict: { kind: 'drop' },
+          escalate: false,
+          facts: [{ kind: 'banned-substance', ingredient: 'Tretinoin' }],
+        })
+      })
+
+      it('is out of every clash pair even when its group clashes: an acid next to it makes no pair', () => {
+        const rules = [...RULES, ruleOf({ name: 'tretinoin', kind: 'banned-substance', group: 'retinoid', clashesWith: ['exfoliating-acid'] })]
+
+        const result = floor([product('cream', ['Aqua', 'Tretinoin']), product('toner', ['Aqua', 'Glycolic Acid'])], { rules })
+
+        expect(entryOf(result, 'toner')).toEqual(OPEN('toner'))
+        expect(result.clashes).toEqual([])
       })
 
       it('is not made by a banned substance that has a group: that one is a group fact (mercury, steroid), not a second fact', () => {
@@ -306,6 +326,18 @@ describe('floorVerdicts', () => {
         expect(entryOf(floor([product('b', ['Aqua'], { name: 'Brightening Glow Serum' })]), 'b')).toEqual(OPEN('b'))
       })
 
+      it('does not match a phrase split across the brand and the name', () => {
+        const result = floor([product('cream', ['Aqua'], { brand: 'Skin', name: 'Toning Cream' })], { claimPhrases: ['skin toning'] })
+
+        expect(entryOf(result, 'cream')).toEqual(OPEN('cream'))
+      })
+
+      it('gives one fact for a phrase that appears in two fields', () => {
+        const result = floor([product('cream', ['Aqua'], { name: 'Whitening Cream', variant: 'Whitening' })])
+
+        expect(entryOf(result, 'cream')).toMatchObject({ facts: [{ kind: 'claim-phrase', phrase: 'whitening' }] })
+      })
+
       it('copes with a product that has no brand and no variant', () => {
         expect(entryOf(floor([product('plain', ['Aqua'], { brand: null, variant: null })]), 'plain')).toEqual(OPEN('plain'))
       })
@@ -410,9 +442,9 @@ describe('floorVerdicts', () => {
       expect(entryOf(floor([retinolSerum()], { pregnant: false }), 'serum')).toEqual(OPEN('serum'))
     })
 
-    it('is beaten by likely the problem: a steroid that is also a pregnancy caution gets the step-down, not a drop', () => {
-      const rules = [...RULES, ruleOf({ name: 'zzyzx cortex', kind: 'pregnancy-caution' })]
-      const result = floor([product('cream', ['Clobetasol', 'Zzyzx Cortex'])], { pregnant: true, rules })
+    it('is beaten by likely the problem: one ingredient that is both a steroid and a pregnancy caution gets the step-down, not a drop', () => {
+      const rules = [...RULES, ruleOf({ name: 'clobetasol', kind: 'pregnancy-caution' })]
+      const result = floor([product('cream', ['Aqua', 'Clobetasol'])], { pregnant: true, rules })
 
       expect(entryOf(result, 'cream')).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' } })
     })
@@ -446,6 +478,41 @@ describe('floorVerdicts', () => {
         expect(entryOf(result, 'oil')).toEqual(OPEN('oil'))
       })
 
+      it('is beaten by likely the problem: a steroid in the product gets the step-down, not a drop', () => {
+        const rules = [...RULES, ruleOf({ name: 'clobetasol', kind: 'allergen' })]
+        const result = floor([product('cream', ['Aqua', 'Clobetasol'])], { rules, mentions: [reactedToIngredient('clobetasol')] })
+
+        expect(entryOf(result, 'cream')).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' } })
+      })
+
+      it('is beaten by a prescription for the product: kept', () => {
+        const result = floor([product('toner', ['Aqua', 'Parfum'])], { mentions: [reactedToIngredient('fragrance'), prescribed('prod-toner')] })
+
+        expect(entryOf(result, 'toner')).toMatchObject({ group: 'prescribed', verdict: { kind: 'keep' } })
+      })
+
+      it('adds to a pregnancy caution: one drop that carries both facts', () => {
+        const result = floor([product('serum', ['Aqua', 'Retinol', 'Parfum'])], { pregnant: true, mentions: [reactedToIngredient('fragrance')] })
+
+        expect(entryOf(result, 'serum')).toEqual({
+          id: 'serum',
+          status: 'fixed',
+          group: 'conflicting',
+          verdict: { kind: 'drop' },
+          escalate: false,
+          facts: [
+            { kind: 'pregnancy-caution', ingredient: 'Retinol' },
+            { kind: 'reaction-ingredient', ingredient: 'Parfum', named: 'fragrance' },
+          ],
+        })
+      })
+
+      it('gives one fact for an ingredient the user named twice', () => {
+        const result = floor([product('toner', ['Aqua', 'Parfum'])], { mentions: [reactedToIngredient('fragrance'), reactedToIngredient('parfum')] })
+
+        expect(entryOf(result, 'toner')).toMatchObject({ facts: [{ kind: 'reaction-ingredient', ingredient: 'Parfum', named: 'fragrance' }] })
+      })
+
       it('is not made by an ingredient the user was prescribed, which they want to use', () => {
         const result = floor([product('toner', ['Aqua', 'Parfum'])], { mentions: [mention({ source: 'prescription', kind: 'ingredient', name: 'fragrance' })] })
 
@@ -466,6 +533,33 @@ describe('floorVerdicts', () => {
         escalate: false,
         facts: [{ kind: 'unknown-contents' }],
       })
+    })
+  })
+
+  describe('a product with an empty ingredient list', () => {
+    it('is set aside like an unknown product rather than left open: nothing is known, so nothing is guessed', () => {
+      const result = floor([product('mystery', [])])
+
+      expect(entryOf(result, 'mystery')).toEqual({
+        id: 'mystery',
+        status: 'fixed',
+        group: 'cant-tell',
+        verdict: { kind: 'drop' },
+        escalate: false,
+        facts: [{ kind: 'unknown-contents' }],
+      })
+    })
+
+    it('takes no part in a clash', () => {
+      expect(floor([product('mystery', []), product('serum', ['Retinol'])]).clashes).toEqual([])
+    })
+
+    it('still yields to a stricter label: a lightening claim in its name gets the step-down, and a prescription keeps it', () => {
+      const claim = floor([product('cream', [], { name: 'Whitening Cream' })])
+      const kept = floor([product('cream', [])], { mentions: [prescribed('prod-cream')] })
+
+      expect(entryOf(claim, 'cream')).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-LIGHTENING-1' } })
+      expect(entryOf(kept, 'cream')).toMatchObject({ group: 'prescribed', verdict: { kind: 'keep' } })
     })
   })
 
@@ -549,6 +643,21 @@ describe('floorVerdicts', () => {
       expect(floor([peroxide('spot'), acid('toner')]).clashes).toEqual([
         { ids: ['spot', 'toner'], groups: ['benzoyl-peroxide', 'exfoliating-acid'], fallbackReduceId: 'spot', maxFrequency: 'alternate-days' },
       ])
+    })
+
+    it('pairs groups that only one side lists: the clash is read in both directions', () => {
+      const oneSided = RULES.map((rule) => ({ ...rule, clashesWith: rule.name === 'retinol' ? ['exfoliating-acid' as const] : [] }))
+
+      const result = floor([retinoid('serum'), acid('toner')], { rules: oneSided })
+
+      expect(result.clashes).toEqual([{ ids: ['serum', 'toner'], groups: ['retinoid', 'exfoliating-acid'], fallbackReduceId: 'toner', maxFrequency: 'alternate-days' }])
+    })
+
+    it('leaves a product that is taper-missing out of every pair: it is already out', () => {
+      const result = floor([retinoid('serum'), product('peel', ['Glycolic Acid', 'Clobetasol'])], { tapers: {} })
+
+      expect(entryOf(result, 'peel')).toMatchObject({ status: 'taper-missing' })
+      expect(result.clashes).toEqual([])
     })
 
     it('reports one pair for two products however many clashing ingredients they hold', () => {
