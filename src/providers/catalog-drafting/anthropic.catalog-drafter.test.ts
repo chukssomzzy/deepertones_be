@@ -258,6 +258,47 @@ describe('AnthropicCatalogDrafter request', () => {
     expect(sent).toMatch(/currenc/i)
   })
 
+  describe('a later attempt', () => {
+    // Only what the user message says: the system prompt is the same for every attempt.
+    const userMessage = (body: any): string => JSON.stringify(body.messages)
+    const messageFor = async (request: DraftRequest) => {
+      const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+      await drafter.draft(request)
+      return userMessage(calls[0]!.body)
+    }
+
+    it.each([2, 3])('tells the model an earlier attempt found no usable price, and to look more widely, on attempt %d', async (attempt) => {
+      const sent = await messageFor({ ...REQUEST, columns: [], attempt })
+
+      expect(sent).toMatch(/earlier attempt/i)
+      // ...and where else to look, in whatever words: other shops, pharmacies, marketplace pages or price-comparison pages.
+      expect(sent).toMatch(/retailer|pharmac|marketplace|comparison/i)
+    })
+
+    it.each([
+      ['no attempt number', undefined],
+      ['attempt 1', 1],
+    ])('does not mention an earlier attempt for %s', async (_label, attempt) => {
+      const sent = await messageFor({ ...REQUEST, ...(attempt === undefined ? {} : { attempt }) })
+
+      expect(sent).not.toMatch(/earlier attempt/i)
+    })
+
+    it('still tells the model the product and the countries to price on a later attempt', async () => {
+      const sent = await messageFor({ ...REQUEST, columns: [], countries: [{ code: 'GH', currency: 'GHS' }], attempt: 2 })
+
+      for (const word of ['CeraVe', 'Hydrating Facial Cleanser', 'GH', 'GHS']) expect(sent).toContain(word)
+    })
+
+    it('still sends the search and fetch tools on a later attempt', async () => {
+      const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
+
+      await drafter.draft({ ...REQUEST, columns: [], attempt: 2 })
+
+      expect((calls[0]!.body.tools as { name: string }[]).map((tool) => tool.name)).toEqual(['web_search', 'web_fetch'])
+    })
+  })
+
   it('allows 16000 output tokens, since adaptive thinking and the search rounds count against the limit as well as the answer', async () => {
     const { calls, drafter } = drafterOver(respondWith(searched(JSON.stringify(answer()))))
 
@@ -328,6 +369,13 @@ describe('AnthropicCatalogDrafter request', () => {
     await drafter.draft(REQUEST)
 
     expect(requestText(calls[0]!.body)).toMatch(/exact brand and product/i)
+  })
+
+  it('tells the model prices are whole units of the currency, not minor units such as pence, so 6.50 pounds is not written 650', () => {
+    const prices = catalogDrafterDraftCatalogRowPrompt.text.split('\n').find((line) => line.startsWith('- Prices:'))
+
+    expect(prices).toBeDefined()
+    expect(prices).toMatch(/not (in )?pence|minor unit/i)
   })
 })
 
@@ -546,7 +594,8 @@ describe('AnthropicCatalogDrafter.draft', () => {
       ['a country that was not asked for', row({ country: 'US' })],
       ['a lowest price above the highest', row({ priceMin: 6501, priceMax: 6500 })],
       ['a negative price', row({ priceMin: -1, priceMax: 6500 })],
-      ['a price with a fraction', row({ priceMin: 4000.5 })],
+      ['a negative price with a fraction', row({ priceMin: -1.5, priceMax: 6500 })],
+      ['a price that rounds to 0', row({ priceMin: 0.4, priceMax: 0.4 })],
       ['a price written as text', row({ priceMin: '4000' })],
       ['no price', row({ priceMax: null })],
       ['a price of 0, which no source gives', row({ priceMin: 0, priceMax: 0 })],
@@ -573,11 +622,11 @@ describe('AnthropicCatalogDrafter.draft', () => {
     })
 
     it('accepts a lowest price of 1 and a single price, at the boundaries of the price rule', async () => {
-      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 1, priceMax: 1 }), row({ country: 'GB', priceMin: 5000, priceMax: 5000 })))
+      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 1, priceMax: 1 }), row({ country: 'GB', priceMin: 15, priceMax: 15 })))
 
       expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
         ['NG', 1, 1],
-        ['GB', 5000, 5000],
+        ['GB', 15, 15],
       ])
     })
 
@@ -626,7 +675,7 @@ describe('AnthropicCatalogDrafter.draft', () => {
       'https://uk.pricerunner.com/product/acme-gentle-wash/123',
       'https://www.idealo.de/preisvergleich/OffersOfProduct/123.html',
       'https://www.idealo.co.uk/compare/123/acme-gentle-wash.html',
-      'https://www.kelkoo.co.uk/ctl/do/search/acme-gentle-wash',
+      'https://www.kelkoo.co.uk/p/acme-gentle-wash-123',
       'https://www.kelkoo.com/products/acme-gentle-wash',
       'https://www.trolley.co.uk/product/acme-gentle-wash/ABC123',
       'https://TROLLEY.CO.UK/product/acme-gentle-wash/ABC123',
@@ -635,10 +684,10 @@ describe('AnthropicCatalogDrafter.draft', () => {
       'https://www.google.com/shopping/product/123',
       'https://www.google.co.uk/shopping/product/123',
       'https://google.com.ng/shopping/product/123',
-    ])('drops a price row sourced from the price-comparison site %s, even with a product-shaped path, and keeps the other country', async (page) => {
+    ])('keeps a price row sourced from the price-comparison site %s: a price is an estimate for a budget band, and a comparison site\'s range is a fair one', async (page) => {
       const result = await draftWithNgOn(page)
 
-      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+      expect(result.availability.map((r) => r.country)).toEqual(['NG', 'GB'])
     })
 
     it.each([
@@ -757,7 +806,8 @@ describe('AnthropicCatalogDrafter.draft', () => {
   })
 
   describe('price rows and the pages the model fetched', () => {
-    // A search snippet is often stale or for another size, so a price is kept only when the model read the page it cites.
+    // A price may come from a page the search returned or one the model fetched (as a cell may): coverage matters more than exactness, since a price only
+    // feeds a budget band. A page the model fetched is matched without regard to a trailing slash, a fragment or the case of its host.
     const NG_SHOP = 'https://ng.shop.example/products/acme-gentle-wash-200ml'
     const GB_SHOP = 'https://uk.shop.example/products/acme-gentle-wash-200ml'
 
@@ -773,15 +823,27 @@ describe('AnthropicCatalogDrafter.draft', () => {
       expect(result.availability.map((r) => r.sourceUrl)).toEqual([NG_SHOP])
     })
 
-    it('drops a price row whose page only the search returned, and keeps a cell that cites that same page', async () => {
+    it('keeps a price row whose page only the search returned, and a cell that cites that same page', async () => {
       const result = await draftFrom(
         answer({ cells: { frequency: { value: 'pm', sourceUrl: NG_SHOP } }, availability: [row({ country: 'NG', sourceUrl: NG_SHOP })] }),
         REQUEST,
         [NG_SHOP],
       )
 
-      expect(result.availability).toEqual([])
+      expect(result.availability.map((r) => [r.country, r.sourceUrl])).toEqual([['NG', NG_SHOP]])
       expect(result.cells).toEqual({ frequency: { value: 'pm', sourceUrl: NG_SHOP } })
+    })
+
+    it('drops a price row whose page the search did not return and the model did not fetch, since the model can name a page it never saw', async () => {
+      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: INVENTED_PAGE })), REQUEST, [NG_SHOP], [GB_SHOP])
+
+      expect(result.availability).toEqual([])
+    })
+
+    it('drops a price row whose page the model never saw even when no page was fetched at all', async () => {
+      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: INVENTED_PAGE })), REQUEST, [NG_SHOP])
+
+      expect(result.availability).toEqual([])
     })
 
     it('keeps a cell that cites a page the model fetched, though the search did not return it', async () => {
@@ -790,20 +852,20 @@ describe('AnthropicCatalogDrafter.draft', () => {
       expect(result.cells.frequency).toEqual({ value: 'pm', sourceUrl: NG_SHOP })
     })
 
-    it('drops a price row whose page the model did not fetch, when it fetched another page', async () => {
+    it('keeps a price row whose page the search returned, when the model fetched another page', async () => {
       const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: NG_SHOP })), REQUEST, [NG_SHOP], [GB_SHOP])
 
-      expect(result.availability).toEqual([])
+      expect(result.availability.map((r) => r.sourceUrl)).toEqual([NG_SHOP])
     })
 
     it.each([
       ['a fetch that failed', fetchError('srvtoolu_f0')],
       ['a fetch that failed, naming the page it was asked for', fetchError('srvtoolu_f0', NG_SHOP)],
       ['a fetch result with no content', { type: 'web_fetch_tool_result', tool_use_id: 'srvtoolu_f0', content: null }],
-    ])('does not count %s as the page fetched', async (_label, failed) => {
+    ])('does not count %s as the page fetched, so a price row citing a page the search did not return is dropped', async (_label, failed) => {
       const content = [
         searchCall('srvtoolu_01', 'q'),
-        searchResults('srvtoolu_01', [NG_SHOP]),
+        searchResults('srvtoolu_01', [BRAND_PAGE]),
         fetchCall('srvtoolu_f0', NG_SHOP),
         failed,
         textBlock(JSON.stringify(rowsOf(row({ country: 'NG', sourceUrl: NG_SHOP })))),
@@ -817,7 +879,7 @@ describe('AnthropicCatalogDrafter.draft', () => {
     it('keeps a price row when a failed fetch of another page sits beside the fetch of its page', async () => {
       const content = [
         searchCall('srvtoolu_01', 'q'),
-        searchResults('srvtoolu_01', [NG_SHOP, GB_SHOP]),
+        searchResults('srvtoolu_01', [BRAND_PAGE]),
         fetchCall('srvtoolu_f0', GB_SHOP),
         fetchError('srvtoolu_f0', GB_SHOP),
         fetchCall('srvtoolu_f1', NG_SHOP),
@@ -838,7 +900,7 @@ describe('AnthropicCatalogDrafter.draft', () => {
       ['a fragment on the fetched page', NG_SHOP + '#top', NG_SHOP],
       ['capitals in the host of the fetched page', 'https://NG.Shop.Example/products/acme-gentle-wash-200ml', NG_SHOP],
     ])('counts a page as fetched that differs only by %s, and keeps the cited address as the source', async (_label, fetchedAs, cited) => {
-      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: cited })), REQUEST, [cited], [fetchedAs])
+      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: cited })), REQUEST, [BRAND_PAGE], [fetchedAs])
 
       expect(result.availability.map((r) => r.sourceUrl)).toEqual([cited])
     })
@@ -849,12 +911,12 @@ describe('AnthropicCatalogDrafter.draft', () => {
       ['another host', 'https://other.shop.example/products/acme-gentle-wash-200ml'],
       ['another query', NG_SHOP + '?size=500ml'],
     ])('does not count a page as fetched that differs by %s', async (_label, fetchedAs) => {
-      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: NG_SHOP })), REQUEST, [NG_SHOP], [fetchedAs])
+      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: NG_SHOP })), REQUEST, [BRAND_PAGE], [fetchedAs])
 
       expect(result.availability).toEqual([])
     })
 
-    it("keeps only the row of the country whose page was fetched when the other country's page was only searched", async () => {
+    it("keeps the row of a country whose page was only searched next to the row of one whose page was fetched", async () => {
       const result = await draftFrom(
         rowsOf(row({ country: 'NG', sourceUrl: NG_SHOP }), row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: GB_SHOP })),
         REQUEST,
@@ -862,15 +924,39 @@ describe('AnthropicCatalogDrafter.draft', () => {
         [GB_SHOP],
       )
 
+      expect(result.availability.map((r) => [r.country, r.sourceUrl])).toEqual([
+        ['NG', NG_SHOP],
+        ['GB', GB_SHOP],
+      ])
+    })
+
+    it("keeps only the row of the country whose page was seen when the other country's page is one the model never saw", async () => {
+      const result = await draftFrom(
+        rowsOf(row({ country: 'NG', sourceUrl: INVENTED_PAGE }), row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: GB_SHOP })),
+        REQUEST,
+        [NG_SHOP],
+        [GB_SHOP],
+      )
+
       expect(result.availability.map((r) => [r.country, r.sourceUrl])).toEqual([['GB', GB_SHOP]])
     })
 
-    it("falls back to the next row for a country when the first row's page was only searched and the second was fetched", async () => {
+    it("falls back to the next row for a country when the first row's page was never seen and the second was fetched", async () => {
       const result = await draftFrom(
-        rowsOf(row({ country: 'NG', priceMin: 4000, sourceUrl: NG_SHOP }), row({ country: 'NG', priceMin: 4100, priceMax: 5000, sourceUrl: BRAND_PAGE })),
+        rowsOf(row({ country: 'NG', priceMin: 4000, sourceUrl: INVENTED_PAGE }), row({ country: 'NG', priceMin: 4100, priceMax: 5000, sourceUrl: BRAND_PAGE })),
         REQUEST,
-        [NG_SHOP, BRAND_PAGE],
+        [NG_SHOP],
         [BRAND_PAGE],
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin])).toEqual([['NG', 4100]])
+    })
+
+    it("falls back to the next row for a country when the first row's page was never seen and the second was only searched", async () => {
+      const result = await draftFrom(
+        rowsOf(row({ country: 'NG', priceMin: 4000, sourceUrl: INVENTED_PAGE }), row({ country: 'NG', priceMin: 4100, priceMax: 5000, sourceUrl: NG_SHOP })),
+        REQUEST,
+        [NG_SHOP],
       )
 
       expect(result.availability.map((r) => [r.country, r.priceMin])).toEqual([['NG', 4100]])
@@ -880,13 +966,214 @@ describe('AnthropicCatalogDrafter.draft', () => {
       'https://shop.example/search?q=acme-gentle-wash',
       'https://shop.example/brands/acme',
       'https://shop.example/collections/cleansers',
+      'https://www.ebay.com/itm/1',
+    ])("still drops a price row from %s whether the model fetched it or only the search returned it, since the page is not one product's", async (page) => {
+      const fetchedToo = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page], [page])
+      const searchedOnly = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page])
+
+      expect(fetchedToo.availability).toEqual([])
+      expect(searchedOnly.availability).toEqual([])
+    })
+
+    it.each([
       'https://www.pricespy.co.uk/product/acme-gentle-wash/123',
       'https://shopping.google.com/product/acme-gentle-wash',
-      'https://www.ebay.com/itm/1',
-    ])("still drops a price row from %s when the model fetched it, since the page is not one product's", async (page) => {
-      const result = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page], [page])
+    ])('keeps a price row from the price-comparison page %s, whether the model fetched it or only the search returned it', async (page) => {
+      const fetchedToo = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page], [page])
+      const searchedOnly = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page])
+
+      expect(fetchedToo.availability.map((r) => r.sourceUrl)).toEqual([page])
+      expect(searchedOnly.availability.map((r) => r.sourceUrl)).toEqual([page])
+    })
+  })
+
+  describe('prices with decimals', () => {
+    it('rounds a price with decimals to the nearest whole unit instead of dropping the row: 6.5 and 7.7 become 7 and 8', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 6.5, priceMax: 7.7 })))
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['GB', 7, 8]])
+    })
+
+    it('rounds half up: 2.5 becomes 3, 3.4999 becomes 3, and 0.5 becomes 1', async () => {
+      const result = await draftFetching(
+        rowsOf(row({ country: 'NG', priceMin: 2.5, priceMax: 3.4999 }), row({ country: 'GB', priceMin: 0.5, priceMax: 1.2 })),
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
+        ['NG', 3, 3],
+        ['GB', 1, 1],
+      ])
+    })
+
+    it.each([
+      ['a price that rounds down to 0', row({ priceMin: 0.49, priceMax: 0.49 })],
+      ['a price written as text, even a decimal one', row({ priceMin: '6.5', priceMax: '7.7' })],
+      ['a lowest price above the highest, before rounding', row({ priceMin: 7.7, priceMax: 6.5 })],
+    ])('still drops a row with %s', async (_label, bad) => {
+      const result = await draftFetching(rowsOf(bad))
 
       expect(result.availability).toEqual([])
+    })
+
+    describe('in a currency with no ceiling', () => {
+      const NO_CEILING: DraftRequest = { ...REQUEST, countries: [{ code: 'ZZ', currency: 'ZZZ' }] }
+      const SAFE = Number.MAX_SAFE_INTEGER
+
+      it('keeps the largest whole number a price can hold exactly, and drops the next one', async () => {
+        const kept = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: SAFE - 1, priceMax: SAFE })), NO_CEILING)
+        const dropped = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: SAFE - 1, priceMax: SAFE + 1 })), NO_CEILING)
+
+        expect(kept.availability.map((r) => [r.priceMin, r.priceMax])).toEqual([[SAFE - 1, SAFE]])
+        expect(dropped.availability).toEqual([])
+      })
+    })
+  })
+
+  describe('a price too high for one face-skincare product in the currency', () => {
+    // Ceilings per the brief: GBP 500, NGN 1,000,000. Written out, not read from the code under test.
+    it('drops a GB row of 650 to 770, which is 6.50 to 7.70 pounds written in pence', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 650, priceMax: 770 })))
+
+      expect(result.availability).toEqual([])
+    })
+
+    it('keeps a GB row whose highest price is exactly 500, and drops one at 501', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 501 })))
+
+      expect(kept.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['GB', 400, 500]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('keeps an NG row whose highest price is exactly 1,000,000, and drops one at 1,000,001', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 800000, priceMax: 1000000 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 800000, priceMax: 1000001 })))
+
+      expect(kept.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['NG', 800000, 1000000]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('checks the ceiling after rounding: 500.4 becomes 500 and is kept, 500.5 becomes 501 and is dropped', async () => {
+      const kept = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500.4 })))
+      const dropped = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 400, priceMax: 500.5 })))
+
+      expect(kept.availability.map((r) => [r.priceMin, r.priceMax])).toEqual([[400, 500]])
+      expect(dropped.availability).toEqual([])
+    })
+
+    it('limits the highest price, not the lowest: a lowest price over the ceiling is dropped with its row', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'GB', priceMin: 600, priceMax: 700 })))
+
+      expect(result.availability).toEqual([])
+    })
+
+    it('does not limit a currency that has no ceiling', async () => {
+      const request: DraftRequest = { ...REQUEST, countries: [{ code: 'ZZ', currency: 'ZZZ' }] }
+
+      const result = await draftFetching(rowsOf(row({ country: 'ZZ', priceMin: 4000000, priceMax: 5000000 })), request)
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['ZZ', 4000000, 5000000]])
+    })
+
+    it('judges a country by its own currency: a price over the GBP ceiling is fine in NGN', async () => {
+      const result = await draftFetching(rowsOf(row({ country: 'NG', priceMin: 650, priceMax: 770 })))
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([['NG', 650, 770]])
+    })
+
+    it('does not use up the country: a later good row for it is kept, and the other country is untouched', async () => {
+      const result = await draftFetching(
+        rowsOf(
+          row({ country: 'GB', priceMin: 650, priceMax: 770 }),
+          row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: RETAILER_PAGE }),
+          row({ country: 'NG', priceMin: 4000, priceMax: 6500 }),
+        ),
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.priceMax])).toEqual([
+        ['GB', 9, 12],
+        ['NG', 4000, 6500],
+      ])
+    })
+  })
+
+  describe('price rows sourced from an international storefront', () => {
+    // These shops show a converted price for a country they ship to, not a local shop's price. The NG row cites `page`; the GB row is good.
+    const draftWithNgOn = (page: string) =>
+      draftFetching(rowsOf(row({ country: 'NG', sourceUrl: page }), row({ country: 'GB', priceMin: 9, priceMax: 12, sourceUrl: RETAILER_PAGE })), REQUEST, [page, RETAILER_PAGE])
+
+    it.each([
+      'https://www.iherb.com/pr/acme-gentle-wash/12345',
+      'https://iherb.com/pr/acme-gentle-wash/12345',
+      'https://uk.iherb.com/pr/acme-gentle-wash/12345',
+      'https://ng.iherb.com/pr/acme-gentle-wash/12345',
+      'https://www.iherb.co.uk/pr/acme-gentle-wash/12345',
+      'https://IHERB.COM/pr/acme-gentle-wash/12345',
+      'https://www.caretobeauty.com/products/acme-gentle-wash',
+      'https://www.sweetcare.com/products/acme-gentle-wash',
+      'https://www.lojaglamourosa.com.br/produto/acme-gentle-wash',
+      'https://www.stylevana.com/en_US/acme-gentle-wash.html',
+      'https://www.yesstyle.com/en/acme-gentle-wash/info.html/pid.123',
+      'https://www.cosmetis.com/en/acme-gentle-wash',
+      'https://www.ubuy.com.ng/product/acme-gentle-wash',
+      'https://www.ubuy.co.uk/product/acme-gentle-wash',
+      'https://www.desertcart.com.ng/products/acme-gentle-wash',
+      'https://www.desertcart.ae/products/acme-gentle-wash',
+    ])('drops a price row sourced from the international storefront %s, and keeps the other country', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['GB'])
+    })
+
+    it('does not use up the country: a later good row for it is kept', async () => {
+      const storefront = 'https://www.iherb.com/pr/acme-gentle-wash/12345'
+      const shop = 'https://shop.example/products/acme-gentle-wash'
+
+      const result = await draftFetching(
+        rowsOf(row({ country: 'NG', priceMin: 4000, priceMax: 5000, sourceUrl: storefront }), row({ country: 'NG', priceMin: 4100, priceMax: 5100, sourceUrl: shop })),
+        REQUEST,
+        [storefront, shop],
+      )
+
+      expect(result.availability.map((r) => [r.country, r.priceMin, r.sourceUrl])).toEqual([['NG', 4100, shop]])
+    })
+
+    it.each([
+      'https://iherbal.shop.example/p/acme-gentle-wash/123',
+      'https://iherb.shop.example/p/acme-gentle-wash/123',
+      'https://notiherb.example/p/acme-gentle-wash/123',
+      'https://shop.example/iherb/acme-gentle-wash',
+      'https://shop.example/p/acme-gentle-wash/123?ref=iherb',
+      'https://www.ubuyer.example/p/acme-gentle-wash/123',
+      'https://www.yesstyles.example/p/acme-gentle-wash/123',
+    ])('keeps a price row sourced from %s, which only looks like an international storefront', async (page) => {
+      const result = await draftWithNgOn(page)
+
+      expect(result.availability.map((r) => r.country)).toEqual(['NG', 'GB'])
+    })
+
+    it.each([
+      'https://www.iherb.com/pr/acme-gentle-wash/12345',
+      'https://www.yesstyle.com/en/acme-gentle-wash/info.html/pid.123',
+      'https://www.ubuy.com.ng/product/acme-gentle-wash',
+    ])('still keeps a cell whose source is %s, since only price rows need a local shop', async (page) => {
+      const result = await draftFetching(cellsOf({ frequency: { value: 'pm', sourceUrl: page } }), REQUEST, [page])
+
+      expect(result.cells.frequency).toEqual({ value: 'pm', sourceUrl: page })
+    })
+  })
+
+  describe('price rows sourced from a classified or auction listing', () => {
+    it.each([
+      'https://jiji.ng/lagos/health-beauty/acme-gentle-wash-abc123.html',
+      'https://jiji.com.gh/accra/health-beauty/acme-gentle-wash-abc123.html',
+      'https://www.ebay.co.uk/itm/1234567890',
+    ])('drops a price row sourced from %s whether the model fetched it or only the search returned it', async (page) => {
+      const fetchedToo = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page], [page])
+      const searchedOnly = await draftFrom(rowsOf(row({ country: 'NG', sourceUrl: page })), REQUEST, [page])
+
+      expect(fetchedToo.availability).toEqual([])
+      expect(searchedOnly.availability).toEqual([])
     })
   })
 

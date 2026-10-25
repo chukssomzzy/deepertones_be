@@ -17,6 +17,7 @@ import { type DraftJudge, type JudgeRequest, unverifiable } from './draft-judge'
 import {
   type CaseInput,
   type CaseScore,
+  type Bands,
   type CaseState,
   COLUMNS,
   type Counts,
@@ -27,6 +28,7 @@ import {
   formatCaseLine,
   applyHumanChecks,
   formatGateLine,
+  formatPricesLine,
   formatOverruledLines,
   formatUnverifiableLine,
   isWrongCurrency,
@@ -73,13 +75,18 @@ export type RunArgs = {
 /** No colons: actions/upload-artifact refuses them in a file name. */
 export const defaultOutDir = (startedAt: Date): string => `.eval/draft-${startedAt.toISOString().replace(/:/g, '-')}`
 
-// The eval's Countries tab. The bands are required by the contract and used by nothing here.
+// The eval's Countries tab. Its bands are what the price band accuracy is measured against.
 const COUNTRY_ROWS: RawRow[] = [
   { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' },
   { code: 'GB', currency: 'GBP', low_max: 10, mid_max: 30, status: 'active' },
 ]
 
 const EVAL_COUNTRIES: DraftCountry[] = COUNTRY_ROWS.map((row) => ({ code: row.code as string, currency: row.currency as string }))
+
+// The eval measures catalog:draft as it runs by default, pinned here so a change to that default is a deliberate eval change.
+const EVAL_PASSES = 3
+
+const EVAL_BANDS: Record<string, Bands> = Object.fromEntries(COUNTRY_ROWS.map((row) => [row.code as string, { lowMax: Number(row.low_max), midMax: Number(row.mid_max) }]))
 
 const headersOf = (key: TabKey): string[] => CONTRACT.tabs.find((tab) => tab.key === key)!.columns.map((column) => column.name)
 
@@ -188,7 +195,7 @@ export const runDraftEval = async ({ cases: allCases, set = 'main', humanChecks 
     const base = { id: c.id, kind: c.kind, countries, expected: c.expected }
     const finish = (input: Omit<CaseInput, keyof typeof base>) => {
       inputs.push(applyHumanChecks({ ...base, ...input }, humanChecks))
-      const score = scoreDraftCase(inputs.at(-1)!)
+      const score = scoreDraftCase(inputs.at(-1)!, EVAL_BANDS)
       io.log(formatCaseLine(score))
       for (const line of attentionLines(inputs.at(-1)!)) io.log(line)
     }
@@ -206,7 +213,7 @@ export const runDraftEval = async ({ cases: allCases, set = 'main', humanChecks 
 
     const spentBefore = ledger.spentMicros()
     recorded.takeErrorName()
-    const outcome = await draftWorkbook(workbookOf([workbook.products.rows[index]!], []), { researcher: recorded.researcher, drafter: recorded.drafter, ledger, countries: c.countries })
+    const outcome = await draftWorkbook(workbookOf([workbook.products.rows[index]!], []), { researcher: recorded.researcher, drafter: recorded.drafter, ledger, countries: c.countries, passes: EVAL_PASSES })
     const errorName = recorded.takeErrorName()
     workbook.products.rows[index] = outcome.workbook.products.rows[0]!
     workbook.availability.rows.push(...outcome.workbook.availability.rows)
@@ -233,7 +240,7 @@ export const runDraftEval = async ({ cases: allCases, set = 'main', humanChecks 
     })
   }
 
-  const scores: CaseScore[] = inputs.map(scoreDraftCase)
+  const scores: CaseScore[] = inputs.map((input) => scoreDraftCase(input, EVAL_BANDS))
   const summary = summariseDraft(scores)
 
   const reported = scores.map((score, i) => ({ ...score, cells: inputs[i]!.cells, prices: inputs[i]!.prices }))
@@ -255,6 +262,7 @@ export const runDraftEval = async ({ cases: allCases, set = 'main', humanChecks 
   for (const line of formatOverruledLines(summary)) io.log(line)
   io.log(`All values: ${countsLine(values)}, contradicted ${percent(values.contradicted, values.filled)}, unverifiable ${percent(values.unverifiable, values.filled)}`)
   io.log(`Traps passed: ${traps.passed}/${traps.total}. Within the plausible sets: ${agreement.agree} agree, ${agreement.disagree} disagree (reported, not gated).`)
+  io.log(formatPricesLine(summary))
   io.log(`Spent ${usd(summary.costMicros)} of the ${usd(ledger.capMicros)} cap.`)
   io.log(`Report: ${reportPath}`)
   io.log(`Workbook: ${workbookPath}`)

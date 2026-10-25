@@ -38,6 +38,9 @@ export class AnthropicCatalogDrafter implements CatalogDrafter {
             role: 'user',
             content:
               'Draft these cells for this product:\n' +
+              (request.attempt !== undefined && request.attempt > 1
+                ? 'An earlier attempt found no usable price for these countries, so look more widely: other retailers and pharmacies, marketplace product pages, and price-comparison pages for this exact product.\n'
+                : '') +
               JSON.stringify({ product: request.product, columns: request.columns, countries: request.countries, allowedValues: DRAFT_VOCABULARY }),
           },
         ],
@@ -69,7 +72,7 @@ export class AnthropicCatalogDrafter implements CatalogDrafter {
     if (message.stop_reason === 'refusal') throw new AnthropicRefusalError('Claude refused to answer')
     if (message.stop_reason === 'max_tokens') throw new AnthropicRequestError('Claude ran out of max_tokens before finishing the answer')
 
-    // The model can name a page it never saw, so a source must be one the search returned or it fetched, and a price must come from a page it fetched. A model that did neither has no source to give.
+    // The model can name a page it never saw, so a source must be one the search returned or it fetched. A model that did neither has no source to give.
     // An answer that cannot be read is nothing: the caller leaves the cells for a person.
     const answer = lastJsonObjectIn(textOf(message), AnthropicCatalogDrafter.ANSWER_SCHEMA)
     if (!answer) return { cells: {}, availability: [] }

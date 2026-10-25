@@ -81,7 +81,7 @@ const answerFor = (request: DraftRequest): DraftResult => {
       steps: { value: ['cleanse'], sourceUrl: CELL_PAGE('steps') },
       frequency: { value: 'am-pm', sourceUrl: CELL_PAGE('frequency') },
     },
-    availability: countries.map(({ code }) => ({ country: code, priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies', sourceUrl: PRICE_PAGE(code) })),
+    availability: countries.map(({ code }) => ({ country: code, ...(code === 'GB' ? { priceMin: 9, priceMax: 12 } : { priceMin: 4000, priceMax: 6500 }), whereSold: 'Pharmacies', sourceUrl: PRICE_PAGE(code) })),
   }
 }
 
@@ -176,8 +176,12 @@ type Reported = {
   startedAt: string
   set: string
   capMicros: number
-  cases: { id: string; kind: string; state: string; costMicros: number; values: { filled: number; grounded: number; contradicted: number; unverifiable: number }; trap: { passed: boolean } | null; cells: { column: string; sourceUrl: string; verdict: Verdict }[]; prices: { country: string; sourceUrl: string }[] }[]
-  summary: { gate: { holds: boolean; failures: string[] }; costMicros: number }
+  cases: { id: string; kind: string; state: string; costMicros: number; values: { filled: number; grounded: number; contradicted: number; unverifiable: number }; trap: { passed: boolean } | null; cells: { column: string; sourceUrl: string; verdict: Verdict }[]; prices: { country: string; sourceUrl: string; verdict: Verdict }[] }[]
+  summary: {
+    gate: { holds: boolean; failures: string[] }
+    costMicros: number
+    prices: { asked: number; priced: number; byCountry: Record<string, { asked: number; priced: number }>; bandCorrect: number; bandKnown: number; bandUnknown: number }
+  }
 }
 const reportOf = (files: Map<string, string>): Reported => JSON.parse(files.get(REPORT_PATH)!)
 const rowOf = (workbook: RawWorkbook, brand: string, name: string) => workbook.products.rows.find((r) => r.brand === brand && r.name === name)!
@@ -244,8 +248,11 @@ describe('runDraftEval: the workbook it builds and drafts', () => {
 
     await run()
 
-    expect(drafter.requests).toHaveLength(CASES.length)
-    for (const request of drafter.requests) expect([...request.columns].sort()).toEqual(['frequency', 'skin_concerns', 'skin_types', 'steps'])
+    // The first pass asks every case for every column; later passes (catalog:draft's retries) ask only for prices still missing.
+    const firstPass = drafter.requests.filter((request) => (request.attempt ?? 1) === 1)
+    expect(firstPass).toHaveLength(CASES.length)
+    for (const request of firstPass) expect([...request.columns].sort()).toEqual(['frequency', 'skin_concerns', 'skin_types', 'steps'])
+    for (const request of drafter.requests.filter((r) => (r.attempt ?? 1) > 1)) expect(request.columns).toEqual([])
     expect(drafter.requests[0]!.countries).toEqual([
       { code: 'NG', currency: 'NGN' },
       { code: 'GB', currency: 'GBP' },
@@ -259,12 +266,13 @@ describe('runDraftEval: the workbook it builds and drafts', () => {
 
     await run()
 
-    // ordinary: 1 draft call + 7 values judged (ingredients, 4 cells, 2 prices); sibling the same; foreign 6 values; unbranded 1 draft call and nothing to judge.
+    // ordinary: 1 draft call + 7 values judged (ingredients, 4 cells, 2 prices); sibling the same; foreign 6 values and 2 retries for its missing GB
+    // price; unbranded 1 draft call and 2 retries, and nothing to judge. A case is drafted as catalog:draft drafts it, retries included.
     expect(reportOf(files).cases.map((c) => [c.id, c.costMicros])).toEqual([
       [ORDINARY.id, 1_070],
       [SIBLING.id, 1_070],
-      [FOREIGN.id, 1_060],
-      [UNBRANDED.id, 1_000],
+      [FOREIGN.id, 3_060],
+      [UNBRANDED.id, 3_000],
     ])
   })
 
@@ -311,7 +319,7 @@ describe('runDraftEval: judging', () => {
     expect(rows.map((r) => r.value)).toEqual(
       expect.arrayContaining([
         { country: 'NG', currency: 'NGN', priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies' },
-        { country: 'GB', currency: 'GBP', priceMin: 4000, priceMax: 6500, whereSold: 'Pharmacies' },
+        { country: 'GB', currency: 'GBP', priceMin: 9, priceMax: 12, whereSold: 'Pharmacies' },
       ]),
     )
     expect(rows.find((r) => (r.value as { country: string }).country === 'NG')!.sourceUrl).toBe(PRICE_PAGE('NG'))
@@ -399,6 +407,21 @@ describe('runDraftEval: exit code and gate', () => {
     const reported = reportOf(t.files)
     expect(reported.cases.map((c) => c.state)).toEqual(['drafted', 'drafted', 'failed', 'drafted'])
     expect(t.researcher.products).toHaveLength(4)
+  })
+
+  it('keeps a case drafted when only a retry for its missing prices fails: the price stays missing, the case is not a failed product, and the run exits as it would have', async () => {
+    const t = setup({ outDir: OUT })
+    // The first pass answers as usual; every later pass, which only asks for the prices still missing (Neutrogena's NG, the unbranded product's NG), throws.
+    t.drafter.failure = (request) => ((request.attempt ?? 1) > 1 ? new Error(ERROR_SENTINEL) : undefined)
+
+    const { exitCode } = await t.run()
+
+    expect(t.drafter.requests.some((request) => (request.attempt ?? 1) > 1)).toBe(true)
+    const reported = reportOf(t.files)
+    expect(reported.cases.map((c) => c.state)).toEqual(['drafted', 'drafted', 'drafted', 'drafted'])
+    for (const c of reported.cases) expect(c, c.id).not.toHaveProperty('errorName')
+    expect(exitCode).toBe(0)
+    expect(t.logs.join('\n')).not.toMatch(/drafter-error|researcher-error/)
   })
 
   // The class name of an error says what kind of failure it was (Anthropic's request, refusal or a network error) and holds no model words, so it is shown
@@ -555,8 +578,8 @@ describe('runDraftEval: the spend cap', () => {
 
     const reported = reportOf(t.files)
     expect(reported.summary.costMicros).toBe(t.ledger.spentMicros())
-    expect(reported.summary.costMicros).toBe(4_200)
-    expect(t.logs.some((line) => line.includes('$0.0042'))).toBe(true)
+    expect(reported.summary.costMicros).toBe(8_200)
+    expect(t.logs.some((line) => line.includes('$0.0082'))).toBe(true)
     expect(reported.capMicros).toBe(BIG_CAP_MICROS)
   })
 
@@ -750,5 +773,120 @@ describe('runDraftEval: the console', () => {
 
     expect(t.logs.join('\n')).not.toContain(URL_SENTINEL)
     expect(t.files.get(REPORT_PATH)).toContain(URL_SENTINEL)
+  })
+})
+
+// Beside the gate the run reports what the drafted prices are for: coverage (of the product-country pairs asked in ordinary cases that were drafted, how
+// many got a price row) and band accuracy (of the rows whose page the judge could read a price for, how many put the product's lowest price in the page's lowest price's budget band,
+// from the Countries tab's low_max and mid_max: NG 5000 and 15000, GB 10 and 30). Neither is part of the gate.
+describe('runDraftEval: price coverage and band accuracy', () => {
+  const ordinary = (id: string, brand: string, countries: string[] = ['NG', 'GB']): DraftCase => ({ id, kind: 'ordinary', product: { brand, name: 'Body Lotion', category: 'body' }, countries })
+  const AMBER = ordinary('amber-body-lotion', 'Amber')
+  const KURUVO = ordinary('kuruvo-body-lotion', 'Kuruvo')
+  const ZELVO = ordinary('zelvo-body-lotion', 'Zelvo')
+  const PRICES_CASES = [AMBER, KURUVO, ZELVO, FOREIGN]
+
+  /** The drafted range for each product and country: NG 4000-6500 is low by its lowest price, 4000 (its midpoint, 5250, would be mid), GB 8-12 is low (8). Kuruvo gets no GB price; Zelvo's drafting fails. */
+  const priceAnswer = (request: DraftRequest): DraftResult => {
+    const base = answerFor(request)
+    if (request.product.brand === 'Neutrogena') return base
+    const rows = { NG: { priceMin: 4000, priceMax: 6500 }, GB: { priceMin: 8, priceMax: 12 } } as const
+    const countries = request.product.brand === 'Kuruvo' ? request.countries.filter((c) => c.code === 'NG') : request.countries
+    return { ...base, availability: countries.map(({ code }) => ({ country: code, ...rows[code as 'NG' | 'GB'], sourceUrl: PRICE_PAGE(code) })) }
+  }
+
+  /** What each judged price page showed: Amber NG 4500 (low, as drafted), Amber GB 25 (mid, not the low drafted), Kuruvo nothing, the foreign trap 5000 (which would be known if it were counted). */
+  const pricesShownFor = (request: JudgeRequest): number[] | undefined => {
+    const country = (request.value as { country: string }).country
+    const brand = request.product.brand
+    if (brand === 'Amber') return country === 'NG' ? [4500] : [25]
+    if (brand === 'Neutrogena') return [5000]
+    return undefined
+  }
+
+  const priced = (extra: Setup = {}) => {
+    const t = setup({ outDir: OUT, cases: PRICES_CASES, ...extra })
+    t.drafter.answer = priceAnswer
+    t.drafter.failure = (request) => (request.product.brand === 'Zelvo' ? new Error(ERROR_SENTINEL) : undefined)
+    t.judge.verdict = (request) => {
+      if (request.column !== 'availability') return GROUNDED
+      const shown = pricesShownFor(request)
+      return { ...GROUNDED, currencyShown: (request.value as { currency: string }).currency, ...(shown === undefined ? {} : { pricesShown: shown }) }
+    }
+    return t
+  }
+
+  it('reports the coverage and the band accuracy in the console, over ordinary cases that were drafted only', async () => {
+    const t = priced()
+
+    await t.run()
+
+    // Amber asked NG and GB (2 priced), Kuruvo asked NG and GB (NG priced): 4 asked, 3 priced. The failed ordinary case and the trap are not in it.
+    const line = t.logs.find((l) => l.startsWith('Prices:'))!
+    expect(line).toMatch(/coverage 3\/4 \(75(\.0)?%\)/)
+    expect(line).toMatch(/NG 2\/2/)
+    expect(line).toMatch(/GB 1\/2/)
+    // Amber NG: the drafted lowest price, 4000, is low, and so is the page's 4500. Amber GB: drafted 8 is low, the page's 25 is mid. Kuruvo NG: the page showed no price.
+    expect(line).toMatch(/band-correct 1\/2 \(50(\.0)?%\)/)
+    expect(line).toMatch(/band unknown 1/)
+    expect(line).not.toContain('NaN')
+  })
+
+  it('keeps the same numbers in report.json under summary.prices', async () => {
+    const t = priced()
+
+    await t.run()
+
+    expect(reportOf(t.files).summary.prices).toEqual({
+      asked: 4,
+      priced: 3,
+      byCountry: { NG: { asked: 2, priced: 2 }, GB: { asked: 2, priced: 1 } },
+      bandCorrect: 1,
+      bandKnown: 2,
+      bandUnknown: 1,
+    })
+  })
+
+  it('counts a case that failed apart, as it already does, and not in the coverage', async () => {
+    const t = priced()
+
+    await t.run()
+
+    expect(reportOf(t.files).cases.map((c) => [c.id, c.state])).toContainEqual([ZELVO.id, 'failed'])
+    expect(reportOf(t.files).summary.prices.asked).toBe(4)
+  })
+
+  it('does not let a person\'s check on a price change its band: the page\'s prices stand', async () => {
+    const check: HumanCheck = { caseId: AMBER.id, column: 'price:NG', value: '4000-6500', verdict: 'wrong', note: 'n', checkedOn: '2030-06-15', by: 'owner' }
+    const t = priced({ humanChecks: [check] })
+
+    await t.run()
+
+    expect(reportOf(t.files).summary.prices).toMatchObject({ bandCorrect: 1, bandKnown: 2, bandUnknown: 1 })
+  })
+
+  it('is not part of the gate: a run whose prices are all out of band and half missing exits as it did', async () => {
+    const t = setup({ outDir: OUT, cases: [AMBER, KURUVO] })
+    t.drafter.answer = priceAnswer
+    t.judge.verdict = (request) => (request.column === 'availability' ? { ...GROUNDED, currencyShown: (request.value as { currency: string }).currency, pricesShown: [900_000] } : GROUNDED)
+
+    const { exitCode } = await t.run()
+
+    expect(reportOf(t.files).summary.prices).toMatchObject({ asked: 4, priced: 3, bandCorrect: 0, bandKnown: 3, bandUnknown: 0 })
+    expect(exitCode).toBe(0)
+    expect(t.logs.at(-1)).toMatch(/^Gate: PASS/)
+  })
+
+  it('says band-correct 0 of 0, not NaN, when the judge gave no prices at all, and still ends with the gate line', async () => {
+    const t = setup({ outDir: OUT })
+
+    await t.run()
+
+    const line = t.logs.find((l) => l.startsWith('Prices:'))!
+    expect(line).toMatch(/coverage 2\/2/)
+    expect(line).toMatch(/band-correct 0\/0/)
+    expect(line).toMatch(/band unknown 2/)
+    expect(line).not.toContain('NaN')
+    expect(t.logs.at(-1)).toMatch(/^Gate: /)
   })
 })

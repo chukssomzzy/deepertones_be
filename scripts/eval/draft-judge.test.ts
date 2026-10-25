@@ -217,6 +217,63 @@ describe('AnthropicDraftJudge: the verdict', () => {
     expect(verdict.currencyShown).toBe('GBP')
   })
 
+  // The prices the page shows for the exact product, in the country's currency: what the eval compares the drafted range's budget band with.
+  describe('pricesShown, for a price row', () => {
+    const priceVerdict = (pricesShown: unknown) => judged(fetchedAndSaid({ ...VERDICT, ...(pricesShown === undefined ? {} : { pricesShown }) }), PRICE_REQUEST)
+
+    it('passes the whole-number prices the page showed through, in the order given', async () => {
+      const verdict = await priceVerdict([5900, 4200])
+
+      expect(verdict.pricesShown).toEqual([5900, 4200])
+    })
+
+    it('is empty when the page showed none', async () => {
+      expect((await priceVerdict([])).pricesShown).toEqual([])
+    })
+
+    it('is empty when the judge did not give it', async () => {
+      expect((await priceVerdict(undefined)).pricesShown).toEqual([])
+    })
+
+    it('drops what is not a positive whole number that is safe to compare, and keeps the rest', async () => {
+      const verdict = await priceVerdict([5000, 0, -3, 12.5, '7000', null, true, 9007199254740992, 6000])
+
+      expect(verdict.pricesShown).toEqual([5000, 6000])
+    })
+
+    it('is empty, and the verdict still read, when pricesShown is not a list', async () => {
+      const verdict = await priceVerdict('5000')
+
+      expect(verdict).toMatchObject({ fetched: true, exactProduct: 'yes', supports: 'yes' })
+      expect(verdict.pricesShown).toEqual([])
+    })
+
+    it('is only for a price row: a cell\'s verdict has none, whatever the judge wrote', async () => {
+      const verdict = await judged(fetchedAndSaid({ ...VERDICT, pricesShown: [5000] }), CELL_REQUEST)
+
+      expect(verdict).toMatchObject({ fetched: true, exactProduct: 'yes', supports: 'yes' })
+      expect(verdict.pricesShown ?? []).toEqual([])
+    })
+
+    it('is none for a page the judge says it could not fetch, whatever it claims to have seen', async () => {
+      const verdict = await judged(fetchedAndSaid({ ...VERDICT, fetched: false, pricesShown: [5000] }), PRICE_REQUEST)
+
+      expect(verdict).toMatchObject(nothingVouched('not-fetched'))
+      expect(verdict.pricesShown ?? []).toEqual([])
+    })
+
+    it('is asked for in the judge\'s instructions, or the judge would never give it', () => {
+      expect(draftJudgeJudgeDraftPrompt.text).toContain('pricesShown')
+    })
+
+    it('says the prices are for the same pack size as the drafted row, or a larger tube on the page would read as a dearer product', () => {
+      const text = draftJudgeJudgeDraftPrompt.text
+      // Loose on purpose: the words may change, but the instruction must sit with the pricesShown one, not elsewhere in the prompt.
+      const nearPricesShown = [...text.matchAll(/pricesShown/g)].some((match) => /same (pack )?size/i.test(text.slice(Math.max(0, match.index - 400), match.index + 400)))
+      expect(nearPricesShown).toBe(true)
+    })
+  })
+
   it('reads the verdict from the last JSON object of a reply that has chatter before it', async () => {
     const verdict = await judged(fetchedAndSaid(`The page lists "{braces}" and more.\n${JSON.stringify(VERDICT)}`))
 
@@ -226,7 +283,7 @@ describe('AnthropicDraftJudge: the verdict', () => {
   it('keeps only the verdict\'s own fields: whatever else the model wrote, page text or reasoning, goes no further', async () => {
     const verdict = await judged(fetchedAndSaid({ ...VERDICT, reasoning: 'SENTINEL-REASONING', quote: 'SENTINEL-PAGE-TEXT' }))
 
-    for (const key of Object.keys(verdict)) expect(['fetched', 'exactProduct', 'supports', 'currencyShown'], key).toContain(key)
+    for (const key of Object.keys(verdict)) expect(['fetched', 'exactProduct', 'supports', 'currencyShown', 'pricesShown'], key).toContain(key)
     expect(JSON.stringify(verdict)).not.toContain('SENTINEL')
   })
 

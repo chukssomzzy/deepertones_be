@@ -23,6 +23,8 @@ export type DraftRequest = {
   columns: DraftColumn[]
   /** Active countries the product has no price for. */
   countries: DraftCountry[]
+  /** Which try this is, from 1; left out for the first. From 2 the adapter tells the model an earlier try found no usable price, so it looks more widely. */
+  attempt?: number
 }
 
 export type DraftResult = {
@@ -85,22 +87,17 @@ const isListingSite = (url: string): boolean => LISTING_SITES.has(registrableLab
 /** A public https page that can sit in a `draft_cells` entry (the cell is split at ";", so a link holding one would be cut in two), and not a listing site. */
 export const isUsableSource = (value: unknown): value is string => isSafePublicHttpsUrl(value) && !value.includes(';') && !isListingSite(value)
 
-// A price row is one product's price, so its page must be that product's own: a price-comparison site or Google Shopping shows other shops' offers,
-// and a search, brand, category or collection page lists many products and prices. Comparison sites are matched on the registrable name like
-// LISTING_SITES (Google Shopping on its host or first path segment), the rest on whole path segments and query-parameter names (so "research-serum" is
-// not a search page), all case-insensitively.
-const PRICE_COMPARISON_SITES: ReadonlySet<string> = new Set(['pricespy', 'pricerunner', 'idealo', 'kelkoo', 'trolley'])
+// A price row is one product's price, so its page must not be a search, brand, category or collection page: those list many products and prices,
+// and the row may be another product's. A price-comparison site is fine: the price is an estimate for a budget band, and its range for the product
+// is a fair one. Matched on whole path segments and query-parameter names (so "research-serum" is not a search page), case-insensitively.
 const SEARCH_SEGMENTS: ReadonlySet<string> = new Set(['search', 'catalogsearch', 'slp'])
 const SEARCH_PARAMETERS: ReadonlySet<string> = new Set(['q', 'query', 'search', 's', 'k', 'keyword', 'searchterm'])
 const LISTING_SEGMENTS: ReadonlySet<string> = new Set(['brands', 'brand', 'category', 'categories', 'collections'])
 const LISTING_PREFIX = 'mlp-'
 
-const isListingOrComparisonPage = (url: string): boolean => {
-  const { hostname, pathname, searchParams } = new URL(url)
+const isSearchOrListingPage = (url: string): boolean => {
+  const { pathname, searchParams } = new URL(url)
   const segments = pathname.toLowerCase().split('/').filter(Boolean)
-  const label = registrableLabel(hostname)
-  if (PRICE_COMPARISON_SITES.has(label)) return true
-  if (label === 'google' && (hostname.toLowerCase().startsWith('shopping.') || segments[0] === 'shopping')) return true
   if (segments.some((segment) => SEARCH_SEGMENTS.has(segment))) return true
   if ([...searchParams.keys()].some((name) => SEARCH_PARAMETERS.has(name.toLowerCase()))) return true
   const last = segments.at(-1)
@@ -111,20 +108,46 @@ const isListingOrComparisonPage = (url: string): boolean => {
 // sizes, bundles or unrelated listings were mixed, which is not one product's price.
 const MAX_PRICE_SPREAD = 2.5
 
-// A price a source gave is a whole number of at least 1: 0 is a missing price read as free, and a number past 2^53 is not exact. (The workbook itself
-// still takes 0 in a price typed by hand.)
-const isPrice = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+// A price a source gave is rounded half up to a whole unit of the currency (a shop shows 6.50, the workbook holds whole numbers). It is refused when it
+// is not a number, is 0 or less after rounding (0 is a missing price read as free), or is past 2^53, where a number is not exact. (The workbook
+// itself still takes 0 in a price typed by hand.)
+const wholePrice = (value: unknown): number | undefined => {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return undefined
+  const rounded = Math.round(value)
+  return rounded >= 1 && rounded <= Number.MAX_SAFE_INTEGER ? rounded : undefined
+}
+
+/**
+ * The most one face-skincare product plausibly costs, per currency, in whole units. A price above it is almost certainly in minor units (6.50
+ * pounds written as 650) or in another currency, and a price that wrong would put the product in the wrong budget band. A currency with no entry
+ * has no ceiling.
+ */
+const MAX_PLAUSIBLE_PRICE: Readonly<Record<string, number>> = { GBP: 500, NGN: 1_000_000 }
+
+// International storefronts show a price converted for a country they ship to, not a local shop's price, so a price row never cites one. Matched on
+// the registrable name like the listing sites; a cell may still cite one.
+const INTERNATIONAL_STOREFRONTS: ReadonlySet<string> = new Set([
+  'iherb',
+  'caretobeauty',
+  'sweetcare',
+  'lojaglamourosa',
+  'stylevana',
+  'yesstyle',
+  'cosmetis',
+  'ubuy',
+  'desertcart',
+])
+
+const isInternationalStorefront = (url: string): boolean => INTERNATIONAL_STOREFRONTS.has(registrableLabel(new URL(url).hostname))
 
 /** The pages a drafter's model saw: those its search returned or cited, and those its fetch tool read. */
 export type DraftSources = { searched: ReadonlySet<string>; fetched: ReadonlySet<string> }
 
 /**
  * What of a drafter's answer the workbook can take: only the columns and countries asked for, only values in the vocabularies, prices as whole
- * numbers (a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped), and only a public https page that is not a classified or auction listing. `sources`, when given, limits where a source may come from (the model
- * can name a page it never saw): a cell's page must be one the search returned or the model fetched, and a price row's page must be one the model fetched,
- * since a search snippet is often stale or for another size. A fetched page is matched without regard to a trailing slash, a fragment or the case of
- * its host. Without `sources` there is no such limit. A price row's page must also be one product's own: a price-comparison, Google Shopping, search or listing page drops the row,
- * though a cell may cite one. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
+ * numbers (a price with decimals is rounded half up to the nearest whole unit, before the other price checks; a row whose highest price is over 2.5 times its lowest is not one product's price and is dropped; nor is a row whose highest price is over `MAX_PLAUSIBLE_PRICE` for the asked country's currency, or whose page is an international storefront), and only a public https page that is not a classified or auction listing. `sources`, when given, limits where a source may come from (the model
+ * can name a page it never saw): a page must be one the search returned or the model fetched, for a price row as for a cell. Coverage matters more than exactness for a price, since it only feeds a budget band, so a search result's price is taken when no fetch was possible. A fetched page is matched without regard to a trailing slash, a fragment or the case of
+ * its host. Without `sources` there is no such limit. A price row's page must also not be a search or listing page (it lists many products), though a cell may cite one; a price-comparison page is allowed. A list cell is filtered to its allowed items; anything else that is not usable is left out whole, never repaired. `raw` is what a model could say, so nothing in it is trusted.
  */
 export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: DraftSources): DraftResult => {
   const answer = asRecord(raw)
@@ -134,7 +157,6 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: Draf
   const wasFetched = (url: string): boolean => fetched.has(comparableUrl(url)!)
   const sourceOf = (value: unknown): string | undefined =>
     isUsableSource(value) && (!sources || sources.searched.has(value) || wasFetched(value)) ? value : undefined
-  const priceSourceOf = (value: unknown): string | undefined => (isUsableSource(value) && (!sources || wasFetched(value)) ? value : undefined)
   const result: DraftResult = { cells: {}, availability: [] }
   if (!cells || !Array.isArray(rows)) return result
 
@@ -150,11 +172,15 @@ export const checkedDraft = (raw: unknown, request: DraftRequest, sources?: Draf
   for (const item of rows) {
     const row = asRecord(item)
     if (!row) continue
-    const { country, priceMin, priceMax, whereSold } = row
-    const sourceUrl = priceSourceOf(row.sourceUrl)
-    if (typeof country !== 'string' || !request.countries.some((asked) => asked.code === country) || taken.has(country)) continue
-    if (!isPrice(priceMin) || !isPrice(priceMax) || priceMin > priceMax || sourceUrl === undefined) continue
-    if (priceMax > priceMin * MAX_PRICE_SPREAD || isListingOrComparisonPage(sourceUrl)) continue
+    const { country, whereSold } = row
+    const sourceUrl = sourceOf(row.sourceUrl)
+    const asked = request.countries.find((candidate) => candidate.code === country)
+    if (typeof country !== 'string' || !asked || taken.has(country)) continue
+    const priceMin = wholePrice(row.priceMin)
+    const priceMax = wholePrice(row.priceMax)
+    if (priceMin === undefined || priceMax === undefined || priceMin > priceMax || sourceUrl === undefined) continue
+    if (priceMax > priceMin * MAX_PRICE_SPREAD || priceMax > (MAX_PLAUSIBLE_PRICE[asked.currency] ?? Infinity)) continue
+    if (isSearchOrListingPage(sourceUrl) || isInternationalStorefront(sourceUrl)) continue
     taken.add(country)
     const shop = typeof whereSold === 'string' ? whereSold.trim() : ''
     const plain = shop !== '' && shop.length <= MAX_WHERE_SOLD && !CONTROL_CHARACTER.test(shop) && !hasLinkOrMarkup(shop)

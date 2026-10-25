@@ -33,6 +33,7 @@ import { DRAFT_DEV } from './eval/draft-dev'
 import { DRAFT_HOLDOUT } from './eval/draft-holdout'
 import { HUMAN_CHECKS } from './eval/draft-human-checks'
 import { AnthropicDraftJudge } from './eval/draft-judge'
+import { DRAFTING_TIMEOUT_MS } from './catalog/draft'
 import { runDraftEval } from './eval/draft-run'
 import { DEFAULT_MODELS } from './eval/models'
 import {
@@ -107,7 +108,7 @@ const main = async (): Promise<number> => {
   }
   const models = { ...DEFAULT_MODELS, ...args.models }
   const ledger = new MemoryAiSpendLedger({ capMicros: Math.round(args.maxUsd * 1_000_000) })
-  const client = new AnthropicClient({ apiKey: env.apiKey, models, ledger })
+  const client = new AnthropicClient({ apiKey: env.apiKey, models, ledger, timeoutMs: DRAFTING_TIMEOUT_MS })
   const analyst = new AnthropicProductAnalyst(client)
   const researcher = new AnthropicProductResearcher(client)
   const goalReader = new AnthropicGoalReader(client)

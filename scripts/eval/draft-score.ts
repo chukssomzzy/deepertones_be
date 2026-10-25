@@ -21,8 +21,8 @@ type Answer = 'yes' | 'no' | 'unclear'
 export const UNVERIFIABLE_REASONS = ['not-fetched', 'fetch-failed', 'cut-off', 'refused', 'unreadable-answer', 'api-error'] as const
 export type UnverifiableReason = (typeof UNVERIFIABLE_REASONS)[number]
 
-/** What the judge said about one value and the page it cites. `currencyShown` is only ever given for a price row; `reason` only when `fetched` is false. */
-export type Verdict = { fetched: boolean; exactProduct: Answer; supports: Answer; currencyShown?: string | null; reason?: UnverifiableReason }
+/** What the judge said about one value and the page it cites. `currencyShown` and `pricesShown` (the whole-number prices the page shows for this exact product) are only ever given for a price row; `reason` only when `fetched` is false. */
+export type Verdict = { fetched: boolean; exactProduct: Answer; supports: Answer; currencyShown?: string | null; pricesShown?: number[]; reason?: UnverifiableReason }
 
 export type DraftedCell = { column: Column; value: string | string[]; sourceUrl: string }
 export type DraftedPrice = { country: string; priceMin: number; priceMax: number; whereSold?: string; sourceUrl: string }
@@ -99,6 +99,28 @@ export type TrapResult = { passed: boolean; problems: string[] }
 /** Unverifiable values by why: the judge's reasons, and "unclear" for a page that was fetched but did not settle the value. */
 export type UnverifiableCounts = Record<UnverifiableReason | 'unclear', number>
 
+/** A country's budget bands: a price up to `lowMax` is low, up to `midMax` is mid, above that is high. The Countries tab's low_max and mid_max. */
+export type Bands = { lowMax: number; midMax: number }
+export type Band = 'low' | 'mid' | 'high'
+
+export const bandOf = (amount: number, { lowMax, midMax }: Bands): Band => (amount <= lowMax ? 'low' : amount <= midMax ? 'mid' : 'high')
+
+/**
+ * Price coverage and band accuracy, reported beside the gate and never part of it. Coverage: of the product-country pairs a drafted ordinary case asked
+ * about, how many got a price row. Band accuracy: of the rows whose page the judge could read a price on, how many put the product in the band the page puts
+ * it in (the drafted range's lowest price against the lowest price shown, since the recommendations filter places a product by its lowest price). A row with no readable page price is band-unknown, neither right nor wrong.
+ */
+export type PriceScore = {
+  asked: number
+  priced: number
+  byCountry: Record<string, { asked: number; priced: number }>
+  bandCorrect: number
+  bandKnown: number
+  bandUnknown: number
+}
+
+const noPrices = (): PriceScore => ({ asked: 0, priced: 0, byCountry: {}, bandCorrect: 0, bandKnown: 0, bandUnknown: 0 })
+
 export type CaseScore = {
   id: string
   kind: DraftCaseKind
@@ -112,6 +134,7 @@ export type CaseScore = {
   unverifiableReasons: UnverifiableCounts
   /** The values a person's check turned over from the judge's verdict. */
   overruled: Overruled[]
+  prices: PriceScore
   /** Whether each drafted value falls in the case's plausible set ("price:NG" for a price row). Reported only, never part of the gate. */
   agreement: Record<string, 'agree' | 'disagree'>
   /** Null for an ordinary case. */
@@ -145,7 +168,8 @@ export const applyHumanChecks = (input: CaseInput, checks: HumanCheck[]): CaseIn
     const before = bucketOf(verdict)
     const after = HUMAN_VERDICT[check.verdict]
     if (before !== bucketOf(after)) overruled.push({ value: name, judge: before, human: check.verdict, note: check.note })
-    return { ...after }
+    // The page's prices are a fact about the page, not about the value, so a person's verdict on the value leaves them be.
+    return { ...after, ...(verdict.pricesShown === undefined ? {} : { pricesShown: verdict.pricesShown }) }
   }
   return {
     ...input,
@@ -203,6 +227,29 @@ const agreementOf = ({ cells, prices, expected }: CaseInput): CaseScore['agreeme
   return agreement
 }
 
+/** Only an ordinary case that was drafted is asked for prices; a trap's prices are held against the tool by the trap, and a case that stopped part-way asked nothing. */
+const priceScoreOf = (input: CaseInput, bands: Record<string, Bands>): PriceScore => {
+  const score = noPrices()
+  if (input.kind !== 'ordinary' || input.state !== 'drafted') return score
+  for (const { code } of input.countries) {
+    const priced = input.prices.some((price) => price.country === code)
+    score.byCountry[code] = { asked: 1, priced: priced ? 1 : 0 }
+    score.asked++
+    if (priced) score.priced++
+  }
+  for (const { country, priceMin, verdict } of input.prices) {
+    const countryBands = bands[country]
+    const shown = verdict.fetched ? (verdict.pricesShown ?? []) : []
+    if (countryBands === undefined || shown.length === 0) {
+      score.bandUnknown++
+      continue
+    }
+    score.bandKnown++
+    if (bandOf(priceMin, countryBands) === bandOf(Math.min(...shown), countryBands)) score.bandCorrect++
+  }
+  return score
+}
+
 const trapOf = (input: CaseInput): TrapResult | null => {
   if (input.kind === 'ordinary') return null
   // A trap that never ran, or ran in part, proves nothing, however empty its result looks.
@@ -227,7 +274,7 @@ const trapOf = (input: CaseInput): TrapResult | null => {
   return { passed: problems.length === 0, problems }
 }
 
-export const scoreDraftCase = (input: CaseInput): CaseScore => {
+export const scoreDraftCase = (input: CaseInput, bands: Record<string, Bands> = {}): CaseScore => {
   const columns = Object.fromEntries(COLUMNS.map((column) => [column, noCounts()])) as Record<Column, Counts>
   for (const { column, verdict } of input.cells) {
     columns[column].filled++
@@ -259,6 +306,7 @@ export const scoreDraftCase = (input: CaseInput): CaseScore => {
     values,
     unverifiableReasons,
     overruled: input.overruled ?? [],
+    prices: priceScoreOf(input, bands),
     agreement: agreementOf(input),
     trap: trapOf(input),
   }
@@ -273,6 +321,7 @@ export type DraftSummary = {
   availability: AvailabilityCounts
   values: Counts
   unverifiableReasons: UnverifiableCounts
+  prices: PriceScore
   /** Every value a person's check turned over, with its case. */
   overruled: (Overruled & { caseId: string })[]
   costMicros: number
@@ -299,6 +348,7 @@ export const summariseDraft = (scores: CaseScore[]): DraftSummary => {
   const values = noCounts()
   const unverifiableReasons = noReasons()
   const agreement = { agree: 0, disagree: 0 }
+  const prices = noPrices()
   const overruled: DraftSummary['overruled'] = []
   let costMicros = 0
   for (const score of scores) {
@@ -307,6 +357,12 @@ export const summariseDraft = (scores: CaseScore[]): DraftSummary => {
     addCounts(values, score.values)
     for (const reason of Object.keys(unverifiableReasons) as (keyof UnverifiableCounts)[]) unverifiableReasons[reason] += score.unverifiableReasons[reason]
     for (const verdict of Object.values(score.agreement)) agreement[verdict]++
+    for (const key of ['asked', 'priced', 'bandCorrect', 'bandKnown', 'bandUnknown'] as const) prices[key] += score.prices[key]
+    for (const [code, counts] of Object.entries(score.prices.byCountry)) {
+      const into = (prices.byCountry[code] ??= { asked: 0, priced: 0 })
+      into.asked += counts.asked
+      into.priced += counts.priced
+    }
     overruled.push(...score.overruled.map((o) => ({ caseId: score.id, ...o })))
     costMicros += score.costMicros
   }
@@ -331,6 +387,7 @@ export const summariseDraft = (scores: CaseScore[]): DraftSummary => {
     availability,
     values,
     unverifiableReasons,
+    prices,
     overruled,
     costMicros,
     failed: scores.filter((score) => score.state === 'failed').length,
@@ -366,6 +423,12 @@ export const formatOverruledLines = (summary: DraftSummary): string[] => [
   `judge overruled by a person: ${summary.overruled.length}`,
   ...summary.overruled.map((o) => `  ${o.caseId} ${o.value} judge=${o.judge} person=${o.human}`),
 ]
+
+/** Coverage and band accuracy on one line. Reported, not gated; 0 of 0 is 0.0%, not NaN. */
+export const formatPricesLine = ({ prices }: DraftSummary): string => {
+  const countries = Object.entries(prices.byCountry).map(([code, c]) => `${code} ${c.priced}/${c.asked}`)
+  return `Prices: coverage ${prices.priced}/${prices.asked} (${percent(prices.priced, prices.asked)})${countries.map((c) => ` ${c}`).join('')}; band-correct ${prices.bandCorrect}/${prices.bandKnown} (${percent(prices.bandCorrect, prices.bandKnown)}), band unknown ${prices.bandUnknown}`
+}
 
 const plural = (n: number, word: string): string => `${n} ${word}${n === 1 ? '' : 's'}`
 
