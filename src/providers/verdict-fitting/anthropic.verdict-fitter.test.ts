@@ -89,6 +89,17 @@ const REQUEST: FitRequest = {
       skinConcerns: ['hd_moisture'],
       floor: { status: 'open' },
     },
+    {
+      id: 'moist-2',
+      brand: 'Brand E',
+      name: 'Rich cream',
+      variant: null,
+      step: 'moisturise',
+      ingredients: ['Aqua', 'Glycerin', 'Ceramide NP', 'Squalane'],
+      cautions: [],
+      skinConcerns: ['hd_moisture'],
+      floor: { status: 'open' },
+    },
   ],
   clashes: [{ ids: ['retinol-1', 'acid-1'], groups: ['retinoid', 'exfoliating-acid'] }],
 }
@@ -105,14 +116,15 @@ const GUEST_REQUEST: FitRequest = {
 /** What the model is meant to answer for REQUEST, and what the adapter must hand back: one entry per open product, one per clash. */
 const RESULT: FitResult = {
   products: [
-    { id: 'retinol-1', label: 'helping', reason: 'Retinol works on dark marks and uneven texture, which are the goal concerns.' },
-    { id: 'acid-1', label: 'blocking', reason: 'Glycolic acid can irritate skin that marks easily, which holds the goal back.' },
-    { id: 'moist-1', label: 'redundant', reason: 'Another moisturiser on the shelf already does this job.' },
+    { id: 'retinol-1', label: 'helping', reason: 'Retinol works on dark marks and uneven texture, which are the goal concerns.', sameJobAs: null },
+    { id: 'acid-1', label: 'blocking', reason: 'Glycolic acid can irritate skin that marks easily, which holds the goal back.', sameJobAs: null },
+    { id: 'moist-1', label: 'redundant', reason: 'The rich cream already keeps skin comfortable, so this does the same job.', sameJobAs: 'moist-2' },
+    { id: 'moist-2', label: 'helping', reason: 'Glycerin, ceramide and squalane keep skin comfortable.', sameJobAs: null },
   ],
   clashes: [{ ids: ['retinol-1', 'acid-1'], reduceId: 'acid-1' }],
 }
 
-const GUEST_RESULT: FitResult = { products: [{ id: 'moist-1', label: 'helping', reason: 'Glycerin and ceramide keep skin comfortable.' }], clashes: [] }
+const GUEST_RESULT: FitResult = { products: [{ id: 'moist-1', label: 'helping', reason: 'Glycerin and ceramide keep skin comfortable.', sameJobAs: null }], clashes: [] }
 
 /** Every job on MODEL, except `routed`, which goes to ROUTED_TO: whichever job the adapter uses shows in the model it sends. */
 const fitterWith = (fetch: typeof globalThis.fetch, ledger = new MemoryAiSpendLedger({ capMicros: BIG_CAP_MICROS }), routed?: AiJob) =>
@@ -246,6 +258,7 @@ describe('AnthropicVerdictFitter answers', () => {
       ['retinol-1', 'helping'],
       ['acid-1', 'blocking'],
       ['moist-1', 'redundant'],
+      ['moist-2', 'helping'],
     ])
   })
 
@@ -268,6 +281,53 @@ describe('AnthropicVerdictFitter answers', () => {
     const answer: FitResult = { ...RESULT, clashes: [] }
 
     await expect(fitterAnswering(answer).fitter.fit(REQUEST)).resolves.toStrictEqual(answer)
+  })
+})
+
+describe('AnthropicVerdictFitter redundant products name the product that stays', () => {
+  it('accepts a redundant product whose sameJobAs is a fixed prescribed product', async () => {
+    const answer: FitResult = {
+      ...RESULT,
+      products: RESULT.products.map((p) => (p.id === 'moist-1' ? { ...p, label: 'redundant', sameJobAs: 'rx-1' } : p)),
+    }
+
+    await expect(fitterAnswering(answer).fitter.fit(REQUEST)).resolves.toStrictEqual(answer)
+  })
+
+  it('accepts several redundant products that all name the same kept product', async () => {
+    const answer: FitResult = {
+      ...RESULT,
+      products: RESULT.products.map((p) => (p.id === 'acid-1' ? { ...p, label: 'redundant', sameJobAs: 'retinol-1' } : p)),
+    }
+
+    await expect(fitterAnswering(answer).fitter.fit(REQUEST)).resolves.toStrictEqual(answer)
+  })
+
+  it('accepts a reason of exactly 200 characters', async () => {
+    const answer: FitResult = { ...RESULT, products: RESULT.products.map((p, i) => (i === 0 ? { ...p, reason: 'a'.repeat(200) } : p)) }
+
+    await expect(fitterAnswering(answer).fitter.fit(REQUEST)).resolves.toStrictEqual(answer)
+  })
+
+  it('asks for a sameJobAs on every product, a string or null, in the schema it sends', async () => {
+    const { calls, fitter } = fitterAnswering()
+
+    await fitter.fit(REQUEST)
+
+    const item = calls[0]!.body.output_config.format.schema.properties.products.items
+    expect(Object.keys(item.properties).sort()).toEqual(['id', 'label', 'reason', 'sameJobAs'])
+    expect([...item.required].sort()).toEqual(['id', 'label', 'reason', 'sameJobAs'])
+    expect(item.additionalProperties).toBe(false)
+  })
+})
+
+describe('AnthropicVerdictFitter clash entries', () => {
+  it("returns each clash with the request's own ids order, whichever order the model gave the pair", async () => {
+    const answer = { ...RESULT, clashes: [{ ids: ['acid-1', 'retinol-1'], reduceId: 'acid-1' }] }
+
+    const result = await fitterAnswering(answer).fitter.fit(REQUEST)
+
+    expect(result.clashes).toStrictEqual([{ ids: ['retinol-1', 'acid-1'], reduceId: 'acid-1' }])
   })
 })
 
@@ -318,14 +378,14 @@ describe('AnthropicVerdictFitter refusals: never a partial result', () => {
 
   it.each([
     ['an unknown product id', broken((r) => (r.products[0].id = 'ghost-9'))],
-    ['an extra entry for an unknown product id', broken((r) => r.products.push({ id: 'ghost-9', label: 'helping', reason: 'Not on the shelf.' }))],
+    ['an extra entry for an unknown product id', broken((r) => r.products.push({ id: 'ghost-9', label: 'helping', reason: 'Not on the shelf.', sameJobAs: null }))],
     ['an open product left out', broken((r) => r.products.splice(2, 1))],
     ['the first open product left out', broken((r) => r.products.splice(0, 1))],
     ['no products at all', broken((r) => (r.products = []))],
-    ['a label for a product the floor fixed as likely the problem', broken((r) => r.products.push({ id: 'steroid-1', label: 'helping', reason: 'It is fine.' }))],
-    ['a label for a product the floor fixed as prescribed', broken((r) => r.products.push({ id: 'rx-1', label: 'blocking', reason: 'It holds the goal back.' }))],
+    ['a label for a product the floor fixed as likely the problem', broken((r) => r.products.push({ id: 'steroid-1', label: 'helping', reason: 'It is fine.', sameJobAs: null }))],
+    ['a label for a product the floor fixed as prescribed', broken((r) => r.products.push({ id: 'rx-1', label: 'blocking', reason: 'It holds the goal back.', sameJobAs: null }))],
     ['a fixed product in place of an open one', broken((r) => (r.products[0].id = 'steroid-1'))],
-    ['an open product labelled twice', broken((r) => r.products.push({ id: 'moist-1', label: 'helping', reason: 'Also helps.' }))],
+    ['an open product labelled twice', broken((r) => r.products.push({ id: 'moist-1', label: 'helping', reason: 'Also helps.', sameJobAs: null }))],
     ['a label outside the three (a safety label the floor alone gives)', broken((r) => (r.products[0].label = 'likely-the-problem'))],
     ['a label outside the three (keep)', broken((r) => (r.products[0].label = 'keep'))],
     ['a label with different capitals', broken((r) => (r.products[0].label = 'Helping'))],
@@ -336,6 +396,31 @@ describe('AnthropicVerdictFitter refusals: never a partial result', () => {
     ['products that are not a list', broken((r) => (r.products = 'retinol-1 helping'))],
     ['no products field', broken((r) => delete r.products)],
     ['no clashes field', broken((r) => delete r.clashes)],
+    ['a redundant entry that names no product it duplicates (null)', broken((r) => (r.products[2].sameJobAs = null))],
+    ['a redundant entry with no sameJobAs field', broken((r) => delete r.products[2].sameJobAs)],
+    ['a redundant entry whose sameJobAs is not text', broken((r) => (r.products[2].sameJobAs = 7))],
+    ['a redundant entry that is redundant to itself', broken((r) => (r.products[2].sameJobAs = 'moist-1'))],
+    ['a redundant entry that is redundant to an unknown id', broken((r) => (r.products[2].sameJobAs = 'ghost-9'))],
+    ['a redundant entry that is redundant to a product the floor fixed as likely the problem', broken((r) => (r.products[2].sameJobAs = 'steroid-1'))],
+    ['a redundant entry that is redundant to a product labelled blocking', broken((r) => (r.products[2].sameJobAs = 'acid-1'))],
+    [
+      'two products redundant to each other',
+      broken((r) => {
+        r.products[3] = { id: 'moist-2', label: 'redundant', reason: 'The other cream does this job.', sameJobAs: 'moist-1' }
+      }),
+    ],
+    [
+      'a redundant entry whose kept product is itself redundant',
+      broken((r) => {
+        r.products[0] = { id: 'retinol-1', label: 'redundant', reason: 'The rich cream does this job.', sameJobAs: 'moist-1' }
+      }),
+    ],
+    ['a helping entry that names a sameJobAs', broken((r) => (r.products[0].sameJobAs = 'moist-2'))],
+    ['a blocking entry that names a sameJobAs', broken((r) => (r.products[1].sameJobAs = 'moist-2'))],
+    ['a helping entry with no sameJobAs field', broken((r) => delete r.products[0].sameJobAs)],
+    ['an entry with an empty reason', broken((r) => (r.products[0].reason = ''))],
+    ['an entry with a reason that is only spaces', broken((r) => (r.products[0].reason = '   \n '))],
+    ['an entry with a reason of 201 characters', broken((r) => (r.products[0].reason = 'a'.repeat(201)))],
     ['a product to reduce that is a known product but not in its pair', broken((r) => (r.clashes[0].reduceId = 'moist-1'))],
     ['a product to reduce that is a fixed product', broken((r) => (r.clashes[0].reduceId = 'rx-1'))],
     ['a product to reduce that is unknown', broken((r) => (r.clashes[0].reduceId = 'ghost-9'))],
@@ -468,5 +553,20 @@ describe('the fit-verdict prompt wording', () => {
   it('says that for each clashing pair it must choose which one to reduce', () => {
     expect(prompt).toMatch(/clash/i)
     expect(prompt).toMatch(/(which|exactly one|one of)[^.]{0,120}reduce|reduce[^.]{0,120}(which|exactly one|one of)/i)
+  })
+
+  it('says a redundant product names the kept product that does the same job, and that only a helping open product or a prescribed fixed product is kept', () => {
+    expect(prompt).toMatch(/sameJobAs/)
+    expect(prompt).toMatch(/prescribed/i)
+    expect(prompt).toMatch(/never[^.]{0,120}both[^.]{0,120}redundant/i)
+  })
+
+  it('asks for a reason of one plain sentence of about 20 words or fewer, naming the ingredient or skin concern behind the label', () => {
+    expect(prompt).toMatch(/one plain sentence[^.]{0,80}\b20 words\b/i)
+    expect(prompt).toMatch(/ingredient[^.]{0,60}(skin )?concern|(skin )?concern[^.]{0,60}ingredient/i)
+  })
+
+  it('does not carry the web-page wording, as nothing here is a page', () => {
+    expect(prompt).not.toMatch(/web page/i)
   })
 })

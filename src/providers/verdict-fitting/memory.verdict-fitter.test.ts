@@ -10,7 +10,7 @@ const request = (goalId: FitRequest['goal']['id']): FitRequest => ({
   clashes: [],
 })
 
-const result = (reason: string): FitResult => ({ products: [{ id: 'p1', label: 'helping', reason }], clashes: [] })
+const result = (reason: string): FitResult => ({ products: [{ id: 'p1', label: 'helping', reason, sameJobAs: null }], clashes: [] })
 
 describe('MemoryVerdictFitter', () => {
   it('fails with a clear "no answer set" error until told how to answer, and records nothing for it', async () => {
