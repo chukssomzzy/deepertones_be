@@ -144,7 +144,8 @@ describe('AnthropicRoutineWriter request', () => {
   it('keeps the skeleton out of the system prompt, so the instructions do not carry it', async () => {
     const { calls, writer } = writerAnswering()
 
-    await writer.write({ ...SKELETON, shelf: [{ ...SKELETON.shelf[0]!, name: 'zzqx-unique-product-name' }] })
+    // Renames one product and keeps the whole shelf, because the schema sent is narrowed to the shelf and the canned answer names its products.
+    await writer.write({ ...SKELETON, shelf: SKELETON.shelf.map((p, i) => (i === 0 ? { ...p, name: 'zzqx-unique-product-name' } : p)) })
 
     expect(JSON.stringify(calls[0]!.body.system)).not.toContain('zzqx-unique-product-name')
     expect(requestText(calls[0]!.body)).toContain('zzqx-unique-product-name')
@@ -178,6 +179,55 @@ describe('AnthropicRoutineWriter request', () => {
     expect(sent).toContain('"anyOf"')
   })
 
+  describe('the schema sent is narrowed to this skeleton', () => {
+    const OTHER_SKELETON: RoutineSkeleton = {
+      ...SKELETON,
+      shelf: [{ id: 'other-shelf-9', brand: null, name: 'Other', ingredients: [], step: 'cleanse', verdict: { kind: 'keep' }, sourceUrls: [] }],
+      gaps: [{ step: 'moisturise', candidates: [{ ...SKELETON.gaps[0]!.candidates[0]!, code: 'other-9' }] }],
+    }
+
+    const enumsIn = (node: unknown): string[][] => {
+      if (Array.isArray(node)) return node.flatMap(enumsIn)
+      if (node === null || typeof node !== 'object') return []
+      return Object.entries(node).flatMap(([key, value]) => (key === 'enum' && Array.isArray(value) ? [value as string[]] : enumsIn(value)))
+    }
+
+    const sentSchema = async (skeleton: RoutineSkeleton, routine: unknown) => {
+      const { calls, writer } = writerAnswering(routine)
+      await writer.write(skeleton)
+      return calls[0]!.body.output_config.format.schema
+    }
+
+    it("lists this skeleton's candidate codes in an enum, and no code from another skeleton", async () => {
+      const schema = await sentSchema(SKELETON, ROUTINE)
+
+      expect(enumsIn(schema)).toContainEqual(['mo-1'])
+      expect(JSON.stringify(schema)).not.toContain('other-9')
+    })
+
+    it('follows the skeleton it is given: another skeleton sends its own codes and not these', async () => {
+      const otherRoutine: Routine = {
+        steps: [{ step: 'moisturise', product: { kind: 'candidate', code: 'other-9' }, frequency: 'am-pm', reason: 'Keeps skin soft.', grounding: [] }],
+        tapers: [],
+        expectation: 'Most people see a change in 8 to 12 weeks.',
+      }
+
+      const schema = await sentSchema(OTHER_SKELETON, otherRoutine)
+
+      expect(enumsIn(schema)).toContainEqual(['other-9'])
+      expect(JSON.stringify(schema)).not.toContain('mo-1')
+    })
+
+    it('lists the kept and reduced shelf ids and the stop products, and leaves out nothing it should keep', async () => {
+      const schema = await sentSchema(SKELETON, ROUTINE)
+      const enums = enumsIn(schema).map((values) => [...values].sort())
+
+      expect(enums).toContainEqual(['cleanser-1', 'serum-1'])
+      expect(enums).toContainEqual(['retinol-1'])
+      expect(enums).toContainEqual(['tpl-retinoid'])
+    })
+  })
+
   it('does not ask the model to send fields the Routine contract does not have', async () => {
     const { calls, writer } = writerAnswering()
 
@@ -203,7 +253,8 @@ describe('AnthropicRoutineWriter answers', () => {
       steps: [...ROUTINE.steps, { step: 'protect', product: { kind: 'none' }, frequency: 'am', reason: 'Use the sun protection you already have.', grounding: [] }],
     }
 
-    await expect(writerAnswering(withNone).writer.write(SKELETON)).resolves.toStrictEqual(withNone)
+    // The skeleton needs a protect step too, because the schema sent is narrowed to the skeleton's steps.
+    await expect(writerAnswering(withNone).writer.write({ ...SKELETON, steps: [...SKELETON.steps, 'protect'] })).resolves.toStrictEqual(withNone)
   })
 
   it('returns a routine with no tapers and no steps as it is, leaving it to the gates to judge', async () => {
@@ -277,6 +328,25 @@ describe('AnthropicRoutineWriter errors: never a partial routine', () => {
     ['an entry with no reason', broken((r) => delete r.steps[0].reason)],
     ['an entry with grounding that is not a list of links', broken((r) => (r.steps[0].grounding = 'https://rules.example/serum-1'))],
     ['a taper with no template', broken((r) => delete r.tapers[0].templateId)],
+  ])('lets AnthropicRequestError through when the reply has %s', async (_label, routine) => {
+    const { writer } = writerAnswering(routine)
+
+    expect(await caught(writer.write(SKELETON))).toBeInstanceOf(AnthropicRequestError)
+  })
+
+  it('lets AnthropicRequestError through when the reply misspells a candidate code (a letter dropped), so no gate ever sees it', async () => {
+    const misspelt = broken((r) => (r.steps[2].product.code = 'm-1'))
+    const { writer } = writerAnswering(misspelt)
+
+    expect(await caught(writer.write(SKELETON))).toBeInstanceOf(AnthropicRequestError)
+  })
+
+  it.each([
+    ['a candidate code that is not in this skeleton', broken((r) => (r.steps[2].product.code = 'mo-2'))],
+    ['a stopped product as a shelf entry', broken((r) => (r.steps[1].product.id = 'retinol-1'))],
+    ['a taper naming a kept product', broken((r) => (r.tapers[0].shelfProductId = 'cleanser-1'))],
+    ['a taper with a template the verdict did not name', broken((r) => (r.tapers[0].templateId = 'tpl-other'))],
+    ['a step the skeleton does not need', broken((r) => (r.steps[0].step = 'protect'))],
   ])('lets AnthropicRequestError through when the reply has %s', async (_label, routine) => {
     const { writer } = writerAnswering(routine)
 
