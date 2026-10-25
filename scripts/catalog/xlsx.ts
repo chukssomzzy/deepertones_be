@@ -1,13 +1,13 @@
 /**
  * The workbook file, shared by `catalog:export` (writes one) and `catalog:upload` (reads one back). The layout is the contract with the people
- * who edit it: four tabs named exactly Products, Availability, Ingredients and Countries, the header row first, and a hidden `_meta` sheet that
+ * who edit it: six tabs named exactly Products, Availability, Ingredients, Countries, Claim words and Tapers, the header row first, and a hidden `_meta` sheet that
  * remembers where the file came from, one `key | value` pair per row: `catalogVersion`, `environment` and `contractVersion`.
  */
 import { readFile } from 'node:fs/promises'
 import ExcelJS from 'exceljs'
 import { CONTRACT_VERSION, type Cell, type RawRow, type RawTab, type RawWorkbook, type TabKey } from '../../src/modules/catalog/catalog.workbook.schema'
 
-export const TAB_NAMES: Record<TabKey, string> = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries' }
+export const TAB_NAMES: Record<TabKey, string> = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers' }
 const TAB_KEYS = Object.keys(TAB_NAMES) as TabKey[]
 const META = '_meta'
 
@@ -46,6 +46,10 @@ export async function writeWorkbookFile(path: string, workbook: RawWorkbook, cat
  * a tab, a column, a row and fixed words, so a caller that hides every other error's message may print this one.
  */
 export class WorkbookFileError extends Error {}
+
+/** The sentence that says a file was made for another contract than this checkout's, for the reader and the upload to share. `stamped` is what `_meta` holds. */
+export const contractMismatch = (file: string, stamped: string | null): string =>
+  `${file} was made for workbook contract version ${stamped ?? 'unknown'}, but this checkout's contract is ${CONTRACT_VERSION}.`
 
 /** A formula saved without a result (written by a tool that never calculated it): there is no value to read, and guessing "empty" would hide it. */
 class FormulaWithoutResult extends Error {}
@@ -152,18 +156,26 @@ export async function readWorkbookBytes(bytes: Uint8Array, name = 'The file'): P
     // The library's own message is not repeated: it is not ours to vouch for.
     throw new WorkbookFileError(`${name} could not be read as an .xlsx workbook (not one, or damaged): save it from Excel or LibreOffice as .xlsx.`, { cause: error })
   }
-  // Names are matched exactly: a renamed or re-cased tab is a missing one, never a guess.
   const sheets = new Map(book.worksheets.map((sheet) => [sheet.name, sheet]))
-  const missing = TAB_KEYS.filter((key) => !sheets.has(TAB_NAMES[key])).map((key) => TAB_NAMES[key])
-  if (missing.length > 0) throw new WorkbookFileError(`The workbook is missing the ${missing.join(', ')} tab${missing.length > 1 ? 's' : ''}, named exactly so.`)
-
-  const [products, availability, ingredients, countries] = TAB_KEYS.map((key) => readTab(sheets.get(TAB_NAMES[key])!))
+  // The stamp is read before the tabs: a file exported under an older contract lacks the tabs the newer one added, and the person should be told
+  // to export again, not sent looking for tabs to add by hand.
   const meta = sheets.get(META)
+  const stamped = textOf(metaValue(meta, 'contractVersion'))
+  // Names are matched exactly: a renamed or re-cased tab is a missing one, never a guess.
+  const missing = TAB_KEYS.filter((key) => !sheets.has(TAB_NAMES[key])).map((key) => TAB_NAMES[key])
+  if (missing.length > 0) {
+    if (stamped !== null && stamped !== CONTRACT_VERSION) {
+      throw new WorkbookFileError(`${contractMismatch(name, stamped)} Run npm run catalog:export again and make the edits on the new file.`)
+    }
+    throw new WorkbookFileError(`The workbook is missing the ${missing.join(', ')} tab${missing.length > 1 ? 's' : ''}, named exactly so.`)
+  }
+
+  const tabs = Object.fromEntries(TAB_KEYS.map((key) => [key, readTab(sheets.get(TAB_NAMES[key])!)])) as RawWorkbook
   return {
-    workbook: { products: products!, availability: availability!, ingredients: ingredients!, countries: countries! },
+    workbook: tabs,
     catalogVersion: catalogVersionOf(meta),
     environment: textOf(metaValue(meta, 'environment')),
-    contractVersion: textOf(metaValue(meta, 'contractVersion')),
+    contractVersion: stamped,
   }
 }
 

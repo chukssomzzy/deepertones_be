@@ -46,15 +46,23 @@ export type SkeletonCandidate = {
 }
 
 /**
- * What the rules decided for a shelf product. The verdict screen sorts products into five groups; each maps to a routine verdict:
+ * What the rules decided for a shelf product (spec #171). The verdict screen sorts products into groups; each maps to a routine verdict:
  *
- * | Verdict group      | Routine verdict |
- * | ------------------ | --------------- |
- * | helping            | keep            |
- * | conflicting        | reduce or drop  |
- * | blocking the goal  | stop or drop    |
- * | redundant          | drop            |
- * | likely the problem | stop            |
+ * | Verdict group                         | Routine verdict                                                          |
+ * | ------------------------------------- | ------------------------------------------------------------------------ |
+ * | helping                               | keep                                                                     |
+ * | redundant                             | drop                                                                     |
+ * | blocking the goal                     | drop (an AI "blocking" never stops; only the rules start a taper)        |
+ * | likely the problem: steroid           | stop, with the approved steroid template                                 |
+ * | likely the problem: lightening        | stop, with the approved lightening template                              |
+ * | likely the problem: mercury           | drop, with an escalation to a professional                               |
+ * | likely the problem: banned, no group  | drop                                                                     |
+ * | likely the problem: reaction product  | drop                                                                     |
+ * | conflicting: a clash                  | reduce (the one product of the pair, capped at alternate days)           |
+ * | conflicting: pregnancy                | drop                                                                     |
+ * | conflicting: reaction ingredient      | drop                                                                     |
+ * | can't tell what's in it               | drop                                                                     |
+ * | prescribed                            | keep (always, over every other label)                                    |
  */
 export type ShelfVerdict =
   /** Use it as it is. */

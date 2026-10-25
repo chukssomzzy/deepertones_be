@@ -95,6 +95,8 @@ const workbookOf = (products: RawRow[], availability: RawRow[]): RawWorkbook => 
   availability: { headers: headersOf('availability'), rows: availability },
   ingredients: { headers: headersOf('ingredients'), rows: [] },
   countries: { headers: headersOf('countries'), rows: structuredClone(COUNTRY_ROWS) },
+  claimWords: { headers: headersOf('claimWords'), rows: [] },
+  tapers: { headers: headersOf('tapers'), rows: [] },
 })
 
 const codeOf = (c: DraftCase): string => `EVAL-${c.id.toUpperCase()}`

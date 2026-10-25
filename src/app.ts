@@ -22,6 +22,7 @@ import { onboardingRoutes } from './modules/onboarding/onboarding.routes'
 import { recommendationsRoutes } from './modules/recommendations/recommendations.routes'
 import { safetyRoutes } from './modules/safety/safety.routes'
 import { shelfRoutes } from './modules/shelf/shelf.routes'
+import { verdictsRoutes } from './modules/verdicts/verdicts.routes'
 import { FACE_SCANS_PATH, PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
 import { scanRoutes } from './modules/scans/scans.routes'
 
@@ -45,6 +46,7 @@ const v1 = openapiApp()
   .route('/me', safetyRoutes)
   .route('/me', recommendationsRoutes)
   .route('/me', shelfRoutes)
+  .route('/me', verdictsRoutes)
   .route('/me', faceConsentRoutes)
   .route('/products', productRoutes)
   .route('/onboarding', onboardingRoutes)

@@ -25,6 +25,11 @@ export type ShelfEntryView = {
 
 export type ShelfView = { entries: ShelfEntryView[] }
 
+/** A shelf entry as the shelf verdict reads it: ids only, so nothing here is resolved through the catalog or the scans. */
+export type ShelfActiveEntry =
+  | { id: string; kind: 'product'; addedAt: Date; productId: string; formulationId: string }
+  | { id: string; kind: 'no-label'; addedAt: Date; itemId: string }
+
 /** What adding a product came to: it was already on the shelf (this is its entry), or a typed scan was started and the entry follows when its item is ready. */
 export type ShelfAddResult = { status: 'exists'; entry: ShelfEntryView } | { status: 'started'; scanId: string; itemId: string }
 
@@ -61,6 +66,22 @@ export class ShelfService {
   async list(): Promise<ShelfView> {
     const { profileId } = requireUser()
     return { entries: await this.viewsOf(await this.repository.activeFor(profileId, SHELF_POLICY.maxEntries)) }
+  }
+
+  /**
+   * The profile's whole active shelf as narrow rows, oldest added first (entries added at the same time by id), so a fingerprint or a response built from them is the same
+   * on every read. By the given profile with no session, since the verdict is built by a job. Not capped at SHELF_POLICY.maxEntries, which only bounds what `list` shows.
+   * Entries are not resolved: one whose formulation or no-label item no longer resolves is still returned, and the caller (the verdict build) must handle the missing
+   * facts. Only a product row with no formulation id at all is left out, since there is nothing to judge.
+   */
+  async activeEntriesFor(profileId: string): Promise<ShelfActiveEntry[]> {
+    const rows = await this.repository.activeFor(profileId)
+    rows.sort((a, b) => a.addedAt.getTime() - b.addedAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    return rows.flatMap((row): ShelfActiveEntry[] => {
+      if (row.kind === 'no-label') return [{ id: row.id, kind: 'no-label', addedAt: row.addedAt, itemId: row.itemId }]
+      if (row.productId === null || row.formulationId === null) return []
+      return [{ id: row.id, kind: 'product', addedAt: row.addedAt, productId: row.productId, formulationId: row.formulationId }]
+    })
   }
 
   /**

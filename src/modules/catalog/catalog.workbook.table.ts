@@ -5,13 +5,17 @@ import {
   CATEGORIES,
   CONCERN_KINDS,
   FREQUENCIES,
+  INGREDIENT_GROUPS,
   ORIGINS,
   PRODUCT_FORMS,
+  TAPER_KINDS,
   type ConcernKind,
   type Frequency,
+  type IngredientGroup,
   type Origin,
   type RoutineStep,
 } from './catalog.vocabulary'
+import type { ScheduleStep } from './catalog.workbook.schema'
 
 /**
  * An ingredient rule: a fact about an ingredient that the analysis must explain, as the workbook's Ingredients tab holds it. Only an
@@ -28,9 +32,40 @@ export const ingredientRules = sqliteTable('ingredient_rules', {
   // An https URL for a regulatory listing; null for a commonly cited concern.
   sourceUrl: text('source_url'),
   helps: text('helps', { mode: 'json' }).$type<ShownConcern[]>().notNull(),
+  // Metadata the shelf verdict reads. Neither is part of what the matcher reads, so neither is part of the rules version.
+  group: text('group', { enum: INGREDIENT_GROUPS }),
+  clashesWith: text('clashes_with', { mode: 'json' }).$type<IngredientGroup[]>().notNull().default([]),
   status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
   approvedBy: text('approved_by'),
   // A calendar day somebody signed on, as the workbook writes it (YYYY-MM-DD), not an instant.
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/** A phrase that says a product is sold for lightening, as the workbook's Claim words tab holds it. Only an approved word is matched; a retired one stays so its code is never reused. */
+export const claimWords = sqliteTable('claim_words', {
+  code: text('code').primaryKey(),
+  phrase: text('phrase').notNull(),
+  claim: text('claim', { enum: ['lightening'] }).notNull(),
+  status: text('status', { enum: ['approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/** A step-down template, as the workbook's Tapers tab holds it. Retired, never deleted, so a past routine can still say which plan it used. */
+export const tapers = sqliteTable('tapers', {
+  code: text('code').primaryKey(),
+  kind: text('kind', { enum: TAPER_KINDS }).notNull(),
+  schedule: text('schedule', { mode: 'json' }).$type<ScheduleStep[]>().notNull(),
+  whatToExpect: text('what_to_expect').notNull(),
+  seeAProfessionalIf: text('see_a_professional_if').notNull(),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
   approvedOn: text('approved_on'),
   auditedBy: text('audited_by'),
   auditedOn: text('audited_on'),

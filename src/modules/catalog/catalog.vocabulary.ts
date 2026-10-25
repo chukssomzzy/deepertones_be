@@ -77,3 +77,11 @@ export type BudgetBand = (typeof BUDGET_BANDS)[number]
 /** Where a recommendation came from: found by us, or put forward by the brand (which only ever buys a review, never a place). */
 export const ORIGINS = ['sourced', 'brand-submitted'] as const
 export type Origin = (typeof ORIGINS)[number]
+
+/** The groups an ingredient rule may belong to, which the shelf verdict's rules read: what an ingredient is, as opposed to what it does. Most rules have none. */
+export const INGREDIENT_GROUPS = ['mercury', 'steroid', 'lightening-agent', 'retinoid', 'exfoliating-acid', 'benzoyl-peroxide'] as const
+export type IngredientGroup = (typeof INGREDIENT_GROUPS)[number]
+
+/** The kinds of product a step-down template is for: the groups that are stopped with a plan, not at once (mercury is stopped at once). */
+export const TAPER_KINDS = ['steroid', 'lightening-agent'] as const
+export type TaperKind = (typeof TAPER_KINDS)[number]

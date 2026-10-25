@@ -419,6 +419,40 @@ describe('wrangler.jsonc face-scans queue', () => {
   })
 })
 
+// The shelf verdict's build (issue #171): the build-verdict job runs on a queue of its own, with a dead-letter queue, per environment. The consumer takes one
+// message at a time: a message is one fit-judge call, and a batch is retried or acked as a whole. 4 retries make the 5 attempts the job's own ladder expects.
+describe('wrangler.jsonc verdicts queue', () => {
+  it.each(scanBlocks)('%s produces to the verdicts queue as VERDICTS_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'VERDICTS_QUEUE')?.queue).toBe(`deepertones-verdicts-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the verdicts queue one message at a time with 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-verdicts-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 1, max_retries: 4, dead_letter_queue: `deepertones-verdicts-dlq-${environment}` })
+  })
+
+  it.each(scanBlocks)('%s consumes the verdicts dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-verdicts-dlq-${environment}`)
+
+    expect(consumer).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps every queue it already had beside it', (_, block, environment) => {
+    const bindings = Object.fromEntries((block?.queues?.producers ?? []).map((p) => [p.binding, p.queue]))
+
+    expect(bindings).toMatchObject({
+      OTP_DELIVERY_QUEUE: `deepertones-otp-delivery-${environment}`,
+      SCAN_ITEMS_QUEUE: `deepertones-scan-items-${environment}`,
+      PUSH_DELIVERY_QUEUE: `deepertones-push-delivery-${environment}`,
+      PUSH_RECEIPTS_QUEUE: `deepertones-push-receipts-${environment}`,
+      PARSE_SAFETY_QUEUE: `deepertones-parse-safety-${environment}`,
+      EMAIL_QUEUE: `deepertones-email-${environment}`,
+      FACE_SCANS_QUEUE: `deepertones-face-scans-${environment}`,
+    })
+  })
+})
+
 // The admin catalog routes: the token is a secret in every block (env blocks do not inherit `secrets`), and the limiter has an id of its own in each.
 describe('wrangler.jsonc admin catalog access', () => {
   const adminBlocks: [string, { secrets?: { required?: string[] }; vars?: Record<string, string>; ratelimits?: { name: string; namespace_id: string }[] } | undefined, string][] = [

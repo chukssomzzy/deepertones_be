@@ -37,6 +37,15 @@ describe('the job registry', () => {
     expect(job!.onDeadLetter).toBeTypeOf('function')
   })
 
+  it('lists the build-verdict job on its own verdicts queue, with a hook for when its retries run out', () => {
+    const job = jobs.find((j) => j.name === 'build-verdict')
+
+    expect(job).toBeDefined()
+    expect(job!.queue).toBe('verdicts')
+    expect(job!.shared).toBeUndefined()
+    expect(job!.onDeadLetter).toBeTypeOf('function')
+  })
+
   it('lists the send-ops-alert job on the shared email queue', () => {
     const job = jobs.find((j) => j.name === 'send-ops-alert')
 

@@ -1458,6 +1458,31 @@ export class ScanService {
     return views
   }
 
+  /**
+   * What the shelf verdict reads of each given no-label item, in one read, keyed by item id: the purpose the user gave and the category (skin when the item has none).
+   * Checks no ownership and needs no session, as `noLabelViews`: the shelf asks only for the items its own profile's rows point at. An item that is gone, or is not an
+   * unidentified one with answers, is absent from the map.
+   */
+  async noLabelFacts(itemIds: string[]): Promise<Map<string, { purpose: NoLabelPurpose; category: ProductCategory }>> {
+    const facts = new Map<string, { purpose: NoLabelPurpose; category: ProductCategory }>()
+    if (itemIds.length === 0) return facts
+    for (const item of await this.repository.findItems([...new Set(itemIds)])) {
+      const { noLabel } = this.noLabelView(item)
+      if (noLabel) facts.set(item.id, { purpose: noLabel.purpose, category: item.recognisedCategory ?? 'skin' })
+    }
+    return facts
+  }
+
+  /**
+   * Whether the system still owes work on anything the profile scanned, of any scan kind: an item recognising (a shelf photo's placeholder is one, so a photo being read counts),
+   * matching, researching, reading its label or analysing, that has changed within the reaper's give-up age. Past that age the reaper fails the item as unavailable, so a
+   * stuck one stops counting and a build never waits on it; exactly at the age it still counts, as the reaper fails only an item older than that. An item waiting for the
+   * user is not work the system owes. By profile id with no session, since a job asks.
+   */
+  async hasShelfWorkInFlight(profileId: string): Promise<boolean> {
+    return this.repository.hasItemsInStates(profileId, ScanService.WORKING_STATES, new Date(this.now().getTime() - ScanService.GIVE_UP_AFTER_MS))
+  }
+
   private async itemViewOf(itemId: string): Promise<ScanItemView> {
     const item = await this.repository.findItem(itemId)
     if (!item) throw ScanService.scanNotFound()

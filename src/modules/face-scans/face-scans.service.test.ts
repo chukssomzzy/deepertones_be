@@ -1437,6 +1437,125 @@ describe('FaceScanService: guests may run the scan flow, the rest is for verifie
   })
 })
 
+// What the shelf verdict reads of the face scan (spec #171, slice D1): the skin type and, for each of the scan's OWN goal's concerns the scan measured, the band, from the
+// profile's newest ready scan. By profile id with no session or consent (the build is a job), and only a read.
+describe('FaceScanService.latestConcernLevelsFor', () => {
+  /** Finishes a scan the way the analysis does, with raw scores for the given concerns (the bands come from the tables, not from the test). */
+  const finish = (ctx: Ctx, scanId: string, over: { scores: [string, number][]; skinType?: 'oily' | 'dry' | 'combination' | 'normal' | null }) => {
+    ctx.advance(HOUR)
+    return ctx.repository.completeFaceScan(scanId, {
+      results: over.scores.map(([concern, rawScore]) => ({ faceScanId: scanId, userId: USER, concern, region: 'whole', rawScore, uiScore: 0 })),
+      masks: [],
+      skinType: over.skinType ?? null,
+      skinAge: null,
+      tablesVersion: 'tables-under-test',
+      updatedAt: ctx.now(),
+    })
+  }
+  const levels = (ctx: Ctx, profileId = PROFILE) => ctx.service.latestConcernLevelsFor(profileId)
+
+  // Raw scores worked out from the tables' cut-offs: hd_age_spot clear at 76 or less, some up to 81, a-little up to 86, faint above; hd_acne faint above 68; hd_texture
+  // clear at 20 or less, some up to 30, a-little up to 40.
+  const MARKS = { age_spot: 78, acne: 90, texture: 35 }
+
+  it('gives the skin type and, in the goal\'s order, the band of each concern of the scan\'s goal that the scan measured, a faint one included', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { skinType: 'combination', scores: [['hd_texture', MARKS.texture], ['hd_age_spot', MARKS.age_spot], ['hd_acne', MARKS.acne]] })
+
+    expect(await levels(ctx)).toEqual({
+      skinType: 'combination',
+      concerns: [
+        { concern: 'hd_age_spot', band: 'some' },
+        { concern: 'hd_acne', band: 'faint' },
+        { concern: 'hd_texture', band: 'a-little' },
+      ],
+    })
+  })
+
+  it('leaves out a concern of the goal the scan has no row for, and a concern that is measured but is not one of the goal\'s', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    // hd_pore is measured for every goal but is not one of this goal's three; hd_texture was not measured.
+    await finish(ctx, made.id, { scores: [['hd_age_spot', MARKS.age_spot], ['hd_acne', MARKS.acne], ['hd_pore', 30]] })
+
+    expect((await levels(ctx))!.concerns.map((c) => c.concern)).toEqual(['hd_age_spot', 'hd_acne'])
+  })
+
+  it('gives a null skin type when the scan found none, and still the concerns', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { skinType: null, scores: [['hd_age_spot', MARKS.age_spot]] })
+
+    expect(await levels(ctx)).toEqual({ skinType: null, concerns: [{ concern: 'hd_age_spot', band: 'some' }] })
+  })
+
+  it('reads the scan under the goal it was taken under, not the goal the profile has now', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { scores: [['hd_age_spot', MARKS.age_spot], ['hd_radiance', 65]] })
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'glow')
+
+    // glow's concerns include hd_radiance, which the scan measured; they are not read, because the scan was taken for fade-dark-marks.
+    expect((await levels(ctx))!.concerns).toEqual([{ concern: 'hd_age_spot', band: 'some' }])
+  })
+
+  it('reads the newest ready scan, under its own goal, and a newer scan that is still being analysed does not hide it', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const first = await create(ctx)
+    await finish(ctx, first.id, { skinType: 'dry', scores: [['hd_age_spot', MARKS.age_spot]] })
+    ctx.advance(SCAN_SPACING)
+    await setGoal(ctx, 'glow')
+    const second = await create(ctx, { front: face({}, 2) })
+    await finish(ctx, second.id, { skinType: 'oily', scores: [['hd_radiance', 70], ['hd_moisture', 40]] })
+    ctx.advance(SCAN_SPACING)
+    await setGoal(ctx, 'even-tone')
+    await create(ctx, { front: face({}, 3) })
+
+    const read = await levels(ctx)
+
+    expect(read!.skinType).toBe('oily')
+    expect(read!.concerns.map((c) => c.concern)).toEqual(['hd_radiance', 'hd_moisture'])
+  })
+
+  it('is null for a profile with no ready scan: never scanned, or a scan still being analysed', async () => {
+    const ctx = setup()
+    expect(await levels(ctx)).toBeNull()
+
+    await ready(ctx, 'glow')
+    await create(ctx)
+
+    expect(await levels(ctx)).toBeNull()
+  })
+
+  it('reads the profile it is asked about: another profile of the account, and another account, see nothing of it', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { scores: [['hd_age_spot', MARKS.age_spot]] })
+
+    expect(await levels(ctx, OTHER_PROFILE)).toBeNull()
+    expect(await levels(ctx, 'profile-of-another-account')).toBeNull()
+  })
+
+  it('needs no session, no verification and no consent: it answers for a guest\'s profile and after the consent is withdrawn', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { scores: [['hd_age_spot', MARKS.age_spot]] })
+    await withdrawConsent(ctx)
+
+    expect(await levels(ctx)).toMatchObject({ concerns: [{ concern: 'hd_age_spot', band: 'some' }] })
+    expect(await asGuest(() => ctx.service.latestConcernLevelsFor(PROFILE), 'someone-else', 'profile-of-someone-else')).toMatchObject({ concerns: [{ concern: 'hd_age_spot' }] })
+  })
+})
+
 describe('FaceScanService.photoForLink', () => {
   const tokenOf = (view: any, position = 'front') => (view.photos[position].url as string).slice('/api/v1/scans/faces/photos/'.length)
 

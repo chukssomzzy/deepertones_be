@@ -158,6 +158,7 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/shelf',
         'DELETE /api/v1/me/shelf/{entryId}',
         'POST /api/v1/me/shelf',
+        'GET /api/v1/me/verdict',
         'POST /api/v1/scans/products',
         'POST /api/v1/scans/products/shelf',
         'GET /api/v1/scans/products/{scanId}',

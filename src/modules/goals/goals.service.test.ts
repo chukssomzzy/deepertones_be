@@ -630,6 +630,48 @@ describe('GoalsService.requireGoal', () => {
   })
 })
 
+// The goal as the shelf verdict reads it (spec #171, slice D1): the profile's current goal id, by profile id with no session because the build is a job, and null
+// when there is no goal to judge a shelf against (never set, or only words nobody sorted into a goal), where `requireGoal` would refuse.
+describe('GoalsService.goalFor', () => {
+  it('is the goal the profile picked', async () => {
+    await set(AMARA, { goal: 'fade-dark-marks' })
+
+    expect(await service.goalFor('profile-amara-1')).toBe('fade-dark-marks')
+  })
+
+  it('is the newest goal once the profile has changed it', async () => {
+    await set(AMARA, { goal: 'fade-dark-marks' })
+    tick()
+    await set(AMARA, { goal: 'glow' })
+
+    expect(await service.goalFor('profile-amara-1')).toBe('glow')
+  })
+
+  it('is the goal the reader found in typed words', async () => {
+    reader.respondWith(() => ({ goal: 'clear-skin', wantsLighter: false }))
+    await set(AMARA, { text: 'make my face clear' })
+
+    expect(await service.goalFor('profile-amara-1')).toBe('clear-skin')
+  })
+
+  it('is null for a profile that never set a goal, and for words nobody sorted into a goal', async () => {
+    expect(await service.goalFor('profile-amara-1')).toBeNull()
+
+    await set(AMARA, { text: 'what is the weather' })
+
+    expect(await service.goalFor('profile-amara-1')).toBeNull()
+  })
+
+  it('answers for the profile it is asked about and never for a caller: it needs no session, and a session of another profile changes nothing', async () => {
+    await set(AMARA, { goal: 'glow' })
+    await set(TOLU, { goal: 'even-tone' })
+
+    expect(await service.goalFor('profile-amara-1')).toBe('glow')
+    expect(await runAs(TOLU, () => service.goalFor('profile-amara-1'))).toBe('glow')
+    expect(await service.goalFor('profile-amara-2')).toBeNull()
+  })
+})
+
 describe('GoalsService without a session', () => {
   it('answers 401 AUTH_REQUIRED from set, current and onboarding, stores nothing and never asks the reader', async () => {
     const codes = [

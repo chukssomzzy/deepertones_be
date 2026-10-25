@@ -1,7 +1,6 @@
 import { requireUser } from '../../lib/context'
 import { ConflictError, NotFoundError, ValidationError } from '../../lib/errors'
 import { ingredientParts, ingredientsKey } from '../catalog/catalog.ingredients'
-import type { ReferenceEntry } from '../catalog/catalog.reference'
 import { flagFacts } from '../catalog/catalog.rules'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import { BUDGET_BANDS, type BudgetBand, type ConcernKind, type RoutineStep } from '../catalog/catalog.vocabulary'
@@ -9,6 +8,7 @@ import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service
 import { concernsForGoal } from '../face-scans/face-scans.tables'
 import type { FaceScanService } from '../face-scans/face-scans.service'
 import type { GoalsService } from '../goals/goals.service'
+import { anyIn, expandLabels, namedIn } from '../safety/safety.matching'
 import type { SafetyService } from '../safety/safety.service'
 import type { SafetyMentionRow } from '../safety/safety.types'
 import type { RecommendationsRepository } from './recommendations.repository'
@@ -124,7 +124,7 @@ export class RecommendationService {
     const concerns = new Set<string>(concernsForGoal(goal.goal!))
     const band = shopping.budgetBand
     const maxPrice = band === 'low' ? country.lowMax : band === 'mid' ? country.midMax : Infinity
-    const named = RecommendationService.named(mentions, rules.entries)
+    const named = namedIn(mentions, rules.entries)
     const lists = await this.productLists(mentions)
     const listedKeys = new Set(lists.map(({ list }) => ingredientsKey(list)))
     const passed: CandidateRule[] = [
@@ -146,14 +146,14 @@ export class RecommendationService {
         return !facts.has('banned-substance') && !(safety.excludesPregnancyCaution && facts.has('pregnancy-caution'))
       })
       .filter((row) => !named.productIds.has(row.productId) && !listedKeys.has(ingredientsKey(row.ingredients)))
-      .filter((row) => !row.ingredients.some((ingredient) => RecommendationService.anyIn(ingredientParts(ingredient), named.ingredientParts)))
+      .filter((row) => !row.ingredients.some((ingredient) => anyIn(ingredientParts(ingredient), named.ingredientParts)))
       .sort((a, b) => a.priceMin - b.priceMin || (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
     if (kept.length === 0) return []
 
     const summaries = await this.catalog.productSummaries(kept.map((row) => row.formulationId))
     const reacted = lists
       .filter(({ reaction }) => reaction)
-      .map(({ productId, list }) => ({ productId, parts: RecommendationService.expand(new Set(list.flatMap(ingredientParts)), rules.entries) }))
+      .map(({ productId, list }) => ({ productId, parts: expandLabels(new Set(list.flatMap(ingredientParts)), rules.entries) }))
     const candidates: Candidate[] = []
     for (const row of kept) {
       const product = summaries.get(row.formulationId)
@@ -171,7 +171,7 @@ export class RecommendationService {
         ingredientsSourceUrl: row.ingredientsSourceUrl,
         passed: [...passed],
         sharedWithReaction: reacted.flatMap(({ productId, parts }) => {
-          const shared = row.ingredients.filter((ingredient) => RecommendationService.anyIn(ingredientParts(ingredient), parts))
+          const shared = row.ingredients.filter((ingredient) => anyIn(ingredientParts(ingredient), parts))
           return shared.length === 0 ? [] : [{ productId, ingredients: shared }]
         }),
         origin: row.origin,
@@ -197,38 +197,6 @@ export class RecommendationService {
     }
     const lists = await Promise.all([...products].map(async ([productId, reaction]) => ({ productId, reaction, list: await this.catalog.latestIngredients(productId) })))
     return lists.flatMap(({ productId, reaction, list }) => (list === null ? [] : [{ productId, reaction, list }]))
-  }
-
-  /**
-   * What the user's words name that a row can be matched by: product ids (either source, resolved or not) and the name parts of ingredients, taken through
-   * the live rules (see `expand`).
-   */
-  private static named(mentions: SafetyMentionRow[], rules: readonly ReferenceEntry[]): { productIds: Set<string>; ingredientParts: Set<string> } {
-    const productIds = new Set<string>()
-    const parts = new Set<string>()
-    for (const mention of mentions) {
-      if (mention.kind === 'ingredient') for (const part of ingredientParts(mention.name)) parts.add(part)
-      else if (mention.productId !== null) productIds.add(mention.productId)
-    }
-    return { productIds, ingredientParts: RecommendationService.expand(parts, rules) }
-  }
-
-  /**
-   * `parts` and every other label of each rule that has one of them as a label (its name or an alias), so a name and its synonyms the reviewed rules list
-   * stand for each other, whichever one the user or the row used. One step from what was named, not a chain through rules that share a label, so the answer
-   * does not depend on the order the rules are in. A name no rule lists stays as it is: the match is never fuzzy.
-   */
-  private static expand(parts: Set<string>, rules: readonly ReferenceEntry[]): Set<string> {
-    const expanded = new Set(parts)
-    for (const { name, aliases } of rules) {
-      const labels = [name, ...aliases]
-      if (labels.some((label) => parts.has(label))) for (const label of labels) expanded.add(label)
-    }
-    return expanded
-  }
-
-  private static anyIn(parts: string[], set: Set<string>): boolean {
-    return parts.some((part) => set.has(part))
   }
 
   private static bandOf(text: string): BudgetBand | null {

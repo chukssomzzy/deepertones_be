@@ -25,14 +25,15 @@ describe('docs/catalog-workbook-contract.md', () => {
     expect(doc).toContain(await contractFingerprint())
   })
 
-  it('names the four tabs and every column the contract checks', async () => {
+  it('names the six tabs and every column the contract checks', async () => {
     const doc = await renderContractDoc()
 
-    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries']) expect(doc, tab).toContain(tab)
+    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers']) expect(doc, tab).toContain(tab)
     for (const column of [
       'code', 'brand', 'variant', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin',
       'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells', 'product_code', 'price_min', 'price_max', 'where_sold', 'aliases',
       'strength_limit', 'statement', 'source_url', 'helps', 'currency', 'low_max', 'mid_max',
+      'group', 'clashes_with', 'phrase', 'claim', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if',
     ]) {
       expect(doc, column).toContain(column)
     }
@@ -44,6 +45,16 @@ describe('docs/catalog-workbook-contract.md', () => {
     for (const value of [...SHOWN_CONCERNS, ...SKIN_TYPE_LABELS, 'all', ...ROUTINE_STEPS, ...FREQUENCIES, ...BUDGET_BANDS, ...ORIGINS]) expect(doc, value).toContain(value)
   })
 
+  it('lists every ingredient group and taper kind, and the claim, so nobody has to read the code to learn them', async () => {
+    const doc = await renderContractDoc()
+
+    for (const value of ['mercury', 'steroid', 'lightening-agent', 'retinoid', 'exfoliating-acid', 'benzoyl-peroxide', 'lightening']) expect(doc, value).toContain(value)
+  })
+
+  it('explains the schedule format with an example that is valid, so a person can copy its shape', async () => {
+    expect(await renderContractDoc()).toContain('1-2: alternate-days; 3-4: weekly; 5: stop')
+  })
+
   it('lists every rule code a problem can carry', async () => {
     const doc = await renderContractDoc()
 
@@ -52,6 +63,8 @@ describe('docs/catalog-workbook-contract.md', () => {
       'NOT_A_WHOLE_NUMBER', 'TOO_LONG', 'ITEM_TOO_LONG', 'TOO_MANY_ITEMS', 'HAS_LINK_OR_MARKUP', 'NOT_NORMALISED', 'ALL_MIXED_WITH_OTHERS', 'AUDIT_INCOMPLETE',
       'APPROVED_WITH_DRAFT_CELLS', 'INVALID_DRAFT_CELL', 'DRAFT_CELL_COLUMN', 'PRICE_RANGE', 'LOW_NOT_BELOW_MID', 'UNKNOWN_PRODUCT', 'UNKNOWN_COUNTRY',
       'DUPLICATE_CODE', 'DUPLICATE_IDENTITY', 'DUPLICATE_AVAILABILITY', 'DUPLICATE_RULE',
+      'CLASH_NOT_SYMMETRIC', 'CLASH_WITHOUT_GROUP', 'SELF_CLASH', 'DUPLICATE_PHRASE', 'NOT_LOWER_CASE', 'NOT_A_LIGHTENING_CLAIM',
+      'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'SCHEDULE_MISSING_STOP', 'SCHEDULE_STOP_NOT_LAST', 'SCHEDULE_FREQUENCY_INCREASES',
     ]) {
       expect(doc, rule).toContain(rule)
     }

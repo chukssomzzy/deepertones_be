@@ -1,10 +1,14 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { HttpNetworkError, HttpTimeoutError } from '../../src/lib/http'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
+import ExcelJS from 'exceljs'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { runUpload } from './upload'
-import { WorkbookFileError } from './xlsx'
+import { readWorkbookBytes, WorkbookFileError } from './xlsx'
 import { errorReply, fakeOutput, fakeReadText, fakeRequest, okReply, OTHER_SECRET, TOKEN, VARS, type Reply, type Sent } from './script.fixture'
-import { availability, country, ingredient, product, validWorkbook } from './workbook.fixture'
+import { availability, country, HEADERS, ingredient, product, validWorkbook } from './workbook.fixture'
 
 // `npm run catalog:upload file.xlsx --env … --by "Name" [--apply]`: read an edited workbook, check it locally against the contract, then send it to
 // the admin API, as a dry run unless --apply is given. `runUpload(args, deps)` is the whole script with every effect handed in:
@@ -33,12 +37,14 @@ const args = (over: Partial<Args> = {}): Args => ({ file: 'edited.xlsx', env: 's
 const XLSX_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 255])
 
 const emptyTab = { added: [], updated: [], retired: [], reactivated: [] }
-const EMPTY_DIFF = { products: emptyTab, availability: emptyTab, ingredients: emptyTab, countries: emptyTab, newProducts: [] }
+const EMPTY_DIFF = { products: emptyTab, availability: emptyTab, ingredients: emptyTab, countries: emptyTab, claimWords: emptyTab, tapers: emptyTab, newProducts: [] }
 const DIFF = {
   products: { added: ['PRD-NEW-A', 'PRD-NEW-B'], updated: ['PRD-CERAVE-CLEANSER'], retired: [], reactivated: [] },
   availability: { added: ['PRD-NEW-A:NG'], updated: [], retired: ['PRD-OLD:GH'], reactivated: [] },
   ingredients: { added: [], updated: [], retired: [], reactivated: ['ING-OLD-RULE'] },
   countries: emptyTab,
+  claimWords: { added: ['CLM-WHITENING', 'CLM-FAIRNESS'], updated: [], retired: ['CLM-OLD'], reactivated: [] },
+  tapers: { added: ['TPR-STEROID-1'], updated: ['TPR-LIGHTENING-1'], retired: ['TPR-STEROID-0'], reactivated: [] },
   newProducts: [
     { code: 'PRD-NEW-A', brand: 'La Roche-Posay', name: 'Anthelios Mineral', variant: null, form: null },
     { code: 'PRD-NEW-B', brand: 'Bioderma', name: 'Sensibio Gel', variant: 'Fragrance free', form: 'gel' },
@@ -304,6 +310,23 @@ describe('runUpload: the request', () => {
     expect(form.get('uploadedBy')).toBe('Tolu Adeyemi')
   })
 
+  it.each([[false], [true]])('sends the contract version the file was made for as contractVersion, so the server can refuse a mismatch (apply=%s)', async (apply) => {
+    const { deps, http } = setup()
+
+    await runUpload(args({ apply }), deps)
+
+    expect(formOf(http.sent[0]!).get('contractVersion')).toBe(CONTRACT_VERSION)
+  })
+
+  it('sends all six tabs of the workbook', async () => {
+    const { deps, http } = setup()
+
+    await runUpload(args(), deps)
+
+    const sent = JSON.parse(formOf(http.sent[0]!).get('workbook') as string) as Record<string, unknown>
+    expect(Object.keys(sent).sort()).toEqual(['availability', 'claimWords', 'countries', 'ingredients', 'products', 'tapers'])
+  })
+
   it('takes baseVersion from the file, whatever version the server is at now', async () => {
     const { deps, http } = setup({ catalogVersion: 3, reply: okReply({ applied: false, catalogVersion: 9, diff: EMPTY_DIFF }) })
 
@@ -365,6 +388,19 @@ describe('runUpload: what it prints when the server answers', () => {
     expect(hasLine(text, /ingredients/i, /reactivated/i, /\b1\b/, 'ING-OLD-RULE')).toBe(true)
   })
 
+  it('prints the claim words and the tapers that were added, updated or retired, each tab by its own name', async () => {
+    const { deps, out } = setup()
+
+    expect(await runUpload(args(), deps)).toBe(0)
+
+    const text = out.stdout()
+    expect(hasLine(text, /claim words/i, /added/i, /\b2\b/, 'CLM-WHITENING', 'CLM-FAIRNESS')).toBe(true)
+    expect(hasLine(text, /claim words/i, /retired/i, /\b1\b/, 'CLM-OLD')).toBe(true)
+    expect(hasLine(text, /tapers/i, /added/i, /\b1\b/, 'TPR-STEROID-1')).toBe(true)
+    expect(hasLine(text, /tapers/i, /updated/i, /\b1\b/, 'TPR-LIGHTENING-1')).toBe(true)
+    expect(hasLine(text, /tapers/i, /retired/i, /\b1\b/, 'TPR-STEROID-0')).toBe(true)
+  })
+
   it('shows each product the workbook would create as new, with its brand and name, so a different spelling is seen before it is applied', async () => {
     const { deps, out } = setup()
 
@@ -410,6 +446,15 @@ describe('runUpload: what it prints when the server answers', () => {
     expect(out.stdout()).not.toContain('--apply')
   })
 
+  it.each(['claimWords', 'tapers'])('exits non-zero rather than claim success when a 200 holds a diff with no %s in it', async (tab) => {
+    const { [tab as 'tapers']: _left, ...partial } = EMPTY_DIFF
+    const { deps, out } = setup({ reply: okReply({ applied: false, catalogVersion: 7, diff: partial }) })
+
+    expect(await runUpload(args(), deps)).not.toBe(0)
+
+    expect(out.stderr()).not.toBe('')
+  })
+
   it('exits non-zero rather than claim success when a 200 holds no diff', async () => {
     const { deps, out } = setup({ reply: okReply({ applied: false, catalogVersion: 7 }) })
 
@@ -428,6 +473,28 @@ describe('runUpload: when the server refuses', () => {
     expect(http.sent).toHaveLength(1)
     expect(out.stderr()).toContain('CATALOG_STALE')
     expect(out.stderr()).toMatch(/catalog:export/)
+  })
+
+  it('tells the person to export again, and does not retry, on 409 CONTRACT_MISMATCH', async () => {
+    const { deps, http, out } = setup({ reply: errorReply(409, 'CONTRACT_MISMATCH') })
+
+    expect(await runUpload(args({ apply: true }), deps)).not.toBe(0)
+
+    expect(http.sent).toHaveLength(1)
+    expect(out.stderr()).toContain('CONTRACT_MISMATCH')
+    expect(out.stderr()).toMatch(/catalog:export/)
+  })
+
+  it('lists a Tapers row the production approver gate refused, with its row and column and the rule UNQUALIFIED_APPROVER, as it lists any problem of CATALOG_INVALID', async () => {
+    const problems = [
+      { tab: 'tapers', row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+      { tab: 'tapers', row: 4, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+    ]
+    const { deps, out } = setup({ environment: 'production', reply: errorReply(400, 'CATALOG_INVALID', { problems }) })
+
+    expect(await runUpload(args({ env: 'production' }), deps)).not.toBe(0)
+
+    for (const { row } of problems) expect(hasLine(out.text(), /tapers/i, new RegExp(`\\b${row}\\b`), 'approved_by', 'UNQUALIFIED_APPROVER'), `row ${row}`).toBe(true)
   })
 
   it('lists every problem the server found, with tab, row, column and rule, on 400 CATALOG_INVALID', async () => {
@@ -585,5 +652,49 @@ describe('runUpload: the token is never printed', () => {
 
     expect(out.text()).not.toContain(TOKEN)
     expect(out.text()).not.toContain(OTHER_SECRET)
+  })
+})
+
+// The reader and the script together, on a file written the way the last release of `catalog:export` wrote it: four tabs, stamped 1.0.0. Nothing is
+// faked between the bytes and the message, so this is what a person with an old export sees.
+describe('runUpload: a file exported before the contract bump', () => {
+  let dir: string
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'catalog-upload-old-'))
+  })
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true })
+  })
+
+  const oldFileBytes = async (): Promise<Uint8Array<ArrayBuffer>> => {
+    const book = new ExcelJS.Workbook()
+    const old = {
+      Products: HEADERS.products,
+      Availability: HEADERS.availability,
+      Ingredients: HEADERS.ingredients.filter((header) => header !== 'group' && header !== 'clashes_with'),
+      Countries: HEADERS.countries,
+    }
+    for (const [name, headers] of Object.entries(old)) book.addWorksheet(name).addRow([...headers])
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['environment', 'staging'])
+    meta.addRow(['contractVersion', '1.0.0'])
+    return new Uint8Array((await book.xlsx.writeBuffer()) as ArrayBuffer)
+  }
+
+  it.each([[false], [true]])('says it was made for contract version 1.0.0 and to export again, not that tabs are missing, and sends nothing (apply=%s)', async (apply) => {
+    const bytes = await oldFileBytes()
+    const { deps, http, out } = setup()
+    deps.readBytes = async () => bytes
+    deps.readWorkbook = readWorkbookBytes as never
+
+    expect(await runUpload(args({ file: 'old-export.xlsx', apply }), deps)).toBe(1)
+
+    expect(http.sent).toEqual([])
+    expect(out.stderr()).toContain('made for workbook contract version 1.0.0')
+    expect(out.stderr()).toContain(CONTRACT_VERSION)
+    expect(out.stderr()).toMatch(/catalog:export/)
+    expect(out.stderr()).not.toMatch(/missing/i)
+    expect(out.stderr()).not.toMatch(/Tapers|Claim words/)
   })
 })

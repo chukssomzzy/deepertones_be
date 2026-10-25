@@ -150,6 +150,75 @@ describe('ShelfService.list', () => {
   })
 })
 
+// The shelf as the shelf verdict reads it (spec #171, slice D1): by profile id, with no session (the build runs as a job), as narrow rows (ids, not views), in a fixed order so that the fingerprint and the response are the same every time.
+describe('ShelfService.activeEntriesFor', () => {
+  it('gives the profile\'s active entries oldest added first, entries added at the same time by id, whatever order they were last scanned in', async () => {
+    put(AMARA.profileId, 1, { addedAt: at(30 * MINUTE), lastScannedAt: at(1 * MINUTE) })
+    put(AMARA.profileId, 2, { addedAt: at(10 * MINUTE), lastScannedAt: at(90 * MINUTE) })
+    put(AMARA.profileId, 4, { addedAt: at(20 * MINUTE) })
+    put(AMARA.profileId, 3, { addedAt: at(10 * MINUTE) })
+
+    const rows = await service.activeEntriesFor(AMARA.profileId)
+
+    expect(rows.map((row) => row.id)).toEqual(['entry-2', 'entry-3', 'entry-4', 'entry-1'])
+  })
+
+  it('gives a product as its id, kind, added time, catalog product and formulation, and a no-label entry as its id, kind, added time and source item: nothing else', async () => {
+    put(AMARA.profileId, 1, { addedAt: at(1 * MINUTE) })
+    put(AMARA.profileId, 2, { kind: 'no-label', productId: null, formulationId: null, addedAt: at(2 * MINUTE) })
+
+    const rows = await service.activeEntriesFor(AMARA.profileId)
+
+    expect(rows).toEqual([
+      { id: 'entry-1', kind: 'product', addedAt: at(1 * MINUTE), productId: 'product-1', formulationId: 'formulation-1' },
+      { id: 'entry-2', kind: 'no-label', addedAt: at(2 * MINUTE), itemId: 'item-2' },
+    ])
+  })
+
+  it('leaves out an entry the user took off the shelf, and every entry of another profile', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2, { removedAt: at(5 * MINUTE), removedReason: 'finished' })
+    put(TOLU.profileId, 3)
+
+    const rows = await service.activeEntriesFor(AMARA.profileId)
+
+    expect(rows.map((row) => row.id)).toEqual(['entry-1'])
+  })
+
+  it('leaves out a product row that has no formulation, as the shelf list does, since there is nothing to judge', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2, { formulationId: null })
+
+    const rows = await service.activeEntriesFor(AMARA.profileId)
+
+    expect(rows.map((row) => row.id)).toEqual(['entry-1'])
+  })
+
+  it('answers for the profile it is asked about and never for the caller: it needs no session, and a session of another profile changes nothing', async () => {
+    put(AMARA.profileId, 1)
+    put(TOLU.profileId, 2)
+
+    expect((await service.activeEntriesFor(AMARA.profileId)).map((row) => row.id)).toEqual(['entry-1'])
+    expect((await runAs(TOLU, () => service.activeEntriesFor(AMARA.profileId))).map((row) => row.id)).toEqual(['entry-1'])
+  })
+
+  it('gives the whole active shelf, not the 200 the shelf list is kept to: the least recently scanned entry of 201 is still there', async () => {
+    expect(SHELF_POLICY.maxEntries).toBe(200)
+    // Entry 1 is the least recently scanned (and the first added), the one a cap of 200 newest-scanned would drop.
+    for (let n = 1; n <= SHELF_POLICY.maxEntries + 1; n++) put(AMARA.profileId, n)
+
+    const rows = await service.activeEntriesFor(AMARA.profileId)
+
+    expect(rows).toHaveLength(SHELF_POLICY.maxEntries + 1)
+    expect(rows[0]!.id).toBe('entry-1')
+    expect(new Set(rows.map((row) => row.id)).size).toBe(SHELF_POLICY.maxEntries + 1)
+  })
+
+  it('answers an empty list for a profile with no shelf', async () => {
+    expect(await service.activeEntriesFor('profile-nobody')).toEqual([])
+  })
+})
+
 describe('ShelfService.remove', () => {
   it('takes the entry off the shelf with the reason and the time it was removed', async () => {
     put(AMARA.profileId, 1)

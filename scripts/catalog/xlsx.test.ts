@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { readFileBytes, readWorkbookBytes, readWorkbookFile, WorkbookFileError, writeWorkbookFile } from './xlsx'
 import { readFile } from 'node:fs/promises'
-import { availability, country, day, dayAsDate, HEADERS, ingredient, product, TAB_NAMES, validWorkbook } from './workbook.fixture'
+import { availability, claimWord, country, day, dayAsDate, HEADERS, ingredient, product, TAB_NAMES, taper, validWorkbook } from './workbook.fixture'
 
 // The shared xlsx module behind `catalog:export` (which writes a workbook file) and `catalog:upload` (which reads one back). The file layout is
-// the contract with the people who edit it: four tabs named exactly Products, Availability, Ingredients and Countries, the header row first, and a
+// the contract with the people who edit it: six tabs named exactly Products, Availability, Ingredients, Countries, Claim words and Tapers, the header row first, and a
 // hidden `_meta` sheet that remembers which catalog version the file was exported at. `_meta` holds one `key | value` pair per row:
 //   catalogVersion | <number>
 //   contractVersion | <text>
@@ -63,16 +63,16 @@ const load = async (path: string): Promise<ExcelJS.Workbook> => new ExcelJS.Work
 const productCells = (row: Record<string, unknown>): unknown[] => HEADERS.products.map((header) => row[header] ?? null)
 
 describe('writeWorkbookFile', () => {
-  it('writes the four tabs under their exact names, in order, then a hidden _meta sheet', async () => {
+  it('writes the six tabs under their exact names, in order, then a hidden _meta sheet', async () => {
     const path = newPath()
     await writeWorkbookFile(path, validWorkbook(), 7)
 
     const book = await load(path)
 
-    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(['Products', 'Availability', 'Ingredients', 'Countries', '_meta'])
+    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', '_meta'])
     // veryHidden, not hidden: Excel's Unhide menu does not list it, so nobody edits the version stamp by accident.
     expect(book.getWorksheet('_meta')?.state).toBe('veryHidden')
-    for (const name of ['Products', 'Availability', 'Ingredients', 'Countries']) expect(book.getWorksheet(name)?.state, name).toBe('visible')
+    for (const name of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers']) expect(book.getWorksheet(name)?.state, name).toBe('visible')
   })
 
   it('puts each tab\'s headers in row 1, in order, and the rows below them', async () => {
@@ -134,7 +134,7 @@ describe('writeWorkbookFile', () => {
 
   it('writes a tab that has headers and no rows as just its header row', async () => {
     const path = newPath()
-    await writeWorkbookFile(path, validWorkbook({ products: [], availability: [], ingredients: [], countries: [] }), 1)
+    await writeWorkbookFile(path, validWorkbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] }), 1)
 
     const book = await load(path)
 
@@ -190,6 +190,8 @@ describe('readWorkbookFile: a round trip', () => {
       availability: [availability(), availability({ product_code: 'PRD-DRAFT-SERUM', price_min: 0, price_max: 0, where_sold: null, source_url: null })],
       ingredients: [ingredient(), ingredient({ code: 'ING-ALCOHOL-DENAT-DRYING', name: 'alcohol denat', aliases: 'sd alcohol; denatured alcohol', kind: 'drying', source_url: 'https://a.example/rule', helps: 'hd_oiliness' })],
       countries: [country(), country({ code: 'GH', currency: 'GHS', low_max: 40, mid_max: 120, status: 'retired' })],
+      claimWords: [claimWord(), claimWord({ code: 'CLM-FAIRNESS', phrase: 'skin fairness', status: 'retired' })],
+      tapers: [taper(), taper({ code: 'TPR-LIGHTENING-1', kind: 'lightening-agent', schedule: '1: am-pm; 2-3: am; 4: stop', audited_by: 'Nneka Audit', audited_on: day(-1) })],
     })
 
     await writeWorkbookFile(path, written, 7)
@@ -397,10 +399,10 @@ describe('readWorkbookFile: _meta', () => {
     expect(read.contractVersion).toBeNull()
   })
 
-  it('does not treat _meta as one of the four tabs', async () => {
+  it('does not treat _meta as one of the six tabs', async () => {
     const path = await buildFile()
 
-    expect(Object.keys((await readWorkbookFile(path)).workbook).sort()).toEqual(['availability', 'countries', 'ingredients', 'products'])
+    expect(Object.keys((await readWorkbookFile(path)).workbook).sort()).toEqual(['availability', 'claimWords', 'countries', 'ingredients', 'products', 'tapers'])
   })
 })
 
@@ -485,6 +487,68 @@ describe('readWorkbookFile: a tab that is not there', () => {
     await writeFile(path, 'this is not a zip file')
 
     await expect(readWorkbookFile(path)).rejects.toThrow(/\S/)
+  })
+
+  it('names the Tapers tab when a file stamped with this contract version does not have it', async () => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    for (const [key, name] of Object.entries(TAB_NAMES)) if (key !== 'tapers') book.addWorksheet(name).addRow([...HEADERS[key as keyof typeof HEADERS]])
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['contractVersion', CONTRACT_VERSION])
+    await book.xlsx.writeFile(path)
+
+    await expect(readWorkbookFile(path)).rejects.toThrow(/missing the Tapers tab/)
+  })
+})
+
+// The contract bump adds two tabs, so a file exported before it has neither. `_meta` is read BEFORE the tabs: such a file is not "missing the Claim
+// words and Tapers tabs" (which sends the person looking for tabs to add by hand), it is a file made for another contract version, and the person
+// is told to export again. The reader may return what it read with the stamp, or throw a WorkbookFileError that names the stamped version; what it
+// must never do is call the missing tabs the problem.
+describe('readWorkbookFile: a file made before the contract bump', () => {
+  /** Exactly what the 1.0.0 export wrote: four tabs with the old headers, and a _meta stamped 1.0.0. */
+  const oldFile = async (): Promise<string> => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    const old = {
+      Products: HEADERS.products,
+      Availability: HEADERS.availability,
+      Ingredients: HEADERS.ingredients.filter((header) => header !== 'group' && header !== 'clashes_with'),
+      Countries: HEADERS.countries,
+    }
+    for (const [name, headers] of Object.entries(old)) book.addWorksheet(name).addRow([...headers])
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['environment', 'staging'])
+    meta.addRow(['contractVersion', '1.0.0'])
+    await book.xlsx.writeFile(path)
+    return path
+  }
+
+  it('does not call the missing Claim words and Tapers tabs the problem', async () => {
+    const path = await oldFile()
+
+    const outcome = await readWorkbookFile(path).then(
+      (read) => ({ contractVersion: read.contractVersion, message: '' }),
+      (error: unknown) => ({ contractVersion: null, message: (error as Error).message }),
+    )
+
+    expect(outcome.message).not.toMatch(/missing/i)
+    expect(outcome.message).not.toMatch(/Tapers|Claim words/)
+    // Either it was read, with the stamp it carried, or it was refused for that stamp.
+    if (outcome.message === '') expect(outcome.contractVersion).toBe('1.0.0')
+    else expect(outcome.message).toContain('1.0.0')
+  })
+
+  it('still names a missing tab when the file has no contract stamp at all, since nothing says it was made for another contract', async () => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    for (const name of ['Products', 'Availability', 'Ingredients', 'Countries']) book.addWorksheet(name).addRow(['code'])
+    book.addWorksheet('_meta').addRow(['catalogVersion', 7])
+    await book.xlsx.writeFile(path)
+
+    await expect(readWorkbookFile(path)).rejects.toThrow(/Claim words|Tapers/)
   })
 })
 

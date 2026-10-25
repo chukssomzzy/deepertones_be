@@ -190,6 +190,10 @@ request. Queues deliver at least once, so the system is built around repeat-safe
   retries like the receipt check (30 s x3 up to 600 s); `onDeadLetter` is `markParseFailed`. The consumer takes **one message at a time** (`max_batch_size` 1): a parse is a
   model read and a catalog research, and a batch is retried or acked as a whole. The body may also carry `retry: true`, for the second try the next day: the dispatcher
   records a dead-lettered run as failed for the key for good, so that message has its own key, `parse-safety:<safetyId>:retry`. The daily cron queues it (see "Guest cleanup").
+- **The `build-verdict` job** (`modules/verdicts`: `verdicts.job-specs.ts`, `verdicts.jobs.ts`; logic in `VerdictService.build`) builds a profile's shelf verdict (see "Shelf verdict"). It is on its
+  own `verdicts` queue and dead-letter queue in all three `wrangler.jsonc` blocks (binding `VERDICTS_QUEUE`; created before the first deploy that binds them, README "Before the first deploy"),
+  one message at a time (`max_batch_size` 1), the standard 5 attempts and the safety parse's backoff. The body is ids and counters, never the shelf or the words typed. The key is
+  `build-verdict:<profileId>:<requestedAt>:<waits>`, with `:retry` on the second day's try for the same reason as `parse-safety`; `onDeadLetter` is `markFitFailed`.
 - **Producing goes through the `JobQueue` provider** (`enqueue(job, body, { delaySeconds? })`, typed by the job's
   schema; the delay holds the message back, for a wait that must not use up retries), with a Cloudflare Queues adapter and an in-memory fake (which records the job name and the bare body, whatever the queue). Services never see bindings.
 - **`buildJobRuntime(env)`** in `container.ts` returns `{ services, jobRuns }` for the dispatcher.
@@ -452,6 +456,8 @@ A daily cron (`triggers.crons` in `wrangler.jsonc`, 03:17 UTC, restated in each 
   `{ job: 'safety-parse-requeue', outcome: 'done', queued }` (only when it queued something) or `{ ..., outcome: 'failed', error }`.
 - **A third step sends the check-in-due pushes** (own try, after the safety sweep): `FaceScanService.sendDueCheckIns(new Date())` (see "Face scans", "Check-in push"). It logs
   `{ job: 'face-check-in-push', outcome: 'done', queued }` when it queued something, or `{ ..., outcome: 'failed', error }`, and a failure here is rethrown only if nothing before it failed.
+- **A fourth step queues the fit retries** (own try, last): `VerdictService.requeueDueFits(new Date())` (see "Shelf verdict"). It logs `{ job: 'verdict-fit-requeue', outcome: 'done', queued }` when it
+  queued something, or `{ ..., outcome: 'failed', error }`, and a failure here is rethrown only if nothing before it failed.
 
 ### Tokens and the auth middleware
 `lib/jwt.ts` signs and verifies HS256 JWTs with WebCrypto (no package); `modules/auth/tokens.service.ts`
@@ -994,7 +1000,7 @@ there), and a dependency-cruiser rule is never loosened to make code fit.
 - **One file per prompt, named `<adapter>.<purpose>.md`:** `label-reader.read-label.md`,
   `product-recognizer.recognize.md`, `product-recognizer.recognize-shelf.md`, `product-researcher.research.md`, `product-analyst.analyse.md`,
   `product-analyst.same-product.md`, `product-analyst.image-check.md`, `name-splitter.split-name.md`,
-  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`, `draft-judge.judge-draft.md` (the eval's own), `routine-judge.judge-routine.md`, `routine-grounding-judge.judge-grounding.md` and `routine-labeller.label-routine.md` (the routine eval's own), `routine-writer.write-routine.md`. The export name is the camelCased file name plus
+  `goal-reader.read-goal.md`, `mention-reader.read-mentions.md`, `catalog-drafter.draft-catalog-row.md`, `draft-judge.judge-draft.md` (the eval's own), `routine-judge.judge-routine.md`, `routine-grounding-judge.judge-grounding.md` and `routine-labeller.label-routine.md` (the routine eval's own), `routine-writer.write-routine.md`, `verdict-fitter.fit-verdict.md`. The export name is the camelCased file name plus
   `Prompt` (`productAnalystAnalysePrompt`); two files that would give the same name are an error.
 - **Front matter, in YAML, for people; the model never sees it.** `purpose` (one line on what the prompt makes Claude do),
   `usedBy` (the adapter class and method, e.g. `AnthropicProductAnalyst.analyse`), `job` (the `AiJob` that runs it, one of
@@ -1188,11 +1194,23 @@ Only the catalog eval's `MemoryAiSpendLedger` refuses on a cap, so its `--max-us
   shows these.
   Migration 0028 adds `vendor` and `units` for the per-unit vendor rows (see "Vendor spend ledger").
 - **Models per job.** `AnthropicClient` takes a model for each job (`research`, `analysis`, `same-product`, `image-check`,
-  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`, `judge-draft`, `judge-routine`, `label-routine`, `judge-grounding`, `write-routine`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal, read-mentions, and the eval's own jobs judge-draft, judge-routine, label-routine and judge-grounding), `_VISION`
-  (image-check, recognize and read-label), `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone) and `_ROUTINE` (write-routine, Sonnet, because its words reach users). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
+  `recognize`, `recognize-shelf`, `read-label`, `split-name`, `read-goal`, `read-mentions`, `draft-catalog-row`, `judge-draft`, `judge-routine`, `label-routine`, `judge-grounding`, `write-routine`, `fit-verdict`), set by `ANTHROPIC_MODEL_RESEARCH` (research and draft-catalog-row), `_ANALYSIS`, `_JUDGE` (same-product, split-name, read-goal, read-mentions, and the eval's own jobs judge-draft, judge-routine, label-routine and judge-grounding), `_VISION`
+  (image-check, recognize and read-label), `_RECOGNIZE_SHELF` (recognize-shelf, on its own so the eval can move it alone) and `_ROUTINE` (write-routine and fit-verdict, Sonnet, because their words reach users). The owner's rule: a cheap model (Haiku) for the internal steps, a better one
   (Sonnet) for the text users read. Each adapter says which job it is. `recognize`, `recognize-shelf`, `read-label` and `split-name` serve the
   scan flow (see "Scan module"); `read-goal` and `read-mentions` serve onboarding (see "Goals (onboarding)" and "Safety facts (onboarding)"). The yes/no answers get `max_tokens` 4096, because Haiku 5.5's adaptive thinking counts
   against it. A test keeps the eval's default models equal to the top-level `ANTHROPIC_MODEL_*` vars.
+- **`AnthropicVerdictFitter`** (`fit-verdict`, port `VerdictFitter`, in `providers/verdict-fitting/`; `MemoryVerdictFitter` is the fake, with `calls`, `respondWith` and
+  `failNextWith`) judges the shelf products the verdict's rules floor left open (spec #171): helping, redundant or blocking the goal, with one plain
+  reason about the product, and for each clashing pair which one to reduce. One call on `ANTHROPIC_MODEL_ROUTINE` (Sonnet, because the reasons reach users), `max_tokens` 8192,
+  prompt `src/prompts/verdict-fitter.fit-verdict.md`. The request (goal, skin type and scan when there are any, every shelf product with its floor status, the
+  clash pairs) goes in the user message as JSON, never in the system prompt. The schema sent is a plain object with required `products` and `clashes` (no `oneOf`).
+  Each product entry has `sameJobAs` (a string or null, always present, so the schema stays a flat object): a `redundant` entry names the product that does its job and stays,
+  and `helping` and `blocking` entries carry null. The adapter throws `AnthropicRequestError`, never returning a partial result, unless the reply has exactly one entry with one of the
+  three labels for each open product and none for a fixed one, each reason is not empty (after trimming) and at most 200 characters, every `redundant` entry's `sameJobAs` is a product
+  that stays (an open product this same answer labels `helping`, or a fixed product in the group `prescribed`; so never itself, an unknown id, a dropped or stopped fixed product, a
+  product labelled `redundant` or `blocking`, or the other half of a mutually redundant pair) and no other label names one, and every clash entry is a pair the request asked about, answered once,
+  reducing one of its own two products and never a prescribed one, and returned with the request's order of `ids`. A pair the reply leaves out is not an error: the floor's fixed
+  tie-break settles it. The adapter logs nothing. The caller skips the call when no product is open and there are no clashes, and passes the floor's `taper-missing` entries as fixed in the group `likely-the-problem`.
 - **`AnthropicCatalogDrafter`** (`draft-catalog-row`, port `CatalogDrafter`, in `providers/catalog-drafting/`; `MemoryCatalogDrafter` is the fake, with `calls`, `respondWith` and
   `failNextWith`) drafts the empty catalog cells of one product for `npm run catalog:draft`: `draft({ product, columns, countries })` (each country with its currency) answers the values of `skin_concerns`, `skin_types`, `steps` and
   `frequency`, each with the page it came from, and a price range for each country. It searches the web (2 searches and one per country, to a most of 6; 16000 `max_tokens`, because Haiku's adaptive thinking and the search rounds count against it as well as the answer, and only the tokens used are billed; an answer cut off or refused throws `AnthropicRequestError` or `AnthropicRefusalError`, as `structured()` does), and, when a country is asked for, may also fetch pages with the `web_fetch` tool (`web_fetch_20260318`, direct calls only so the results come back as top-level blocks, one fetch per country to a most of 4, no `allowed_domains` since the shops are not known in advance, and `max_content_tokens` 12000 because a fetched page is billed as input tokens; the client reserves up to `max_uses` × `max_content_tokens` of fetched input on top of the search allowance; the docs say that bound is approximate and does not cover binary content such as PDFs, so a fetched PDF can bill past the reservation, settled at actual cost as for the judge). The prompt tells the model to use only the pages it
@@ -1804,13 +1822,15 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   (`catalog.workbook.seed.ts`): `ING-<NAME>-<KIND>`, in capitals, cut to 40. **`REFERENCE` is frozen**: it is the seed and the eval's fixture, never edited
   to change a rule. The workbook is where a rule changes.
 - **`liveRules()`** (`CatalogWorkbookRepository`, in the catalog module) returns `{ version, entries }`: the latest rules version, and the approved rules
-  in the shape the matcher reads, in code order. It reads the latest version on every call, and keeps the entries per isolate, **keyed by that version**
-  (a version names one set of rules, so they are read again only when it moves). When the version has moved, it reads the version and the rule rows in ONE
+  in the shape the matcher reads, in code order. It reads the latest version on every call, and keeps the entries per isolate, **keyed by the catalog
+  version number** (every applied upload moves it, including one that changes only a rule's `group` or `clashes_with`, which the rules version does not
+  see, so a key on the rules version would serve that metadata stale; a Products-only upload costs one re-read). When the catalog version has moved, it reads the version and the rule rows in ONE
   `db.batch`, so an upload cannot land between them and leave new rules stored under the old version. `ProductCatalogService` reads it only where it needs
   it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
-- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: four tabs, their columns, accepted values and
+- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: six tabs (Products, Availability, Ingredients,
+  Countries, Claim words, Tapers; contract 2.0.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2670,6 +2690,20 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 - **The `counted` flag.** `scan_items.counted` (integer boolean, NOT NULL, default true; migration 0027, a plain `ALTER TABLE ... ADD`) says whether an item counts toward the daily photo quotas. `photoCounts`, so both `photosSince` and `photosSinceIp`, count only counted items. Every item that existed before the column, and every photo or shelf item, is counted; only a typed item created with `counted = false` is not, and that is a product that needed no model (`ready` or `analysis-failed`), so adding one is never refused for the allowance and does not use any of it. A typed item that needs a model is counted, as one photo.
 - **The push rule.** A typed scan sends "your scan is ready" only if it waited for a model: `notifyFinished` skips the push for a typed scan none of whose items is counted (it finished inside the request, in front of the user), and sends it, with the usual notification settings, for a counted one (which finishes later, possibly after the user left). The `done` event is published either way.
 
+### Shelf verdict
+
+`src/modules/verdicts` saves each profile's verdict on its shelf (spec #171): the rules floor's labels merged with the fit judge's (`AnthropicVerdictFitter`, "Claude (Anthropic) providers"). It is built by a job, never in a request.
+
+- **One row per profile** in `shelf_verdicts`: a status (`pending` or `ready`), the fingerprint of the inputs it was built from, the products, and the fit retry columns (`fit_attempts`, `fit_retried`, `fit_retry_due_at`). A rebuild keeps the previous build in the row while it is pending.
+- **Served only when ready and current.** `VerdictService.current` (the caller) and `savedFor(profileId)` (the routine, by profile id, with any session) recompute the fingerprint from the inputs as they are now and serve the row only if it is ready and the fingerprints match, whatever its fit. Otherwise they claim and queue a build and answer `pending` (`current`) or null (`savedFor`); the previous verdict is never served as if it were current. Both go through one private path, so the claim, the queueing and the release below are written once.
+- **Gates.** `current` throws 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down template is not approved (a stopped product could not be shown its taper), then 409 `GOAL_REQUIRED` for a profile with no goal. `savedFor` throws neither: it answers null and writes nothing. The job fails for good (`PermanentJobError`) on either.
+- **The route** is `GET /me/verdict` (`verdicts.routes.ts`, thin: `VerdictService.current` through `verdicts.presenter.ts`). Its public shape is `{ status: 'pending' }` or `{ status: 'ready', fit, products, tapers }`: a product is `{ entryId, group, verdict, reason, escalate, sameJobAs?, nudge? }` (a stop names its step-down by `taperCode`) and a taper is `{ code, kind, schedule, whatToExpect, seeAProfessionalIf }`. The presenter names every field, so `facts`, `step`, `sourceUrls` and a template's status and audit columns never leave the service; the schedule arrives from the workbook already as steps, so nothing is parsed.
+- **Claiming is atomic.** `requestBuild` is one INSERT ... ON CONFLICT DO UPDATE ... WHERE: it claims a new row, a ready row of another fingerprint, or a pending row 30 minutes old (its build died), so parallel asks queue one build. If the enqueue then throws, the service calls `releaseClaim(profileId, requestedAt)` (one UPDATE that moves that exact pending request to the epoch, so the next ask claims at once) and rethrows the queue's error; without it the dead claim would hold every ask off for 30 minutes.
+- **The job.** It rebuilds from the inputs as they are when it runs and saves their fingerprint. While a scan of the shelf is in flight or safety words are being parsed it queues itself again 60 s on (`waits` + 1, key `...:<waits>`, so each wait is a run of its own and uses no retry), and builds anyway after 15 waits. A row already built from those inputs with its fit ready is left alone, so a repeated message costs no second call to the judge.
+- **Fit retries.** If the judge fails or its answer does not fit the shelf, the verdict is still saved at once, floor labels only, with the open products undecided and the fit `not-ready`. Only the judge's call and the merge of its answer count as an attempt; the floor-only merge is outside that. The first two failures throw so the queue retries; the third saves a retry due 24 hours on (`fit_retry_due_at`) and returns. The daily sweep (`requeueDueFits`, "Guest cleanup") queues, with no delay and `retry: true`, the longest overdue 200 a run; the row keeps its due time until the retry builds. A dead-lettered build gets the same one more try (`markFitFailed`), and a second failure is final. A `retry: true` message for a fingerprint that is no longer current is skipped, and a message without it never tries the judge again for a row whose retry is spent.
+- **The judge's client** is its own, with a 120 s timeout (`VERDICT_FIT_TIMEOUT_MS` in `container.ts`): it reads a whole shelf and nobody waits for it, so a stuck request frees the consumer for the retry.
+- **Logs** carry ids and outcomes (`verdict-entry-unresolved`, `fit-failed`, `fit-retry-enqueue-failed`), never a product name, a reason or the words typed.
+
 ### Routines
 
 `src/modules/routines` is pure code for the routine stage (#152): no service, repository or route yet; the routine-stage spec adds those. It imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`. The writer is a provider (below).
@@ -2702,16 +2736,29 @@ signed-in, never opens them: they have a door of their own.
 
 ### Catalog workbook import
 `CatalogWorkbookService` (`catalog.workbook.service.ts`, built by the container as `catalogWorkbook`) serves and changes the catalog workbook: the
-Products, Availability, Ingredients and Countries tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
-(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, and the `ingredient_rules` and
+Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
+(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, `claim_words`, `tapers`, and the `ingredient_rules` and
 `catalog_versions` of "Product catalog data". The routes are `GET /api/v1/admin/catalog/export` and `POST /api/v1/admin/catalog/import`
 (`catalog.workbook.routes.ts`), behind "Admin access".
 
 - **Export** gives `{ catalogVersion, contractVersion, workbook }`: every tab with its full header row, retired rows included, in the shape the import
   takes (lists joined with `; `, dates `YYYY-MM-DD`, an empty cell `null`; `catalog.workbook.raw.ts`). Importing an export unchanged is an empty diff.
-- **Import** is multipart: `workbook` (the JSON text), `file` (the `.xlsx`, up to 10 MB), `baseVersion`, `dryRun` (**default `true`**) and `uploadedBy`
+- **Import** is multipart: `workbook` (the JSON text), `file` (the `.xlsx`, up to 10 MB), `baseVersion`, `contractVersion`, `dryRun` (**default `true`**) and `uploadedBy`
   (1 to 80 characters). In order:
-  1. `validateWorkbook` runs on the server whatever the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
+  0. `contractVersion` (the version of the export the file was edited from) must be the server's `CONTRACT_VERSION`: 409 `CONTRACT_MISMATCH`, before
+     anything else and for a dry run too, because a file made for another contract cannot be judged by this one (its problems would only mislead). The
+     upload script sends the file's own `_meta` stamp, and the file reader reads `_meta` before the tabs, so an old export is told to export again and
+     not "missing the Tapers tab". The route's body schema reads `workbook` only as a JSON object (a bad JSON text is a 400 `VALIDATION_FAILED`), so a genuine
+     1.0.0 file, which has four tabs, reaches this check and gets the 409 instead of a 400 about its missing tabs, also when posted without the script.
+  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all six tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
+     `{ path, message }` details under `workbook`. Only a file of the current contract version gets this far. Then `validateWorkbook` runs on the server whatever
+     the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
+  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers row with status `approved` must have an `approved_by` that is
+     exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved template).
+     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
+     the name is never echoed or logged. It is a process control, not authentication: the approver is a label in a cell, written by whoever holds the
+     admin token. Staging and development accept any approver, so the owner or Claude can approve there. The service takes `environment` and
+     `qualifiedApprovers` from the container; `QUALIFIED_APPROVERS` is a plain var in all three `wrangler.jsonc` blocks, empty until a qualified approver is named.
   2. `baseVersion` must be the live catalog version: 409 `CATALOG_STALE`, for a dry run too, so a stale copy is told before anyone applies it.
   3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
      `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
@@ -2728,8 +2775,21 @@ Products, Availability, Ingredients and Countries tabs the team edits in a sprea
      counts is the one on the version's `catalog_versions.archive_key`.
   7. **`applyWorkbook(plan)`** is one repository method and one `db.batch`. Only the rows the diff names are written. It upserts countries, creates the new
      products (`on conflict (identity_key) do nothing`), stores the workbook formulations (`on conflict (product_id, ingredients_key) do nothing`),
-     upserts the Products rows with their pinned formulation found by a subquery, replaces availability when it changed, upserts the rules, and marks the
-     codes the upload left out retired.
+     upserts the Products rows with their pinned formulation found by a subquery, replaces availability when it changed, upserts the rules, the claim
+     words and the tapers, and marks the codes the upload left out retired.
+- **Claim words, tapers, and rule metadata.** A Claim words row is a lower-case phrase that says a product is sold for lightening (`claim`
+  `lightening`; status `approved` or `retired`; no draft). A Tapers row is a step-down template: `kind` (`steroid` or `lightening-agent`), a `schedule`
+  and two plain-text cells (what to expect, when to see a professional). The schedule is written `1-2: alternate-days; 3-4: weekly; 5: stop`: steps
+  separated by `;`, each its weeks (`N` or `N-M`) and one frequency (the usual ones, or `stop`), weeks running on from 1 with no gap or overlap and at most
+  52, the frequency never going up (am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop), ending with `stop` and with `stop`
+  only last. It is parsed into `{ fromWeek, toWeek, frequency }[]`, stored as JSON, and exported in that one canonical spelling, and the diff compares
+  parsed steps, so spacing is no change. An Ingredients row gains `group` (mercury, steroid, lightening-agent, retinoid, exfoliating-acid,
+  benzoyl-peroxide; empty for most) and `clashes_with` (groups; the relation must hold both ways among the rules that are not retired). **Group and
+  clashes_with are rule metadata, not part of the rules version:** the fingerprint hashes only what the matcher reads, and `liveRules().entries` stay
+  exactly `{ name, aliases, kind, rule, source }`, so adding groups to the seeded rules re-analyses no formulation; they are read with the workbook
+  (`readWorkbook`). The live-rules cache (per isolate) is keyed on the catalog version, which is read on every call, so an isolate re-reads the rules on its first call after an upload lands; a call already in flight at that moment can still return the previous rules. None of the three is ever deleted.
+- **Statement budget.** The three new tables are written in chunks like the others (11 claim words, 9 tapers and 6 rules to a statement, rules now binding
+  16 parameters a row), inside the same single batch.
 - **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
   since the service read it, the insert violates `catalog_versions.version` and D1 rolls the WHOLE batch back, so the loser writes nothing: no product, no
   formulation, no row, no version. The repository then sees that the live version moved past `baseVersion` and reports it, and the service answers
@@ -2741,7 +2801,7 @@ Products, Availability, Ingredients and Countries tabs the team edits in a sprea
   source, or a rule approved, drafted or retired) is a new version, and each product is analysed again on its next scan.
 - **Size, and what Cloudflare documents.**
   - Every table is written with **multi-row** statements, chunked so none binds more than D1's 100 parameters (`STATEMENT_ROWS` in the repository: for
-    example 3 Products rows, 12 formulations, 15 availability rows or 6 rules to a statement, and 90 codes to a retire). A test reads the parameters off
+    example 3 Products rows, 12 formulations, 15 availability rows, 6 rules, 11 claim words or 9 tapers to a statement, and 90 codes to a retire). A test reads the parameters off
     the built statements. The batch is still ONE `db.batch`, with the version insert first.
   - A 500-product, 1500-availability, 200-rule workbook applied against local D1 as **409 statements** (it was about 1,200 with a statement for each row)
     in about 0.66 s for the whole request (0.46 s as a dry run); a one-cell change is 2 statements. This is local, a simulation.
@@ -2756,7 +2816,7 @@ Products, Availability, Ingredients and Countries tabs the team edits in a sprea
   - **Remote behaviour has not been confirmed.** Nothing above was run against a remote D1. Before relying on it, apply a catalog-sized upload on
     staging (a few hundred products with availability) and check that it commits and how long it takes; the 900 limit is a guess at the safe side, to be
     set from that run.
-- **Logs** carry the catalog version, the per-tab counts and the outcome (`catalog-import-applied`, `-dry-run`, `-invalid`, `-stale`, `-lost-race`, `-too-large`, and `catalog-archive-failed`, which carries the version only), never a
+- **Logs** carry the catalog version, the per-tab counts and the outcome (`catalog-import-applied`, `-dry-run`, `-invalid`, `-stale`, `-lost-race`, `-too-large`, `-contract-mismatch`, `-unqualified-approver` (a count only), and `catalog-archive-failed`, which carries the version only), never a
   brand, a name, an ingredient, a rule or a place of sale.
 
 ### OTP over channels (email now, WhatsApp later)

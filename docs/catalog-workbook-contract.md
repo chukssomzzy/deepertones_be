@@ -1,13 +1,13 @@
 # Catalog workbook contract
 
-Version 1.0.0. Fingerprint `07117987b8cd6148aaa44263bdeb52ee7a081f14b847151b537acbb6687eb723`.
+Version 2.0.0. Fingerprint `4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
 
 ## How the workbook is read
 
-The workbook has four tabs: Products, Availability, Ingredients and Countries. The first row of a tab is its header: one column name for each
+The workbook has six tabs: Products, Availability, Ingredients, Countries, Claim words and Tapers. The first row of a tab is its header: one column name for each
 column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not
 listed here is a problem. A tab with no rows is fine, but it still needs its header row.
 
@@ -88,6 +88,8 @@ The ingredient rules: a fact about an ingredient that every analysis of a produc
 | `statement` | Required | What is said about the ingredient, in plain words a person can read. No links and no markup. | Text. Up to 600 characters. No links or markup. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` |
 | `source_url` | Optional | A link to the regulation or listing behind the statement. Leave it empty for a commonly cited caution that no regulation lists. | An https link. | `NOT_HTTPS_URL` |
 | `helps` | Optional | The skin concerns the ingredient helps with, separated by ;. Optional. | One or more of, separated by semicolons: `hd_acne`, `hd_pore`, `hd_oiliness`, `hd_age_spot`, `hd_redness`, `hd_radiance`, `hd_texture`, `hd_dark_circle`, `hd_moisture`. | `NOT_IN_VOCABULARY` |
+| `group` | Optional | What kind of ingredient this is, where it matters for a shelf: for example retinoid or steroid. Empty for most rules. It does not change how the rule is matched. | One of: `mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`. | `NOT_IN_VOCABULARY` |
+| `clashes_with` | Optional | The groups that should not be used together with this rule's group, separated by ;. The relation goes both ways: if retinoid lists exfoliating-acid, a rule of the exfoliating-acid group lists retinoid. Needs a group on the rule. | One or more of, separated by semicolons: `mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`. | `NOT_IN_VOCABULARY` |
 | `status` | Required | draft: still being worked on, and applies to nothing. approved: in force. retired: no longer in force; the row stays so its code is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `approved_by` | Required when approved | Who approved this rule. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
 | `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
@@ -98,6 +100,9 @@ Checks across cells and rows:
 
 - `DUPLICATE_RULE`: One rule for each ingredient name or alias and kind among the rules that are not retired; a draft counts.
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+- `CLASH_WITHOUT_GROUP`: A rule that lists clashes_with has a group.
+- `SELF_CLASH`: A rule does not list its own group in clashes_with.
+- `CLASH_NOT_SYMMETRIC`: If a rule's group lists another group, a rule of that group lists the first back. Retired rules are not counted; a draft is.
 
 ### Countries
 
@@ -114,6 +119,48 @@ The countries the catalog serves, and where each one's price bands end. A price 
 Checks across cells and rows:
 
 - `LOW_NOT_BELOW_MID`: low_max is below mid_max.
+
+### Claim words
+
+Phrases that say a product is sold for lightening or bleaching. A product whose brand, name or variant holds an approved phrase is flagged by the shelf verdict. "Brightening" and "glow" are never claim words. A claim word is retired, never deleted.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `code` | Required | Our own short code for the claim word, such as CLM-WHITENING. It never changes once the word is in the workbook. | Capital letters, digits and hyphens, 2 to 40 characters, starting with a letter or digit. Unique in the tab. | `REQUIRED` `BAD_CODE` `DUPLICATE_CODE` |
+| `phrase` | Required | The words, in lower case, as they appear in a product name: for example "whitening". | Text. Up to 60 characters. No links or markup. Lower case only. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `NOT_LOWER_CASE` |
+| `claim` | Required | What the phrase claims. Only lightening, for now. | One of: `lightening`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `status` | Required | approved: in force. retired: no longer in force; the row stays so its code is never reused. A claim word has no draft: leave a word you are unsure of out of the workbook. | One of: `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this claim word. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `DUPLICATE_PHRASE`: One claim word for each phrase among the words that are not retired.
+- `NOT_A_LIGHTENING_CLAIM`: No phrase, retired or not, holds "brightening" or "glow" as a whole word (any case).
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
+### Tapers
+
+Step-down templates: how a person stops a steroid or a lightening product without the flare of stopping at once. A template is shown to people, so a qualified person approves it; in production the server refuses an approved template whose approver is not on its list. A template is retired, never deleted, so a past routine can still say which plan it used.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `code` | Required | Our own short code for the template, such as TPR-STEROID-1. It never changes once the template is in the workbook. | Capital letters, digits and hyphens, 2 to 40 characters, starting with a letter or digit. Unique in the tab. | `REQUIRED` `BAD_CODE` `DUPLICATE_CODE` |
+| `kind` | Required | The kind of product the template is for. | One of: `steroid`, `lightening-agent`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `schedule` | Required | The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week 52. The frequency never goes up, and the last step is stop. For example: 1-2: alternate-days; 3-4: weekly; 5: stop | Steps separated by semicolons, each `<weeks>: <frequency>`, the frequency one of: `am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `stop`. Up to 300 characters. | `REQUIRED` `TOO_LONG` `BAD_SCHEDULE` `SCHEDULE_NOT_CONTIGUOUS` `SCHEDULE_MISSING_STOP` `SCHEDULE_STOP_NOT_LAST` `SCHEDULE_FREQUENCY_INCREASES` |
+| `what_to_expect` | Required | What a person should expect while stepping down, in plain words: for example that a flare after a step is expected and passes. | Text. Up to 400 characters. No links or markup. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` |
+| `see_a_professional_if` | Required | When to stop and see a professional, in plain words. | Text. Up to 400 characters. No links or markup. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its code is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this template. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
 ## Accepted values
 
@@ -194,13 +241,51 @@ Used by: `Products.own_cautions`, `Ingredients.kind`
 
 `draft`, `approved`, `retired`
 
-Used by: `Products.status`, `Ingredients.status`
+Used by: `Products.status`, `Ingredients.status`, `Tapers.status`
 
 ### Country statuses
 
 `active`, `retired`
 
 Used by: `Countries.status`
+
+### Claim word statuses
+
+`approved`, `retired`
+
+Used by: `Claim words.status`
+
+### Claims
+
+`lightening`
+
+What a claim word says about a product. For now there is one: a product whose brand, name or variant holds the phrase is sold for lightening.
+
+Used by: `Claim words.claim`
+
+### Ingredient groups
+
+`mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`
+
+What an ingredient is, for the rules that look across a shelf, as opposed to what it does. Most ingredient rules have no group. Mercury is stopped at once; steroid and lightening-agent are stopped with a step-down plan.
+
+Used by: `Ingredients.group`, `Ingredients.clashes_with`
+
+### Taper kinds
+
+`steroid`, `lightening-agent`
+
+The groups that are stopped with a step-down plan and not at once. Mercury is not on the list: it is stopped at once.
+
+Used by: `Tapers.kind`
+
+### Schedule frequencies
+
+`am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `stop`
+
+The frequencies of a step-down schedule: the usual frequencies, and stop. A schedule goes only down the ladder, strongest first: am-pm, then am or pm (the same strength), then alternate-days, then weekly, then as-needed, then stop. It never goes back up, and it ends with stop.
+
+Used by: `Tapers.schedule`
 
 ## Problem codes
 
@@ -234,3 +319,15 @@ Used by: `Countries.status`
 | `DUPLICATE_IDENTITY` | Two products are the same product: their brand, name, variant and form read the same once case, accents, punctuation and pack sizes are ignored. Keep one row, or tell them apart with the variant or form. |
 | `DUPLICATE_AVAILABILITY` | A product has two rows for the same country. Keep one row with the price range for that country. |
 | `DUPLICATE_RULE` | Two ingredient rules of the same kind name the same ingredient, by name or by alias, in lower case. Draft rules count; retired rules do not. Keep one rule for each ingredient and kind. |
+| `CLASH_NOT_SYMMETRIC` | A rule says its group clashes with another group, but no rule of that group says the same back (or the other group has no rule at all). Both sides are reported. Retired rules neither ask for an answer nor give one; draft rules count. |
+| `CLASH_WITHOUT_GROUP` | A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with. |
+| `SELF_CLASH` | A rule lists its own group in clashes_with. A group does not clash with itself. |
+| `DUPLICATE_PHRASE` | Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one. |
+| `NOT_A_LIGHTENING_CLAIM` | The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out. |
+| `NOT_LOWER_CASE` | The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case. |
+| `BAD_SCHEDULE` | The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop. A schedule is at most 52 weeks long. |
+| `SCHEDULE_NOT_CONTIGUOUS` | The weeks of the schedule do not run on from week 1 one step after another: it starts after week 1, or leaves a gap, or two steps share a week, or the steps are out of order. |
+| `SCHEDULE_MISSING_STOP` | The schedule never says stop. A step-down ends with a step whose frequency is stop. |
+| `SCHEDULE_STOP_NOT_LAST` | A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step. |
+| `SCHEDULE_FREQUENCY_INCREASES` | A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop. |
+| `UNQUALIFIED_APPROVER` | In production only: a Tapers row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file. |

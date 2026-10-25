@@ -3,12 +3,14 @@ import { REFERENCE, REFERENCE_VERSION } from '../../src/modules/catalog/catalog.
 import {
   APPROVED_ON,
   BRITAIN,
+  CONTRACT_VERSION,
   EMPTY_DIFF,
   HEADERS,
   NIGERIA,
   TABS,
   applied,
   availabilityRow,
+  claimWordRow,
   dataOf,
   exportLive,
   exportRaw,
@@ -18,6 +20,7 @@ import {
   ruleRow,
   rulesVersion,
   sorted,
+  taperRow,
   upload,
   withCountry,
   type ImportResult,
@@ -39,11 +42,12 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(Object.keys(body.data.workbook as object).sort()).toEqual([...TABS].sort())
   })
 
-  it('is catalog version 1 under contract version 1.0.0, the version the migration seeded', async () => {
+  it('is catalog version 1, served under the current contract version 2.0.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
     const live = await exportLive()
 
     expect(live.catalogVersion).toBe(1)
-    expect(live.contractVersion).toBe('1.0.0')
+    expect(live.contractVersion).toBe(CONTRACT_VERSION)
+    expect(CONTRACT_VERSION).toBe('2.0.0')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 
@@ -59,6 +63,8 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(workbook.products.rows).toEqual([])
     expect(workbook.availability.rows).toEqual([])
     expect(workbook.countries.rows).toEqual([])
+    expect(workbook.claimWords.rows).toEqual([])
+    expect(workbook.tapers.rows).toEqual([])
     expect(workbook.ingredients.rows).toHaveLength(REFERENCE.length)
     for (const entry of REFERENCE) {
       const rows = workbook.ingredients.rows.filter((row) => row.name === entry.name && row.kind === entry.kind)
@@ -72,6 +78,8 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
         approved_on: '2026-10-21',
         strength_limit: null,
         helps: null,
+        group: null,
+        clashes_with: null,
         audited_by: null,
         audited_on: null,
       })
@@ -117,6 +125,24 @@ describe('GET /api/v1/admin/catalog/export after an upload', () => {
     expect(rowWith(live.workbook.availability, 'product_code', product.code)).toEqual(availability)
     expect(rowWith(live.workbook.ingredients, 'code', rule.code)).toEqual(rule)
     expect(rowWith(live.workbook.countries, 'code', 'NG')).toEqual(NIGERIA)
+  })
+
+  it('gives back a claim word, a taper and a rule\'s group and clashes_with as they were uploaded, the schedule written one way whatever way it was typed', async () => {
+    const claim = claimWordRow({ audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const taper = taperRow({ kind: 'lightening-agent', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const [one, other] = [ruleRow({ group: 'retinoid', clashes_with: 'exfoliating-acid' }), ruleRow({ group: 'exfoliating-acid', clashes_with: 'retinoid' })]
+
+    await applied((workbook) => {
+      workbook.claimWords.rows.push({ ...claim })
+      workbook.tapers.rows.push({ ...taper, schedule: '1-2:alternate-days;3-4:  weekly ;5:stop' })
+      workbook.ingredients.rows.push({ ...one }, { ...other })
+    })
+
+    const live = await exportLive()
+    expect(rowWith(live.workbook.claimWords, 'code', claim.code)).toEqual(claim)
+    expect(rowWith(live.workbook.tapers, 'code', taper.code)).toEqual({ ...taper, schedule: '1-2: alternate-days; 3-4: weekly; 5: stop' })
+    expect(rowWith(live.workbook.ingredients, 'code', one.code)).toEqual(one)
+    expect(rowWith(live.workbook.ingredients, 'code', other.code)).toEqual(other)
   })
 
   it('joins lists with "; " however the upload separated them, and the dates stay YYYY-MM-DD', async () => {

@@ -30,8 +30,10 @@ type Raw = RawTab['rows'][number]
 const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
+  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 const tab = (name: Tab, rows: Raw[]): RawTab => ({ headers: [...HEADERS[name]], rows })
@@ -102,6 +104,8 @@ const RULE: Raw = {
   statement: 'Can make skin burn more easily in the sun, so sunscreen matters while using it.',
   source_url: null,
   helps: null,
+  group: null,
+  clashes_with: null,
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
   approved_on: APPROVED_ON,
@@ -115,6 +119,8 @@ const workbook = (rows: Rows = {}): RawWorkbook => ({
   availability: tab('availability', rows.availability ?? []),
   ingredients: tab('ingredients', rows.ingredients ?? [RULE]),
   countries: tab('countries', rows.countries ?? [NG, GB, GH_RETIRED]),
+  claimWords: tab('claimWords', rows.claimWords ?? []),
+  tapers: tab('tapers', rows.tapers ?? []),
 })
 
 // Where the fakes say their values came from.
@@ -389,7 +395,7 @@ describe('draftWorkbook: rows that are not drafts', () => {
 
     expect(outcome.workbook.ingredients).toEqual(input.ingredients)
     expect(outcome.workbook.countries).toEqual(input.countries)
-    for (const name of ['products', 'availability', 'ingredients', 'countries'] as const) expect(outcome.workbook[name].headers).toEqual(input[name].headers)
+    for (const name of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers'] as const) expect(outcome.workbook[name].headers).toEqual(input[name].headers)
   })
 
   it('skips a draft row that has no brand, name or category, asking about nothing, and says so', async () => {

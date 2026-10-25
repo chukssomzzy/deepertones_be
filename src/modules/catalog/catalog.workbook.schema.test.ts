@@ -29,8 +29,10 @@ type Tab = keyof RawWorkbook
 const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
+  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 /** A tab with its full header row unless other headers are given. A row need not hold every header: a key left out is an empty cell. */
@@ -74,6 +76,34 @@ const ingredient = (over: Raw = {}): Raw => ({
   statement: 'Can make skin burn more easily in the sun, so sunscreen matters while using it.',
   source_url: null,
   helps: null,
+  group: null,
+  clashes_with: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+const claimWord = (over: Raw = {}): Raw => ({
+  code: 'CLM-WHITENING',
+  phrase: 'whitening',
+  claim: 'lightening',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+const taper = (over: Raw = {}): Raw => ({
+  code: 'TPR-STEROID-1',
+  kind: 'steroid',
+  schedule: '1-2: alternate-days; 3-4: weekly; 5: stop',
+  what_to_expect: 'Skin may flare or look redder for a few days after each step down. This is expected and passes.',
+  see_a_professional_if: 'The redness spreads, the skin weeps or blisters, or you feel unwell.',
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
   approved_on: APPROVED_ON,
@@ -90,6 +120,8 @@ const workbook = (over: Partial<Record<Tab, Raw[]>> = {}): RawWorkbook => ({
   availability: tab('availability', over.availability ?? [availability()]),
   ingredients: tab('ingredients', over.ingredients ?? [ingredient()]),
   countries: tab('countries', over.countries ?? [country()]),
+  claimWords: tab('claimWords', over.claimWords ?? [claimWord()]),
+  tapers: tab('tapers', over.tapers ?? [taper()]),
 })
 
 // A tab under test sits in a workbook where nothing else can add a problem: a product row mutated on its own has no availability to point
@@ -98,6 +130,8 @@ const inProducts = (...products: Raw[]): RawWorkbook => workbook({ products, ava
 const inAvailability = (...rows: Raw[]): RawWorkbook => workbook({ availability: rows, ingredients: [], countries: [country(), country({ code: 'GH', currency: 'GHS' })] })
 const inIngredients = (...ingredients: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients, countries: [] })
 const inCountries = (...countries: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries })
+const inClaimWords = (...claimWords: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords })
+const inTapers = (...tapers: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], tapers })
 
 type Problem = { tab: Tab; row: number; column: string; rule: string }
 const problem = (tab: Tab, row: number, column: string, rule: string): Problem => ({ tab, row, column, rule })
@@ -120,8 +154,8 @@ const parsed = (raw: RawWorkbook) => {
 const text = (length: number, char = 'a') => char.repeat(length)
 
 describe('the contract', () => {
-  it('is version 1.0.0', () => {
-    expect(CONTRACT_VERSION).toBe('1.0.0')
+  it('is version 2.0.0: the contract that adds the Claim words and Tapers tabs and the Ingredients group and clashes_with columns', () => {
+    expect(CONTRACT_VERSION).toBe('2.0.0')
   })
 
   it('is plain data: it survives JSON unchanged, so nothing in it (a pattern, a limit) can be left out of the fingerprint', () => {
@@ -144,17 +178,33 @@ describe('the contract', () => {
     for (const value of values) expect(written, value).toContain(`"${value}"`)
   })
 
-  it('lists the four tabs, by the names a RawWorkbook uses', () => {
+  it('lists the six tabs, by the names a RawWorkbook uses', () => {
     const written = JSON.stringify(CONTRACT)
 
-    for (const tab of ['products', 'availability', 'ingredients', 'countries']) expect(written, tab).toContain(`"${tab}"`)
+    for (const tab of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers']) expect(written, tab).toContain(`"${tab}"`)
+  })
+
+  it('titles the new tabs "Claim words" and "Tapers", the names they have in the workbook file', () => {
+    expect(CONTRACT.tabs.map((tab) => [tab.key, tab.title])).toEqual([
+      ['products', 'Products'],
+      ['availability', 'Availability'],
+      ['ingredients', 'Ingredients'],
+      ['countries', 'Countries'],
+      ['claimWords', 'Claim words'],
+      ['tapers', 'Tapers'],
+    ])
+  })
+
+  it('lists the columns of every tab in the order the workbook has them, the new ones included', () => {
+    for (const tab of CONTRACT.tabs) expect(tab.columns.map((column) => column.name), tab.key).toEqual([...HEADERS[tab.key]])
   })
 })
 
-// The fingerprint of the contract as released at CONTRACT_VERSION 1.0.0, written out. A contract change that does not bump the version (and,
+// The fingerprint of the contract as released at CONTRACT_VERSION 2.0.0, written out. A contract change that does not bump the version (and,
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
-const RELEASED = { version: '1.0.0', fingerprint: '07117987b8cd6148aaa44263bdeb52ee7a081f14b847151b537acbb6687eb723' }
+// The fingerprint of contract 2.0.0 (`await contractFingerprint()`, pinned at release as this file describes).
+const RELEASED = { version: '2.0.0', fingerprint: '4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -225,7 +275,13 @@ describe('validateWorkbook: a valid workbook', () => {
           }),
         ],
         availability: [availability()],
-        ingredients: [ingredient({ aliases: 'vitamin a alcohol; retinol alcohol', strength_limit: '0.3% in leave-on', source_url: 'https://example.com/retinol', helps: 'hd_texture;hd_age_spot' })],
+        ingredients: [
+          ingredient({ aliases: 'vitamin a alcohol; retinol alcohol', strength_limit: '0.3% in leave-on', source_url: 'https://example.com/retinol', helps: 'hd_texture;hd_age_spot', group: 'retinoid', clashes_with: 'exfoliating-acid; benzoyl-peroxide' }),
+          ingredient({ code: 'ING-GLYCOLIC-ACID-IRRITATION', name: 'glycolic acid', aliases: null, kind: 'irritation', group: 'exfoliating-acid', clashes_with: 'retinoid' }),
+          ingredient({ code: 'ING-BENZOYL-PEROXIDE-IRRITATION', name: 'benzoyl peroxide', aliases: null, kind: 'irritation', group: 'benzoyl-peroxide', clashes_with: 'retinoid' }),
+        ],
+        claimWords: [claimWord({ audited_by: 'Nneka Audit', audited_on: AUDITED_ON })],
+        tapers: [taper({ audited_by: 'Nneka Audit', audited_on: AUDITED_ON })],
       }),
     )
 
@@ -265,14 +321,49 @@ describe('validateWorkbook: a valid workbook', () => {
         statement: 'Can make skin burn more easily in the sun, so sunscreen matters while using it.',
         sourceUrl: 'https://example.com/retinol',
         helps: ['hd_texture', 'hd_age_spot'],
+        group: 'retinoid',
+        clashesWith: ['exfoliating-acid', 'benzoyl-peroxide'],
         status: 'approved',
         approvedBy: 'Dr A. Reviewer',
         approvedOn: utcMidnight(APPROVED_ON),
         auditedBy: null,
         auditedOn: null,
       },
+      expect.objectContaining({ code: 'ING-GLYCOLIC-ACID-IRRITATION', group: 'exfoliating-acid', clashesWith: ['retinoid'] }),
+      expect.objectContaining({ code: 'ING-BENZOYL-PEROXIDE-IRRITATION', group: 'benzoyl-peroxide', clashesWith: ['retinoid'] }),
     ])
     expect(result.countries).toEqual([{ code: 'NG', currency: 'NGN', lowMax: 5000, midMax: 15000, status: 'active' }])
+    expect(result.claimWords).toEqual([
+      {
+        code: 'CLM-WHITENING',
+        phrase: 'whitening',
+        claim: 'lightening',
+        status: 'approved',
+        approvedBy: 'Dr A. Reviewer',
+        approvedOn: utcMidnight(APPROVED_ON),
+        auditedBy: 'Nneka Audit',
+        auditedOn: utcMidnight(AUDITED_ON),
+      },
+    ])
+    // The schedule is read into its steps: `N` is a step of one week (fromWeek = toWeek), `N-M` a step of several.
+    expect(result.tapers).toEqual([
+      {
+        code: 'TPR-STEROID-1',
+        kind: 'steroid',
+        schedule: [
+          { fromWeek: 1, toWeek: 2, frequency: 'alternate-days' },
+          { fromWeek: 3, toWeek: 4, frequency: 'weekly' },
+          { fromWeek: 5, toWeek: 5, frequency: 'stop' },
+        ],
+        whatToExpect: 'Skin may flare or look redder for a few days after each step down. This is expected and passes.',
+        seeAProfessionalIf: 'The redness spreads, the skin weeps or blisters, or you feel unwell.',
+        status: 'approved',
+        approvedBy: 'Dr A. Reviewer',
+        approvedOn: utcMidnight(APPROVED_ON),
+        auditedBy: 'Nneka Audit',
+        auditedOn: utcMidnight(AUDITED_ON),
+      },
+    ])
   })
 
   it('reads an optional cell left empty as null, or as an empty list for a list', () => {
@@ -280,13 +371,13 @@ describe('validateWorkbook: a valid workbook', () => {
 
     expect(result.products[0]).toMatchObject({ variant: null, form: null, ownCautions: [], evidenceUrls: [], auditedBy: null, auditedOn: null, draftCells: [] })
     expect(result.availability[0]).toMatchObject({ whereSold: null })
-    expect(result.ingredients[0]).toMatchObject({ strengthLimit: null, sourceUrl: null, helps: [] })
+    expect(result.ingredients[0]).toMatchObject({ strengthLimit: null, sourceUrl: null, helps: [], group: null, clashesWith: [] })
   })
 
   it('is ok with every tab empty', () => {
-    expect(validateWorkbook(workbook({ products: [], availability: [], ingredients: [], countries: [] }))).toEqual({
+    expect(validateWorkbook(workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] }))).toEqual({
       ok: true,
-      workbook: { products: [], availability: [], ingredients: [], countries: [] },
+      workbook: { products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] },
     })
   })
 
@@ -357,7 +448,7 @@ describe('validateWorkbook: cells', () => {
 })
 
 describe('validateWorkbook: columns', () => {
-  const TABS = ['products', 'availability', 'ingredients', 'countries'] as const
+  const TABS = ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers'] as const
   /** The one-valid-row workbook with `name` given other headers (and, when asked, other rows). */
   const withTab = (name: Tab, headers: readonly string[], rows: Raw[] = workbook()[name].rows): RawWorkbook => ({ ...workbook(), [name]: tab(name, rows, headers) })
   const without = (name: Tab, column: string) => HEADERS[name].filter((header) => header !== column)
@@ -396,6 +487,10 @@ describe('validateWorkbook: columns', () => {
     ['availability', 'price_min'],
     ['ingredients', 'statement'],
     ['countries', 'currency'],
+    ['ingredients', 'group'],
+    ['ingredients', 'clashes_with'],
+    ['claimWords', 'phrase'],
+    ['tapers', 'schedule'],
   ] as const)('reports %s without a %s header once, as MISSING_COLUMN on the header row, and nothing else about that column', (name, column) => {
     expectProblems(withTab(name, without(name, column), omitting(workbook()[name].rows, column)), [problem(name, 1, column, 'MISSING_COLUMN')])
   })
@@ -415,7 +510,7 @@ describe('validateWorkbook: columns', () => {
   })
 
   it.each(TABS)('checks the header row of %s even when the tab has no rows', (name) => {
-    const empty = workbook({ products: [], availability: [], ingredients: [], countries: [] })
+    const empty = workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] })
     const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...empty, [name]: tab(name, [], headers) })
 
     expectValid(emptyWith(HEADERS[name]))
@@ -1041,6 +1136,426 @@ describe('validateWorkbook: Countries', () => {
   })
 })
 
+// --- the contract bump: Ingredients group and clashes_with, the Claim words tab, the Tapers tab -----------------------------------------------------
+// Where a problem is reported, where the spec leaves it open (pinned here):
+//   - clashes_with: the row that lists a group is the one reported, in `clashes_with`. A relation that is not symmetric is reported on the row that
+//     lists the group nobody lists back, AND on every row of the listed group, in `group`, so both sides are seen (a listed group with no row at all
+//     is reported on the listing row only). A retired rule applies to nothing: it neither asks for a reciprocal nor gives one.
+//   - a phrase that two rows share (among rows that are not retired): every such row, in `phrase`.
+//   - a schedule: always the `schedule` cell, one rule per shape, and a schedule with one fault gives exactly that fault.
+
+describe('validateWorkbook: Ingredients group and clashes_with', () => {
+  // The relation the lists carry: a retinoid and an exfoliating acid clash, and each says so.
+  const retinoid = (over: Raw = {}) => ingredient({ code: 'ING-RETINOL-SUN-SENSITIVITY', name: 'retinol', aliases: null, group: 'retinoid', clashes_with: 'exfoliating-acid', ...over })
+  const acid = (over: Raw = {}) => ingredient({ code: 'ING-GLYCOLIC-IRRITATION', name: 'glycolic acid', aliases: null, kind: 'irritation', group: 'exfoliating-acid', clashes_with: 'retinoid', ...over })
+
+  it.each(['mercury', 'steroid', 'lightening-agent', 'retinoid', 'exfoliating-acid', 'benzoyl-peroxide'])('accepts %s as a group', (group) => {
+    expectValid(inIngredients(ingredient({ group })))
+  })
+
+  it('leaves group and clashes_with empty on a rule that has neither, which is most rules', () => {
+    expectValid(inIngredients(ingredient({ group: null, clashes_with: null })))
+  })
+
+  it('refuses a group that is not one of the six, with the spelling and case that must match exactly', () => {
+    expectProblems(inIngredients(ingredient({ group: 'Retinoid' }), ingredient({ code: 'ING-B', name: 'b', aliases: null, group: 'vitamin-c' })), [
+      problem('ingredients', 2, 'group', 'NOT_IN_VOCABULARY'),
+      problem('ingredients', 3, 'group', 'NOT_IN_VOCABULARY'),
+    ])
+  })
+
+  it('refuses a clashes_with item that is not a group, whether it is the only item or one of several', () => {
+    expectProblems(inIngredients(ingredient({ group: 'retinoid', clashes_with: 'vitamin-c' })), [problem('ingredients', 2, 'clashes_with', 'NOT_IN_VOCABULARY')])
+    expectProblems(inIngredients(retinoid({ clashes_with: 'exfoliating-acid; vitamin-c' }), acid()), [problem('ingredients', 2, 'clashes_with', 'NOT_IN_VOCABULARY')])
+  })
+
+  it('accepts a symmetric relation: every group that is listed has a row that lists the first group back', () => {
+    expectValid(inIngredients(retinoid(), acid()))
+  })
+
+  it('accepts a relation where one side lists several groups and each of them lists the first back', () => {
+    expectValid(
+      inIngredients(
+        retinoid({ clashes_with: 'exfoliating-acid; benzoyl-peroxide' }),
+        acid(),
+        ingredient({ code: 'ING-BPO-IRRITATION', name: 'benzoyl peroxide', aliases: null, kind: 'irritation', group: 'benzoyl-peroxide', clashes_with: 'retinoid' }),
+      ),
+    )
+  })
+
+  it('accepts the reciprocal on any row of the listed group, not only the first', () => {
+    expectValid(inIngredients(retinoid(), acid({ code: 'ING-LACTIC-IRRITATION', name: 'lactic acid', clashes_with: null }), acid({ code: 'ING-MANDELIC-IRRITATION', name: 'mandelic acid' })))
+  })
+
+  it('refuses a relation that is not symmetric, naming both sides: the row that lists the group and the rows of the group that does not list it back', () => {
+    expectProblems(inIngredients(retinoid(), acid({ clashes_with: null })), [problem('ingredients', 2, 'clashes_with', 'CLASH_NOT_SYMMETRIC'), problem('ingredients', 3, 'group', 'CLASH_NOT_SYMMETRIC')])
+  })
+
+  it('refuses a listed group that no row has at all, on the row that lists it', () => {
+    expectProblems(inIngredients(retinoid()), [problem('ingredients', 2, 'clashes_with', 'CLASH_NOT_SYMMETRIC')])
+  })
+
+  it('does not count a retired rule as the reciprocal: it applies to nothing', () => {
+    expectProblems(inIngredients(retinoid(), acid({ status: 'retired' })), [problem('ingredients', 2, 'clashes_with', 'CLASH_NOT_SYMMETRIC')])
+  })
+
+  it('does not ask a retired rule for a reciprocal either', () => {
+    expectValid(inIngredients(retinoid({ status: 'retired' })))
+  })
+
+  it('counts a draft, as it counts a draft for a duplicate: it is waiting to become a rule', () => {
+    expectValid(inIngredients(retinoid(), acid({ status: 'draft', approved_by: null, approved_on: null })))
+  })
+
+  it('refuses a rule that lists clashes_with but has no group, since the relation is between groups', () => {
+    expectProblems(inIngredients(ingredient({ group: null, clashes_with: 'retinoid' }), ingredient({ code: 'ING-GLYCOLIC-X', name: 'glycolic acid', aliases: null, group: 'retinoid', clashes_with: null })), [
+      problem('ingredients', 2, 'clashes_with', 'CLASH_WITHOUT_GROUP'),
+    ])
+  })
+
+  it('refuses a group that clashes with itself', () => {
+    expectProblems(inIngredients(retinoid({ clashes_with: 'retinoid' })), [problem('ingredients', 2, 'clashes_with', 'SELF_CLASH')])
+  })
+
+  it('refuses a self clash even when other groups are listed with it, and reports only that item', () => {
+    expectProblems(inIngredients(retinoid({ clashes_with: 'exfoliating-acid; retinoid' }), acid()), [problem('ingredients', 2, 'clashes_with', 'SELF_CLASH')])
+  })
+
+  it('splits clashes_with on ";" like every list, trimming each item and dropping empty ones', () => {
+    const result = parsed(inIngredients(retinoid({ clashes_with: ' exfoliating-acid ;; ' }), acid()))
+
+    expect(result.ingredients[0]).toMatchObject({ group: 'retinoid', clashesWith: ['exfoliating-acid'] })
+  })
+})
+
+describe('validateWorkbook: Claim words', () => {
+  it('reads a claim word into code, phrase, claim, status and sign-off', () => {
+    expect(parsed(inClaimWords(claimWord({ phrase: 'skin fairness', audited_by: 'Nneka Audit', audited_on: AUDITED_ON }))).claimWords).toEqual([
+      {
+        code: 'CLM-WHITENING',
+        phrase: 'skin fairness',
+        claim: 'lightening',
+        status: 'approved',
+        approvedBy: 'Dr A. Reviewer',
+        approvedOn: utcMidnight(APPROVED_ON),
+        auditedBy: 'Nneka Audit',
+        auditedOn: utcMidnight(AUDITED_ON),
+      },
+    ])
+  })
+
+  describe('code', () => {
+    it.each(['CLM-WHITENING', 'CLM-A1', 'C1'])('accepts %s', (code) => {
+      expectValid(inClaimWords(claimWord({ code })))
+    })
+
+    it.each(['clm-whitening', 'C', '-CLM', 'CLM WHITENING', `C${text(40)}`.toUpperCase()])('refuses %j as BAD_CODE', (code) => {
+      expectProblems(inClaimWords(claimWord({ code })), [problem('claimWords', 2, 'code', 'BAD_CODE')])
+    })
+
+    it('is required and unique: both rows that share one are reported', () => {
+      expectProblems(inClaimWords(claimWord({ code: null })), [problem('claimWords', 2, 'code', 'REQUIRED')])
+      expectProblems(inClaimWords(claimWord(), claimWord({ phrase: 'bleaching' })), [problem('claimWords', 2, 'code', 'DUPLICATE_CODE'), problem('claimWords', 3, 'code', 'DUPLICATE_CODE')])
+    })
+
+    it('is its own list: a product, a rule and a taper may have a code a claim word has', () => {
+      expectValid(workbook({ products: [product({ code: 'CLM-WHITENING' })], availability: [], ingredients: [ingredient({ code: 'CLM-WHITENING' })], countries: [], tapers: [taper({ code: 'CLM-WHITENING' })] }))
+    })
+  })
+
+  describe('phrase', () => {
+    it('is plain lower-case words of at most 60 characters: 60 is fine, 61 is TOO_LONG', () => {
+      expectValid(inClaimWords(claimWord({ phrase: text(60) })))
+      expectProblems(inClaimWords(claimWord({ phrase: text(61) })), [problem('claimWords', 2, 'phrase', 'TOO_LONG')])
+    })
+
+    it('is required', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: null })), [problem('claimWords', 2, 'phrase', 'REQUIRED')])
+    })
+
+    it('is written in lower case: a capital is refused as NOT_LOWER_CASE, not silently lowered', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'Whitening' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE')])
+      expectProblems(inClaimWords(claimWord({ phrase: 'skin Toning' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE')])
+    })
+
+    it.each(['brightening', 'glow', 'instant glow', 'skin brightening serum', 'glow-boost'])('is never a claim word to say %j: it is NOT_A_LIGHTENING_CLAIM', (phrase) => {
+      expectProblems(inClaimWords(claimWord({ phrase })), [problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it('refuses brightening and glow in any case, and says NOT_LOWER_CASE too when it has a capital', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'Brightening' })), [problem('claimWords', 2, 'phrase', 'NOT_LOWER_CASE'), problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it('refuses them in a retired row too, so the workbook never holds such a word', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'glow', status: 'retired' })), [problem('claimWords', 2, 'phrase', 'NOT_A_LIGHTENING_CLAIM')])
+    })
+
+    it.each(['glowing', 'afterglow', 'brightenings', 'skin lightening', 'whitening'])('does not refuse %j, which holds neither word as a whole word', (phrase) => {
+      expectValid(inClaimWords(claimWord({ phrase })))
+    })
+
+    it('keeps digits, hyphens and spaces, which are plain', () => {
+      expectValid(inClaimWords(claimWord({ phrase: '2-in-1 skin toning' })))
+    })
+
+    it('has no link and no markup', () => {
+      expectProblems(inClaimWords(claimWord({ phrase: 'https://x.example.com' })), [problem('claimWords', 2, 'phrase', 'HAS_LINK_OR_MARKUP')])
+      expectProblems(inClaimWords(claimWord({ phrase: '<b>whitening</b>' })), [problem('claimWords', 2, 'phrase', 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('is unique among the rows that are not retired: both rows are reported, in the phrase column', () => {
+      expectProblems(inClaimWords(claimWord(), claimWord({ code: 'CLM-WHITENING-2' })), [problem('claimWords', 2, 'phrase', 'DUPLICATE_PHRASE'), problem('claimWords', 3, 'phrase', 'DUPLICATE_PHRASE')])
+    })
+
+    it('may be the phrase of a retired row, so a retired word can be replaced by a new one for the same phrase', () => {
+      expectValid(inClaimWords(claimWord({ status: 'retired' }), claimWord({ code: 'CLM-WHITENING-2' })))
+    })
+
+    it('may be shared by two retired rows', () => {
+      expectValid(inClaimWords(claimWord({ status: 'retired' }), claimWord({ code: 'CLM-WHITENING-2', status: 'retired' })))
+    })
+  })
+
+  describe('claim', () => {
+    it('is lightening, the only claim there is', () => {
+      expectValid(inClaimWords(claimWord({ claim: 'lightening' })))
+    })
+
+    it.each(['brightening', 'Lightening', 'glow'])('refuses %s', (claim) => {
+      expectProblems(inClaimWords(claimWord({ claim })), [problem('claimWords', 2, 'claim', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('is required', () => {
+      expectProblems(inClaimWords(claimWord({ claim: null })), [problem('claimWords', 2, 'claim', 'REQUIRED')])
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    it('is approved or retired: a claim word has no draft, so draft is refused', () => {
+      expectValid(inClaimWords(claimWord({ status: 'approved' })))
+      expectValid(inClaimWords(claimWord({ status: 'retired' })))
+      expectProblems(inClaimWords(claimWord({ status: 'draft' })), [problem('claimWords', 2, 'status', 'NOT_IN_VOCABULARY')])
+      expectProblems(inClaimWords(claimWord({ status: null })), [problem('claimWords', 2, 'status', 'REQUIRED')])
+    })
+
+    it('needs an approver and a date to be approved, each reported where it is missing, and neither for a retired word', () => {
+      expectProblems(inClaimWords(claimWord({ approved_by: null, approved_on: null })), [
+        problem('claimWords', 2, 'approved_by', 'REQUIRED_WHEN_APPROVED'),
+        problem('claimWords', 2, 'approved_on', 'REQUIRED_WHEN_APPROVED'),
+      ])
+      expectValid(inClaimWords(claimWord({ status: 'retired', approved_by: null, approved_on: null })))
+    })
+
+    it('has an approver of at most 80 characters: 80 is fine, 81 is TOO_LONG', () => {
+      expectValid(inClaimWords(claimWord({ approved_by: text(80) })))
+      expectProblems(inClaimWords(claimWord({ approved_by: text(81) })), [problem('claimWords', 2, 'approved_by', 'TOO_LONG')])
+    })
+
+    it('reads dates as YYYY-MM-DD, real calendar days only', () => {
+      expectProblems(inClaimWords(claimWord({ approved_on: '2030-02-30' })), [problem('claimWords', 2, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('takes an audit as a name and a date together or not at all, reporting the half that is missing', () => {
+      expectProblems(inClaimWords(claimWord({ audited_by: 'Nneka Audit' })), [problem('claimWords', 2, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(inClaimWords(claimWord({ audited_on: AUDITED_ON })), [problem('claimWords', 2, 'audited_by', 'AUDIT_INCOMPLETE')])
+      expectValid(inClaimWords(claimWord({ audited_by: 'Nneka Audit', audited_on: AUDITED_ON })))
+    })
+  })
+})
+
+describe('validateWorkbook: Tapers', () => {
+  /** A taper whose schedule is the one given, and nothing else different. */
+  const scheduled = (schedule: string | null) => inTapers(taper({ schedule }))
+  const scheduleProblem = (rule: string) => [problem('tapers', 2, 'schedule', rule)]
+
+  it('reads a taper into code, kind, steps, the two plain-text cells, status and sign-off', () => {
+    const [row] = parsed(inTapers(taper({ code: 'TPR-LIGHTENING-1', kind: 'lightening-agent' }))).tapers
+
+    expect(row).toMatchObject({ code: 'TPR-LIGHTENING-1', kind: 'lightening-agent', status: 'approved', approvedBy: 'Dr A. Reviewer', approvedOn: utcMidnight(APPROVED_ON), auditedBy: null, auditedOn: null })
+  })
+
+  describe('code', () => {
+    it('is a code like the others, required and unique: both rows that share one are reported', () => {
+      expectValid(inTapers(taper({ code: 'TPR-STEROID-1' })))
+      expectProblems(inTapers(taper({ code: 'tpr-steroid-1' })), [problem('tapers', 2, 'code', 'BAD_CODE')])
+      expectProblems(inTapers(taper({ code: null })), [problem('tapers', 2, 'code', 'REQUIRED')])
+      expectProblems(inTapers(taper(), taper()), [problem('tapers', 2, 'code', 'DUPLICATE_CODE'), problem('tapers', 3, 'code', 'DUPLICATE_CODE')])
+    })
+  })
+
+  describe('kind', () => {
+    it.each(['steroid', 'lightening-agent'])('accepts %s', (kind) => {
+      expectValid(inTapers(taper({ kind })))
+    })
+
+    it.each(['mercury', 'Steroid', 'lightening'])('refuses %s: only a steroid or a lightening agent is stepped down', (kind) => {
+      expectProblems(inTapers(taper({ kind })), [problem('tapers', 2, 'kind', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('is required', () => {
+      expectProblems(inTapers(taper({ kind: null })), [problem('tapers', 2, 'kind', 'REQUIRED')])
+    })
+  })
+
+  describe('what_to_expect and see_a_professional_if', () => {
+    it.each(['what_to_expect', 'see_a_professional_if'])('%s holds at most 400 characters: 400 is fine, 401 is TOO_LONG', (column) => {
+      expectValid(inTapers(taper({ [column]: text(400) })))
+      expectProblems(inTapers(taper({ [column]: text(401) })), [problem('tapers', 2, column, 'TOO_LONG')])
+    })
+
+    it.each(['what_to_expect', 'see_a_professional_if'])('%s is required, since a plan with nothing to expect or nobody to see is not one a person can follow', (column) => {
+      expectProblems(inTapers(taper({ [column]: null })), [problem('tapers', 2, column, 'REQUIRED')])
+    })
+
+    it.each(['what_to_expect', 'see_a_professional_if'])('%s is plain text: no link and no markup', (column) => {
+      expectProblems(inTapers(taper({ [column]: 'Read more at https://example.com/flare' })), [problem('tapers', 2, column, 'HAS_LINK_OR_MARKUP')])
+      expectProblems(inTapers(taper({ [column]: 'Skin may <b>flare</b>.' })), [problem('tapers', 2, column, 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('says only that a cell is too long when it is also full of links: the length is checked first', () => {
+      expectProblems(inTapers(taper({ what_to_expect: `https://example.com ${text(400)}` })), [problem('tapers', 2, 'what_to_expect', 'TOO_LONG')])
+    })
+  })
+
+  describe('schedule', () => {
+    it('is required', () => {
+      expectProblems(scheduled(null), scheduleProblem('REQUIRED'))
+    })
+
+    it('reads each entry as weeks, a frequency and where it ends: N is one week, N-M several', () => {
+      const [row] = parsed(scheduled('1-2: alternate-days; 3: weekly; 4-6: as-needed; 7: stop')).tapers
+
+      expect(row!.schedule).toEqual([
+        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days' },
+        { fromWeek: 3, toWeek: 3, frequency: 'weekly' },
+        { fromWeek: 4, toWeek: 6, frequency: 'as-needed' },
+        { fromWeek: 7, toWeek: 7, frequency: 'stop' },
+      ])
+    })
+
+    it('is the example of the contract: 1-2: alternate-days; 3-4: weekly; 5: stop', () => {
+      expectValid(scheduled('1-2: alternate-days; 3-4: weekly; 5: stop'))
+    })
+
+    it('ignores spaces around entries and after the colon, as it does around every list item', () => {
+      expect(parsed(scheduled(' 1-2:alternate-days ;  3 :  stop ')).tapers[0]!.schedule).toEqual([
+        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days' },
+        { fromWeek: 3, toWeek: 3, frequency: 'stop' },
+      ])
+    })
+
+    it.each([['am-pm'], ['am'], ['pm'], ['alternate-days'], ['weekly'], ['as-needed']])('accepts %s as the frequency of a step', (frequency) => {
+      expectValid(scheduled(`1: ${frequency}; 2: stop`))
+    })
+
+    describe('each entry is `<weeks>: <frequency>`', () => {
+      it.each([
+        ['text that is no entry', 'taper slowly'],
+        ['an entry with no weeks', ': weekly; 1: stop'],
+        ['an entry with no frequency', '1: ; 2: stop'],
+        ['an entry with no colon', '1 weekly; 2: stop'],
+        ['a frequency that is not in the list', '1: daily; 2: stop'],
+        ['a frequency in capitals', '1: Weekly; 2: stop'],
+        ['week 0, since weeks start at 1', '0: weekly; 1: stop'],
+        ['a week that is not a number', 'one: weekly; 2: stop'],
+        ['a decimal week', '1.5: weekly; 2: stop'],
+        ['a negative week', '-1: weekly; 2: stop'],
+        ['a range written backwards', '3-1: weekly; 4: stop'],
+        ['a range with three ends', '1-2-3: weekly; 4: stop'],
+        ['a range with no end', '1-: weekly; 2: stop'],
+      ])('refuses %s as BAD_SCHEDULE', (_what, schedule) => {
+        expectProblems(scheduled(schedule), scheduleProblem('BAD_SCHEDULE'))
+      })
+    })
+
+    describe('the weeks run from week 1 with no gap and no overlap', () => {
+      it('accepts steps that follow each other: 1-2, 3, 4-6, 7', () => {
+        expectValid(scheduled('1-2: weekly; 3: weekly; 4-6: as-needed; 7: stop'))
+      })
+
+      it('refuses a schedule that does not start at week 1', () => {
+        expectProblems(scheduled('2: weekly; 3: stop'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses a gap: 1-2, then 4 (week 3 is nobody\'s)', () => {
+        expectProblems(scheduled('1-2: weekly; 4: stop'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses an overlap: 1-3, then 3', () => {
+        expectProblems(scheduled('1-3: weekly; 3: stop'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses a step that goes back inside an earlier one: 1-3, then 2', () => {
+        expectProblems(scheduled('1-3: weekly; 2: stop'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses steps written out of order, even when together they cover the weeks', () => {
+        expect(problemsOf(scheduled('3: stop; 1-2: weekly'))).toContainEqual(problem('tapers', 2, 'schedule', 'SCHEDULE_NOT_CONTIGUOUS'))
+      })
+    })
+
+    describe('it ends with stop, and stop is only the last step', () => {
+      it('refuses a schedule whose last step is not stop', () => {
+        expectProblems(scheduled('1-2: alternate-days; 3-4: weekly'), scheduleProblem('SCHEDULE_MISSING_STOP'))
+        expectProblems(scheduled('1: weekly'), scheduleProblem('SCHEDULE_MISSING_STOP'))
+      })
+
+      it('refuses a stop that is followed by another step', () => {
+        expectProblems(scheduled('1: weekly; 2: stop; 3: stop'), scheduleProblem('SCHEDULE_STOP_NOT_LAST'))
+      })
+    })
+
+    describe('the frequency never goes up: am-pm, then am or pm, then alternate-days, then weekly, then as-needed', () => {
+      it('accepts the whole ladder, step by step down', () => {
+        expectValid(scheduled('1: am-pm; 2: am; 3: alternate-days; 4: weekly; 5: as-needed; 6: stop'))
+      })
+
+      it('accepts a frequency that stays the same from one step to the next', () => {
+        expectValid(scheduled('1: weekly; 2: weekly; 3: stop'))
+      })
+
+      it('treats am and pm as equal strength, so going from one to the other is not an increase, in either direction', () => {
+        expectValid(scheduled('1: am; 2: pm; 3: stop'))
+        expectValid(scheduled('1: pm; 2: am; 3: stop'))
+      })
+
+      it.each([
+        ['weekly then alternate-days', '1: weekly; 2: alternate-days; 3: stop'],
+        ['alternate-days then am', '1: alternate-days; 2: am; 3: stop'],
+        ['pm then am-pm', '1: pm; 2: am-pm; 3: stop'],
+        ['as-needed then weekly', '1: as-needed; 2: weekly; 3: stop'],
+        ['one step down then back up', '1: am-pm; 2: weekly; 3: alternate-days; 4: stop'],
+      ])('refuses %s as an increase', (_what, schedule) => {
+        expectProblems(scheduled(schedule), scheduleProblem('SCHEDULE_FREQUENCY_INCREASES'))
+      })
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    it('is draft, approved or retired', () => {
+      for (const status of ['draft', 'approved', 'retired']) expectValid(inTapers(taper({ status, ...(status === 'approved' ? {} : { approved_by: null, approved_on: null }) })))
+      expectProblems(inTapers(taper({ status: 'live' })), [problem('tapers', 2, 'status', 'NOT_IN_VOCABULARY')])
+      expectProblems(inTapers(taper({ status: null })), [problem('tapers', 2, 'status', 'REQUIRED')])
+    })
+
+    it('needs an approver and a date to be approved, each reported where it is missing, and neither for a draft or a retired template', () => {
+      expectProblems(inTapers(taper({ approved_by: null, approved_on: null })), [problem('tapers', 2, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('tapers', 2, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+      expectValid(inTapers(taper({ status: 'draft', approved_by: null, approved_on: null }), taper({ code: 'TPR-STEROID-2', status: 'retired', approved_by: null, approved_on: null })))
+    })
+
+    it('takes an audit as a name and a date together or not at all, reporting the half that is missing', () => {
+      expectProblems(inTapers(taper({ audited_by: 'Nneka Audit' })), [problem('tapers', 2, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(inTapers(taper({ audited_on: AUDITED_ON })), [problem('tapers', 2, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+  })
+
+  it('keeps a retired template whole, schedule and all, so a past routine can still say which plan it used', () => {
+    const [row] = parsed(inTapers(taper({ status: 'retired' }))).tapers
+
+    expect(row).toMatchObject({ status: 'retired', schedule: [expect.anything(), expect.anything(), expect.anything()] })
+  })
+})
+
 // A spreadsheet cell holds up to 32767 characters, so a file can be full of cells that size. Each one is refused for its length before anything
 // reads its content, so checking the whole workbook costs about the length of the cells and no more.
 describe('validateWorkbook: cells at the spreadsheet limit', () => {
@@ -1052,6 +1567,8 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
       products: [product({ brand: huge, name: huge, variant: huge, approved_by: huge, ingredients: Array.from({ length: 150 }, () => huge).join(';') })],
       availability: [availability({ where_sold: huge })],
       ingredients: [ingredient({ name: huge, aliases: huge, statement: huge })],
+      claimWords: [claimWord({ phrase: huge, approved_by: huge })],
+      tapers: [taper({ schedule: huge, what_to_expect: huge, see_a_professional_if: huge, approved_by: huge })],
     })
 
     const started = performance.now()
@@ -1069,6 +1586,12 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
         problem('ingredients', 2, 'name', 'TOO_LONG'),
         problem('ingredients', 2, 'aliases', 'ITEM_TOO_LONG'),
         problem('ingredients', 2, 'statement', 'TOO_LONG'),
+        problem('claimWords', 2, 'phrase', 'TOO_LONG'),
+        problem('claimWords', 2, 'approved_by', 'TOO_LONG'),
+        problem('tapers', 2, 'schedule', 'TOO_LONG'),
+        problem('tapers', 2, 'what_to_expect', 'TOO_LONG'),
+        problem('tapers', 2, 'see_a_professional_if', 'TOO_LONG'),
+        problem('tapers', 2, 'approved_by', 'TOO_LONG'),
       ]),
     )
     expect(took).toBeLessThan(1000)

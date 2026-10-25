@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { productAnalystAnalysePrompt } from '../../prompts/prompts.generated'
+import * as vocabulary from './catalog.vocabulary'
 import { ANALYSIS_VERSION, BUDGET_BANDS, CATEGORIES, CONCERN_KINDS, FREQUENCIES, FRESH_FOR_DAYS, ORIGINS, ROUTINE_STEPS, SEVERITIES, TRAITS } from './catalog.vocabulary'
 
 describe('catalog vocabulary', () => {
@@ -20,6 +21,18 @@ describe('catalog vocabulary', () => {
       'banned-substance',
       'drying',
     ])
+  })
+
+  // The groups an ingredient rule may belong to, and the kinds of product a step-down template is for. A namespace import, so a missing export
+  // is one failing test and not a file that cannot load.
+  it('lists the ingredient groups a rule may have', () => {
+    expect((vocabulary as unknown as Record<string, unknown>).INGREDIENT_GROUPS).toEqual(['mercury', 'steroid', 'lightening-agent', 'retinoid', 'exfoliating-acid', 'benzoyl-peroxide'])
+  })
+
+  it('lists the kinds a step-down template is for, which are the groups that are stopped with a plan and not at once', () => {
+    const named = vocabulary as unknown as Record<string, readonly string[] | undefined>
+    expect(named.TAPER_KINDS).toEqual(['steroid', 'lightening-agent'])
+    for (const kind of named.TAPER_KINDS ?? []) expect(named.INGREDIENT_GROUPS, kind).toContain(kind)
   })
 
   it('lists the severities, mildest first', () => {

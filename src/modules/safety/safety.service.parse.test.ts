@@ -1357,6 +1357,84 @@ describe('SafetyView stays as the app knows it', () => {
   })
 })
 
+// What the shelf verdict is built from (spec #171, slice D1): a profile's current answers, the state of their parse and the mentions found, read by profile id with no
+// session (the build is a job) in one place, so the fingerprint and the floor see the same answer. It only reads: it does not queue a parse the way `current` repairs one.
+describe('SafetyService.snapshotFor', () => {
+  const snapshot = (profileId: string) => service.snapshotFor(profileId)
+
+  it('is no view, no parse state and no mentions for a profile that never answered', async () => {
+    expect(await snapshot('profile-amara-1')).toEqual({ view: null, parseState: null, mentions: [] })
+  })
+
+  it('gives the view of the current answer and a parse state of none when there are no words to read', async () => {
+    const saved = await set(AMARA, { choices: ['pregnant'] })
+
+    expect(await snapshot('profile-amara-1')).toEqual({ view: saved, parseState: 'none', mentions: [] })
+  })
+
+  it('gives the answer with its parse still pending, and no mentions yet, right after the words are saved', async () => {
+    const saved = await set(AMARA, { choices: ['reaction'], reactionText: REACTION })
+
+    expect(await snapshot('profile-amara-1')).toEqual({ view: saved, parseState: 'pending', mentions: [] })
+  })
+
+  it('gives the mentions found, in order, with the parse done, once it has run', async () => {
+    readerSays({ [REACTION]: [product('Caro White'), ingredient('fragrance')], [PRESCRIPTION]: [product('Movate', { brand: null })] })
+    await parse(await bothAnswer())
+
+    const { view, parseState, mentions } = await snapshot('profile-amara-1')
+
+    expect(parseState).toBe('done')
+    expect(view).toMatchObject({ choices: ['reaction', 'prescription'], reactionText: REACTION, prescriptionText: PRESCRIPTION })
+    expect(mentions).toMatchObject([
+      { source: 'reaction', kind: 'product', name: 'Caro White', resolution: 'resolved' },
+      { source: 'reaction', kind: 'ingredient', name: 'fragrance', resolution: null },
+      { source: 'prescription', kind: 'product', name: 'Movate', resolution: 'unresolved' },
+    ])
+  })
+
+  it('says a parse that ran out of retries has failed, and keeps what it had found', async () => {
+    readerSays({ [REACTION]: [product('Caro White')] })
+    catalog.onResolve = () => {
+      throw new CatalogBusyError()
+    }
+    const safetyId = await reactionAnswer()
+    await errorOf(parse(safetyId))
+    await markParseFailed(safetyId)
+    setClock(DAY)
+    await markParseFailed(safetyId)
+
+    expect(await snapshot('profile-amara-1')).toMatchObject({ parseState: 'failed', mentions: [{ name: 'Caro White', resolution: 'pending' }] })
+  })
+
+  it('gives the newest answer only: its view, its parse state and its mentions, not those of the answer before', async () => {
+    readerSays({ [REACTION]: [product('Caro White')] })
+    await parse(await reactionAnswer())
+    setClock(HOUR)
+    const newer = await set(AMARA, { choices: ['pregnant'] })
+
+    expect(await snapshot('profile-amara-1')).toEqual({ view: newer, parseState: 'none', mentions: [] })
+  })
+
+  it('answers for the profile it is asked about and never for a caller: it needs no session, and a session of another profile changes nothing', async () => {
+    const saved = await set(AMARA, { choices: ['pregnant'] })
+
+    expect(await service.snapshotFor('profile-amara-1')).toEqual({ view: saved, parseState: 'none', mentions: [] })
+    expect(await runAs(TOLU, () => service.snapshotFor('profile-amara-1'))).toEqual({ view: saved, parseState: 'none', mentions: [] })
+    expect(await snapshot('profile-tolu-1')).toEqual({ view: null, parseState: null, mentions: [] })
+  })
+
+  it('queues nothing, even for a parse long overdue: it reads and does not repair', async () => {
+    await reactionAnswer()
+    const queuedBefore = queued().length
+    setClock(DAY)
+
+    await snapshot('profile-amara-1')
+
+    expect(queued()).toHaveLength(queuedBefore)
+  })
+})
+
 describe('SafetyService parse logging', () => {
   it('never logs the words, a brand or a name, through reading, resolving, research, a retry or a stale row', async () => {
     const spies = spyOnConsole()

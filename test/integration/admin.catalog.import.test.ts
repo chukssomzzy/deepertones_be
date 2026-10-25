@@ -1,12 +1,18 @@
+import { env } from 'cloudflare:workers'
+import type { RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   BRITAIN,
+  CONTRACT_VERSION,
   NIGERIA,
+  SCHEDULE,
+  WORKER_ENV,
   XLSX_MEDIA_TYPE,
   applied,
   archiveKeyPattern,
   archived,
   availabilityRow,
+  claimWordRow,
   code,
   counts,
   dataOf,
@@ -17,12 +23,14 @@ import {
   importRaw,
   latestVersionRow,
   liveRuleNames,
+  liveRules,
   productRow,
   productsOfBrand,
   rowWith,
   ruleRow,
   rulesVersion,
   sorted,
+  taperRow,
   upload,
   withCountry,
   without,
@@ -75,6 +83,8 @@ describe('a dry run', () => {
       availability: diffOf({ added: [`${product.code as string}:GH`] }),
       ingredients: diffOf({ added: [rule.code as string] }),
       countries: diffOf({ added: ['GH'] }),
+      claimWords: diffOf({}),
+      tapers: diffOf({}),
       newProducts: [{ code: product.code, brand: product.brand, name: product.name, variant: 'Night', form: 'cream' }],
     })
     expect(await exportLive()).toEqual(live)
@@ -147,7 +157,7 @@ describe('applying an upload', () => {
     expect(await latestVersionRow()).toMatchObject({
       version: before.catalogVersion + 1,
       uploadedBy: 'Dr B. Auditor',
-      contractVersion: '1.0.0',
+      contractVersion: CONTRACT_VERSION,
       archiveKey: expect.stringMatching(archiveKeyPattern(before.catalogVersion + 1)),
     })
   })
@@ -580,6 +590,484 @@ describe('the rules version', () => {
 
     expect(second).not.toBe(first)
     expect(await rulesVersion()).toBe(first)
+  })
+})
+
+describe('the contract version', () => {
+  it.each([
+    ['an older contract', '1.0.0'],
+    ['a newer contract', '9.9.9'],
+  ])('refuses a file made for %s with 409 CONTRACT_MISMATCH, as a dry run and as an apply, and writes nothing', async (_what, contractVersion) => {
+    const live = await exportLive()
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const { res } = await upload(addProduct(), { dryRun, file: dryRun ? null : xlsxBytes('contract-mismatch'), contractVersion })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('says so before it says the workbook is invalid or stale', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.products.rows.push(productRow({ category: 'nonsense' }))
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion - 1, dryRun: true, contractVersion: '1.0.0' })
+
+    expect(res.status).toBe(409)
+    expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+  })
+
+  it('refuses a genuine 1.0.0 workbook, which has four tabs and no claimWords or tapers, with 409 CONTRACT_MISMATCH and not a 400 for its shape, as a dry run and as an apply', async () => {
+    const live = await exportLive()
+    const { claimWords: _claimWords, tapers: _tapers, ...fourTabs } = live.workbook
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const res = await importRaw({ workbook: fourTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun, file: dryRun ? null : xlsxBytes('four-tabs'), contractVersion: '1.0.0' })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await counts()).toEqual(before)
+  })
+
+  it('still refuses a workbook of the current contract version whose shape is wrong, with a 400 and not a 409', async () => {
+    const live = await exportLive()
+    const { tapers: _tapers, ...fiveTabs } = live.workbook
+
+    const res = await importRaw({ workbook: fiveTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: live.contractVersion })
+
+    expect(res.status).toBe(400)
+  })
+
+  it('refuses an upload that does not say which contract it was made for with a 400', async () => {
+    const live = await exportLive()
+
+    const res = await importRaw({ workbook: live.workbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: null })
+
+    expect(res.status).toBe(400)
+  })
+
+  it('takes the version the export gave', async () => {
+    const live = await exportLive()
+
+    const res = await importRaw({ workbook: live.workbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: live.contractVersion })
+
+    expect(res.status).toBe(200)
+  })
+})
+
+describe('claim words and tapers', () => {
+  it('reports the added claim word and taper in a dry run, per tab, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const [claim, taper] = [claimWordRow(), taperRow()]
+
+    const { res } = await upload(
+      (workbook) => {
+        workbook.claimWords.rows.push({ ...claim })
+        workbook.tapers.rows.push({ ...taper })
+      },
+      { dryRun: true },
+    )
+
+    expect(res.status).toBe(200)
+    const data = await dataOf<ImportResult>(res)
+    expect(data.applied).toBe(false)
+    expect(sorted(data.diff)).toEqual({ ...EMPTY_DIFF, claimWords: diffOf({ added: [claim.code as string] }), tapers: diffOf({ added: [taper.code as string] }) })
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores them on apply: the next catalog version, the rows in the export, the rules version where it was', async () => {
+    const [claim, taper] = [claimWordRow(), taperRow({ kind: 'lightening-agent', schedule: '1: am-pm; 2-3: am; 4: stop' })]
+    const version = await rulesVersion()
+
+    const { before, data } = await applied((workbook) => {
+      workbook.claimWords.rows.push({ ...claim })
+      workbook.tapers.rows.push({ ...taper })
+    })
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff)).toMatchObject({ claimWords: diffOf({ added: [claim.code as string] }), tapers: diffOf({ added: [taper.code as string] }) })
+    const live = await exportLive()
+    expect(rowWith(live.workbook.claimWords, 'code', claim.code)).toEqual(claim)
+    expect(rowWith(live.workbook.tapers, 'code', taper.code)).toEqual(taper)
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('reports an edit as updated, and only the row edited', async () => {
+    const [claim, other, taper] = [claimWordRow(), claimWordRow(), taperRow()]
+    await applied((workbook) => {
+      workbook.claimWords.rows.push({ ...claim }, { ...other })
+      workbook.tapers.rows.push({ ...taper })
+    })
+
+    const { res } = await upload(
+      (workbook) => {
+        rowWith(workbook.claimWords, 'code', claim.code)!.phrase = word('zqedited')
+        rowWith(workbook.tapers, 'code', taper.code)!.schedule = '1-3: alternate-days; 4: stop'
+      },
+      { dryRun: true },
+    )
+
+    const data = await dataOf<ImportResult>(res)
+    expect(sorted(data.diff)).toEqual({ ...EMPTY_DIFF, claimWords: diffOf({ updated: [claim.code as string] }), tapers: diffOf({ updated: [taper.code as string] }) })
+  })
+
+  it('compares a schedule by what it means: the same steps with other spaces are no change', async () => {
+    const taper = taperRow({ schedule: SCHEDULE })
+    await applied((workbook) => {
+      workbook.tapers.rows.push({ ...taper })
+    })
+
+    const { res } = await upload(
+      (workbook) => {
+        rowWith(workbook.tapers, 'code', taper.code)!.schedule = '1-2:alternate-days;3-4:weekly;5:stop'
+      },
+      { dryRun: true },
+    )
+
+    expect((await dataOf<ImportResult>(res)).diff.tapers).toEqual(diffOf({}))
+  })
+
+  it('never deletes: a claim word or taper left out of the upload is retired in place, with its cells, and reactivated when the code comes back', async () => {
+    const [claim, taper] = [claimWordRow(), taperRow()]
+    await applied((workbook) => {
+      workbook.claimWords.rows.push({ ...claim })
+      workbook.tapers.rows.push({ ...taper })
+    })
+
+    const { data: retired } = await applied((workbook) => {
+      without(workbook.claimWords, 'code', claim.code)
+      without(workbook.tapers, 'code', taper.code)
+    })
+
+    expect(sorted(retired.diff)).toMatchObject({ claimWords: diffOf({ retired: [claim.code as string] }), tapers: diffOf({ retired: [taper.code as string] }) })
+    const live = await exportLive()
+    expect(rowWith(live.workbook.claimWords, 'code', claim.code)).toEqual({ ...claim, status: 'retired' })
+    expect(rowWith(live.workbook.tapers, 'code', taper.code)).toEqual({ ...taper, status: 'retired' })
+
+    const { data: back } = await applied((workbook) => {
+      workbook.claimWords.rows = workbook.claimWords.rows.filter((row) => row.code !== claim.code).concat({ ...claim })
+      workbook.tapers.rows = workbook.tapers.rows.filter((row) => row.code !== taper.code).concat({ ...taper })
+    })
+    expect(sorted(back.diff)).toMatchObject({ claimWords: diffOf({ reactivated: [claim.code as string] }), tapers: diffOf({ reactivated: [taper.code as string] }) })
+    expect(rowWith((await exportLive()).workbook.tapers, 'code', taper.code)).toEqual(taper)
+  })
+
+  it('refuses a taper whose schedule is not allowed, with its row and the rule, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.tapers.rows.push(taperRow({ schedule: '1: weekly; 2: alternate-days; 3: stop' }))
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('bad-schedule') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'tapers', row: bad.tapers.rows.length + 1, column: 'schedule', rule: 'SCHEDULE_FREQUENCY_INCREASES' }])
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses two live claim words with one phrase, naming both rows', async () => {
+    const phrase = word('zqtwice')
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.claimWords.rows.push(claimWordRow({ phrase }), claimWordRow({ phrase }))
+    })
+    const [first, second] = [bad.claimWords.rows.length, bad.claimWords.rows.length - 1]
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect((((await errorOf(res)).details as { problems: unknown[] }).problems)).toEqual(
+      expect.arrayContaining([
+        { tab: 'claimWords', row: first + 1, column: 'phrase', rule: 'DUPLICATE_PHRASE' },
+        { tab: 'claimWords', row: second + 1, column: 'phrase', rule: 'DUPLICATE_PHRASE' },
+      ]),
+    )
+  })
+
+  afterEach(() => vi.restoreAllMocks())
+
+  it('does not log a phrase or the words of a taper', async () => {
+    const logs = (['log', 'info', 'warn', 'error', 'debug'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+    const [phrase, expectWords, see] = [word('zqlogphrase'), word('Logexpect'), word('Logsee')]
+
+    await applied((workbook) => {
+      workbook.claimWords.rows.push(claimWordRow({ phrase }))
+      workbook.tapers.rows.push(taperRow({ what_to_expect: `Mild ${expectWords}.`, see_a_professional_if: `Severe ${see}.` }))
+    })
+
+    const text = JSON.stringify(logs.flatMap((spy) => spy.mock.calls))
+    for (const secret of [phrase, expectWords, see]) expect(text, secret).not.toContain(secret)
+  })
+})
+
+describe('group and clashes_with', () => {
+  const pair = () => {
+    const retinoid = ruleRow({ group: 'retinoid', clashes_with: 'exfoliating-acid' })
+    const acid = ruleRow({ group: 'exfoliating-acid', clashes_with: 'retinoid' })
+    return { retinoid, acid }
+  }
+
+  it('are stored with the rule and exported as they were written', async () => {
+    const { retinoid, acid } = pair()
+
+    await applied((workbook) => {
+      workbook.ingredients.rows.push({ ...retinoid }, { ...acid })
+    })
+
+    const live = await exportLive()
+    expect(rowWith(live.workbook.ingredients, 'code', retinoid.code)).toEqual(retinoid)
+    expect(rowWith(live.workbook.ingredients, 'code', acid.code)).toEqual(acid)
+  })
+
+  it('refuse a clash that is not returned: 400 CATALOG_INVALID with the rows on both sides', async () => {
+    const { retinoid, acid } = pair()
+    acid.clashes_with = null
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      // Rules an earlier test left in groups would answer the clash (the upload is the whole catalog), so these two stand alone.
+      for (const row of workbook.ingredients.rows) Object.assign(row, { group: null, clashes_with: null })
+      workbook.ingredients.rows.push({ ...retinoid }, { ...acid })
+    })
+    const at = bad.ingredients.rows.length + 1
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect((((await errorOf(res)).details as { problems: unknown[] }).problems)).toEqual(
+      expect.arrayContaining([
+        { tab: 'ingredients', row: at - 1, column: 'clashes_with', rule: 'CLASH_NOT_SYMMETRIC' },
+        { tab: 'ingredients', row: at, column: 'group', rule: 'CLASH_NOT_SYMMETRIC' },
+      ]),
+    )
+  })
+
+  it('do not change the rules version when they are added, changed or cleared on an approved rule, while a change the matcher reads still does', async () => {
+    const { retinoid, acid } = pair()
+    await applied((workbook) => {
+      workbook.ingredients.rows.push({ ...retinoid }, { ...acid })
+    })
+    const version = await rulesVersion()
+
+    const { data: regrouped } = await applied((workbook) => {
+      Object.assign(rowWith(workbook.ingredients, 'code', retinoid.code)!, { group: 'steroid', clashes_with: null })
+      Object.assign(rowWith(workbook.ingredients, 'code', acid.code)!, { group: 'lightening-agent', clashes_with: null })
+    })
+    expect(sorted(regrouped.diff).ingredients).toEqual(diffOf({ updated: [retinoid.code as string, acid.code as string].sort() }))
+    expect(await rulesVersion()).toBe(version)
+
+    await applied((workbook) => {
+      Object.assign(rowWith(workbook.ingredients, 'code', retinoid.code)!, { group: null })
+      Object.assign(rowWith(workbook.ingredients, 'code', acid.code)!, { group: null })
+    })
+    expect(await rulesVersion()).toBe(version)
+
+    await applied((workbook) => {
+      rowWith(workbook.ingredients, 'code', retinoid.code)!.statement = 'Commonly advised to patch test first.'
+    })
+    expect(await rulesVersion()).not.toBe(version)
+  })
+
+  it('leave the rules the matcher applies exactly as they were', async () => {
+    const rule = ruleRow({ aliases: 'zq matcher oil' })
+    await applied((workbook) => {
+      workbook.ingredients.rows.push({ ...rule })
+    })
+    const entries = async () => (await liveRules()).entries.filter((entry) => entry.name === rule.name)
+    const before = await entries()
+
+    await applied((workbook) => {
+      Object.assign(rowWith(workbook.ingredients, 'code', rule.code)!, { group: 'mercury' })
+    })
+
+    expect(await entries()).toEqual(before)
+    expect(before).toHaveLength(1)
+  })
+})
+
+// The server knows which environment it is. In production only, a Tapers row that is approved must have been approved by someone on the list of
+// qualified approvers; elsewhere anyone may approve, so the owner or Claude can approve on staging. It is a process control, not authentication:
+// the approver is a label in a cell. Each call here hands the Worker its own bindings.
+describe('the production approver gate', () => {
+  const QUALIFIED = 'Dr Q. Dermatologist'
+  const asProduction = (approvers: string | undefined): typeof env => ({ ...WORKER_ENV, ENVIRONMENT: 'production', QUALIFIED_APPROVERS: approvers }) as unknown as typeof env
+  const asEnvironment = (environment: string, approvers = ''): typeof env => ({ ...WORKER_ENV, ENVIRONMENT: environment, QUALIFIED_APPROVERS: approvers }) as unknown as typeof env
+  const problemsOf = async (res: Response) => ((await errorOf(res)).details as { problems: { tab: string; row: number; column: string; rule: string }[] }).problems
+
+  /**
+   * Dry runs, which the gate applies to as much as to an apply. The upload is the whole catalog, and the Tapers tab of an earlier test is part of
+   * what is live, so each starts from no templates (a template left out is retired, and retired ones are not checked): the only approved
+   * templates in an upload are the ones the test is about.
+   */
+  const noTapers = (workbook: RawWorkbook) => {
+    workbook.tapers.rows = []
+  }
+  const dry = (edit: (workbook: RawWorkbook) => void, workerEnv: typeof env) =>
+    upload(
+      (workbook) => {
+        noTapers(workbook)
+        edit(workbook)
+      },
+      { dryRun: true, workerEnv },
+    )
+
+  it('refuses an approved taper whose approver is not on the list, 400 CATALOG_INVALID with one UNQUALIFIED_APPROVER problem at that row and column, and never the approver\'s name', async () => {
+    const approver = word('Owner')
+    const taper = taperRow({ approved_by: approver })
+    let row = 0
+
+    const { res } = await dry(
+      (workbook) => {
+        workbook.tapers.rows.push({ ...taper })
+        row = workbook.tapers.rows.length + 1
+      },
+      asProduction(QUALIFIED),
+    )
+
+    expect(res.status).toBe(400)
+    const text = await res.text()
+    expect(text).not.toContain(approver)
+    const body = JSON.parse(text) as { error: { code: string; details: { problems: unknown[] } } }
+    expect(body.error.code).toBe('CATALOG_INVALID')
+    expect(body.error.details.problems).toEqual([{ tab: 'tapers', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }])
+  })
+
+  it('names every approved taper that is refused, one problem each, and not the ones that pass', async () => {
+    const rows = [taperRow({ approved_by: 'Somebody Else' }), taperRow({ approved_by: QUALIFIED }), taperRow({ approved_by: 'Another Person' })]
+    let first = 0
+
+    const { res } = await dry(
+      (workbook) => {
+        first = workbook.tapers.rows.length + 2
+        workbook.tapers.rows.push(...rows.map((row) => ({ ...row })))
+      },
+      asProduction(QUALIFIED),
+    )
+
+    expect(res.status).toBe(400)
+    expect(await problemsOf(res)).toEqual([
+      { tab: 'tapers', row: first, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+      { tab: 'tapers', row: first + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+    ])
+  })
+
+  it('accepts an approved taper whose approver is on the list', async () => {
+    const { res } = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: QUALIFIED })), asProduction(QUALIFIED))
+
+    expect(res.status).toBe(200)
+    expect((await dataOf<ImportResult>(res)).applied).toBe(false)
+  })
+
+  it('reads the list as comma-separated labels, spaces around them ignored, and matches a label whole: a part of a name is not the name', async () => {
+    const list = ` Dr B. Other ,${QUALIFIED}  ,Dr C. Third`
+
+    const whole = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: QUALIFIED })), asProduction(list))
+    const other = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: 'Dr C. Third' })), asProduction(list))
+    const part = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: 'Dr Q.' })), asProduction(list))
+    const longer = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: `${QUALIFIED} Jr` })), asProduction(list))
+
+    expect(whole.res.status).toBe(200)
+    expect(other.res.status).toBe(200)
+    expect(part.res.status).toBe(400)
+    expect(longer.res.status).toBe(400)
+  })
+
+  it.each([
+    ['an empty list', ''],
+    ['a list of only spaces and commas', ' , ,'],
+    ['no list at all', undefined],
+  ])('refuses every approved taper when the list is %s: nobody is qualified', async (_what, approvers) => {
+    const { res } = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: QUALIFIED })), asProduction(approvers))
+
+    expect(res.status).toBe(400)
+    expect((await problemsOf(res)).map((problem) => problem.rule)).toEqual(['UNQUALIFIED_APPROVER'])
+  })
+
+  it('checks only a taper that is approved: a draft and a retired template may name anyone, since neither is in force', async () => {
+    const { res } = await dry((workbook) => {
+      workbook.tapers.rows.push(
+        taperRow({ status: 'draft', approved_by: null, approved_on: null }),
+        taperRow({ status: 'draft', approved_by: 'Somebody Else' }),
+        taperRow({ status: 'retired', approved_by: 'Somebody Else' }),
+      )
+    }, asProduction(QUALIFIED))
+
+    expect(res.status).toBe(200)
+  })
+
+  it('checks only Tapers: products, rules and claim words approved by anyone are accepted in production', async () => {
+    const { res } = await dry((workbook) => {
+      withCountry(workbook, NIGERIA)
+      workbook.products.rows.push(productRow({ approved_by: 'Somebody Else' }))
+      workbook.ingredients.rows.push(ruleRow({ approved_by: 'Somebody Else' }))
+      workbook.claimWords.rows.push(claimWordRow({ approved_by: 'Somebody Else' }))
+    }, asProduction(QUALIFIED))
+
+    expect(res.status).toBe(200)
+  })
+
+  it('refuses an apply too, and writes nothing: no version, no row, no archived file', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      noTapers(workbook)
+      workbook.tapers.rows.push(taperRow({ approved_by: 'Somebody Else' }))
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('unqualified'), workerEnv: asProduction(QUALIFIED) })
+
+    expect(res.status).toBe(400)
+    expect((await problemsOf(res)).map((problem) => problem.rule)).toEqual(['UNQUALIFIED_APPROVER'])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+    expect(await archived(live.catalogVersion + 1)).toBeNull()
+  })
+
+  it.each([['staging'], ['development']])('accepts any approver in %s, whatever the list says', async (environment) => {
+    for (const approvers of ['', QUALIFIED]) {
+      const { res } = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: 'Somebody Else' })), asEnvironment(environment, approvers))
+
+      expect(res.status, `${environment} / ${JSON.stringify(approvers)}`).toBe(200)
+    }
+  })
+
+  it('applies in staging: an approved taper by anyone is stored', async () => {
+    const taper = taperRow({ approved_by: 'The Owner' })
+    const file = xlsxBytes('staging-approval')
+
+    const { res } = await upload(
+      (workbook) => {
+        workbook.tapers.rows.push({ ...taper })
+      },
+      { dryRun: false, file, workerEnv: asEnvironment('staging') },
+    )
+
+    expect((await dataOf<ImportResult>(res)).applied).toBe(true)
+    expect(rowWith((await exportLive()).workbook.tapers, 'code', taper.code)).toEqual(taper)
+  })
+
+  it('is the Worker\'s own environment that decides: the same upload that production refuses is accepted by the Worker as the tests run it', async () => {
+    const edit = (workbook: RawWorkbook) => {
+      workbook.tapers.rows.push(taperRow({ approved_by: 'Somebody Else' }))
+    }
+
+    const production = await dry(edit, asProduction(QUALIFIED))
+    const testing = await dry(edit, WORKER_ENV)
+
+    expect(production.res.status).toBe(400)
+    expect(testing.res.status).toBe(200)
   })
 })
 

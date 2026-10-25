@@ -20,5 +20,6 @@ export const DEFAULT_MODELS: Record<AiJob, string> = {
   'label-routine': 'claude-haiku-5-5',
   'judge-grounding': 'claude-haiku-5-5',
   'write-routine': 'claude-sonnet-5-5',
+  'fit-verdict': 'claude-sonnet-5-5',
   analysis: 'claude-sonnet-5-5',
 }

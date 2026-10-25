@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { CatalogWorkbookRepository, PlannedProduct, WorkbookPlan } from './catalog.workbook.repository'
-import type { ConcernKind } from './catalog.vocabulary'
+import type { ConcernKind, IngredientGroup } from './catalog.vocabulary'
 import type { ProductRow } from './catalog.workbook.schema'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
 
@@ -15,6 +15,9 @@ export type RuleRow = {
   statement: string
   sourceUrl: string | null
   helps: ShownConcern[]
+  /** Rule metadata the floor reads: null for most rules. Not part of what the matcher reads, so not part of the rules version. */
+  group: IngredientGroup | null
+  clashesWith: IngredientGroup[]
   status: 'draft' | 'approved' | 'retired'
   approvedBy: string | null
   approvedOn: string | null
@@ -42,6 +45,8 @@ export const ruleRow = (over: Partial<RuleRow> = {}): RuleRow => {
     statement: 'Commonly reported to sting skin with a weakened barrier.',
     sourceUrl: null,
     helps: ['hd_redness'],
+    group: null,
+    clashesWith: [],
     status: 'approved',
     approvedBy: 'Dr A. Reviewer',
     approvedOn: APPROVED_ON,
@@ -111,6 +116,51 @@ export const sale = (code: string, country: string, over: Partial<{ priceMin: nu
   ...over,
 })
 export const country = (code: string, status: 'active' | 'retired' = 'active') => ({ code, currency: 'NGN', lowMax: 5000, midMax: 15000, status })
+
+/** A Claim words row as an upload parses it (the days are Dates). The properties are the contract's camelCased column names. */
+export const claimWordRow = (over: Partial<{ code: string; phrase: string; claim: 'lightening'; status: 'approved' | 'retired'; approvedBy: string | null; approvedOn: Date | null; auditedBy: string | null; auditedOn: Date | null }> = {}) => ({
+  code: `CLM-${runSalt}-${counter++}`,
+  phrase: fresh('zzyzx cream'),
+  claim: 'lightening' as const,
+  status: 'approved' as 'approved' | 'retired',
+  approvedBy: 'Dr A. Reviewer' as string | null,
+  approvedOn: DAY as Date | null,
+  auditedBy: 'Dr B. Auditor' as string | null,
+  auditedOn: DAY as Date | null,
+  ...over,
+})
+
+/** A Tapers row as an upload parses it: the schedule is its steps, as the contract reads them. */
+export const taperRow = (
+  over: Partial<{
+    code: string
+    kind: 'steroid' | 'lightening-agent'
+    schedule: { fromWeek: number; toWeek: number; frequency: string }[]
+    whatToExpect: string
+    seeAProfessionalIf: string
+    status: 'draft' | 'approved' | 'retired'
+    approvedBy: string | null
+    approvedOn: Date | null
+    auditedBy: string | null
+    auditedOn: Date | null
+  }> = {},
+) => ({
+  code: `TPR-${runSalt}-${counter++}`,
+  kind: 'steroid' as 'steroid' | 'lightening-agent',
+  schedule: [
+    { fromWeek: 1, toWeek: 2, frequency: 'alternate-days' },
+    { fromWeek: 3, toWeek: 4, frequency: 'weekly' },
+    { fromWeek: 5, toWeek: 5, frequency: 'stop' },
+  ],
+  whatToExpect: 'Skin may flare for a few days after each step down. This is expected.',
+  seeAProfessionalIf: 'The redness spreads, or the skin weeps or blisters.',
+  status: 'approved' as 'draft' | 'approved' | 'retired',
+  approvedBy: 'Dr A. Reviewer' as string | null,
+  approvedOn: DAY as Date | null,
+  auditedBy: null as string | null,
+  auditedOn: null as Date | null,
+  ...over,
+})
 
 /** Behaviour every CatalogWorkbookRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier). */
 export const catalogWorkbookRepositoryContract = (name: string, make: () => RulesHarness | Promise<RulesHarness>) => {
@@ -222,6 +272,10 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         retiredProducts: [],
         retiredIngredients: [],
         retiredCountries: [],
+        claimWords: [],
+        tapers: [],
+        retiredClaimWords: [],
+        retiredTapers: [],
         ...over,
       })
       const stored = async (repo: CatalogWorkbookRepository, code: string) => (await repo.readWorkbook()).workbook.products.find((row) => row.code === code)
@@ -363,6 +417,135 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         expect((await repo.liveRules()).entries.map((entry) => entry.name)).not.toContain(rule.name)
       })
 
+      it('stores the group and clashes_with of a rule and reads them back, while the live rules stay exactly what the matcher reads', async () => {
+        const { repo } = await make()
+        const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), aliases: [], helps: [], strengthLimit: null, auditedBy: null, auditedOn: null, group: 'retinoid', clashesWith: ['exfoliating-acid', 'benzoyl-peroxide'] })
+        const { approvedOn, ...rest } = rule
+        expect(approvedOn).toBe('2030-06-15')
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-group'), ingredients: [{ ...rest, approvedOn: DAY, auditedOn: null }] }))
+
+        expect((await repo.readWorkbook()).workbook.ingredients.find((row) => row.code === rule.code)).toMatchObject({ group: 'retinoid', clashesWith: ['exfoliating-acid', 'benzoyl-peroxide'] })
+        expect((await repo.liveRules()).entries.find((entry) => entry.name === rule.name)).toEqual({ name: rule.name, aliases: [], kind: rule.kind, rule: rule.statement, source: null })
+      })
+
+      it('changes the group of a rule in place, and clears it, without adding a rule', async () => {
+        const { repo } = await make()
+        const rule = ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), aliases: [], helps: [], strengthLimit: null, auditedBy: null, auditedOn: null, group: 'steroid' })
+        const { approvedOn: _day, ...rest } = rule
+        const version = fresh('rules-contract-regroup')
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, approvedOn: DAY, auditedOn: null }] }))
+        const rowsBefore = (await repo.readWorkbook()).workbook.ingredients.length
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, group: 'lightening-agent', approvedOn: DAY, auditedOn: null }] }))
+        expect((await repo.readWorkbook()).workbook.ingredients.find((row) => row.code === rule.code)?.group).toBe('lightening-agent')
+
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion: version, ingredients: [{ ...rest, group: null, approvedOn: DAY, auditedOn: null }] }))
+        expect((await repo.readWorkbook()).workbook.ingredients.find((row) => row.code === rule.code)?.group).toBeNull()
+        expect((await repo.readWorkbook()).workbook.ingredients).toHaveLength(rowsBefore)
+      })
+
+      describe('claim words and tapers', () => {
+        const claimsOf = async (repo: CatalogWorkbookRepository, codes: string[]) => (await repo.readWorkbook()).workbook.claimWords.filter((row) => codes.includes(row.code))
+        const tapersOf = async (repo: CatalogWorkbookRepository, codes: string[]) => (await repo.readWorkbook()).workbook.tapers.filter((row) => codes.includes(row.code))
+
+        it('stores the claim words and tapers of a plan and reads them back whole, with their steps and their days as dates, and moves to the next version', async () => {
+          const { repo } = await make()
+          const claim = claimWordRow()
+          const taper = taperRow({ auditedBy: 'Dr B. Auditor', auditedOn: DAY })
+          const base = await repo.catalogVersion()
+
+          expect(await repo.applyWorkbook(await planOf(repo, { claimWords: [claim], tapers: [taper] }))).toBe(true)
+
+          expect(await repo.catalogVersion()).toBe(base + 1)
+          expect(await claimsOf(repo, [claim.code])).toEqual([claim])
+          expect(await tapersOf(repo, [taper.code])).toEqual([taper])
+        })
+
+        it('leaves them, and the rules version, alone when the plan names none: a plan that writes products does not touch claim words or tapers', async () => {
+          const { repo } = await make()
+          const [claim, taper] = [claimWordRow(), taperRow()]
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [claim], tapers: [taper] }))
+          const one = workbookProduct()
+          const version = (await repo.liveRules()).version
+
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [one.newProduct], products: [one.planned] }))
+
+          expect(await claimsOf(repo, [claim.code])).toEqual([claim])
+          expect(await tapersOf(repo, [taper.code])).toEqual([taper])
+          expect((await repo.liveRules()).version).toBe(version)
+        })
+
+        it('updates a claim word and a taper by code, in place, without adding a second row', async () => {
+          const { repo } = await make()
+          const [claim, taper] = [claimWordRow(), taperRow()]
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [claim], tapers: [taper] }))
+          const before = (await repo.readWorkbook()).workbook
+
+          const longer = [{ fromWeek: 1, toWeek: 3, frequency: 'alternate-days' }, { fromWeek: 4, toWeek: 4, frequency: 'stop' }]
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [{ ...claim, phrase: `${claim.phrase} soap` }], tapers: [{ ...taper, schedule: longer }] }))
+
+          const after = (await repo.readWorkbook()).workbook
+          expect(after.claimWords).toHaveLength(before.claimWords.length)
+          expect(after.tapers).toHaveLength(before.tapers.length)
+          expect(await claimsOf(repo, [claim.code])).toEqual([{ ...claim, phrase: `${claim.phrase} soap` }])
+          expect(await tapersOf(repo, [taper.code])).toEqual([{ ...taper, schedule: longer }])
+        })
+
+        it('retires the ones it is told to, keeping the rows and every cell but the status, and never deletes', async () => {
+          const { repo } = await make()
+          const [claim, taper, other] = [claimWordRow(), taperRow(), taperRow()]
+          await repo.applyWorkbook(await planOf(repo, { claimWords: [claim], tapers: [taper, other] }))
+          const before = (await repo.readWorkbook()).workbook
+
+          await repo.applyWorkbook(await planOf(repo, { retiredClaimWords: [claim.code], retiredTapers: [taper.code] }))
+
+          const after = (await repo.readWorkbook()).workbook
+          expect(await claimsOf(repo, [claim.code])).toEqual([{ ...claim, status: 'retired' }])
+          expect(await tapersOf(repo, [taper.code])).toEqual([{ ...taper, status: 'retired' }])
+          expect(await tapersOf(repo, [other.code])).toEqual([other])
+          expect(after.claimWords).toHaveLength(before.claimWords.length)
+          expect(after.tapers).toHaveLength(before.tapers.length)
+        })
+
+        it('reads them in code order, retired ones included', async () => {
+          const { repo } = await make()
+          const [b, a] = [taperRow({ code: `TPR-${runSalt}-B`, status: 'retired' }), taperRow({ code: `TPR-${runSalt}-A` })]
+          await repo.applyWorkbook(await planOf(repo, { tapers: [b, a] }))
+
+          const { tapers } = (await repo.readWorkbook()).workbook
+
+          expect(tapers.map((row) => row.code)).toEqual([...tapers.map((row) => row.code)].sort())
+          expect(tapers.filter((row) => [a.code, b.code].includes(row.code))).toEqual([a, b])
+        })
+
+        it('writes none of them for a plan that lost the race', async () => {
+          const { repo } = await make()
+          const [first, second] = [claimWordRow(), claimWordRow()]
+          const [taperOne, taperTwo] = [taperRow(), taperRow()]
+          const winner = await planOf(repo, { claimWords: [first], tapers: [taperOne] })
+          const loser = await planOf(repo, { claimWords: [second], tapers: [taperTwo] })
+
+          expect(await repo.applyWorkbook(winner)).toBe(true)
+          expect(await repo.applyWorkbook(loser)).toBe(false)
+
+          expect(await claimsOf(repo, [second.code])).toEqual([])
+          expect(await tapersOf(repo, [taperTwo.code])).toEqual([])
+          expect(await claimsOf(repo, [first.code])).toEqual([first])
+        })
+
+        it('counts their statements in the batch: more rows to write, more statements', async () => {
+          const { repo } = await make()
+          const none = repo.statementCount(await planOf(repo))
+
+          const withRows = repo.statementCount(await planOf(repo, { claimWords: [claimWordRow()], tapers: [taperRow()] }))
+          const withRetire = repo.statementCount(await planOf(repo, { retiredClaimWords: ['CLM-GONE'], retiredTapers: ['TPR-GONE'] }))
+
+          expect(withRows).toBeGreaterThan(none)
+          expect(withRetire).toBeGreaterThan(none)
+        })
+      })
+
       describe('approvedFor', () => {
         const rows = async (repo: CatalogWorkbookRepository, where: string) => {
           const fixtures: Record<string, Fixture> = {
@@ -459,6 +642,121 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         // 1 version + 1 country + 1 products (8 a statement) + 1 formulations (12) + 3 rows (3 a statement) + 1 retire + 1 delete and 1 availability (15)
         expect(repo.statementCount(plan)).toBe(1 + 1 + 1 + 1 + 3 + 1 + 1 + 1)
         expect(await repo.applyWorkbook({ ...plan, retiredProducts: [] })).toBe(true)
+      })
+
+      it('reads the rules version of the catalog version it reads the rows at, with the catalog version', async () => {
+        const { repo } = await make()
+        const rulesVersion = fresh('rules-contract-read')
+        await repo.applyWorkbook(await planOf(repo, { rulesVersion }))
+
+        const read = await repo.readWorkbook()
+
+        expect(read.rulesVersion).toBe(rulesVersion)
+        expect(read.catalogVersion).toBe(await repo.catalogVersion())
+      })
+
+      describe('readVerdictReference', () => {
+        /** A rule as a plan writes it: the days are dates. */
+        const planned = (rule: RuleRow) => {
+          const { approvedOn, ...rest } = rule
+          return { ...rest, approvedOn: approvedOn === null ? null : DAY, auditedOn: null }
+        }
+
+        it('gives the rules, claim words and tapers of every status, with both versions, as one read of the catalog version they belong to', async () => {
+          const { repo } = await make()
+          const [approved, draft, retired] = [
+            ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), group: 'retinoid', clashesWith: ['exfoliating-acid'], helps: ['hd_texture'] }),
+            ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx'), status: 'draft', approvedBy: null, approvedOn: null }),
+            ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx') }),
+          ]
+          const [claim, oldClaim] = [claimWordRow(), claimWordRow()]
+          const [taper, oldTaper] = [taperRow(), taperRow({ kind: 'lightening-agent' })]
+          await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-ref'), ingredients: [approved, draft, retired].map(planned), claimWords: [claim, oldClaim], tapers: [taper, oldTaper] }))
+          const rulesVersion = fresh('rules-contract-ref')
+          await repo.applyWorkbook(await planOf(repo, { rulesVersion, retiredIngredients: [retired.code], retiredClaimWords: [oldClaim.code], retiredTapers: [oldTaper.code] }))
+
+          const reference = await repo.readVerdictReference()
+
+          expect(reference.catalogVersion).toBe(await repo.catalogVersion())
+          expect(reference.rulesVersion).toBe(rulesVersion)
+          expect(reference.rulesVersion).toBe((await repo.liveRules()).version)
+          const mine = <T extends { code: string }>(rows: T[], codes: string[]): T[] => rows.filter((row) => codes.includes(row.code))
+          expect(mine(reference.rules, [approved.code, draft.code, retired.code]).map((row) => [row.code, row.status])).toEqual(
+            [[approved.code, 'approved'], [draft.code, 'draft'], [retired.code, 'retired']].sort((a, b) => (a[0]! < b[0]! ? -1 : 1)),
+          )
+          expect(reference.rules.find((row) => row.code === approved.code)).toMatchObject({ name: approved.name, group: 'retinoid', clashesWith: ['exfoliating-acid'], helps: ['hd_texture'], statement: approved.statement })
+          expect(mine(reference.claimWords, [claim.code, oldClaim.code])).toEqual([claim, { ...oldClaim, status: 'retired' }].sort((a, b) => (a.code < b.code ? -1 : 1)))
+          expect(mine(reference.tapers, [taper.code, oldTaper.code])).toEqual([taper, { ...oldTaper, status: 'retired' }].sort((a, b) => (a.code < b.code ? -1 : 1)))
+        })
+
+        it('gives exactly the rows the whole-workbook read gives for those three tabs, in the same order, and not the products, availability or countries', async () => {
+          const { repo } = await make()
+          const one = workbookProduct()
+          await repo.applyWorkbook(await planOf(repo, { rulesVersion: fresh('rules-contract-ref'), ingredients: [planned(ruleRow({ code: `ING-${runSalt}-${counter++}`, name: fresh('zzyzx') }))], claimWords: [claimWordRow()], tapers: [taperRow()], newProducts: [one.newProduct], products: [one.planned] }))
+
+          const reference = await repo.readVerdictReference()
+          const { workbook } = await repo.readWorkbook()
+
+          expect(reference.rules).toEqual(workbook.ingredients)
+          expect(reference.claimWords).toEqual(workbook.claimWords)
+          expect(reference.tapers).toEqual(workbook.tapers)
+          expect(Object.keys(reference).sort()).toEqual(['catalogVersion', 'claimWords', 'rules', 'rulesVersion', 'tapers'])
+        })
+      })
+
+      describe('tapersByCode', () => {
+        it('gives the templates with the codes asked for, retired ones included, in code order, and leaves out a code that names none', async () => {
+          const { repo } = await make()
+          const [b, a, retired, other] = [taperRow({ code: `TPR-${runSalt}-B` }), taperRow({ code: `TPR-${runSalt}-A` }), taperRow({ status: 'retired' }), taperRow()]
+          await repo.applyWorkbook(await planOf(repo, { tapers: [b, a, retired, other] }))
+
+          const found = await repo.tapersByCode([b.code, a.code, retired.code, fresh('TPR-NONE')])
+
+          expect(found).toEqual([a, b, retired].sort((x, y) => (x.code < y.code ? -1 : 1)))
+        })
+
+        it('answers for more codes than one query binds, and for none', async () => {
+          const { repo } = await make()
+          const one = taperRow()
+          await repo.applyWorkbook(await planOf(repo, { tapers: [one] }))
+          const codes = [...Array.from({ length: 250 }, (_, i) => `TPR-MISSING-${runSalt}-${i}`), one.code]
+
+          expect((await repo.tapersByCode(codes)).map((row) => row.code)).toEqual([one.code])
+          expect(await repo.tapersByCode([])).toEqual([])
+        })
+      })
+
+      describe('stepsOf', () => {
+        it('gives the steps of the approved rows of each product named, by the id of its catalog product, and leaves out a draft row, a retired row and a product nobody names', async () => {
+          const { repo } = await make()
+          const [approved, draft, retired, unasked] = [
+            workbookProduct({ steps: ['cleanse', 'treat'] }),
+            workbookProduct({ status: 'draft', approvedBy: null, approvedOn: null, steps: ['cleanse'] }),
+            workbookProduct({ status: 'retired', steps: ['cleanse'] }),
+            workbookProduct({ steps: ['protect'] }),
+          ]
+          const all = [approved, draft, retired, unasked]
+          await repo.applyWorkbook(await planOf(repo, { newProducts: all.map((one) => one.newProduct), products: all.map((one) => one.planned) }))
+
+          const found = await repo.stepsOf([approved, draft, retired].map((one) => one.newProduct.id).concat('product-nobody-has'))
+
+          expect([...found]).toEqual([[approved.newProduct.id, ['cleanse', 'treat']]])
+        })
+
+        it('gives a step once when more than one approved row of a product fills it, and answers for none', async () => {
+          const { repo } = await make()
+          const first = workbookProduct({ steps: ['cleanse', 'treat'] })
+          const second = workbookProduct({ steps: ['treat', 'protect'] })
+          // The same catalog product under two codes.
+          const same = { ...second.planned, productKey: first.identityKey }
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [first.newProduct], products: [first.planned, same] }))
+
+          const found = await repo.stepsOf([first.newProduct.id])
+
+          expect(new Set(found.get(first.newProduct.id))).toEqual(new Set(['cleanse', 'treat', 'protect']))
+          expect(found.get(first.newProduct.id)).toHaveLength(3)
+          expect((await repo.stepsOf([])).size).toBe(0)
+        })
       })
 
       describe('matchProducts', () => {

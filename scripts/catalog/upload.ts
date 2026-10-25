@@ -7,7 +7,7 @@ import { basename } from 'node:path'
 import { HttpTransportError } from '../../src/lib/http'
 import { CONTRACT_VERSION, validateWorkbook, type TabKey, type WorkbookProblem } from '../../src/modules/catalog/catalog.workbook.schema'
 import { adminUrl, createTerminal, describeFailure, isRecord, readAdminToken, readAnswer, type AdminRequest, type Environment } from './admin-api'
-import { TAB_NAMES, type WorkbookFile } from './xlsx'
+import { contractMismatch, TAB_NAMES, type WorkbookFile } from './xlsx'
 
 const IMPORT_PATH = '/api/v1/admin/catalog/import'
 const UNSURE = 'The upload may or may not have been applied. Run npm run catalog:export and check the catalog version before retrying.'
@@ -72,7 +72,7 @@ function staleStamp(file: string, env: Environment, read: WorkbookFile): string 
     return `${file} was exported from ${read.environment}, but you asked to upload to ${env}. Nothing was sent. Run npm run catalog:export -- --env ${env} and make the edits on that file.`
   }
   if (read.contractVersion !== CONTRACT_VERSION) {
-    return `${file} was made for workbook contract version ${read.contractVersion ?? 'unknown'}, but this checkout's contract is ${CONTRACT_VERSION}. ${again}`
+    return `${contractMismatch(file, read.contractVersion)} ${again}`
   }
   return null
 }
@@ -111,6 +111,8 @@ export async function runUpload(args: { file: string; env: Environment; by: stri
     form.append('baseVersion', String(catalogVersion))
     form.append('dryRun', String(!args.apply))
     form.append('uploadedBy', args.by)
+    // The stamp is the file's own, which staleStamp has just held equal to this checkout's: the server refuses a file made for another contract.
+    form.append('contractVersion', read.contractVersion!)
     // The file goes along only when applying: the server archives it under the new catalog version.
     if (args.apply) form.append('file', new Blob([bytes], { type: XLSX_MEDIA_TYPE }), basename(args.file))
 
@@ -121,6 +123,11 @@ export async function runUpload(args: { file: string; env: Environment; by: stri
     if (answer.kind === 'refused' && answer.code === 'CATALOG_STALE') {
       terminal.error(`Refused: ${describeFailure(answer)}`)
       terminal.error('The catalog has changed since this file was exported. Run npm run catalog:export again and make the edits on the new file.')
+      return 1
+    }
+    if (answer.kind === 'refused' && answer.code === 'CONTRACT_MISMATCH') {
+      terminal.error(`Refused: ${describeFailure(answer)}`)
+      terminal.error('The server\'s workbook contract is not the one this file was made for. Run npm run catalog:export again and make the edits on the new file.')
       return 1
     }
     if (answer.kind === 'refused' && answer.code === 'CATALOG_INVALID') {

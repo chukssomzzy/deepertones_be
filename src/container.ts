@@ -35,6 +35,8 @@ import { D1ShelfRepository } from './modules/shelf/shelf.repository'
 import { ShelfService } from './modules/shelf/shelf.service'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
+import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
+import { VerdictService } from './modules/verdicts/verdicts.service'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
 import { R2CatalogImageStore } from './providers/catalog-images/r2.catalog-image-store'
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
@@ -52,6 +54,7 @@ import { AnthropicProductRecognizer } from './providers/product-recognition/anth
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
 import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
+import { AnthropicVerdictFitter } from './providers/verdict-fitting/anthropic.verdict-fitter'
 import { R2WorkbookArchive } from './providers/workbook-archive/r2.workbook-archive'
 
 const PHOTO_ENVIRONMENTS: readonly string[] = ['development', 'staging', 'production', 'test']
@@ -127,6 +130,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'label-routine': env.ANTHROPIC_MODEL_JUDGE,
         'judge-grounding': env.ANTHROPIC_MODEL_JUDGE,
         'write-routine': env.ANTHROPIC_MODEL_ROUTINE,
+        'fit-verdict': env.ANTHROPIC_MODEL_ROUTINE,
       },
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     })
@@ -142,6 +146,10 @@ export const buildContainer = (env: CloudflareBindings) => {
   // 30 s so a stuck request frees the consumer for the retry, which is billed afresh, rather than holding it for the 60 s a web search turn can take.
   const MENTION_READ_TIMEOUT_MS = 30_000
   const mentionReaderAnthropic = once(() => newAnthropic(MENTION_READ_TIMEOUT_MS))
+  // The fit judge reads a whole shelf and gives a reason for each product (adaptive thinking included), so one call runs well past a mention read; it is on
+  // the queue and nobody waits, and 120 s still frees the consumer for the retry, which is billed afresh, if the request is stuck.
+  const VERDICT_FIT_TIMEOUT_MS = 120_000
+  const verdictFitterAnthropic = once(() => newAnthropic(VERDICT_FIT_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -172,6 +180,9 @@ export const buildContainer = (env: CloudflareBindings) => {
         archive: new R2WorkbookArchive({ bucket: env.PRIVATE_PHOTOS, environment: photoEnvironment(env.ENVIRONMENT) }),
         now: () => new Date(),
         newId: () => crypto.randomUUID(),
+        // In production only, an approved step-down template must be approved by someone on this list.
+        environment: env.ENVIRONMENT,
+        qualifiedApprovers: env.QUALIFIED_APPROVERS,
       }),
   )
 
@@ -186,6 +197,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'parse-safety': env.PARSE_SAFETY_QUEUE,
         email: env.EMAIL_QUEUE,
         'face-scans': env.FACE_SCANS_QUEUE,
+        verdicts: env.VERDICTS_QUEUE,
       }),
   )
 
@@ -340,6 +352,23 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const verdicts = once(
+    () =>
+      new VerdictService({
+        repository: new D1VerdictsRepository(db()),
+        fitter: new AnthropicVerdictFitter(verdictFitterAnthropic()),
+        jobs: jobQueue(),
+        workbook: catalogWorkbook(),
+        catalog: catalog(),
+        shelf: shelf(),
+        scans: scans(),
+        safety: safety(),
+        goals: goals(),
+        faceScans: faceScans(),
+        now: () => new Date(),
+      }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -403,6 +432,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get users() {
       return users()
+    },
+    get verdicts() {
+      return verdicts()
     },
   }
 }
