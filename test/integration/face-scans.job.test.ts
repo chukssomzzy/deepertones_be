@@ -108,7 +108,7 @@ describe('the upload step through the queue handler', () => {
     const [put] = perfectCorp.calls.filter((call) => call.method === 'PUT')
     expect(new Uint8Array(put!.body as ArrayBuffer | Uint8Array)).toEqual(photo.bytes)
     const [analysis] = perfectCorp.callsTo('POST', '/s2s/v2.0/task/skin-analysis')
-    expect(analysis!.body).toEqual({ src_file_id: expect.stringMatching(/^file-/), dst_actions: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_skin_type'], format: 'json' })
+    expect(analysis!.body).toEqual({ src_file_id: expect.stringMatching(/^file-/), dst_actions: ['hd_radiance', 'hd_moisture', 'hd_texture', 'hd_age_spot', 'hd_acne', 'hd_pore', 'hd_oiliness', 'hd_skin_type'], format: 'json' })
     expect(perfectCorp.callsTo('POST', '/s2s/v2.0/task/fitzpatrick-scale-analyzer')).toHaveLength(1)
   })
 
@@ -220,12 +220,12 @@ describe('the fetch step through the queue handler', () => {
     ])
   })
 
-  it('records the spend once, as 12 units of face-analysis keyed by the task, and deletes Perfect Corp\'s copy of the task', async () => {
+  it('records the spend once, as 16 units of face-analysis keyed by the task, and deletes Perfect Corp\'s copy of the task', async () => {
     const scan = await uploaded()
 
     await finishedWith(scan)
 
-    expect(await spendOf(scan.analysisTask)).toEqual({ vendor: 'perfect-corp', job: 'face-analysis', units: 12, status: 'settled' })
+    expect(await spendOf(scan.analysisTask)).toEqual({ vendor: 'perfect-corp', job: 'face-analysis', units: 16, status: 'settled' })
     expect(perfectCorp.callsTo('POST', '/s2s/v2.0/task/delete').map((call) => call.body)).toEqual([{ task_id: scan.analysisTask }])
   })
 

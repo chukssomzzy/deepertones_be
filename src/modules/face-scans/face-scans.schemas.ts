@@ -59,6 +59,10 @@ const ConcernIdEnum = z.enum(Object.values(CONCERN_IDS) as [string, ...string[]]
 const FaceScanSeen = z.object({
   concern: ConcernIdEnum,
   region: z.string().openapi({ description: 'The region that was read: `whole` for the whole face.' }),
+  level: z.enum(['faint', 'a-little', 'some', 'clear']).openapi({
+    description:
+      'A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped.',
+  }),
   words: z.string().openapi({ description: 'What can be seen, in plain words. Show it as it is; it is never a diagnosis.' }),
   overlay: z
     .object({ url: z.string() })
@@ -86,14 +90,20 @@ const FaceScanSinceDayOne = z.object({
 
 const FaceScanResult = z
   .object({
-    seen: z.array(FaceScanSeen).openapi({ description: 'The goal\'s concerns that can be seen now, in goal order, at most 3. Empty when nothing stands out.' }),
-    nothingStandsOut: z.string().nullable().openapi({ description: 'A calm sentence to show when `seen` is empty; null otherwise.' }),
+    seen: z
+      .array(FaceScanSeen)
+      .openapi({ description: 'Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back.' }),
+    alsoNoticed: z
+      .array(FaceScanSeen)
+      .openapi({ description: 'Other concerns that can be seen, beyond the goal\'s; never a diagnosis. Only those that are not `faint`, in a fixed order; empty when there are none (always, for a scan taken before these were measured). Show them under the goal\'s concerns as "Also noticed". They are not part of `sinceDayOne` or `nothingStandsOut`.' }),
+    nothingStandsOut: z.string().nullable().openapi({ description: 'A calm sentence to show when every item in `seen` is `faint`, or `seen` is empty; null otherwise.' }),
     skinType: z.enum(['oily', 'dry', 'combination', 'normal']).nullable().openapi({ description: 'The skin type; null when it could not be read.' }),
     skinAge: z
       .object({ years: z.number().int(), words: z.string() })
       .nullable()
       .openapi({ description: 'The skin age as a plain fact in whole years. It is never compared with a real age. Null when it could not be read.' }),
     sinceDayOne: FaceScanSinceDayOne.nullable().openapi({ description: 'The change since day one; null when this scan is its own day one.' }),
+    nextGoal: z.enum(GOALS).nullable().openapi({ description: 'The goal to suggest working on next, from this check-in scan. Null on every other scan.' }),
     tablesVersion: z.string().openapi({ description: 'The version of the rules that worded this result. The words are worked out each time the scan is read.' }),
   })
   .openapi('FaceScanResult', {
@@ -117,7 +127,7 @@ export const FaceScanResponse = z
     goal: z.enum(GOALS).openapi({ description: 'The goal the scan was taken under, whatever the goal is now.' }),
     createdAt: z.iso.datetime(),
     photos: z.object({ front: FacePhotoLink.optional(), right: FacePhotoLink.optional(), left: FacePhotoLink.optional() }).openapi({ description: 'A link for each photo that was sent.' }),
-    rescanSuggested: z.boolean().openapi({ description: 'True when the profile\'s latest scan was taken under another goal than its current one.' }),
+    rescanSuggested: z.boolean().openapi({ description: 'True when a face scan is due now for the profile\'s current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase\'s check-in at the review point.' }),
     // Not `FaceScanResult.nullable()`: that would make the registered component itself nullable and replace its never-list description.
     result: z.union([FaceScanResult, z.null()]).openapi({ description: 'What the scan shows: filled when `state` is `ready`, null otherwise.' }),
   })

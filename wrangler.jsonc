@@ -42,8 +42,8 @@
     "CATALOG_IMAGES_PUBLIC_URL": "",
     // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
     "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
-    // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
-    "PERFECT_CORP_USD_PER_UNIT": "0.05"
+    // USD per Perfect Corp unit, used to cost every face-scan call in the ledger: the pay-as-you-go price ($0.055, units valid a year; checked 2026-10-23 on yce.perfectcorp.com/ai-api/api-pricing). On a monthly subscription use its price instead (0.048 up to 2,000 units/mo, 0.047 at 5,000, 0.046 at 10,000).
+    "PERFECT_CORP_USD_PER_UNIT": "0.055"
   },
   // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
   // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
@@ -283,8 +283,8 @@
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
         // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
         "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
-        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
-        "PERFECT_CORP_USD_PER_UNIT": "0.05"
+        // USD per Perfect Corp unit, used to cost every face-scan call in the ledger: the pay-as-you-go price ($0.055, units valid a year; checked 2026-10-23 on yce.perfectcorp.com/ai-api/api-pricing). On a monthly subscription use its price instead (0.048 up to 2,000 units/mo, 0.047 at 5,000, 0.046 at 10,000).
+        "PERFECT_CORP_USD_PER_UNIT": "0.055"
       },
       // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.
@@ -487,8 +487,8 @@
         "CATALOG_IMAGES_PUBLIC_URL": "https://assets.deepertones.com",
         // Perfect Corp (YouCam) API address for the face scan. Its key and webhook secret are secrets (PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET), not set here.
         "PERFECT_CORP_BASE_URL": "https://yce-api-01.makeupar.com",
-        // PLACEHOLDER: USD per Perfect Corp unit, used to cost every face-scan call in the ledger. Confirm it from Perfect Corp's feature-cost endpoint and the plan price before relying on spend figures.
-        "PERFECT_CORP_USD_PER_UNIT": "0.05"
+        // USD per Perfect Corp unit, used to cost every face-scan call in the ledger: the pay-as-you-go price ($0.055, units valid a year; checked 2026-10-23 on yce.perfectcorp.com/ai-api/api-pricing). On a monthly subscription use its price instead (0.048 up to 2,000 units/mo, 0.047 at 5,000, 0.046 at 10,000).
+        "PERFECT_CORP_USD_PER_UNIT": "0.055"
       },
       // Deploys fail until ZEPTOMAIL_API_KEY, OTP_PEPPER, JWT_SECRET, DEVICE_ID_KEY, ANTHROPIC_API_KEY, EXPO_ACCESS_TOKEN, PERFECT_CORP_API_KEY, PERFECT_CORP_WEBHOOK_SECRET and ADMIN_API_TOKEN are set on this environment's Worker: fill in
       // .dev.vars.<env>, then `npm run secrets:push -- --env <env> --apply`.

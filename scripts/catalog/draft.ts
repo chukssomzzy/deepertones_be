@@ -7,6 +7,7 @@ import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.pr
 import { AnthropicConfigError } from '../../src/providers/anthropic/anthropic.provider'
 import type { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
 import { type CatalogDrafter, checkedDraft, DRAFT_COLUMNS, type DraftColumn, type DraftCountry, type DraftRequest, isUsableSource } from '../../src/providers/catalog-drafting/catalog-drafter.provider'
+import { DraftInputError } from './draft-input-error'
 import type { ProductCategory, ProductForm, ProductIdentity, ProductResearcher } from '../../src/providers/product-research/product-researcher.provider'
 
 export type DraftDeps = {
@@ -38,6 +39,8 @@ export type DraftOutcome = {
   skipped: string[]
   /** Products a call failed for (other than the spend cap); they were left as far as they got and the run went on. */
   failed: { code: string; reason: FailureReason }[]
+  /** How many Products rows are `draft`, skipped ones included: 0 means there was nothing to draft. */
+  draftRows: number
   /** Why the run ended before the last product: the spend cap, or a setup that is wrong (key, billing, permissions). Null when it did not. */
   stoppedBy: 'cap' | 'config' | null
   spentMicros: number
@@ -55,21 +58,46 @@ const entriesOf = (cell: unknown): string[] =>
         .filter((entry) => entry !== '')
     : []
 
+const hasCurrency = (row: RawRow): boolean => typeof row.currency === 'string' && row.currency.trim() !== ''
+
 const activeCountries = (workbook: RawWorkbook): DraftCountry[] =>
   workbook.countries.rows
-    .filter((row) => row.status === 'active' && typeof row.code === 'string' && typeof row.currency === 'string')
+    .filter((row) => row.status === 'active' && typeof row.code === 'string' && hasCurrency(row))
     .map((row) => ({ code: row.code as string, currency: row.currency as string }))
+
+/** Codes of the Countries rows marked active that are left out of the draft because they have no currency to price in. */
+const withoutCurrency = (workbook: RawWorkbook): string[] =>
+  workbook.countries.rows.filter((row) => row.status === 'active' && typeof row.code === 'string' && row.code !== '' && !hasCurrency(row)).map((row) => row.code as string)
+
+const withoutCurrencyLine = (codes: string[]): string =>
+  codes.length === 1 ? `Countries row ${codes[0]} was skipped because it has no currency.` : `Countries rows ${codes.join(', ')} were skipped because they have no currency.`
 
 /** The errors that end the run, not just one product: the cap, and a key, billing or permission that is wrong (retrying every product cannot help). */
 const stopOf = (error: unknown): 'cap' | 'config' | null =>
   error instanceof AiBudgetExceededError ? 'cap' : error instanceof AnthropicConfigError ? 'config' : null
+
+const draftRowsOf = (workbook: RawWorkbook): number => workbook.products.rows.filter((row) => row.status === 'draft').length
+
+export const NOTHING_TO_DRAFT = 'No draft rows to fill: add products to the Products tab with status draft (brand, name, category, origin) and run again. No file was written.'
+export const NO_ACTIVE_COUNTRIES = 'The Countries tab has no active countries, so only product cells will be drafted, not prices. To draft prices too, add a Countries row (code, currency, low_max, mid_max, status active).'
 
 /** The countries to draft: those named, or every active one. A name that is not an active country stops the run before anything is spent. */
 const targetCountries = (workbook: RawWorkbook, named: string[] | undefined): DraftCountry[] => {
   const active = activeCountries(workbook)
   if (named === undefined) return active
   const refused = named.filter((code) => !active.some((country) => country.code === code))
-  if (refused.length > 0) throw new Error(`Not an active country in the Countries tab: ${refused.join(', ')}`)
+  if (refused.length > 0) {
+    const skipped = withoutCurrency(workbook).filter((code) => refused.includes(code))
+    throw new DraftInputError(
+      [
+        `Not an active country in the Countries tab: ${refused.join(', ')}.`,
+        ...(skipped.length > 0 ? [withoutCurrencyLine(skipped)] : []),
+        active.length === 0
+          ? 'The Countries tab has no active country: add a row with code, currency, low_max, mid_max, status active, and run again.'
+          : `Active countries: ${active.map((country) => country.code).join(', ')}.`,
+      ].join(' '),
+    )
+  }
   return active.filter((country) => named.includes(country.code))
 }
 
@@ -196,7 +224,7 @@ export const draftWorkbook = async (input: RawWorkbook, { researcher, drafter, l
   const prices = { passes: passesMade, asked, priced: asked - missing.reduce((sum, entry) => sum + entry.countries.length, 0), missing }
 
   const checked = validateWorkbook(workbook)
-  return { workbook, problems: checked.ok ? [] : checked.problems, skipped, failed, stoppedBy, spentMicros: ledger.spentMicros(), prices }
+  return { workbook, problems: checked.ok ? [] : checked.problems, skipped, failed, draftRows: draftRowsOf(workbook), stoppedBy, spentMicros: ledger.spentMicros(), prices }
 }
 
 const dollars = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
@@ -226,10 +254,22 @@ export type DraftIo = {
   writeWorkbook: (path: string, workbook: RawWorkbook, catalogVersion: number | null, stamp: { environment?: string; contractVersion?: string }) => Promise<void>
 }
 
-/** Reads `input`, drafts it, and writes the result to `out`, even when a stop or problems remain: the file is what the person finishes. */
-export const runDraft = async (args: { input: string; out: string; countries?: string[]; passes?: number }, deps: Omit<DraftDeps, 'countries' | 'passes'> & { io: DraftIo }): Promise<DraftOutcome> => {
+/**
+ * Reads `input`, drafts it, and writes the result to `out`, even when a stop or problems remain: the file is what the person finishes. A workbook
+ * with no draft rows has nothing to write, so it is said (through `notify`) and left alone.
+ */
+export const runDraft = async (args: { input: string; out: string; countries?: string[]; passes?: number }, deps: Omit<DraftDeps, 'countries' | 'passes'> & { io: DraftIo; notify?: (line: string) => void }): Promise<DraftOutcome> => {
   const { workbook, catalogVersion, environment, contractVersion } = await deps.io.readWorkbook(args.input)
+  if (args.countries === undefined && draftRowsOf(workbook) > 0) {
+    if (activeCountries(workbook).length === 0) deps.notify?.(NO_ACTIVE_COUNTRIES)
+    const skipped = withoutCurrency(workbook)
+    if (skipped.length > 0) deps.notify?.(withoutCurrencyLine(skipped))
+  }
   const outcome = await draftWorkbook(workbook, { researcher: deps.researcher, drafter: deps.drafter, ledger: deps.ledger, countries: args.countries, passes: args.passes })
+  if (outcome.draftRows === 0) {
+    deps.notify?.(NOTHING_TO_DRAFT)
+    return outcome
+  }
   // A stamp the input lacked is left out, not made up: the upload refuses such a file, and a draft must not look more trustworthy than its source.
   await deps.io.writeWorkbook(args.out, outcome.workbook, catalogVersion, {
     ...(environment === null ? {} : { environment }),

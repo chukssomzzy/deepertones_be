@@ -702,6 +702,54 @@
         ],
         "description": "The current safety answers, or null until the profile answers. Shown even when the goal is not set yet."
       },
+      "SwitchPreview": {
+        "type": "object",
+        "properties": {
+          "goal": {
+            "type": "string",
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair"
+            ],
+            "description": "One of the six goals the app offers.",
+            "example": "fade-dark-marks"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "resume",
+              "fresh"
+            ],
+            "description": "`resume` when switching continues the chase the goal had; `fresh` when it starts a new one."
+          },
+          "dayOneAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the chase's first ready scan was taken. Null for a fresh start, or while the chase has no ready scan."
+          },
+          "resumeUntil": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last moment the goal can be taken up again and still resume. Null for a fresh start."
+          }
+        },
+        "required": [
+          "goal",
+          "outcome",
+          "dayOneAt",
+          "resumeUntil"
+        ]
+      },
       "SetSafetyBody": {
         "type": "object",
         "properties": {
@@ -1480,6 +1528,22 @@
               "continueLabel",
               "choices"
             ]
+          },
+          "switchScreen": {
+            "type": "object",
+            "properties": {
+              "resume": {
+                "type": "string"
+              },
+              "fresh": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "resume",
+              "fresh"
+            ],
+            "description": "The heads-up before a goal switch: show the line named by the `outcome` of `GET /api/v1/me/goal/switch-preview`. Draft wording."
           }
         },
         "required": [
@@ -1489,7 +1553,8 @@
           "answerScreen",
           "answers",
           "colourNote",
-          "safetyScreen"
+          "safetyScreen",
+          "switchScreen"
         ]
       },
       "Scan": {
@@ -2127,7 +2192,7 @@
           },
           "rescanSuggested": {
             "type": "boolean",
-            "description": "True when the profile's latest scan was taken under another goal than its current one."
+            "description": "True when a face scan is due now for the profile's current goal (the same due rule `POST /scans/faces` enforces): a first scan under the goal, or its chase's check-in at the review point."
           },
           "result": {
             "anyOf": [
@@ -2179,6 +2244,16 @@
                   "type": "string",
                   "description": "The region that was read: `whole` for the whole face."
                 },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "faint",
+                    "a-little",
+                    "some",
+                    "clear"
+                  ],
+                  "description": "A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped."
+                },
                 "words": {
                   "type": "string",
                   "description": "What can be seen, in plain words. Show it as it is; it is never a diagnosis."
@@ -2202,18 +2277,83 @@
               "required": [
                 "concern",
                 "region",
+                "level",
                 "words",
                 "overlay"
               ]
             },
-            "description": "The goal's concerns that can be seen now, in goal order, at most 3. Empty when nothing stands out."
+            "description": "Every goal concern Perfect Corp measured, with how much can be seen, in goal order, at most 3. A concern Perfect Corp did not return is left out; empty when none came back."
+          },
+          "alsoNoticed": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "concern": {
+                  "type": "string",
+                  "enum": [
+                    "spots",
+                    "pores",
+                    "shine",
+                    "marks",
+                    "redness",
+                    "glow",
+                    "texture",
+                    "under-eyes",
+                    "dryness"
+                  ],
+                  "description": "The concern, by the app's own id. Never a Perfect Corp name."
+                },
+                "region": {
+                  "type": "string",
+                  "description": "The region that was read: `whole` for the whole face."
+                },
+                "level": {
+                  "type": "string",
+                  "enum": [
+                    "faint",
+                    "a-little",
+                    "some",
+                    "clear"
+                  ],
+                  "description": "A level of how much can be seen, from `faint` (hardly there; the words read as reassurance) up to `clear`. It is not a score and carries no number. Use it to style the item, for example to show a `faint` one subdued with its overlay off until it is tapped."
+                },
+                "words": {
+                  "type": "string",
+                  "description": "What can be seen, in plain words. Show it as it is; it is never a diagnosis."
+                },
+                "overlay": {
+                  "type": [
+                    "object",
+                    "null"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "url"
+                  ],
+                  "description": "A signed link to the PNG mask of where the concern shows, good for 5 minutes (fetch the scan again for a new one); null when there is no mask."
+                }
+              },
+              "required": [
+                "concern",
+                "region",
+                "level",
+                "words",
+                "overlay"
+              ]
+            },
+            "description": "Other concerns that can be seen, beyond the goal's; never a diagnosis. Only those that are not `faint`, in a fixed order; empty when there are none (always, for a scan taken before these were measured). Show them under the goal's concerns as \"Also noticed\". They are not part of `sinceDayOne` or `nothingStandsOut`."
           },
           "nothingStandsOut": {
             "type": [
               "string",
               "null"
             ],
-            "description": "A calm sentence to show when `seen` is empty; null otherwise."
+            "description": "A calm sentence to show when every item in `seen` is `faint`, or `seen` is empty; null otherwise."
           },
           "skinType": {
             "type": [
@@ -2336,6 +2476,22 @@
             ],
             "description": "The change since day one; null when this scan is its own day one."
           },
+          "nextGoal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "clear-skin",
+              "even-tone",
+              "fade-dark-marks",
+              "brighter",
+              "glow",
+              "calm-repair",
+              null
+            ],
+            "description": "The goal to suggest working on next, from this check-in scan. Null on every other scan."
+          },
           "tablesVersion": {
             "type": "string",
             "description": "The version of the rules that worded this result. The words are worked out each time the scan is read."
@@ -2343,10 +2499,12 @@
         },
         "required": [
           "seen",
+          "alsoNoticed",
           "nothingStandsOut",
           "skinType",
           "skinAge",
           "sinceDayOne",
+          "nextGoal",
           "tablesVersion"
         ],
         "description": "What a ready scan shows. It never holds a score or any number but the skin age in years, never a condition name, never a Perfect Corp name, never a Fitzpatrick type, and never a word about lightness. It describes the face, not the person: show the words as they are."
@@ -3944,6 +4102,110 @@
         }
       }
     },
+    "/api/v1/me/goal/switch-preview": {
+      "get": {
+        "operationId": "getSwitchPreview",
+        "tags": [
+          "Onboarding"
+        ],
+        "summary": "What switching to another goal would do",
+        "description": "Guests included. `outcome` is `resume` when the goal was left no more than 90 days ago and its chase would continue, with `dayOneAt` (its first ready scan, or null) and `resumeUntil` (90 days after it was left); otherwise `fresh`, with both null. A profile with no goal yet starts every goal fresh. Reads only: no goal is saved and no scan is made. The goal the profile is already on is 400 `GOAL_ALREADY_CURRENT`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "clear-skin",
+                "even-tone",
+                "fade-dark-marks",
+                "brighter",
+                "glow",
+                "calm-repair"
+              ],
+              "description": "One of the six goals the app offers.",
+              "example": "fade-dark-marks"
+            },
+            "required": true,
+            "description": "One of the six goals the app offers.",
+            "name": "goal",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What switching would do",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SwitchPreview"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/safety": {
       "put": {
         "operationId": "setSafety",
@@ -4642,7 +4904,7 @@
           "Face scans"
         ],
         "summary": "Say yes to keeping and analysing face photos",
-        "description": "Guests included. Consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_CONSENT_VERSION_MISMATCH` with `details.current`. Giving consent again, or after a withdrawal, is 200 and starts it afresh. A face scan is refused (409 `FACE_CONSENT_REQUIRED`) without a current consent.",
+        "description": "A guest may call this. Consent belongs to the active profile. Send `{ version }`, the version of the consent wording the user agreed to: only the current one is accepted, any other is 400 `FACE_CONSENT_VERSION_MISMATCH` with `details.current`. Giving consent again, or after a withdrawal, is 200 and starts it afresh. A face scan is refused (409 `FACE_CONSENT_REQUIRED`) without a current consent.",
         "security": [
           {
             "bearerAuth": []
@@ -4743,7 +5005,7 @@
           "Face scans"
         ],
         "summary": "The face photo consent this profile gave",
-        "description": "A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_CONSENT_NOT_FOUND` until the profile has given one.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. A withdrawn consent is still shown, with `withdrawnAt` and `current` false, as is one for an older wording. 404 `FACE_CONSENT_NOT_FOUND` until the profile has given one.",
         "security": [
           {
             "bearerAuth": []
@@ -4796,6 +5058,16 @@
               }
             }
           },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not found",
             "content": {
@@ -4824,7 +5096,7 @@
           "Face scans"
         ],
         "summary": "Take back the face photo consent",
-        "description": "Stamps the time and keeps the record; it deletes no photos (delete a face scan to do that). 204 again when already withdrawn, and 204 when there was never any consent.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Stamps the time and keeps the record; it deletes no photos (delete a face scan to do that). 204 again when already withdrawn, and 204 when there was never any consent.",
         "security": [
           {
             "bearerAuth": []
@@ -4836,6 +5108,16 @@
           },
           "401": {
             "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
             "content": {
               "application/json": {
                 "schema": {
@@ -6356,7 +6638,7 @@
           "Face scans"
         ],
         "summary": "Start a face scan from a front photo and optionally two side photos",
-        "description": "Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE` (`details.reason` is `already-scanned-for-goal`: the profile's latest scan was taken under its current goal), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "A guest may call this. Multipart: a `front` part, and optionally `right` and `left`. Every photo must be a JPEG of at most 6,000,000 bytes, with a shorter side of at least 1080 and a longer side of at most 4096 pixels. The checks run in this order and nothing is stored until all pass: 409 `FACE_CONSENT_REQUIRED` (no current consent for this profile), 409 `GOAL_REQUIRED` (pick a goal first), 429 `FACE_SCAN_NOT_DUE`: the current goal's chase gets one scan, plus one wider check-in scan at its review point (issue #145). `details.reason` is `already-scanned-for-goal` (the chase already has a scan, or its check-in is still being analysed or needs a retake), `check-in-not-due` (the chase has its day one but has not reached its review point yet; `details.checkInDueAt` says when it will) or `check-in-taken` (the chase's check-in has already been taken) or `scan-limit` (a new chase's first scan waits 30 days after the profile's last day-one scan under any goal; check-ins neither count nor are limited; `details.nextScanAt` says when), then the photos: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. One bad photo refuses the whole scan. The answer is 202 with the scan `analysing`; if the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202), and a new scan may be started. Starting a scan costs nothing in the AI spend ledger. The answer shows no result; a guest follows the scan with `GET /api/v1/scans/faces/{id}/events` and must verify to read it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
@@ -6487,7 +6769,7 @@
           "Face scans"
         ],
         "summary": "The profile's face scans, latest first",
-        "description": "The current profile's scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. Another profile's scans, of this account or any other, are never listed.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. The current profile's scans, latest first, at most 20, in every state (`analysing`, `needs-retake`, `ready` and `failed`), each as `GET /api/v1/scans/faces/{id}` shows it, with `result` for a ready scan and fresh photo links. A profile with none gets an empty list. It needs no consent and no goal, so it still works after the consent is withdrawn. Another profile's scans, of this account or any other, are never listed.",
         "security": [
           {
             "bearerAuth": []
@@ -6540,6 +6822,16 @@
               }
             }
           },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "500": {
             "description": "Unexpected server error",
             "content": {
@@ -6560,7 +6852,7 @@
           "Face scans"
         ],
         "summary": "A face scan and where it has got to",
-        "description": "Shows no result yet. `state` is `analysing`, `needs-retake`, `ready` or `failed`, and `reason` says why a scan needs a retake or failed: follow it live with `GET /api/v1/scans/faces/{id}/events` or poll this. Another profile's scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Shows no result yet. `state` is `analysing`, `needs-retake`, `ready` or `failed`, and `reason` says why a scan needs a retake or failed: follow it live with `GET /api/v1/scans/faces/{id}/events` or poll this. Another profile's scan, of this account or any other, is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
         "security": [
           {
             "bearerAuth": []
@@ -6633,6 +6925,16 @@
               }
             }
           },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not found",
             "content": {
@@ -6661,7 +6963,7 @@
           "Face scans"
         ],
         "summary": "Delete a face scan and its photos",
-        "description": "Deletes the photos from storage, then the scan. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist or is already deleted. Consent is kept.",
+        "description": "Verified users only: a guest gets 403 `VERIFICATION_REQUIRED`. Deletes the photos from storage, then the scan. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist or is already deleted. Consent is kept.",
         "security": [
           {
             "bearerAuth": []
@@ -6701,6 +7003,16 @@
               }
             }
           },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "404": {
             "description": "Not found",
             "content": {
@@ -6731,7 +7043,7 @@
           "Face scans"
         ],
         "summary": "Follow a face scan live, as server-sent events",
-        "description": "A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
+        "description": "A guest may call this. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames carry only `id`, `state` and `reason`, never a result, scores or photo links, so a guest learns the next step and must verify and call `GET /api/v1/scans/faces/{id}` for the result. Frames: `snapshot` first, whose data is `{ id, state, reason }` as the scan now is; then one `face` with the same three fields each time its state changes; then `done` (data `{}`) once the scan is `ready`, `failed` or `needs-retake`, after which the server closes the stream. A scan that is already over gets `snapshot` and `done` at once. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on, the new `snapshot` is the current state. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body. Another profile's scan is 404 `FACE_SCAN_NOT_FOUND`, the same as one that does not exist.",
         "security": [
           {
             "bearerAuth": []
@@ -6809,7 +7121,7 @@
           "Face scans"
         ],
         "summary": "Send a new front photo for a scan that needs a retake",
-        "description": "Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: 404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
+        "description": "A guest may call this. Multipart with a `front` part only, a JPEG held to the same rules as when the scan was started. For a scan whose `state` is `needs-retake`. The checks run in this order and nothing changes until all pass: 404 `FACE_SCAN_NOT_FOUND`, 409 `FACE_CONSENT_REQUIRED`, 409 `FACE_SCAN_NOT_AWAITING_RETAKE` (the scan is in any other state), then the photo: 400 `UNSUPPORTED_IMAGE`, `IMAGE_TOO_SMALL` or `IMAGE_TOO_LARGE`, and 400 `VALIDATION_FAILED` without a `front`. The new photo replaces the old and the scan is `analysing` again with no `reason`: 202 with the scan. If the analysis cannot be queued the scan is `failed` with reason `unavailable` (still 202). A retake is never refused for how many came before it. A per-address and a per-user limit apply: 429 `RATE_LIMITED` with `Retry-After`.",
         "security": [
           {
             "bearerAuth": []
