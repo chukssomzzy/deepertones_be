@@ -489,6 +489,17 @@ describe('runRoutineEval: the report', () => {
   it('names the default out directory after the start time, without a colon', () => {
     expect(defaultOutDir(BASE)).toBe('.eval/routine-2030-06-15T00-00-00.000Z')
   })
+
+  // pr6b: a later `eval:routine:rejudge --rescore` reuses the saved judgements, and can only tell whether they came from today's judge prompt if the report names it.
+  it('names the hash of the rubric judge prompt it ran with, beside the writer\'s promptHash', async () => {
+    const { routineJudgeJudgeRoutinePrompt } = await import('../../src/prompts/prompts.generated')
+    const { run, files } = setup()
+
+    await run()
+
+    expect(reportOf(files)).toMatchObject({ judgePromptHash: routineJudgeJudgeRoutinePrompt.hash, promptHash: 'prompt-hash-123' })
+    expect(routineJudgeJudgeRoutinePrompt.hash).toEqual(expect.any(String))
+  })
 })
 
 describe('runRoutineEval: the bar', () => {

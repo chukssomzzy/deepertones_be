@@ -27,6 +27,7 @@
     "catalog:upload": "tsx scripts/catalog-upload.ts",
     "eval:catalog": "tsx scripts/eval-catalog.ts",
     "eval:routine": "tsx scripts/eval-routine.ts",
+    "eval:routine:rejudge": "tsx scripts/eval-routine-rejudge.ts",
     "eval:routine:sheet": "tsx scripts/eval-routine-sheet.ts",
     "eval:routine:labels": "tsx scripts/eval-routine-labels.ts",
     "eval:routine:auto-label": "tsx scripts/eval-routine-auto-label.ts",

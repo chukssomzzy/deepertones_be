@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import { checkRoutine } from '../../src/modules/routines/routines.gates'
 import type { GateFailure, Routine, RoutineSkeleton } from '../../src/modules/routines/routines.types'
+import { routineJudgeJudgeRoutinePrompt } from '../../src/prompts/prompts.generated'
 import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.provider'
 import { AnthropicConfigError } from '../../src/providers/anthropic/anthropic.provider'
 import type { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
@@ -62,10 +63,10 @@ export type RunArgs = {
 /** No colons: actions/upload-artifact refuses them in a file name. */
 export const defaultOutDir = (startedAt: Date): string => `.eval/routine-${startedAt.toISOString().replace(/:/g, '-')}`
 
-type Stop = 'cap' | 'config' | null
-type CaseState = 'done' | 'writer-error' | 'cut-off'
+export type Stop = 'cap' | 'config' | null
+export type CaseState = 'done' | 'writer-error' | 'cut-off'
 
-type Reported = {
+export type Reported = {
   id: string
   state: CaseState
   writerError?: string
@@ -91,9 +92,9 @@ export const classNameOf = (error: unknown): string => {
 }
 
 export const usd = (micros: number): string => `$${(micros / 1_000_000).toFixed(4)}`
-const shown = (value: number | null, digits = 1): string => (value === null ? 'n/a' : value.toFixed(digits))
+export const shown = (value: number | null, digits = 1): string => (value === null ? 'n/a' : value.toFixed(digits))
 
-const gatesOf = (state: CaseState, writerError: string | undefined, failures: GateFailure[]): string => {
+export const gatesOf = (state: CaseState, writerError: string | undefined, failures: GateFailure[]): string => {
   if (state === 'cut-off') return 'cut-off'
   if (state === 'writer-error') return `error ${writerError}`
   return failures.length === 0 ? 'ok' : failures.map((f) => (f.step === null ? f.gate : `${f.gate}(${f.step})`)).join(',')
@@ -102,7 +103,7 @@ const gatesOf = (state: CaseState, writerError: string | undefined, failures: Ga
 const judgeLine = (row: JudgeComparison): string =>
   `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`} (exact ${row.exactAgreement === null ? 'n/a' : `${row.exactAgreement.toFixed(1)}%`}), fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}`
 
-type GroundingTally = { checked: number; supported: number; unverifiable: number; skipped: number; skippedGate: number }
+export type GroundingTally = { checked: number; supported: number; unverifiable: number; skipped: number; skippedGate: number }
 
 export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: given, startedAt, model, judges, maxGrounding, promptHash, snapshot, labels, previous, deps, io }: RunArgs): Promise<{ exitCode: number; outDir: string }> => {
   const { writer, judges: judgeDeps, grounding, ledger } = deps
@@ -225,8 +226,36 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
     io.log(`${c.id}  ${gatesOf(state, writerError, failures)}${picks}  ${usd(cost)}`)
   }
 
+  const header = { startedAt: startedAt.toISOString(), set, snapshotSha256: snapshot.sha256, labelVersion: labels?.version ?? null, labelSnapshotSha256: labels?.snapshotSha256 ?? null, labelledBy, model, judges: judges.map(({ name, model }) => ({ name, model })), promptHash, judgePromptHash: routineJudgeJudgeRoutinePrompt.hash }
   // A run of the first N cases (--limit) is a trial, as one stopped at the cap is: it can fail the bar but never pass it.
-  const partial = stopped !== null || cases.length < allCases.length
+  return finishRun({ header, set, trial: cases.length < allCases.length, stopped, judges, judgeResults, judgeTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io })
+}
+
+export type FinishArgs = {
+  /** The report's fields before `capMicros`; the cases and the summary are added. */
+  header: Record<string, unknown>
+  set: RoutineSet
+  /** The run is a trial for a reason of its own (fewer cases than the set); a stop at the cap makes it one too. */
+  trial: boolean
+  stopped: Stop
+  judges: { name: string; model: string }[]
+  judgeResults: Record<string, (JudgeResult | null)[]>
+  judgeTotals: Record<string, number>
+  labelledBy: string | null
+  inputs: RoutineCaseInput[]
+  /** What the run spent, for the summary and the last lines. */
+  costMicros: number
+  tally: GroundingTally
+  reported: Reported[]
+  ledger: MemoryAiSpendLedger
+  previous?: { summary: Measures } | null | undefined
+  outDir: string
+  io: RunIo
+}
+
+/** What follows the cases of a run, whichever way they got their routines and judgements: the judge comparison, the scores and the bar, report.json, and the closing console lines. */
+export const finishRun = async ({ header, set, trial, stopped, judges, judgeResults, judgeTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io }: FinishArgs): Promise<{ exitCode: number; outDir: string }> => {
+  const partial = stopped !== null || trial
   // The judges are compared on the same routines, and the cheapest one the labels trust (else the one that agrees most) is the one whose numbers feed the bar.
   const judgeComparison = judges.map((j) => judgeComparisonOf(j, judgeResults[j.name]!, judgeTotals[j.name]!, labelledBy ?? undefined))
   const selected = selectJudge(judgeComparison)
@@ -247,7 +276,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
     groundingSkipped: tally.skipped,
     groundingSkippedGate: tally.skippedGate,
   }
-  const report = { startedAt: startedAt.toISOString(), set, snapshotSha256: snapshot.sha256, labelVersion: labels?.version ?? null, labelSnapshotSha256: labels?.snapshotSha256 ?? null, labelledBy, model, judges: judges.map(({ name, model }) => ({ name, model })), promptHash, capMicros: ledger.capMicros, partial, cases: reported, summary }
+  const report = { ...header, capMicros: ledger.capMicros, partial, cases: reported, summary }
   const reportPath = join(outDir, 'report.json')
   await io.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
 
