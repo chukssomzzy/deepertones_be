@@ -30,6 +30,7 @@ import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.j
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
 import {
+  type Band,
   chaseStartFor,
   concernsForGoal,
   hdActionsForCheckIn,
@@ -43,6 +44,7 @@ import {
   REVIEW_WEEKS,
   reviewPointFor,
   SHOWN_CONCERNS,
+  type ShownConcern,
   shownConcerns,
   type SkinTypeLabel,
   skinTypeLabel,
@@ -285,6 +287,18 @@ export class FaceScanService {
   async latestSkinType(): Promise<SkinTypeLabel | null> {
     const { profileId } = requireUser()
     return (await this.repository.latestReadyForProfile(profileId))?.skinType ?? null
+  }
+
+  /**
+   * What the shelf verdict reads of the given profile's newest ready scan: its skin type and, in goal order, the band of each concern of the scan's OWN goal (the goal it
+   * was taken under, not the profile's goal now) that the scan measured, a faint one included and the also-noticed ones left out. Null when there is no ready scan.
+   * By profile id with no session, consent or verification, since a job asks; reads only.
+   */
+  async latestConcernLevelsFor(profileId: string): Promise<{ skinType: SkinTypeLabel | null; concerns: { concern: ShownConcern; band: Band }[] } | null> {
+    const scan = await this.repository.latestReadyForProfile(profileId)
+    if (!scan) return null
+    const results = await this.repository.resultsOf(scan.id)
+    return { skinType: scan.skinType, concerns: shownConcerns(scan.goalAtScan, results).map(({ concern, band }) => ({ concern, band })) }
   }
 
   /**

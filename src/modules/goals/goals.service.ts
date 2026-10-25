@@ -109,6 +109,14 @@ export class GoalsService {
   }
 
   /**
+   * The goal of the given profile, or null when it has none (never set, or only words nobody sorted into a goal), for a build that judges against it. Read by profile
+   * id with no session, since a job asks; where `requireGoal` refuses a missing goal this answers null.
+   */
+  async goalFor(profileId: string): Promise<Goal | null> {
+    return (await this.repository.current(profileId))?.goal ?? null
+  }
+
+  /**
    * Which first-run step comes next: the goal until one is picked (typed words alone do not count), then the safety question until it is
    * answered, then the shelf. The safety answers come along whichever step it is, because the question can be answered before the goal.
    */

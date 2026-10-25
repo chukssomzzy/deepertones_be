@@ -9,7 +9,7 @@ import type { ProductCategory } from '../../providers/product-research/product-r
 import { CatalogBusyError, type ProductCatalogService } from '../catalog/catalog.service'
 import { parseSafetySpec } from './safety.job-specs'
 import type { SafetyRepository } from './safety.repository'
-import type { MentionSource, SafetyMentionRow, SafetyRow, SafetyView } from './safety.types'
+import type { MentionSource, ParseState, SafetyMentionRow, SafetyRow, SafetyView } from './safety.types'
 import { SAFETY_CHOICES, type SafetyChoice } from './safety.vocabulary'
 
 export type SafetyServiceDeps = {
@@ -143,6 +143,16 @@ export class SafetyService {
   async currentMentions(): Promise<SafetyMentionRow[]> {
     const row = await this.currentRow()
     return row ? this.repository.mentions(row.id) : []
+  }
+
+  /**
+   * The given profile's current answers, the state of their parse and the mentions found, all of the one current row, so that what is fingerprinted and what the floor
+   * reads are the same answer. By profile id with no session, since a job asks. It only reads: unlike `current` it does not queue a parse that is overdue.
+   */
+  async snapshotFor(profileId: string): Promise<{ view: SafetyView | null; parseState: ParseState | null; mentions: SafetyMentionRow[] }> {
+    const row = await this.repository.current(profileId)
+    if (!row) return { view: null, parseState: null, mentions: [] }
+    return { view: this.view(row), parseState: row.parseState, mentions: await this.repository.mentions(row.id) }
   }
 
   /**
