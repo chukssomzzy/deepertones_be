@@ -50,6 +50,10 @@ type Resolved = {
 
 const byText = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
 
+// Mentions in a fixed order (source, then catalog product id with none last, then kind), so a saved row never depends on the order the safety answers came in.
+const byMention = (a: VerdictProvenance['safety']['mentions'][number], b: VerdictProvenance['safety']['mentions'][number]): number =>
+  byText(a.source, b.source) || byText(a.productId ?? '\uffff', b.productId ?? '\uffff') || byText(a.kind, b.kind)
+
 const sortedUnique = <T extends string>(items: readonly T[]): T[] => [...new Set(items)].sort(byText)
 
 /** The earliest of the steps in routine order, not in the order the catalog lists them. */
@@ -197,13 +201,22 @@ export const fingerprintInputOf = (facts: VerdictFacts, floor: FloorResult): Fin
   }
 }
 
-/** What the saved row records of its inputs: ids, codes and bands, never a word the user typed or a product's name. */
+/**
+ * What the saved row records of its inputs: ids, codes and bands, never a word the user typed or a product's name. Only skin entries are listed, as the
+ * verdict itself shows only those; a mention is its source, its catalog product id and its kind and resolution, never its name.
+ */
 export const provenanceOf = (facts: VerdictFacts, floor: FloorResult): VerdictProvenance => ({
   goal: facts.goal,
-  entries: resolve(facts).resolved.map(({ fingerprint }) =>
-    fingerprint.kind === 'product' ? { id: fingerprint.id, formulationId: fingerprint.formulationId } : { id: fingerprint.id, noLabelPurpose: fingerprint.noLabelPurpose },
-  ),
+  entries: resolve(facts)
+    .resolved.filter((entry) => entry.floor.category === 'skin')
+    .map(({ fingerprint }) =>
+      fingerprint.kind === 'product' ? { id: fingerprint.id, formulationId: fingerprint.formulationId } : { id: fingerprint.id, noLabelPurpose: fingerprint.noLabelPurpose },
+    ),
   scan: scanOf(facts.scan),
-  safety: { choices: [...(facts.safety.view?.choices ?? [])], parseState: facts.safety.parseState },
+  safety: {
+    choices: [...(facts.safety.view?.choices ?? [])].sort(byText),
+    parseState: facts.safety.parseState,
+    mentions: facts.safety.mentions.map(({ source, productId, kind, resolution }) => ({ source, productId, kind, resolution })).sort(byMention),
+  },
   taperCodes: usedTaperCodes(floor),
 })

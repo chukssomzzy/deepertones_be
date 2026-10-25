@@ -545,9 +545,64 @@ describe('provenanceOf', () => {
         { id: 'e-tub', noLabelPurpose: 'moisturise' },
       ],
       scan: { skinType: 'combination', concerns: [{ concern: 'hd_age_spot', band: 'some' }] },
-      safety: { choices: ['reaction', 'prescription'], parseState: 'done' },
+      // The choices are sorted, and a mention is its source, its catalog product id (if any), its kind and its resolution: never its name. The mentions are
+      // sorted by source, then product id, then kind, so the same answers always give the same row whatever order they were read in.
+      safety: {
+        choices: ['prescription', 'reaction'],
+        parseState: 'done',
+        mentions: [
+          { source: 'prescription', productId: 'prod-derm', kind: 'product', resolution: 'resolved' },
+          { source: 'reaction', productId: 'prod-named', kind: 'product', resolution: 'resolved' },
+        ],
+      },
       taperCodes: ['TPR-STEROID-1'],
     })
+  })
+
+  it('records the choices sorted, whatever order the view held them in', () => {
+    const facts = factsOf(BASIC, { safety: { ...safety, view: { ...view, choices: ['reaction', 'pregnant', 'prescription', 'breastfeeding'] } } })
+
+    expect(provenanceOf(facts, floorOf(facts)).safety.choices).toEqual(['breastfeeding', 'pregnant', 'prescription', 'reaction'])
+  })
+
+  it('records an ingredient the user named, which has no catalog product and no resolution, and a product still being looked up, by those enums only, in a fixed order whatever order they were read in', () => {
+    const mentions = [
+      mentionOf({ id: 'm-unresolved', position: 2, source: 'reaction', productId: 'prod-unfound', resolution: 'unresolved', name: 'Other Tub Name' }),
+      mentionOf({ id: 'm-pending', position: 1, source: 'prescription', productId: null, resolution: 'pending', name: 'Secret Tub Name' }),
+      mentionOf({ id: 'm-ingredient', source: 'prescription', kind: 'ingredient', name: 'lanolin zeta', brand: null, category: null, productId: null, resolution: null }),
+    ]
+    const facts = factsOf(BASIC, { safety: { ...safety, mentions } })
+
+    const saved = provenanceOf(facts, floorOf(facts)).safety.mentions
+
+    // Prescription before reaction; within a source the same product id (here none) falls back to the kind, ingredient before product.
+    expect(saved).toEqual([
+      { source: 'prescription', productId: null, kind: 'ingredient', resolution: null },
+      { source: 'prescription', productId: null, kind: 'product', resolution: 'pending' },
+      { source: 'reaction', productId: 'prod-unfound', kind: 'product', resolution: 'unresolved' },
+    ])
+    const text = JSON.stringify(provenanceOf(facts, floorOf(facts)))
+    for (const word of ['lanolin zeta', 'Secret Tub Name', 'Other Tub Name', 'Moonlight']) expect(text).not.toContain(word)
+  })
+
+  it('orders the mentions of one source by their catalog product id', () => {
+    const mentions = [mentionOf({ id: 'm-b', productId: 'prod-b' }), mentionOf({ id: 'm-a', productId: 'prod-a', position: 1 })]
+    const facts = factsOf(BASIC, { safety: { ...safety, mentions } })
+
+    expect(provenanceOf(facts, floorOf(facts)).safety.mentions.map((mention) => mention.productId)).toEqual(['prod-a', 'prod-b'])
+  })
+
+  it('records no mentions for a profile with no safety answers', () => {
+    const facts = factsOf(BASIC)
+
+    expect(provenanceOf(facts, floorOf(facts)).safety.mentions).toEqual([])
+  })
+
+  it('leaves out an entry that is not skin care', () => {
+    const mixed = shelfOf([SERUM, { id: 'e-shampoo', ingredients: ['Aqua', 'Sodium Laureth Sulfate'], facts: { category: 'hair' } }], [{ id: 'e-lip', purpose: 'not-sure', category: 'makeup' }, { id: 'e-tub', purpose: 'moisturise' }])
+    const facts = factsOf(mixed)
+
+    expect(provenanceOf(facts, floorOf(facts)).entries.map((entry) => entry.id)).toEqual(['e-serum', 'e-tub'])
   })
 
   it('holds no word the user typed and no product name', () => {

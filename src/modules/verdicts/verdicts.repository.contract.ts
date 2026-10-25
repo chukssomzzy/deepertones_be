@@ -81,7 +81,7 @@ const inputsOf = (): Built['inputs'] => ({
     { id: 'entry-4', noLabelPurpose: 'lighten' },
   ],
   scan: { skinType: 'combination', concerns: [{ concern: 'hd_age_spot', band: 'some' }] },
-  safety: { choices: ['reaction'], parseState: 'done' },
+  safety: { choices: ['reaction'], parseState: 'done', mentions: [{ source: 'prescription', productId: 'prod-1', kind: 'product', resolution: 'resolved' }] },
   taperCodes: ['TPR-STEROID-1'],
 })
 

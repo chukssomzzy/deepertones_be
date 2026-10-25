@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { normaliseIngredient } from './catalog.ingredients'
 import { REFERENCE, REFERENCE_COVERAGE, REFERENCE_VERSION, type ReferenceEntry } from './catalog.reference'
-import { flagFacts } from './catalog.rules'
+import { flagFacts, rulesMatching } from './catalog.rules'
 import { CONCERN_KINDS } from './catalog.vocabulary'
 
 const kindsOf = (ingredient: string) =>
@@ -279,5 +279,53 @@ describe('flagFacts', () => {
         if (entry.source !== null) expect(entry.source).toMatch(/^https:\/\//)
       }
     })
+  })
+})
+
+// rulesMatching is what the shelf verdict reads rules through (the floor, the fit request and the routine's sources), so it is pinned directly: unlike flagFacts
+// it keeps every rule that matches, even several of one kind, and a rule is returned as the very object it was given (the verdict reads their other columns).
+describe('rulesMatching', () => {
+  const rule = (over: Partial<ReferenceEntry> & Pick<ReferenceEntry, 'name'>): ReferenceEntry => ({ aliases: [], kind: 'irritation', rule: `${over.name} (made up)`, source: null, ...over })
+  const FIRST = rule({ name: 'zzyzx extractum', aliases: ['zzyzx oil'] })
+  const SECOND = rule({ name: 'zzyzx extractum', rule: 'A second reviewed rule for the same ingredient.' })
+  const OTHER = rule({ name: 'qwerty butter', kind: 'drying' })
+
+  it('returns both rules when two rules of the same kind match one ingredient, which flagFacts would fold into one', () => {
+    const rules = [FIRST, OTHER, SECOND]
+
+    expect(rulesMatching('Zzyzx Extractum', rules)).toEqual([FIRST, SECOND])
+    expect(flagFacts(['Zzyzx Extractum'], rules)).toHaveLength(1)
+  })
+
+  it('matches by an alias', () => {
+    expect(rulesMatching('ZZYZX OIL', [FIRST, OTHER])).toEqual([FIRST])
+  })
+
+  it('matches by either side of a slash (in the order the sides are written) and by the part inside or outside brackets', () => {
+    const rules = [FIRST, OTHER]
+
+    expect(rulesMatching('Qwerty Butter/Zzyzx Oil', rules)).toEqual([OTHER, FIRST])
+    expect(rulesMatching('Aqua (Zzyzx Extractum)', rules)).toEqual([FIRST])
+    expect(rulesMatching('Zzyzx Extractum (Qwerty Butter)', rules)).toEqual([FIRST, OTHER])
+  })
+
+  it('returns no rule for an ingredient no rule names, and none at all when there are no rules', () => {
+    expect(rulesMatching('Aqua', [FIRST, OTHER])).toEqual([])
+    expect(rulesMatching('Zzyzx Extractum', [])).toEqual([])
+  })
+
+  it('returns a rule once however many of its names the ingredient carries', () => {
+    expect(rulesMatching('Zzyzx Extractum/Zzyzx Oil', [FIRST])).toEqual([FIRST])
+  })
+
+  it('returns the same order for the same input every time: the strictest kind first, rules of one kind in the order they were given', () => {
+    const allergen = rule({ name: 'zzyzx extractum', kind: 'allergen' })
+    const banned = rule({ name: 'zzyzx extractum', kind: 'banned-substance' })
+    const rules = [SECOND, allergen, FIRST, banned]
+
+    const expected = [banned, allergen, SECOND, FIRST]
+    expect(rulesMatching('Zzyzx Extractum', rules)).toEqual(expected)
+    expect(rulesMatching('Zzyzx Extractum', rules)).toEqual(expected)
+    expect(rulesMatching('Zzyzx Extractum', [...rules])).toEqual(expected)
   })
 })
