@@ -33,6 +33,7 @@ export type RoutineArgs = {
 
 const DEFAULT_MAX_USD = 5
 const DEFAULT_MAX_GROUNDING = 40
+const DEFAULT_REJUDGE_MAX_USD = 1
 
 export const USAGE =
   'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--judges haiku|opus|haiku,opus] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
@@ -42,9 +43,10 @@ type Reading = { flag: string; value: string }
 
 /**
  * The flags in `argv` as `--flag value` or `--flag=value`, each value non-empty and not another flag. Strict on purpose: a misspelt flag must stop the
- * run before it spends money. `known` are the flags the command takes; `repeatable` may be given more than once.
+ * run before it spends money. `known` are the flags the command takes; `repeatable` may be given more than once; `bare` are the switches among them, which
+ * take no value (their reading is `true`) and so cannot be written `--flag=value`.
  */
-const read = (argv: string[], known: readonly string[], repeatable: readonly string[], usage: string): Reading[] => {
+const read = (argv: string[], known: readonly string[], repeatable: readonly string[], usage: string, bare: readonly string[] = []): Reading[] => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${usage}`)
   }
@@ -53,13 +55,26 @@ const read = (argv: string[], known: readonly string[], repeatable: readonly str
     const arg = argv[i]!
     const equals = arg.startsWith('--') ? arg.indexOf('=') : -1
     const flag = equals === -1 ? arg : arg.slice(0, equals)
-    if (!known.includes(flag)) fail(`Unrecognised argument "${arg}"`)
+    if (!known.includes(flag) || (bare.includes(flag) && equals !== -1)) fail(`Unrecognised argument "${arg}"`)
+    if (bare.includes(flag)) {
+      if (readings.some((r) => r.flag === flag)) fail(`${flag} was given twice`)
+      readings.push({ flag, value: 'true' })
+      continue
+    }
     const value = equals === -1 ? argv[++i] : arg.slice(equals + 1)
     if (value === undefined || value === '' || value.startsWith('-')) fail(`${flag} needs a value`)
     if (!repeatable.includes(flag) && readings.some((r) => r.flag === flag)) fail(`${flag} was given twice`)
     readings.push({ flag, value: value! })
   }
   return readings
+}
+
+/** The judges in a `--judges` value: a comma list of known names, none empty or twice. */
+const judgeNamesOf = (value: string, fail: (reason: string) => never): JudgeName[] => {
+  const names = value.split(',')
+  if (names.some((name) => !JUDGE_NAMES.includes(name as JudgeName))) fail(`--judges must be a comma list of ${JUDGE_NAMES.join(' and ')} with no empty name`)
+  if (new Set(names).size !== names.length) fail('--judges names a judge twice')
+  return names as JudgeName[]
 }
 
 const wholeNumber = (value: string): boolean => /^\d+$/.test(value)
@@ -98,12 +113,8 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
       if (!wholeNumber(value)) fail('--max-grounding must be a whole number of fetch calls (0 for none)')
       args.maxGrounding = Number(value)
     }
-    else if (flag === '--judges') {
-      const names = value.split(',')
-      if (names.some((name) => !JUDGE_NAMES.includes(name as JudgeName))) fail(`--judges must be a comma list of ${JUDGE_NAMES.join(' and ')} with no empty name`)
-      if (new Set(names).size !== names.length) fail('--judges names a judge twice')
-      args.judges = names as JudgeName[]
-    } else if (flag === '--snapshot') args.snapshot = value
+    else if (flag === '--judges') args.judges = judgeNamesOf(value, fail)
+    else if (flag === '--snapshot') args.snapshot = value
     else if (flag === '--out-dir') args.outDir = value
     else args.compare = value
   }
@@ -237,4 +248,40 @@ export const parseAutoLabelArgs = (argv: string[]): AutoLabelArgs => {
   }
   if (version === undefined) fail('--version is needed')
   return { version: version!, ...args }
+}
+
+export const REJUDGE_USAGE = `Usage: npm run eval:routine:rejudge -- --report PATH/report.json --labels VERSION [--judges haiku|opus|haiku,opus] [--rescore] [--max-usd N] [--out-dir DIR] (judges the routines saved in a report written by eval:routine again, or with --rescore only scores its saved judgements against the labels, which costs nothing and takes no --judges or --max-usd; the default judge is haiku and the cap ${DEFAULT_REJUDGE_MAX_USD} dollar; the writer is never called)`
+
+export type RejudgeArgs = { report: string; labels: string; judges: JudgeName[]; rescore: boolean; maxUsd: number; outDir: string | undefined }
+
+export const parseRejudgeArgs = (argv: string[]): RejudgeArgs => {
+  const fail = (reason: string): never => {
+    throw new RoutineUsageError(`${reason}. ${REJUDGE_USAGE}`)
+  }
+  let report: string | undefined
+  let labels: string | undefined
+  const args = { judges: ['haiku'] as JudgeName[], rescore: false, maxUsd: DEFAULT_REJUDGE_MAX_USD, outDir: undefined as string | undefined }
+  const given = new Set<string>()
+  for (const { flag, value } of read(argv, ['--report', '--labels', '--judges', '--rescore', '--max-usd', '--out-dir'], [], REJUDGE_USAGE, ['--rescore'])) {
+    given.add(flag)
+    if (flag === '--report') report = value
+    else if (flag === '--labels') {
+      if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
+      labels = value
+    } else if (flag === '--judges') args.judges = judgeNamesOf(value, fail)
+    else if (flag === '--max-usd') args.maxUsd = dollars(value, flag, REJUDGE_USAGE)
+    else if (flag === '--out-dir') args.outDir = value
+    else args.rescore = true
+  }
+  if (report === undefined) fail('--report is needed')
+  if (labels === undefined) fail('--labels is needed')
+  if (args.rescore && (given.has('--judges') || given.has('--max-usd'))) fail('--rescore makes no calls, so it takes no --judges or --max-usd')
+  return { report: report!, labels: labels!, ...args }
+}
+
+/** A model never judges its own routines: `judges` are the ones asked, `writerModel` the one that wrote the saved routines (known once the report is read). */
+export const refuseSelfJudging = (judges: readonly { name: string; model: string }[], writerModel: string): void => {
+  if (!judges.some((judge) => judge.model === writerModel)) return
+  const others = JUDGE_NAMES.filter((name) => JUDGE_MODELS[name] !== writerModel)
+  throw new RoutineUsageError(`Refused, because a model never judges its own routines: the saved report's writer ran on ${writerModel}, which is also a judge in --judges. Pass --judges ${others.join(',')}. ${REJUDGE_USAGE}`)
 }
