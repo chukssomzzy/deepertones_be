@@ -1,5 +1,5 @@
 import { PermanentJobError } from '../../jobs/job'
-import { requireUser } from '../../lib/context'
+import { requireUser, requireVerified } from '../../lib/context'
 import { ConflictError, NotFoundError, RateLimitedError, UnauthorizedError, UnavailableError, ValidationError } from '../../lib/errors'
 import { describeImageBytes, readImageHeader } from '../../lib/image-header'
 import { PHOTO_LINK_TTL_SECONDS, signPhotoLink, verifyPhotoLink } from '../../lib/photo-link'
@@ -20,6 +20,7 @@ import type { PhotoEnvironment, PhotoStore } from '../../providers/photo-store/p
 import type { ProductImage } from '../../providers/product-analysis/product-analyst.provider'
 import type { FaceScanFrame, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { GoalsService } from '../goals/goals.service'
+import type { GoalRow, SwitchPreviewView } from '../goals/goals.types'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
@@ -28,7 +29,25 @@ import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
 import { mayScanNow } from './face-scans.policy'
 import type { FaceScansRepository } from './face-scans.repository'
-import { concernsForGoal, hdActionsForGoal, type ResultView, resultView, shownConcerns, type SkinTypeLabel, skinTypeLabel, TABLES_VERSION } from './face-scans.tables'
+import {
+  chaseStartFor,
+  concernsForGoal,
+  hdActionsForCheckIn,
+  hdActionsForGoal,
+  measuredConcernsForGoal,
+  nextGoalFor,
+  noticedConcerns,
+  type ResultView,
+  RESUME_DAYS,
+  resultView,
+  REVIEW_WEEKS,
+  reviewPointFor,
+  SHOWN_CONCERNS,
+  shownConcerns,
+  type SkinTypeLabel,
+  skinTypeLabel,
+  TABLES_VERSION,
+} from './face-scans.tables'
 import type { FaceMask, FacePhotoPosition, FaceResult, FaceScan, FaceScanPhoto, FaceScanReason, FaceScanState, NewFacePhoto } from './face-scans.types'
 
 export type FaceScanPolicy = {
@@ -61,9 +80,9 @@ export type FaceScanView = {
   goal: Goal
   createdAt: Date
   photos: Partial<Record<FacePhotoPosition, { url: string }>>
-  /** True when the profile's latest scan was taken under a goal other than its current one. Worked out when read, never stored. */
+  /** True when the due rule would allow a scan now, under the profile's current goal (issue #145). Worked out when read, never stored. */
   rescanSuggested: boolean
-  result: ResultView | null
+  result: (ResultView & { nextGoal: Goal | null }) | null
 }
 
 /** The view of a scan that was retaken: it always has its front photo. */
@@ -71,7 +90,7 @@ export type RetakenFaceScanView = FaceScanView & { photos: { front: { url: strin
 
 export type FaceScanServiceDeps = {
   repository: FaceScansRepository
-  goals: Pick<GoalsService, 'requireGoal' | 'current'>
+  goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history' | 'historyFor'>
   photos: PhotoStore
   jobs: JobQueue
   perfectCorp: PerfectCorpClient
@@ -79,8 +98,8 @@ export type FaceScanServiceDeps = {
   aiUsage: VendorSpendLedger
   /** Tells whoever is watching a scan that it changed. */
   events: ScanEvents
-  /** Tells the person's phone when a scan is ready or needs a retake. Never throws: a push that cannot be queued does not fail a step. */
-  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
+  /** Tells the person's phone when a scan is ready, needs a retake or a check-in is due. Never throws: a push that cannot be queued does not fail a step. */
+  notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
   /** Signs the photo links. photo-link.ts derives its own key from it. */
@@ -93,14 +112,16 @@ export type FaceScanServiceDeps = {
 
 const POSITIONS: readonly FacePhotoPosition[] = ['front', 'right', 'left']
 
-/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). */
+/** What Perfect Corp charges for an HD skin analysis, by the number of actions asked for (1 to 4, 5 to 8, 9 to 12, 13 to 16). A normal scan asks 5 to 8 (16 units); a check-in asks 10 (20 units). */
 const unitsForActions = (actions: number): number => (actions <= 4 ? 12 : actions <= 8 ? 16 : actions <= 12 ? 20 : 22)
 /** What a Fitzpatrick read costs. */
 const FITZPATRICK_UNITS = 10
 
 export class FaceScanService {
   private static faceScanNotFound = () => new NotFoundError('FACE_SCAN_NOT_FOUND', 'Face scan not found')
-  private static notDue = (reason: 'already-scanned-for-goal') => new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', { reason })
+  /** `checkInDueAt` is set only for `check-in-not-due`, the one reason that carries a date the app can show. */
+  private static notDue = (reason: 'already-scanned-for-goal' | 'check-in-not-due' | 'check-in-taken' | 'scan-limit', checkInDueAt?: string) =>
+    new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', checkInDueAt ? { reason, checkInDueAt } : { reason })
   private static photoNotFound = () => new NotFoundError('PHOTO_NOT_FOUND', 'Photo not found')
   private static notAwaitingRetake = () => new ConflictError('FACE_SCAN_NOT_AWAITING_RETAKE', 'This face scan is not waiting for a retake')
   private static consentRequired = () => new ConflictError('FACE_CONSENT_REQUIRED', 'Say yes to the face photo consent first')
@@ -110,15 +131,18 @@ export class FaceScanService {
   private static readonly STUCK_AFTER_MS = 15 * FaceScanService.MINUTE
   private static readonly GIVE_UP_AFTER_MS = 120 * FaceScanService.MINUTE
   private static readonly REAP_BATCH = 100
+  private static readonly CHECK_IN_SWEEP_LIMIT = 200
+  /** The shortest review week of any goal, so the candidate read never cuts off a chase that is due; each candidate is then judged by its own goal's review point. */
+  private static readonly SHORTEST_REVIEW_MS = Math.min(...Object.values(REVIEW_WEEKS)) * 7 * 24 * 60 * 60 * 1000
 
   private readonly repository: FaceScansRepository
-  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current'>
+  private readonly goals: Pick<GoalsService, 'requireGoal' | 'current' | 'history' | 'historyFor'>
   private readonly photos: PhotoStore
   private readonly jobs: JobQueue
   private readonly perfectCorp: PerfectCorpClient
   private readonly aiUsage: VendorSpendLedger
   private readonly events: ScanEvents
-  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake'>
+  private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
@@ -156,12 +180,12 @@ export class FaceScanService {
 
   /** Withdraws the profile's consent, keeping the record. Nothing to withdraw is not an error. */
   async withdrawConsent(): Promise<void> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     await this.repository.withdrawConsent(profileId, this.now())
   }
 
   async consent(): Promise<FaceConsentView> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const found = await this.repository.consentOf(profileId)
     if (!found) throw new NotFoundError('FACE_CONSENT_NOT_FOUND', 'No face photo consent has been given')
     return { version: found.version, givenAt: found.givenAt, withdrawnAt: found.withdrawnAt, current: FaceScanService.isCurrent(found) }
@@ -178,16 +202,29 @@ export class FaceScanService {
     await this.requireCurrentConsent(profileId)
     const goal = (await this.goals.requireGoal()).goal
     if (goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    // `latest` first, before the due rule: the write below guards against a scan stored since by checking this same `latest` is still the
+    // profile's latest at write time. Reading it after the due rule would let two requests, each catching the other's write in a fresh
+    // `latestForProfile` read, both pass that guard with a verdict that was already stale when either wrote. `now` comes after the reads, so a
+    // rival scan stored in the middle of them is stamped no later than `now` and still counts (the policy has no upper bound either).
     const latest = await this.repository.latestForProfile(profileId)
-    const verdict = mayScanNow({ goal, latest })
-    if (!verdict.allowed) throw FaceScanService.notDue(verdict.reason)
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
+    const history = await this.goals.history()
+    // The chase start only needs a time to measure the resume window from; the verdict and the stored scan use the later `now`.
+    const readAt = this.now()
+    const since = chaseStartFor(history, goal, readAt) ?? readAt
+    const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
+    const now = this.now()
+    const verdict = mayScanNow({ goal, history, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null })
+    if (!verdict.allowed) {
+      if (verdict.reason === 'scan-limit') throw new RateLimitedError('FACE_SCAN_NOT_DUE', 'A face scan is not due yet', { reason: 'scan-limit', nextScanAt: verdict.nextScanAt.toISOString() })
+      throw FaceScanService.notDue(verdict.reason, verdict.reason === 'check-in-not-due' ? verdict.due.toISOString() : undefined)
+    }
 
     const valid = POSITIONS.flatMap((position) => {
       const photo = photos[position]
       return photo ? [{ position, image: this.checkPhoto(photo) }] : []
     })
 
-    const now = this.now()
     const scanId = this.newId()
     const rows: NewFacePhoto[] = valid.map(({ position }) => ({
       faceScanId: scanId,
@@ -205,7 +242,11 @@ export class FaceScanService {
       if (failed) throw failed.reason
       // Two requests can both read "not scanned yet" before either writes, so the write itself refuses the second: it stores the scan only while the
       // latest scan is still the one read above.
-      const stored = await this.repository.createFaceScan({ id: scanId, userId, profileId, goalAtScan: goal, createdAt: now }, rows, { expectLatestId: latest?.id ?? null })
+      const stored = await this.repository.createFaceScan(
+        { id: scanId, userId, profileId, goalAtScan: goal, checkIn: verdict.checkIn, createdAt: now },
+        rows,
+        { expectLatestId: latest?.id ?? null },
+      )
       if (!stored) refused = true
     } catch (error) {
       await this.photos.deleteMany(keys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: scanId, error: describeUnexpectedError(cleanup) }))
@@ -214,7 +255,7 @@ export class FaceScanService {
     if (refused) {
       // Lost to a request that stored a scan first: its photos are the ones that count.
       await this.photos.deleteMany(keys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: scanId, error: describeUnexpectedError(cleanup) }))
-      throw FaceScanService.notDue('already-scanned-for-goal')
+      throw FaceScanService.notDue(verdict.checkIn ? 'check-in-taken' : 'already-scanned-for-goal')
     }
 
     try {
@@ -231,6 +272,7 @@ export class FaceScanService {
 
   /** The scan as it now is. A scan made by another profile, of this account or any other, is FACE_SCAN_NOT_FOUND, with no hint that it exists. */
   async getFaceScan(id: string): Promise<FaceScanView> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     return this.view(scan, await this.repository.photosOf(id))
   }
@@ -247,16 +289,49 @@ export class FaceScanService {
 
   /**
    * The profile's latest scans, newest first, in every state, each the view `getFaceScan` gives. Needs no consent and no goal, so it still works after the consent
-   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them.
+   * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them; it now needs the goal history too
+   * (the due rule reads it), so the history is fetched once and shared with the day-one comparison every ready scan in the list makes.
    */
   async listFaceScans(): Promise<FaceScanView[]> {
-    const { profileId } = requireUser()
+    const { profileId } = requireVerified()
     const scans = await this.repository.listForProfile(profileId, FACE_SCAN_LIST_LIMIT)
     if (scans.length === 0) return []
-    const rescanSuggested = await this.rescanSuggested(profileId)
+    // A profile with no goal has no chase to rank scans against, so the history is read only when there is a goal.
+    const goal = await this.currentGoal()
+    const history = goal === null ? undefined : this.goals.history()
+    // Its first reader awaits it only after that scan's photo links, so a failed read is caught here meanwhile; each reader still sees it fail.
+    history?.catch(() => undefined)
+    const rescanSuggested = await this.rescanSuggested(profileId, goal, history)
     // Scans under one goal share a day one, so its scores are read once for the list.
     const dayOneResults = new Map<string, Promise<FaceResult[]>>()
-    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults)))
+    return Promise.all(scans.map(async (scan) => this.view(scan, await this.repository.photosOf(scan.id), rescanSuggested, dayOneResults, history)))
+  }
+
+  /**
+   * What switching to `goal` would do, as if it were picked now: `resume` when the chase rule reaches back into an earlier run of the goal,
+   * else `fresh`. Reads only. The goal the profile is on is 400 GOAL_ALREADY_CURRENT; a profile with no goal yet starts every goal fresh.
+   */
+  async switchPreview(goal: Goal): Promise<SwitchPreviewView> {
+    const { profileId } = requireUser()
+    const current = await this.goals.current().then(
+      (view) => view.goal,
+      (error: unknown) => {
+        if (error instanceof NotFoundError) return null
+        throw error
+      },
+    )
+    if (current === goal) throw new ValidationError('GOAL_ALREADY_CURRENT', 'That is already your goal')
+    const now = this.now()
+    const fresh: SwitchPreviewView = { goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null }
+    const history = await this.goals.history()
+    const chaseStart = chaseStartFor([...history, { goal, createdAt: now }], goal, now)
+    if (chaseStart === null || chaseStart.getTime() >= now.getTime()) return fresh
+    // The goal was left when the row after its latest run was saved. A run of the goal that is not the last row always has one after it.
+    const lastRun = history.map((row) => row.goal).lastIndexOf(goal)
+    const left = history[lastRun + 1]!.createdAt
+    // dayOneFor ignores `scanId`; no scan is being asked about here.
+    const dayOne = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: '' })
+    return { goal, outcome: 'resume', dayOneAt: dayOne?.createdAt ?? null, resumeUntil: new Date(left.getTime() + RESUME_DAYS * 24 * 60 * 60 * 1000) }
   }
 
   /**
@@ -265,11 +340,12 @@ export class FaceScanService {
    * would otherwise stay in the bucket for ever. Perfect Corp's copies of the photo go too, best effort.
    */
   async deleteFaceScan(id: string): Promise<void> {
+    requireVerified()
     const scan = await this.ownedScan(id)
     await this.photos.deleteMany(await this.repository.keysOfFaceScan(id))
     await this.repository.deleteFaceScan(id)
     // The rows are gone, so a failure here cannot be retried by the user (the next delete is a 404): log it and finish.
-    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...concernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
+    const fixedKeys = [...POSITIONS.map((position) => this.objectKey(scan, `${position}.jpg`)), ...measuredConcernsForGoal(scan.goalAtScan).map((concern) => this.objectKey(scan, FaceScanService.maskName(concern)))]
     await this.photos.deleteMany(fixedKeys).catch((cleanup: unknown) => console.error({ outcome: 'photo-cleanup-failed', faceScanId: id, error: describeUnexpectedError(cleanup) }))
     await this.deleteTasks(scan)
   }
@@ -407,6 +483,51 @@ export class FaceScanService {
   }
 
   /**
+   * The daily sweep, run by the cron with no session: tells each profile whose chase has reached its review point and has not taken its check-in, once per
+   * chase, the longest overdue first and at most 200 a run. Answers how many pushes were queued.
+   *
+   * A candidate (a ready day one of the profile's current goal) is confirmed by the pure rule: it must be the first ready scan of the chase the goal is in now
+   * (`chaseStartFor`), and `now` must be at its review point. One that is a scan of an earlier chase of the same goal can never be told, so it is recorded without a
+   * push and leaves the candidate list. The record is written BEFORE the push is queued and only a write that landed queues it, so a chase is told at most once;
+   * a queue that is down is logged by id and swallowed, and that chase is not tried again. The account's `scanNeedsYou` switch is read when the push is sent,
+   * not here: with it off the push is dropped there.
+   */
+  async sendDueCheckIns(now: Date): Promise<number> {
+    let queued = 0
+    const candidates = await this.repository.checkInPushCandidates({
+      createdBefore: new Date(now.getTime() - FaceScanService.SHORTEST_REVIEW_MS),
+      limit: FaceScanService.CHECK_IN_SWEEP_LIMIT,
+    })
+    for (const dayOne of candidates) {
+      try {
+        const { profileId, userId, goalAtScan: goal } = dayOne
+        const history = await this.goals.historyFor(profileId)
+        // No goal history at all: nothing can ever make this day one due, so it is recorded without a push and leaves the candidate set (it would otherwise starve the cap).
+        if (history.length === 0) {
+          await this.repository.recordCheckInPush({ profileId, userId, goal, dayOneScanId: dayOne.id, sentAt: now })
+          continue
+        }
+        const chaseStart = chaseStartFor(history, goal, now)
+        // The goal was left since the candidate was read: it counts again if the goal is taken up again.
+        if (chaseStart === null) continue
+        const first = await this.repository.dayOneFor({ profileId, goal, at: now, since: chaseStart, scanId: dayOne.id })
+        const isDayOne = first?.id === dayOne.id
+        // The SQL cutoff uses the shortest review week, so it is exact while every goal is 6 weeks. If review weeks are tuned per goal, rows on a longer goal can
+        // briefly take places in the cap before they are due: transient, not permanent.
+        if (isDayOne && now.getTime() < reviewPointFor(dayOne.createdAt, goal).getTime()) continue
+        if (!(await this.repository.recordCheckInPush({ profileId, userId, goal, dayOneScanId: dayOne.id, sentAt: now }))) continue
+        if (!isDayOne) continue
+        await this.notifications.faceCheckInDue({ userId, profileId, dayOneScanId: dayOne.id })
+        queued++
+      } catch (error) {
+        // Logged and swallowed per candidate: a D1 outage partway through reports 0 sent, and the next day's run retries because nothing was recorded.
+        console.error({ outcome: 'check-in-push-failed', profileId: dayOne.profileId, dayOneScanId: dayOne.id, error: describeUnexpectedError(error) })
+      }
+    }
+    return queued
+  }
+
+  /**
    * Opens a live stream of the scan for the profile that made it (anyone else's scan is FACE_SCAN_NOT_FOUND). It starts with the scan's frame as it now is,
    * then carries each change, and `done` once the scan is over: ready, failed, or waiting for a retake. The snapshot is read before the stream opens, so the
    * scan is read again once it is open: a change stored in between is sent, and a scan that is over gets `done` straight away. A failure to send is logged.
@@ -442,7 +563,7 @@ export class FaceScanService {
     }
     await this.guarded(scan, async () => {
       const fileId = await this.perfectCorp.uploadFile(photo.bytes, { contentType: 'image/jpeg', fileName: 'front.jpg' })
-      const taskId = await this.perfectCorp.createSkinAnalysis({ fileId, actions: hdActionsForGoal(scan.goalAtScan) })
+      const taskId = await this.perfectCorp.createSkinAnalysis({ fileId, actions: FaceScanService.actionsFor(scan) })
       const now = this.now()
       // At once, before anything else can fail: a task Perfect Corp holds that we do not know of is one we cannot fetch or pay for. Only while the scan has no
       // task: of two uploads of one scan the first to store keeps its task.
@@ -483,7 +604,7 @@ export class FaceScanService {
       // Perfect Corp charges when the task succeeds, not when we store the result, so the spend is recorded now: a mask that will not download, a scan deleted
       // meanwhile or a failed write must not leave a charge off the books. The ledger is keyed by the task, so a retry does not record it twice.
       try {
-        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(hdActionsForGoal(scan.goalAtScan).length), key: taskId })
+        await this.aiUsage.record({ vendor: 'perfect-corp', job: 'face-analysis', units: unitsForActions(FaceScanService.actionsFor(scan).length), key: taskId })
       } catch (error) {
         // Not worth losing the result for: the books are caught up from the ledger's side, and a retry would only fail the same way.
         console.error({ outcome: 'spend-record-failed', faceScanId: id, taskId, error: describeUnexpectedError(error) })
@@ -502,7 +623,7 @@ export class FaceScanService {
     const masks: FaceMask[] = []
     await this.logFrontPhotoSize(scan)
     try {
-      for (const concern of concernsForGoal(scan.goalAtScan)) {
+      for (const concern of measuredConcernsForGoal(scan.goalAtScan)) {
         const url = FaceScanService.maskUrlOf(analysis.concerns, concern)
         if (!url) continue
         const maskKey = this.objectKey(scan, FaceScanService.maskName(concern))
@@ -536,11 +657,19 @@ export class FaceScanService {
     await this.publishFrame(id, 'ready', null, { done: true })
   }
 
-  /** A goal concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores, links or photo. */
+  /** What to ask Perfect Corp for: every concern the app can show at a check-in, else what the goal measures. */
+  private static actionsFor(scan: Pick<FaceScan, 'goalAtScan' | 'checkIn'>): string[] {
+    return scan.checkIn ? hdActionsForCheckIn() : hdActionsForGoal(scan.goalAtScan)
+  }
+
+  /**
+   * A concern Perfect Corp did not return is not an error (the scan is ready with what came back), but ops needs to see it. Names only: no scores,
+   * links or photo. A check-in reads all nine concerns, so it is watched for all nine; a normal scan only for the goal's own three.
+   */
   private static warnMissingConcerns(scan: FaceScan, analysis: Extract<SkinAnalysisResult, { status: 'success' }>): void {
     const present = new Set(analysis.concerns.map((item) => item.concern))
     const returned = [...present].sort()
-    for (const concern of concernsForGoal(scan.goalAtScan)) {
+    for (const concern of scan.checkIn ? SHOWN_CONCERNS : concernsForGoal(scan.goalAtScan)) {
       if (!present.has(concern)) console.warn({ outcome: 'face-scan-concern-missing', faceScanId: scan.id, concern, returned, skipped: analysis.skipped })
     }
   }
@@ -751,8 +880,17 @@ export class FaceScanService {
     return { bytes: photo.bytes, mediaType: 'image/jpeg' }
   }
 
-  /** `rescanSuggested` and `dayOneResults` (the day-one scans' scores read so far, by scan id) are worked out here unless the caller, building many views for one profile, shares them. */
-  private async view(scan: FaceScan, photos: FaceScanPhoto[], rescanSuggested?: boolean, dayOneResults?: Map<string, Promise<FaceResult[]>>): Promise<FaceScanView> {
+  /**
+   * `rescanSuggested`, `dayOneResults` (the day-one scans' scores read so far, by scan id) and `history` (the goal history the chase rule reads) are
+   * worked out here unless the caller, building many views for one profile, shares them.
+   */
+  private async view(
+    scan: FaceScan,
+    photos: FaceScanPhoto[],
+    rescanSuggested?: boolean,
+    dayOneResults?: Map<string, Promise<FaceResult[]>>,
+    history?: Promise<GoalRow[]>,
+  ): Promise<FaceScanView> {
     const now = this.now()
     const expiresAt = new Date(now.getTime() + PHOTO_LINK_TTL_SECONDS * 1000)
     const link = async (key: string) => facePhotoUrl(await signPhotoLink({ key, userId: scan.userId, profileId: scan.profileId, expiresAt }, this.#photoLinkSecret, now))
@@ -766,30 +904,44 @@ export class FaceScanService {
       createdAt: scan.createdAt,
       photos: links,
       rescanSuggested: rescanSuggested ?? (await this.rescanSuggested(scan.profileId)),
-      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map()) : null,
+      result: scan.state === 'ready' ? await this.result(scan, link, dayOneResults ?? new Map(), history ?? this.goals.history()) : null,
     }
   }
 
-  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest, which is no day one to compare with. */
-  private async result(scan: FaceScan, link: (key: string) => Promise<string>, dayOneResults: Map<string, Promise<FaceResult[]>>): Promise<ResultView> {
-    const [results, masks, found] = await Promise.all([
-      this.repository.resultsOf(scan.id),
-      this.repository.masksOf(scan.id),
-      this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, scanId: scan.id }),
+  /** The result of a ready scan, worked out from its stored rows now. Day one is the scan itself when it is the earliest in its chase, which is no day one to compare with. */
+  private async result(
+    scan: FaceScan,
+    link: (key: string) => Promise<string>,
+    dayOneResults: Map<string, Promise<FaceResult[]>>,
+    history: Promise<GoalRow[]>,
+  ): Promise<ResultView & { nextGoal: Goal | null }> {
+    const [results, masks, historyRows] = await Promise.all([this.repository.resultsOf(scan.id), this.repository.masksOf(scan.id), history])
+    // Through the product a scan is only ever taken under the current goal, so a chase always holds it; with none (unreachable) the scan is its own day one.
+    const since = chaseStartFor(historyRows, scan.goalAtScan, scan.createdAt) ?? scan.createdAt
+    const found = await this.repository.dayOneFor({ profileId: scan.profileId, goal: scan.goalAtScan, at: scan.createdAt, since, scanId: scan.id })
+    // Only the concerns that are shown get a link (the goal's own, faint ones too, and the extras that can be seen): a signature per mask that is then dropped is work for nothing.
+    const shown = new Set<string>([
+      ...shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
+      ...noticedConcerns(scan.goalAtScan, results).map(({ concern }) => concern),
     ])
-    // Only the concerns that are shown get a link: a signature per mask that is then dropped is work for nothing.
-    const shown = new Set<string>(shownConcerns(scan.goalAtScan, results).map(({ concern }) => concern))
     const overlays: Record<string, { url: string }> = {}
     for (const mask of masks) if (shown.has(mask.concern)) overlays[mask.concern] = { url: await link(mask.maskKey) }
     const dayOne = found && found.id !== scan.id ? found : null
-    return resultView({
+    const dayOneResultRows = dayOne ? await this.dayOneResultsOf(dayOne.id, dayOneResults) : null
+    const view = resultView({
       goal: scan.goalAtScan,
       results,
       overlays,
       skinType: scan.skinType,
       skinAge: scan.skinAge,
-      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: await this.dayOneResultsOf(dayOne.id, dayOneResults), skinAge: dayOne.skinAge },
+      dayOne: dayOne && { id: dayOne.id, createdAt: dayOne.createdAt, results: dayOneResultRows ?? [], skinAge: dayOne.skinAge },
     })
+    // Only a check-in suggests a next goal; the list and a single get both land here, so they agree.
+    const nextGoal =
+      scan.checkIn && dayOneResultRows
+        ? nextGoalFor({ goal: scan.goalAtScan, results, dayOneResults: dayOneResultRows, everWantedLighter: historyRows.some((row) => row.wantsLighter) })
+        : null
+    return { ...view, nextGoal }
   }
 
   private dayOneResultsOf(id: string, cache: Map<string, Promise<FaceResult[]>>): Promise<FaceResult[]> {
@@ -801,17 +953,28 @@ export class FaceScanService {
     return read
   }
 
-  /** Whether the profile's latest scan was taken under another goal than the one it has now. No goal, or typed words nobody sorted into one, suggests nothing. */
-  private async rescanSuggested(profileId: string): Promise<boolean> {
-    const goal = await this.goals.current().then(
+  private async currentGoal(): Promise<Goal | null> {
+    return this.goals.current().then(
       (view) => view.goal,
       (error: unknown) => {
         if (error instanceof NotFoundError) return null
         throw error
       },
     )
+  }
+
+  /**
+   * Whether the due rule would allow a scan right now, under the profile's current goal (issue #145): the policy's own "a scan is allowed",
+   * reused as the app's rescan hint. No goal, or typed words nobody sorted into one, suggests nothing.
+   */
+  private async rescanSuggested(profileId: string, known?: Goal | null, history?: Promise<GoalRow[]>): Promise<boolean> {
+    const goal = known === undefined ? await this.currentGoal() : known
     if (goal === null) return false
-    const latest = await this.repository.latestForProfile(profileId)
-    return latest !== null && latest.goalAtScan !== goal
+    const rows = await (history ?? this.goals.history())
+    const now = this.now()
+    const since = chaseStartFor(rows, goal, now) ?? now
+    const scans = await this.repository.scansUnderGoalSince(profileId, goal, since)
+    const lastDayOne = await this.repository.latestDayOneForProfile(profileId)
+    return mayScanNow({ goal, history: rows, scans, at: now, lastDayOneAt: lastDayOne?.createdAt ?? null }).allowed
   }
 }

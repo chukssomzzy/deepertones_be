@@ -1,0 +1,1 @@
+ALTER TABLE `face_scans` ADD `check_in` integer DEFAULT false NOT NULL;

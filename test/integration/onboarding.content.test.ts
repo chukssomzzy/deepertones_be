@@ -59,6 +59,7 @@ type Content = {
   answers: Record<string, Answer>
   colourNote: string
   safetyScreen: { title: string; subtitle: string; footnote: string; continueLabel: string; choices: Choice[] }
+  switchScreen: { resume: string; fresh: string }
 }
 
 const dataOf = async <T>(res: Reply): Promise<T> => {
@@ -114,7 +115,7 @@ describe('the content of GET /api/v1/onboarding/content', () => {
   it('has exactly the documented top-level keys, with a version that is a non-empty string', async () => {
     const data = await contentOf()
 
-    expect(Object.keys(data).sort()).toEqual(['answerScreen', 'answers', 'colourNote', 'contentVersion', 'goalScreen', 'locale', 'safetyScreen'])
+    expect(Object.keys(data).sort()).toEqual(['answerScreen', 'answers', 'colourNote', 'contentVersion', 'goalScreen', 'locale', 'safetyScreen', 'switchScreen'])
     expect(data.contentVersion).toMatch(/^[A-Za-z0-9+/=_-]+$/)
   })
 
@@ -201,6 +202,17 @@ describe('the content of GET /api/v1/onboarding/content', () => {
 
     expect(colourNote).toBe(answerFor('brighter', true).note)
     expect(colourNote.trim()).not.toBe('')
+  })
+
+  // The heads-up before a goal switch (issue #145): the app shows one of these two lines beside what `GET /api/v1/me/goal/switch-preview`
+  // answers, so they are keyed by its `outcome`. Both are DRAFT, so the words are not pinned here, only that each is there and says something.
+  it('serves a line for each switch outcome, so the app can word the heads-up for a resume and for a fresh start', async () => {
+    const { switchScreen } = await contentOf()
+
+    expect(Object.keys(switchScreen).sort()).toEqual(['fresh', 'resume'])
+    expect(switchScreen.resume.trim()).not.toBe('')
+    expect(switchScreen.fresh.trim()).not.toBe('')
+    expect(switchScreen.resume).not.toBe(switchScreen.fresh)
   })
 
   it('keeps the sixth chip label apart from the calm-repair answer title, which says "again"', async () => {

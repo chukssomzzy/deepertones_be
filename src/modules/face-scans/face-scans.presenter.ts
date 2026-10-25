@@ -15,8 +15,11 @@ export const toFaceConsentResponse = ({ version, givenAt, withdrawnAt, current }
   current,
 })
 
-const toFaceScanResultResponse = ({ seen, nothingStandsOut, skinType, skinAge, sinceDayOne, tablesVersion }: ResultView): NonNullable<z.infer<typeof FaceScanResponse>['result']> => ({
-  seen: seen.map(({ concern, region, words, overlay }) => ({ concern, region, words, overlay: overlay ? { url: overlay.url } : null })),
+const toSeenItem = ({ concern, region, level, words, overlay }: ResultView['seen'][number]) => ({ concern, region, level, words, overlay: overlay ? { url: overlay.url } : null })
+
+const toFaceScanResultResponse = ({ seen, alsoNoticed, nothingStandsOut, skinType, skinAge, sinceDayOne, tablesVersion, nextGoal }: NonNullable<FaceScanView['result']>): NonNullable<z.infer<typeof FaceScanResponse>['result']> => ({
+  seen: seen.map(toSeenItem),
+  alsoNoticed: alsoNoticed.map(toSeenItem),
   nothingStandsOut,
   skinType,
   skinAge: skinAge ? { years: skinAge.years, words: skinAge.words } : null,
@@ -29,6 +32,7 @@ const toFaceScanResultResponse = ({ seen, nothingStandsOut, skinType, skinAge, s
       }
     : null,
   tablesVersion,
+  nextGoal,
 })
 
 // Every field is named, so a field added to the view is not published by accident.

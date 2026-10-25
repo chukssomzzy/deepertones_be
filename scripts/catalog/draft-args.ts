@@ -1,5 +1,6 @@
 import path from 'node:path'
 import { DEFAULT_PASSES } from './draft'
+import { DraftInputError } from './draft-input-error'
 
 export type Args = { input: string; out: string; maxUsd: number; countries: string[] | undefined; passes: number }
 
@@ -13,7 +14,7 @@ const USAGE = 'Usage: npm run catalog:draft -- <in.xlsx> --out <out.xlsx> [--max
  */
 export const parseArgs = (argv: string[]): Args => {
   const fail = (reason: string): never => {
-    throw new Error(`${reason}. ${USAGE}`)
+    throw new DraftInputError(`${reason}. ${USAGE}`)
   }
   let input: string | undefined
   let out: string | undefined

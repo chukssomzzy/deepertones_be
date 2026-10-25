@@ -265,7 +265,9 @@ stops at `--max-usd` (2 dollars by default), keeping what it has. Prices are har
 all (1 to 5, 3 by default), each one asking again, with a wider look, only for the products and countries still without a price; the report says how
 many product-country pairs are priced and lists the ones still missing. Each extra pass is another billed drafter call for every product still
 unpriced, so a higher `--passes` costs more. The report lists what is still wrong, by tab, row and column; the output file is a normal
-workbook to finish and upload as above. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
+workbook to finish and upload as above. A fresh export has an empty Countries tab and no draft products, so prepare it first: add a Countries row
+(code, currency, low_max, mid_max, status `active`) for each country to draft prices for, and the draft Products rows; with no draft rows the command says so and writes
+nothing, and with no active country it drafts the product cells only. A mistake in the file or the flags is printed in words, exit 2. Draft from a file you exported: the output keeps the input's `_meta` stamps (environment, catalog version and
 contract version), so it uploads to the environment it was exported from, and a file with no stamp stays refused by the upload.
 
 ## Face scan setup (Perfect Corp)
@@ -280,7 +282,7 @@ The face scan sends the front photo to Perfect Corp (YouCam) and gets the analys
 2. Register the webhook URL in Perfect Corp's console, once per environment, for task results:
    `https://<that Worker's host>/api/v1/webhooks/perfect-corp`. Until it is registered nothing wakes the analysis, and the reaper's single check 15
    minutes after the photo is what finds the result.
-3. Confirm `PERFECT_CORP_USD_PER_UNIT` in `wrangler.jsonc` (a placeholder) and create the `face-scans` queues (see [Before the first deploy](#before-the-first-deploy)).
+3. Check `PERFECT_CORP_USD_PER_UNIT` in `wrangler.jsonc` matches your Perfect Corp plan (0.055 is pay-as-you-go; a subscription is 0.046–0.048) and create the `face-scans` queues (see [Before the first deploy](#before-the-first-deploy)).
 
 The webhook route has its own per-address limit (`PERFECT_CORP_WEBHOOK_LIMITER`, 300 a minute) and refuses a body over 64 KB. The tests never reach Perfect
 Corp: they stub `fetch`.
@@ -288,8 +290,11 @@ Corp: they stub `fetch`.
 ### Showing a face scan result (for the app)
 
 `GET /api/v1/scans/faces/{id}` (and the create and retake answers) carry `result`: null until `state` is `ready`. Render it as it is: `result.seen` is the
-goal's concerns that can be seen now (at most 3, goal order; `words` is the text to show, `concern` an id such as `glow` or `spots`), or show
-`result.nothingStandsOut` when `seen` is empty. `skinType` and `skinAge.words` are plain facts, and `sinceDayOne` (null for the first scan under a goal)
+goal's concerns Perfect Corp measured (at most 3, goal order; `words` is the text to show, `concern` an id such as `glow` or `spots`). Render every item.
+`level` (`faint`, `a-little`, `some`, `clear`) is a word for how much can be seen, never a score: a `faint` item reads as reassurance ("Hardly any spots"), so show it
+subdued, with its overlay hidden until tapped. Show `result.nothingStandsOut` when every item is `faint` or `seen` is empty. Under the goal's concerns, render `result.alsoNoticed` as "Also noticed": other
+concerns that can be seen (never `faint`, same item shape as `seen`, so the same `words` and `overlay`), possibly empty, in which case show nothing. It is not part
+of `sinceDayOne` or `nothingStandsOut`. `skinType` and `skinAge.words` are plain facts, and `sinceDayOne` (null for the first scan under a goal)
 has the `words` for how each concern moved. Never show a number or invent wording of your own: there is no score, diagnosis or Fitzpatrick type in the
 result by design. `overlay.url` is a signed link to a PNG mask of where the concern shows and **expires after 5 minutes**: when it has, fetch the scan
 again for fresh links. Field details are in `docs/openapi.json` (`FaceScanResult`).

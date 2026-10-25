@@ -25,3 +25,13 @@ export type OnboardingView = {
   safety: SafetyView | null
   next: OnboardingStep
 }
+
+/** What switching to a goal would do, worked out from the goal history alone (issue #145). `dayOneAt` and `resumeUntil` are null for a fresh start. */
+export type SwitchPreviewView = {
+  goal: Goal
+  outcome: 'resume' | 'fresh'
+  /** When the chase's first ready scan was taken, or null when it has none. */
+  dayOneAt: Date | null
+  /** The last moment the goal can be taken up again and still continue its chase. */
+  resumeUntil: Date | null
+}
