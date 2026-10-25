@@ -19,7 +19,7 @@ import {
   textBlock,
 } from '../../src/providers/anthropic/messages-api.fake'
 import type { GapLabel } from './routine-labels'
-import { AnthropicRoutineJudge, classOfPick, judgeResultOf, PROBLEM_CODES, type RoutineJudgement } from './routine-judge'
+import { AnthropicRoutineJudge, classOfPick, judgeOnce, judgeResultOf, PROBLEM_CODES, type RoutineJudge, type RoutineJudgeInput, type RoutineJudgement } from './routine-judge'
 import { candidate, routineOf, skeletonOf } from './routine.fixture'
 
 // The rubric judge of `npm run eval:routine`: one Claude call per routine that has been written. It is shown the person, the shelf with its verdicts, each gap's
@@ -392,5 +392,79 @@ describe('judgeResultOf: agreement over the scored gaps', () => {
     const result = judgeResultOf(judgement([['cleanse', 'acceptable'], ['treat', 'not'], ['protect', 'acceptable']]), { routine: PICKS, gapCodes: GAP_CODES, labels: stale })
 
     expect(result).toMatchObject({ picksAgreed: 0, picksAgreedExactly: 0, picksJudged: 0 })
+  })
+})
+
+// judgeOnce: the one retry of the rubric judge. Haiku sometimes gives one invalid answer (AnthropicRequestError: off-schema JSON, not JSON, or out of tokens) on a case,
+// and a case with a routine but no judgement blocks the bar, so a RequestError is tried once more with the same input. Nothing else is retried: a cap, a rejected key,
+// an unavailable model and a refusal each mean something to the run, and the retry's own error (of any class) is thrown as it is.
+describe('judgeOnce: a rubric judge answer that is invalid is retried once', () => {
+  /** A judge that does what `steps` say on its first call, second call and so on (an Error is thrown, a judgement is returned), and records every input. */
+  const scripted = (...steps: (RoutineJudgement | Error)[]) => {
+    const calls: RoutineJudgeInput[] = []
+    const judge: RoutineJudge = {
+      judge: async (given) => {
+        calls.push(given)
+        const step = steps[calls.length - 1]
+        if (step === undefined) throw new Error('called more often than the test scripted')
+        if (step instanceof Error) throw step
+        return step
+      },
+    }
+    return { judge, calls }
+  }
+  const SECOND: RoutineJudgement = { ...JUDGEMENT, fit: 2 }
+
+  it('asks again after an AnthropicRequestError and returns the second answer, marked retried, with the same input both times', async () => {
+    const { judge, calls } = scripted(new AnthropicRequestError('SENTINEL-FIRST'), SECOND)
+
+    const result = await judgeOnce(judge, input)
+
+    expect(result).toEqual({ judgement: SECOND, retried: true })
+    expect(calls).toHaveLength(2)
+    expect(calls[0]).toEqual(input)
+    expect(calls[1]).toEqual(input)
+  })
+
+  it('throws the second AnthropicRequestError as it is, after exactly two calls, when the retry fails too', async () => {
+    const second = new AnthropicRequestError('SENTINEL-SECOND')
+    const { judge, calls } = scripted(new AnthropicRequestError('SENTINEL-FIRST'), second)
+
+    await expect(judgeOnce(judge, input)).rejects.toBe(second)
+
+    expect(calls).toHaveLength(2)
+  })
+
+  it('throws whatever error the retry fails with, of any class, as it is', async () => {
+    const second = new AnthropicRefusalError('SENTINEL-SECOND')
+    const { judge, calls } = scripted(new AnthropicRequestError('SENTINEL-FIRST'), second)
+
+    await expect(judgeOnce(judge, input)).rejects.toBe(second)
+
+    expect(calls).toHaveLength(2)
+  })
+
+  it('makes one call and says it did not retry when the first answer is valid', async () => {
+    const { judge, calls } = scripted(JUDGEMENT)
+
+    const result = await judgeOnce(judge, input)
+
+    expect(result).toEqual({ judgement: JUDGEMENT, retried: false })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toEqual(input)
+  })
+
+  it.each([
+    ['AiBudgetExceededError', new AiBudgetExceededError('cap')],
+    ['AnthropicConfigError', new AnthropicConfigError('key')],
+    ['AnthropicUnavailableError', new AnthropicUnavailableError('down')],
+    ['AnthropicRefusalError', new AnthropicRefusalError('declined')],
+    ['a plain Error', new Error('anything')],
+  ])('never retries %s: it is thrown as it is after one call', async (_name, error) => {
+    const { judge, calls } = scripted(error, JUDGEMENT)
+
+    await expect(judgeOnce(judge, input)).rejects.toBe(error)
+
+    expect(calls).toHaveLength(1)
   })
 })

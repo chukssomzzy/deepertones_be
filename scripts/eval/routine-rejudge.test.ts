@@ -6,6 +6,7 @@ import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import type { GateFailure, Routine, RoutineSkeleton } from '../../src/modules/routines/routines.types'
 import { routineJudgeJudgeRoutinePrompt } from '../../src/prompts/prompts.generated'
 import { type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
+import { AnthropicRequestError } from '../../src/providers/anthropic/anthropic.provider'
 import { BIG_CAP_MICROS } from '../../src/providers/anthropic/messages-api.fake'
 import { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
 import { MemoryRoutineWriter } from '../../src/providers/routine-writing/memory.routine-writer'
@@ -220,8 +221,8 @@ const makeSource = async ({ cases = 3, set = 'holdout', limit, capMicros = BIG_C
 
 type Source = Awaited<ReturnType<typeof makeSource>>
 
-type SavedCase = { id: string; state: string; writerError?: string; skeleton: RoutineSkeleton; routine: Routine | null; failures: GateFailure[]; costMicros: number; score: { picks: string; gatesPassed: boolean }; judgements: Record<string, RoutineJudgement | null>; judgeErrors: Record<string, string>; judgeCostMicros: Record<string, number>; grounding: { step: RoutineStep; sourceUrl: string; verdict: GroundingVerdict }[] }
-type JudgeRow = { name: string; model: string; agreement: number | null; exactAgreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null; selfAgreement: boolean }
+type SavedCase = { id: string; state: string; writerError?: string; skeleton: RoutineSkeleton; routine: Routine | null; failures: GateFailure[]; costMicros: number; score: { picks: string; gatesPassed: boolean }; judgements: Record<string, RoutineJudgement | null>; judgeErrors: Record<string, string>; judgeCostMicros: Record<string, number>; judgeRetries: Record<string, number>; grounding: { step: RoutineStep; sourceUrl: string; verdict: GroundingVerdict }[] }
+type JudgeRow = { name: string; model: string; agreement: number | null; exactAgreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null; selfAgreement: boolean; retries: number }
 type Summary = {
   cases: number
   gatesPassed: number | null
@@ -661,6 +662,110 @@ describe('runRejudge: the spend cap', () => {
 
     expect(reportOf(files)).toMatchObject({ capMicros: 2500 })
     expect(reportOf(files).summary.judgeComparison[0]).toMatchObject({ name: 'haiku', costMicros: 2000 })
+  })
+})
+
+describe('runRejudge: a rubric judge answer that is invalid is retried once', () => {
+  /** The judge fails with an AnthropicRequestError on its n-th call (counted over the whole re-judge, retries included). */
+  const failingOn = (...failing: number[]) => (call: number): RoutineJudgement => {
+    if (failing.includes(call)) throw new AnthropicRequestError('SENTINEL-JUDGE-ERROR-MESSAGE')
+    return judgement()
+  }
+
+  it('asks again about the same saved routine when the answer is invalid, keeps the second answer, and records the retry on the case, in the judge\'s row and on its console line', async () => {
+    // Three saved routines; calls: 1 is hold-01, 2 fails on hold-02, 3 is hold-02 again, 4 is hold-03.
+    const source = await makeSource()
+    const { run, judges, files, logs } = rejudgeOf(source, { judgeAnswers: { haiku: failingOn(2) } })
+
+    await run()
+
+    expect(judges.haiku.calls).toHaveLength(4)
+    expect(judges.haiku.calls[2]).toEqual(judges.haiku.calls[1])
+    expect(judges.haiku.calls[1]!.routine).toEqual(savedCases(source)[1]!.routine)
+    const report = reportOf(files)
+    expect(report.cases[1]!.judgements.haiku).toEqual(judgement())
+    expect(report.cases[1]!.judgeErrors).toEqual({})
+    expect(report.cases.map((c) => c.judgeRetries)).toEqual([{ haiku: 0 }, { haiku: 1 }, { haiku: 0 }])
+    expect(report.summary.judgeComparison[0]).toMatchObject({ name: 'haiku', retries: 1 })
+    expect(logs.find((l) => l.startsWith('Judge haiku'))!).toMatch(/, retried 1$/)
+  })
+
+  it('lets the bar be evaluated, and pass, when the one judge\'s only failure is retried', async () => {
+    const source = await makeSource()
+    const { run, files, logs } = rejudgeOf(source, { judgeAnswers: { haiku: failingOn(1) } })
+
+    const { exitCode } = await run()
+
+    expect(reportOf(files).summary.bar).toEqual({ status: 'pass' })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('counts the retry in the case\'s judge cost and in the judge\'s total: a failed call and its retry are 200 on that case', async () => {
+    const source = await makeSource()
+    const { run, files, ledger } = rejudgeOf(source, { judgeMicros: 100, judgeAnswers: { haiku: failingOn(1) } })
+
+    await run()
+
+    const report = reportOf(files)
+    expect(report.cases.map((c) => c.judgeCostMicros)).toEqual([{ haiku: 200 }, { haiku: 100 }, { haiku: 100 }])
+    expect(report.summary.judgeComparison[0]).toMatchObject({ costMicros: 400 })
+    expect(ledger.spentMicros()).toBe(400)
+  })
+
+  it('leaves the case unjudged with the error\'s class name, after two calls and no more, when the retry fails too, and says no-judge for a single judge', async () => {
+    const source = await makeSource()
+    const { run, judges, files, logs } = rejudgeOf(source, { judgeAnswers: { haiku: failingOn(2, 3) } })
+
+    await run()
+
+    expect(judges.haiku.calls).toHaveLength(4)
+    const report = reportOf(files)
+    expect(report.cases[1]).toMatchObject({ judgements: { haiku: null }, judgeErrors: { haiku: 'AnthropicRequestError' } })
+    expect(JSON.stringify(report)).not.toContain('SENTINEL-JUDGE-ERROR-MESSAGE')
+    expect(logs.join('\n')).not.toContain('SENTINEL-JUDGE-ERROR-MESSAGE')
+    expect(logs.at(-1)).toBe('Bar: not evaluated (no-judge)')
+  })
+
+  it('stops at the cap, as for any cap hit, when the retry is the call the cap refuses: no retry loop, nothing more asked, partial', async () => {
+    // Four saved routines, 1000 a judge call, cap 2500. hold-01 takes call 1 (1000); hold-02's call 2 fails (2000); its retry would make 3000 and is refused.
+    const source = await makeSource({ cases: 4 })
+    const { run, judges, files, logs, ledger } = rejudgeOf(source, { judgeMicros: 1000, capMicros: 2500, judgeAnswers: { haiku: failingOn(2) } })
+
+    await run()
+
+    expect(judges.haiku.calls).toHaveLength(3)
+    expect(ledger.spentMicros()).toBe(2000)
+    const report = reportOf(files)
+    expect(report.partial).toBe(true)
+    expect(report.cases[0]!.judgements.haiku).not.toBeNull()
+    expect(report.cases[1]).toMatchObject({ judgements: { haiku: null }, judgeErrors: { haiku: 'AiBudgetExceededError' } })
+    expect(report.cases[2]!.judgements.haiku).toBeNull()
+    expect(report.cases[3]!.judgements.haiku).toBeNull()
+    expect(logs.join('\n')).toMatch(/spend cap/i)
+  })
+
+  it('records no retries and prints no "retried" when nothing failed', async () => {
+    const source = await makeSource({ judgeNames: ['haiku', 'opus'] })
+    const { run, files, logs } = rejudgeOf(source, { judgeNames: ['haiku', 'opus'] })
+
+    await run()
+
+    const report = reportOf(files)
+    expect(report.cases.map((c) => c.judgeRetries)).toEqual([{ haiku: 0, opus: 0 }, { haiku: 0, opus: 0 }, { haiku: 0, opus: 0 }])
+    expect(report.summary.judgeComparison.map((row) => row.retries)).toEqual([0, 0])
+    expect(logs.join('\n')).not.toContain('retried')
+  })
+
+  it('still makes no calls on --rescore, whether or not the source run had a retry', async () => {
+    const source = await makeSource({ sourceJudge: { haiku: (call) => { if (call === 2) throw new AnthropicRequestError('SENTINEL-JUDGE-ERROR-MESSAGE'); return judgement() } } })
+    const { run, judges, ledger } = rejudgeOf(source, { mode: 'rescore' })
+
+    await run()
+
+    expect(judges.haiku.calls).toEqual([])
+    expect(judges.opus.calls).toEqual([])
+    expect(ledger.entries).toEqual([])
   })
 })
 

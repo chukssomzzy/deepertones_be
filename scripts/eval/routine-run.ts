@@ -15,7 +15,7 @@ import type { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.a
 import type { RoutineWriter } from '../../src/providers/routine-writing/routine-writer.provider'
 import type { RoutineCase, RoutineSet } from './routine-cases'
 import { type GroundingJudge, type GroundingVerdict, unverifiableGrounding } from './routine-grounding-judge'
-import { judgeResultOf, type RoutineJudge, type RoutineJudgement } from './routine-judge'
+import { judgeOnce, judgeResultOf, type RoutineJudge, type RoutineJudgement } from './routine-judge'
 import type { LabelSet } from './routine-labels'
 import { barExitCode, type CaseScore, compare, formatBarLine, type JudgeComparison, judgeComparisonOf, type JudgeResult, JUDGE_AGREEMENT_MIN, type Measures, type RoutineCaseInput, scoreRoutineCase, scoreRun, selectJudge } from './routine-score'
 import { buildSkeleton } from './routine-skeleton'
@@ -81,6 +81,8 @@ export type Reported = {
   judgeErrors: Record<string, string>
   /** What each judge's calls cost on this case, a failed call included. */
   judgeCostMicros: Record<string, number>
+  /** How many times each judge was asked again on this case after an invalid answer (0 or 1). Every judge of the run has a key. */
+  judgeRetries: Record<string, number>
   /** The links that were checked, with the verdict on each. */
   grounding: { step: RoutineStep; sourceUrl: string; verdict: GroundingVerdict }[]
 }
@@ -100,8 +102,11 @@ export const gatesOf = (state: CaseState, writerError: string | undefined, failu
   return failures.length === 0 ? 'ok' : failures.map((f) => (f.step === null ? f.gate : `${f.gate}(${f.step})`)).join(',')
 }
 
-const judgeLine = (row: JudgeComparison): string =>
-  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`} (exact ${row.exactAgreement === null ? 'n/a' : `${row.exactAgreement.toFixed(1)}%`}), fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}`
+/** A judge's row of the comparison, with how often it was asked again after an invalid answer. */
+export type JudgeRow = JudgeComparison & { retries: number }
+
+const judgeLine = (row: JudgeRow): string =>
+  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`} (exact ${row.exactAgreement === null ? 'n/a' : `${row.exactAgreement.toFixed(1)}%`}), fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}${row.retries > 0 ? `, retried ${row.retries}` : ''}`
 
 export type GroundingTally = { checked: number; supported: number; unverifiable: number; skipped: number; skippedGate: number }
 
@@ -120,6 +125,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
   // Each judge's result on each case in `inputs` (null where it judged nothing), in the same order, so the selected judge's can be set on the inputs once it is known.
   const judgeResults: Record<string, (JudgeResult | null)[]> = Object.fromEntries(judges.map((j) => [j.name, []]))
   const judgeTotals: Record<string, number> = Object.fromEntries(judges.map((j) => [j.name, 0]))
+  const judgeRetryTotals: Record<string, number> = Object.fromEntries(judges.map((j) => [j.name, 0]))
   const reported: Reported[] = []
   const tally: GroundingTally = { checked: 0, supported: 0, unverifiable: 0, skipped: 0, skippedGate: 0 }
   let costMicros = 0
@@ -138,6 +144,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
     const judgements: Record<string, RoutineJudgement | null> = Object.fromEntries(judges.map((j) => [j.name, null]))
     const judgeErrors: Record<string, string> = {}
     const judgeCostMicros: Record<string, number> = Object.fromEntries(judges.map((j) => [j.name, 0]))
+    const judgeRetries: Record<string, number> = Object.fromEntries(judges.map((j) => [j.name, 0]))
     const checked: Reported['grounding'] = []
     let failures: GateFailure[] = []
     const spentBefore = ledger.spentMicros()
@@ -159,7 +166,8 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
         if (stopped !== null) break
         const before = ledger.spentMicros()
         try {
-          judgements[name] = await judge.judge({ skeleton, routine })
+          // The retry is recorded as it starts, so one that fails too is still counted.
+          judgements[name] = (await judgeOnce(judge, { skeleton, routine }, () => (judgeRetries[name] = 1))).judgement
         } catch (error) {
           // Set before the stop check, so a case the cap or a rejected key left unjudged says why.
           judgeErrors[name] = classNameOf(error)
@@ -167,6 +175,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
         }
         judgeCostMicros[name] = ledger.spentMicros() - before
         judgeTotals[name] = judgeTotals[name]! + judgeCostMicros[name]!
+        judgeRetryTotals[name] = judgeRetryTotals[name]! + judgeRetries[name]!
       }
       // A routine that failed the grounding gate cites links that are not the product's own, so a fetch of them would be spent on nothing.
       const badLinks = failures.some((failure) => failure.gate === 'grounding')
@@ -220,6 +229,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
       judgements,
       judgeErrors,
       judgeCostMicros,
+      judgeRetries,
       grounding: checked,
     })
     const picks = state === 'cut-off' ? '' : `  ${score.picks}`
@@ -228,7 +238,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
 
   const header = { startedAt: startedAt.toISOString(), set, snapshotSha256: snapshot.sha256, labelVersion: labels?.version ?? null, labelSnapshotSha256: labels?.snapshotSha256 ?? null, labelledBy, model, judges: judges.map(({ name, model }) => ({ name, model })), promptHash, judgePromptHash: routineJudgeJudgeRoutinePrompt.hash }
   // A run of the first N cases (--limit) is a trial, as one stopped at the cap is: it can fail the bar but never pass it.
-  return finishRun({ header, set, trial: cases.length < allCases.length, stopped, judges, judgeResults, judgeTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io })
+  return finishRun({ header, set, trial: cases.length < allCases.length, stopped, judges, judgeResults, judgeTotals, judgeRetryTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io })
 }
 
 export type FinishArgs = {
@@ -241,6 +251,8 @@ export type FinishArgs = {
   judges: { name: string; model: string }[]
   judgeResults: Record<string, (JudgeResult | null)[]>
   judgeTotals: Record<string, number>
+  /** How often each judge was asked again after an invalid answer, over the run. */
+  judgeRetryTotals: Record<string, number>
   labelledBy: string | null
   inputs: RoutineCaseInput[]
   /** What the run spent, for the summary and the last lines. */
@@ -254,10 +266,10 @@ export type FinishArgs = {
 }
 
 /** What follows the cases of a run, whichever way they got their routines and judgements: the judge comparison, the scores and the bar, report.json, and the closing console lines. */
-export const finishRun = async ({ header, set, trial, stopped, judges, judgeResults, judgeTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io }: FinishArgs): Promise<{ exitCode: number; outDir: string }> => {
+export const finishRun = async ({ header, set, trial, stopped, judges, judgeResults, judgeTotals, judgeRetryTotals, labelledBy, inputs, costMicros, tally, reported, ledger, previous, outDir, io }: FinishArgs): Promise<{ exitCode: number; outDir: string }> => {
   const partial = stopped !== null || trial
   // The judges are compared on the same routines, and the cheapest one the labels trust (else the one that agrees most) is the one whose numbers feed the bar.
-  const judgeComparison = judges.map((j) => judgeComparisonOf(j, judgeResults[j.name]!, judgeTotals[j.name]!, labelledBy ?? undefined))
+  const judgeComparison: JudgeRow[] = judges.map((j) => ({ ...judgeComparisonOf(j, judgeResults[j.name]!, judgeTotals[j.name]!, labelledBy ?? undefined), retries: judgeRetryTotals[j.name]! }))
   const selected = selectJudge(judgeComparison)
   // When every judge made the labels, none may count, and that is why the bar has no judge.
   const judgeSelfLabelled = judgeComparison.length > 0 && judgeComparison.every((row) => row.selfAgreement)

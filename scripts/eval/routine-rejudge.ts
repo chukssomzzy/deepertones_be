@@ -14,7 +14,7 @@ import { AiBudgetExceededError } from '../../src/providers/anthropic/ai-spend.pr
 import { AnthropicConfigError } from '../../src/providers/anthropic/anthropic.provider'
 import type { MemoryAiSpendLedger } from '../../src/providers/anthropic/memory.ai-spend-ledger'
 import { refuseSelfJudging } from './routine-args'
-import { judgeResultOf, PICK_CLASSES, type RoutineJudge, type RoutineJudgement } from './routine-judge'
+import { judgeOnce, judgeResultOf, PICK_CLASSES, type RoutineJudge, type RoutineJudgement } from './routine-judge'
 import type { LabelSet } from './routine-labels'
 import { classNameOf, finishRun, gatesOf, type GroundingTally, type Reported, type RunIo, type Stop, usd } from './routine-run'
 import { type JudgeResult, type RoutineCaseInput, scoreRoutineCase } from './routine-score'
@@ -43,6 +43,8 @@ const CaseSchema = z.object({
   judgements: z.record(z.string(), JudgementSchema.nullable()),
   judgeErrors: z.record(z.string(), z.string()),
   judgeCostMicros: z.record(z.string(), z.number()),
+  // A report from before the retry has none; a rescore carries 0 for its judges then.
+  judgeRetries: z.record(z.string(), z.number()).optional(),
   grounding: z.array(z.looseObject({ step: StepSchema, sourceUrl: z.string(), verdict: z.looseObject({ fetched: z.boolean(), supports: z.enum(['yes', 'no', 'unclear']) }) })),
 })
 const ReportSchema = z.object({
@@ -59,7 +61,7 @@ const ReportSchema = z.object({
 })
 
 /** A case as the run that made the report saved it (its score is worked out again). */
-export type SourceCase = Omit<Reported, 'score'>
+export type SourceCase = Omit<Reported, 'score' | 'judgeRetries'> & { judgeRetries?: Record<string, number> }
 
 export type SourceReport = {
   startedAt: string
@@ -133,6 +135,7 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
   const inputs: RoutineCaseInput[] = []
   const judgeResults: Record<string, (JudgeResult | null)[]> = Object.fromEntries(asked.map((j) => [j.name, []]))
   const judgeTotals: Record<string, number> = Object.fromEntries(asked.map((j) => [j.name, 0]))
+  const judgeRetryTotals: Record<string, number> = Object.fromEntries(asked.map((j) => [j.name, 0]))
   const reported: Reported[] = []
   const tally: GroundingTally = { checked: 0, supported: 0, unverifiable: 0, skipped: report.groundingSkipped, skippedGate: report.groundingSkippedGate }
   for (const c of report.cases) {
@@ -141,6 +144,7 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
     const judgements: Record<string, RoutineJudgement | null> = Object.fromEntries(asked.map((j) => [j.name, rescore ? (c.judgements[j.name] ?? null) : null]))
     const judgeErrors: Record<string, string> = rescore ? { ...c.judgeErrors } : {}
     const judgeCostMicros: Record<string, number> = Object.fromEntries(asked.map((j) => [j.name, rescore ? (c.judgeCostMicros[j.name] ?? 0) : 0]))
+    const judgeRetries: Record<string, number> = Object.fromEntries(asked.map((j) => [j.name, rescore ? (c.judgeRetries?.[j.name] ?? 0) : 0]))
     const spentBefore = ledger.spentMicros()
 
     // A case with no routine (the writer failed, or the run was cut off before it) has nothing to judge. A cap or a rejected key ends the run; any other failure is only that call's.
@@ -149,7 +153,8 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
         if (stopped !== null) break
         const before = ledger.spentMicros()
         try {
-          judgements[name] = await judge.judge({ skeleton: c.skeleton, routine: c.routine })
+          // The retry is recorded as it starts, so one that fails too is still counted.
+          judgements[name] = (await judgeOnce(judge, { skeleton: c.skeleton, routine: c.routine }, () => (judgeRetries[name] = 1))).judgement
         } catch (error) {
           judgeErrors[name] = classNameOf(error)
           if (error instanceof AiBudgetExceededError) stopped = 'cap'
@@ -158,7 +163,10 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
         judgeCostMicros[name] = ledger.spentMicros() - before
       }
     }
-    for (const { name } of asked) judgeTotals[name] = judgeTotals[name]! + judgeCostMicros[name]!
+    for (const { name } of asked) {
+      judgeTotals[name] = judgeTotals[name]! + judgeCostMicros[name]!
+      judgeRetryTotals[name] = judgeRetryTotals[name]! + judgeRetries[name]!
+    }
     for (const entry of c.grounding) {
       tally.checked++
       if (entry.verdict.fetched && entry.verdict.supports === 'yes') tally.supported++
@@ -175,7 +183,7 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
       }
     }
     const score = scoreRoutineCase(input)
-    reported.push({ ...c, score, judgements, judgeErrors, judgeCostMicros })
+    reported.push({ ...c, score, judgements, judgeErrors, judgeCostMicros, judgeRetries })
     io.log(`${c.id}  ${gatesOf(c.state, c.writerError, c.failures)}${c.state === 'cut-off' ? '' : `  ${score.picks}`}  ${usd(ledger.spentMicros() - spentBefore)}`)
   }
 
@@ -194,5 +202,5 @@ export const runRejudge = async ({ report, reportPath, labels, mode, judges, dep
     mode,
   }
   // The bar is the source run's: the same routines, so the same set, and a source that was a trial stays one.
-  return finishRun({ header, set: report.set, trial: report.partial, stopped, judges: asked, judgeResults, judgeTotals, labelledBy, inputs, costMicros: ledger.spentMicros(), tally, reported, ledger, outDir, io })
+  return finishRun({ header, set: report.set, trial: report.partial, stopped, judges: asked, judgeResults, judgeTotals, judgeRetryTotals, labelledBy, inputs, costMicros: ledger.spentMicros(), tally, reported, ledger, outDir, io })
 }
