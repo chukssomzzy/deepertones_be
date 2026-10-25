@@ -8,6 +8,7 @@ import { ROUTINE_STEPS } from '../../src/modules/catalog/catalog.vocabulary'
 import type { Routine, RoutineProduct, RoutineSkeleton } from '../../src/modules/routines/routines.types'
 import { routineJudgeJudgeRoutinePrompt } from '../../src/prompts/prompts.generated'
 import type { AnthropicClient } from '../../src/providers/anthropic/anthropic.client'
+import { AnthropicRequestError } from '../../src/providers/anthropic/anthropic.provider'
 import type { GapLabel } from './routine-labels'
 import { type JudgeResult, type RoutineCaseInput, scoredGapsOf } from './routine-score'
 
@@ -52,7 +53,7 @@ export interface RoutineJudge {
 /** Judges a written routine with Claude. It has no tools and no labels: it sees only what the writer saw and what the writer wrote. */
 export class AnthropicRoutineJudge implements RoutineJudge {
   // Room for the answer and for the model's thinking, which counts against max_tokens.
-  private static readonly MAX_TOKENS = 4096
+  private static readonly MAX_TOKENS = 12000
   private static readonly LEAD_IN = 'Judge this routine:'
 
   private readonly client: AnthropicClient
@@ -74,6 +75,21 @@ export class AnthropicRoutineJudge implements RoutineJudge {
   }
 }
 
+/**
+ * Asks the judge, and once more with the same input when its answer was invalid (an AnthropicRequestError: off-schema JSON, not JSON, or out of tokens), because a
+ * case with a routine and no judgement blocks the bar. Any other error is thrown at once, and so is whatever the retry fails with, as it is. `onRetry` is called
+ * just before the second call, so a caller can record the retry even when it fails too.
+ */
+export const judgeOnce = async (judge: RoutineJudge, input: RoutineJudgeInput, onRetry?: () => void): Promise<{ judgement: RoutineJudgement; retried: boolean }> => {
+  try {
+    return { judgement: await judge.judge(input), retried: false }
+  } catch (error) {
+    if (!(error instanceof AnthropicRequestError)) throw error
+    onRetry?.()
+    return { judgement: await judge.judge(input), retried: true }
+  }
+}
+
 // --- agreement ---------------------------------------------------------------------------------------------------------------------------------
 
 /** The class the labels give a routine's pick: best, acceptable, or not (which is also what a pick that is no candidate of the gap, a shelf product or "use what you have" is). */
@@ -85,15 +101,21 @@ export const classOfPick = (label: GapLabel, product: RoutineProduct): PickClass
 
 /**
  * The judge's judgement as the score takes it. A pick is judged on each scored gap (the scorer's own rule: labelled, 2 or more candidates, labels current), and
- * agreed when the judge's class is exactly the label's class for the pick. A scored gap the judge gave no class for is judged and not agreed, so leaving a gap out
+ * agreed when the judge's class and the label's class for the pick are on the same side (best and acceptable are right, not is not), and agreed exactly when they are the
+ * same class. The line between best and acceptable is unstable even between two labelling passes, and the writer's own score counts both as right. A scored gap the judge gave no class for is judged and not agreed, so leaving a gap out
  * cannot raise the agreement. Without labels nothing is judged, but the three scores still count.
  */
 export const judgeResultOf = (judgement: RoutineJudgement, { routine, gapCodes, labels }: { routine: Routine; gapCodes: RoutineCaseInput['gapCodes']; labels: RoutineCaseInput['labels'] }): JudgeResult => {
   const scored = scoredGapsOf({ gapCodes, labels })
   let picksAgreed = 0
+  let picksAgreedExactly = 0
   for (const [step, label] of scored) {
     const product = routine.steps.find((entry) => entry.step === step)?.product ?? { kind: 'none' as const }
-    if (judgement.picks.find((pick) => pick.step === step)?.pickClass === classOfPick(label, product)) picksAgreed++
+    const judged = judgement.picks.find((pick) => pick.step === step)?.pickClass
+    if (judged === undefined) continue
+    const labelled = classOfPick(label, product)
+    if (judged === labelled) picksAgreedExactly++
+    if ((judged === 'not') === (labelled === 'not')) picksAgreed++
   }
-  return { picksAgreed, picksJudged: scored.length, fit: judgement.fit, simplicity: judgement.simplicity, words: judgement.words }
+  return { picksAgreed, picksAgreedExactly, picksJudged: scored.length, fit: judgement.fit, simplicity: judgement.simplicity, words: judgement.words }
 }

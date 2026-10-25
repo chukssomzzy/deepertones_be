@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
 import { DEFAULT_MODELS } from './models'
-import { AUTO_LABEL_USAGE, parseAutoLabelArgs, parseLabelsArgs, parseOutcomesArgs, parseRoutineArgs, parseSheetArgs, requirePricedModel, resolveRoutineJudges, resolveRoutineModels, RoutineUsageError, USAGE } from './routine-args'
+import { AUTO_LABEL_USAGE, parseAutoLabelArgs, parseLabelsArgs, parseOutcomesArgs, parseRejudgeArgs, parseRoutineArgs, parseSheetArgs, refuseSelfJudging, REJUDGE_USAGE, requirePricedModel, resolveRoutineJudges, resolveRoutineModels, RoutineUsageError, USAGE } from './routine-args'
 
 // The arguments of `npm run eval:routine`. Strict on purpose, as `eval:catalog`'s are: a misspelt flag must stop the run before it spends money. Every
 // refusal is a RoutineUsageError, which the CLI turns into exit 2. Accepts `--flag value` and `--flag=value`.
@@ -450,5 +450,136 @@ describe('requirePricedModel for the label-routine job', () => {
 
     expect(() => requirePricedModel('label-routine', model)).toThrow(RoutineUsageError)
     expect(() => requirePricedModel('label-routine', model)).toThrow(/No price is known for model "claude-no-such-model" \(the label-routine job\)/)
+  })
+})
+
+// `npm run eval:routine:rejudge -- --report PATH/report.json --labels VERSION [--judges haiku|opus|haiku,opus] [--rescore] [--max-usd N] [--out-dir DIR]`
+// (pr6b). Strict like the others. Two demands on the implementer: `--rescore` is a bare flag (the shared `read` insists on a value after every flag, so it
+// must learn one that has none), and the writer-equals-judge check cannot live in parseRejudgeArgs (the writer model is in the report, which is not read until
+// --report is known), so it is the separate pure refuseSelfJudging(judges, writerModel), which the core and the CLI call once the report is read.
+
+describe('parseRejudgeArgs: the flags', () => {
+  it('needs only --report and --labels: it judges with haiku, caps the spend at 1 dollar, and lets the run pick its directory', () => {
+    expect(parseRejudgeArgs(['--report', 'prev/report.json', '--labels', 'v2'])).toEqual({ report: 'prev/report.json', labels: 'v2', judges: ['haiku'], rescore: false, maxUsd: 1, outDir: undefined })
+  })
+
+  it('reads every flag together, in any order, with --rescore as a bare flag between the others', () => {
+    expect(parseRejudgeArgs(['--out-dir', 'out/r', '--rescore', '--labels', 'v2', '--report', 'prev/report.json'])).toEqual({ report: 'prev/report.json', labels: 'v2', judges: ['haiku'], rescore: true, maxUsd: 1, outDir: 'out/r' })
+  })
+
+  it('takes --rescore last on the line too, and --flag=value forms', () => {
+    expect(parseRejudgeArgs(['--report=r.json', '--labels=v2', '--rescore']).rescore).toBe(true)
+    expect(parseRejudgeArgs(['--report=r.json', '--labels=v2', '--out-dir=o']).outDir).toBe('o')
+  })
+
+  it('takes --judges as eval:routine does, in the order given', () => {
+    const base = ['--report', 'r.json', '--labels', 'v2']
+    expect(parseRejudgeArgs([...base, '--judges', 'opus']).judges).toEqual(['opus'])
+    expect(parseRejudgeArgs([...base, '--judges', 'haiku,opus']).judges).toEqual(['haiku', 'opus'])
+    expect(parseRejudgeArgs([...base, '--judges=opus,haiku']).judges).toEqual(['opus', 'haiku'])
+  })
+
+  it.each([['sonnet'], ['claude-haiku-5-5'], ['Opus'], ['haiku,'], [',opus'], ['haiku,,opus'], ['haiku,haiku'], ['']])('refuses --judges %j', (list) => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--judges', list])).toThrow(RoutineUsageError)
+  })
+
+  it.each([['0.5', 0.5], ['3', 3], ['12', 12]])('takes --max-usd %s', (value, maxUsd) => {
+    expect(parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--max-usd', value]).maxUsd).toBe(maxUsd)
+  })
+
+  it.each([['0'], ['-1'], ['lots'], ['1e2']])('refuses --max-usd %s: dollars above 0', (value) => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--max-usd', value])).toThrow(RoutineUsageError)
+  })
+
+  it('refuses --labels that is not a plain version name', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', '../v2'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'a/b'])).toThrow(RoutineUsageError)
+  })
+})
+
+describe('parseRejudgeArgs: what it refuses', () => {
+  it('needs --report', () => {
+    expect(() => parseRejudgeArgs(['--labels', 'v2'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--labels', 'v2'])).toThrow(/--report/)
+  })
+
+  it('needs --labels', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--report', 'r.json'])).toThrow(/--labels/)
+  })
+
+  it('refuses no arguments at all', () => {
+    expect(() => parseRejudgeArgs([])).toThrow(RoutineUsageError)
+  })
+
+  it.each([['--set', 'dev'], ['--limit', '2'], ['--model', 'write-routine=x'], ['--snapshot', 's.xlsx'], ['--compare', 'c.json'], ['--max-grounding', '2'], ['--rescor', 'x'], ['--verbose', 'x']])('refuses the flag %s, which this command does not take', (flag, value) => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', flag, value])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', flag, value])).toThrow(/Unrecognised/)
+  })
+
+  it('refuses a stray word', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', 'extra'])).toThrow(RoutineUsageError)
+  })
+
+  it.each([['--report', 'a.json', 'b.json'], ['--labels', 'v1', 'v2'], ['--judges', 'haiku', 'opus'], ['--max-usd', '1', '2'], ['--out-dir', 'a', 'b']])('refuses %s given twice', (flag, first, second) => {
+    const required = [...(flag === '--report' ? [] : ['--report', 'r.json']), ...(flag === '--labels' ? [] : ['--labels', 'v2'])]
+    expect(() => parseRejudgeArgs([...required, flag, first, flag, second])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs([...required, flag, first, flag, second])).toThrow(/twice/)
+  })
+
+  it('refuses --rescore given twice, and --rescore with a value', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--rescore', '--rescore'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--rescore', 'yes'])).toThrow(RoutineUsageError)
+  })
+
+  it.each([['--report'], ['--labels'], ['--judges'], ['--max-usd'], ['--out-dir']])('refuses %s with no value, or followed by another flag', (flag) => {
+    const others = flag === '--report' ? ['--labels', 'v2'] : flag === '--labels' ? ['--report', 'r.json'] : ['--report', 'r.json', '--labels', 'v2']
+    expect(() => parseRejudgeArgs([...others, flag])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs([...others, flag, '--rescore'])).toThrow(RoutineUsageError)
+  })
+
+  it('refuses --rescore with --judges, even when the judges are the default', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--rescore', '--judges', 'haiku'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--judges', 'opus', '--rescore', '--report', 'r.json', '--labels', 'v2'])).toThrow(/--rescore/)
+  })
+
+  it('refuses --rescore with --max-usd: a rescore spends nothing', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--rescore', '--max-usd', '1'])).toThrow(RoutineUsageError)
+    expect(() => parseRejudgeArgs(['--max-usd', '2', '--report', 'r.json', '--labels', 'v2', '--rescore'])).toThrow(/--rescore/)
+  })
+
+  it('lets --rescore have --out-dir: where the new report goes is its own business', () => {
+    expect(() => parseRejudgeArgs(['--report', 'r.json', '--labels', 'v2', '--rescore', '--out-dir', 'o'])).not.toThrow()
+  })
+
+  it('shows the usage in every refusal, and the usage names the command and its flags', () => {
+    for (const flag of ['--report', '--labels', '--judges', '--rescore', '--max-usd', '--out-dir']) expect(REJUDGE_USAGE, flag).toContain(flag)
+    expect(REJUDGE_USAGE).toContain('npm run eval:routine:rejudge')
+    expect(() => parseRejudgeArgs([])).toThrow(/npm run eval:routine:rejudge/)
+    expect(() => parseRejudgeArgs(['--nope', 'x'])).toThrow(/--rescore/)
+  })
+})
+
+describe('refuseSelfJudging: a model never judges its own routines', () => {
+  const HAIKU = { name: 'haiku', model: 'claude-haiku-5-5' }
+  const OPUS = { name: 'opus', model: 'claude-opus-5-5' }
+
+  it('lets a writer that is neither judge be judged by both', () => {
+    expect(() => refuseSelfJudging([HAIKU, OPUS], 'claude-sonnet-5-5')).not.toThrow()
+  })
+
+  it('lets the Opus writer be judged by Haiku, and the Haiku writer by Opus: the other side of the line', () => {
+    expect(() => refuseSelfJudging([HAIKU], 'claude-opus-5-5')).not.toThrow()
+    expect(() => refuseSelfJudging([OPUS], 'claude-haiku-5-5')).not.toThrow()
+  })
+
+  it('refuses a judge that is the writer, with the fixed message', () => {
+    expect(() => refuseSelfJudging([HAIKU], 'claude-haiku-5-5')).toThrow(RoutineUsageError)
+    expect(() => refuseSelfJudging([HAIKU], 'claude-haiku-5-5')).toThrow(/a model never judges its own routines/)
+    expect(() => refuseSelfJudging([OPUS], 'claude-opus-5-5')).toThrow(/a model never judges its own routines/)
+  })
+
+  it('refuses when only one of several judges is the writer, and names the saved report\'s writer', () => {
+    expect(() => refuseSelfJudging([OPUS, HAIKU], 'claude-opus-5-5')).toThrow(/claude-opus-5-5/)
   })
 })
