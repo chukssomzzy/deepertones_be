@@ -29,6 +29,7 @@
     "eval:routine": "tsx scripts/eval-routine.ts",
     "eval:routine:sheet": "tsx scripts/eval-routine-sheet.ts",
     "eval:routine:labels": "tsx scripts/eval-routine-labels.ts",
+    "eval:routine:auto-label": "tsx scripts/eval-routine-auto-label.ts",
     "eval:routine:outcomes": "tsx scripts/eval-routine-outcomes.ts",
     "eval:shelf": "tsx scripts/eval/shelf.ts",
     "eval:matching": "tsx scripts/eval/matching.ts",

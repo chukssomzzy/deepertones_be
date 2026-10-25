@@ -15,6 +15,7 @@ const bodyOf = (name: string) => files().find((f) => f.name === name)?.content ?
 describe.each([
   { job: 'judge-routine', file: 'routine-judge.judge-routine.md', exportName: 'routineJudgeJudgeRoutinePrompt', usedBy: 'AnthropicRoutineJudge.judge' },
   { job: 'judge-grounding', file: 'routine-grounding-judge.judge-grounding.md', exportName: 'routineGroundingJudgeJudgeGroundingPrompt', usedBy: 'AnthropicGroundingJudge.judge' },
+  { job: 'label-routine', file: 'routine-labeller.label-routine.md', exportName: 'routineLabellerLabelRoutinePrompt', usedBy: 'AnthropicRoutineLabeller.label' },
 ])('the $job AI job and src/prompts/$file', ({ job, file, exportName, usedBy }) => {
   it('is one of the AI jobs, so its calls are costed, capped and listed like every other, and runs on Haiku in the shared table', () => {
     expect(AI_JOBS).toContain(job)

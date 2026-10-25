@@ -117,6 +117,13 @@ describe('applyOutcomes: a change applies only when labelChange says so', () => 
     expect(LABELS).toEqual(before)
   })
 
+  it('keeps who made the labels it started from: a label revised by outcomes began as the labeller\'s', () => {
+    const counts = countsOf(group([product('C-1', ZERO), product('C-2', ALL)]))
+
+    expect(apply(counts, { ...LABELS, labelledBy: 'claude-opus-5-5' }).labels.labelledBy).toBe('claude-opus-5-5')
+    expect(apply(counts, { ...LABELS, labelledBy: 'human' }).labels.labelledBy).toBe('human')
+  })
+
   it('leaves a gap alone when its counts do not lead enough, and a case with no change keeps its labels exactly', () => {
     // Moisturise: M-2 has 29 users: under MIN_USERS (30) the group says nothing, however good it looks. Cleanse has no counts at all.
     const { labels, changes } = apply(countsOf(group([product('M-1', ZERO), product('M-2', c(29, 29))])))

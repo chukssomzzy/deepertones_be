@@ -24,6 +24,7 @@ export const MODELS: Record<AiJob, string> = {
   'draft-catalog-row': MODEL,
   'judge-draft': MODEL,
   'judge-routine': MODEL,
+  'label-routine': MODEL,
   'judge-grounding': MODEL,
   'write-routine': MODEL,
 }
@@ -42,6 +43,7 @@ export const ROUTED_MODELS: Record<AiJob, string> = {
   'draft-catalog-row': 'claude-opus-5-5',
   'judge-draft': 'claude-sonnet-5-5',
   'judge-routine': 'claude-opus-5-5',
+  'label-routine': 'claude-opus-5-5',
   'judge-grounding': 'claude-haiku-5-5',
   'write-routine': 'claude-sonnet-5-5',
 }

@@ -7,7 +7,7 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions, judge-draft, judge-routine and judge-grounding; write-routine has its own variable, because the routine's words reach users.
+// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions, judge-draft, judge-routine, judge-grounding and label-routine; write-routine has its own variable, because the routine's words reach users.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
@@ -22,6 +22,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'draft-catalog-row': 'ANTHROPIC_MODEL_RESEARCH',
   'judge-draft': 'ANTHROPIC_MODEL_JUDGE',
   'judge-routine': 'ANTHROPIC_MODEL_JUDGE',
+  'label-routine': 'ANTHROPIC_MODEL_JUDGE',
   'judge-grounding': 'ANTHROPIC_MODEL_JUDGE',
   'write-routine': 'ANTHROPIC_MODEL_ROUTINE',
 }
@@ -63,6 +64,13 @@ describe('the eval default models', () => {
     expect(AI_JOBS).toContain('judge-grounding')
     expect((DEFAULT_MODELS as Record<string, string>)['judge-routine']).toBe('claude-haiku-5-5')
     expect((DEFAULT_MODELS as Record<string, string>)['judge-grounding']).toBe('claude-haiku-5-5')
+  })
+
+  // label-routine is the eval-only job that labels the routine eval's cases as a dermatologist would. Like judge-routine it sits on the shared judge variable, so this table
+  // (held to wrangler.jsonc) has it on Haiku; `npm run eval:routine:auto-label` moves it to Opus at run level (see parseAutoLabelArgs in routine-args.test.ts).
+  it('run the routine labeller on the cheap judge model here, as wrangler.jsonc has it: the labelling command moves it to Opus by itself', () => {
+    expect(AI_JOBS).toContain('label-routine')
+    expect((DEFAULT_MODELS as Record<string, string>)['label-routine']).toBe('claude-haiku-5-5')
   })
 
   it('cover exactly the jobs there are', () => {

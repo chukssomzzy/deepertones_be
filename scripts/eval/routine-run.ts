@@ -85,7 +85,7 @@ type Reported = {
 }
 
 /** The name of an error's class, for a report: a code identifier, never the message. `constructor.name`, because an instance's `name` is "Error" unless a subclass sets it. */
-const classNameOf = (error: unknown): string => {
+export const classNameOf = (error: unknown): string => {
   const name = (error as { constructor?: { name?: unknown } } | null | undefined)?.constructor?.name
   return typeof name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]{0,59}$/.test(name) ? name : 'Error'
 }
@@ -100,7 +100,7 @@ const gatesOf = (state: CaseState, writerError: string | undefined, failures: Ga
 }
 
 const judgeLine = (row: JudgeComparison): string =>
-  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`}, fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar`
+  `Judge ${row.name} (${row.model}): agreement ${row.agreement === null ? 'n/a' : `${row.agreement.toFixed(1)}%`}, fit ${shown(row.fit)}, simplicity ${shown(row.simplicity)}, words ${shown(row.words)}, cost ${usd(row.costMicros)}, ${shown(row.agreementPerDollar)} agreement per dollar${row.selfAgreement ? ' (self-agreement: made the labels)' : ''}`
 
 type GroundingTally = { checked: number; supported: number; unverifiable: number; skipped: number; skippedGate: number }
 
@@ -112,6 +112,8 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
   await io.mkdir(outDir)
   io.log(`Routine eval: set ${set}, ${cases.length} cases, cap ${usd(ledger.capMicros)}, labels ${labels?.version ?? 'none'}`)
 
+  // Who made the labels: a model id, 'human' (a sheet, or a legacy set), or null with none.
+  const labelledBy = labels === null ? null : (labels.labelledBy ?? 'human')
   let stopped: Stop = null
   const inputs: RoutineCaseInput[] = []
   // Each judge's result on each case in `inputs` (null where it judged nothing), in the same order, so the selected judge's can be set on the inputs once it is known.
@@ -226,13 +228,15 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
   // A run of the first N cases (--limit) is a trial, as one stopped at the cap is: it can fail the bar but never pass it.
   const partial = stopped !== null || cases.length < allCases.length
   // The judges are compared on the same routines, and the cheapest one the labels trust (else the one that agrees most) is the one whose numbers feed the bar.
-  const judgeComparison = judges.map((j) => judgeComparisonOf(j, judgeResults[j.name]!, judgeTotals[j.name]!))
+  const judgeComparison = judges.map((j) => judgeComparisonOf(j, judgeResults[j.name]!, judgeTotals[j.name]!, labelledBy ?? undefined))
   const selected = selectJudge(judgeComparison)
+  // When every judge made the labels, none may count, and that is why the bar has no judge.
+  const judgeSelfLabelled = judgeComparison.length > 0 && judgeComparison.every((row) => row.selfAgreement)
   const scored = inputs.map((input, i) => ({ ...input, judge: selected === null ? null : judgeResults[selected.name]![i]! }))
   // The page-support share is reported beside the words, and is not in the bar. A link that could not be verified counts as not supported.
   const groundingSupport = tally.checked === 0 ? null : (tally.supported * 100) / tally.checked
   const summary = {
-    ...scoreRun(scored, { set, partial }),
+    ...scoreRun(scored, { set, partial, judgeSelfLabelled }),
     costMicros,
     judgeComparison,
     selectedJudge: selected?.name ?? null,
@@ -243,7 +247,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
     groundingSkipped: tally.skipped,
     groundingSkippedGate: tally.skippedGate,
   }
-  const report = { startedAt: startedAt.toISOString(), set, snapshotSha256: snapshot.sha256, labelVersion: labels?.version ?? null, labelSnapshotSha256: labels?.snapshotSha256 ?? null, model, judges: judges.map(({ name, model }) => ({ name, model })), promptHash, capMicros: ledger.capMicros, partial, cases: reported, summary }
+  const report = { startedAt: startedAt.toISOString(), set, snapshotSha256: snapshot.sha256, labelVersion: labels?.version ?? null, labelSnapshotSha256: labels?.snapshotSha256 ?? null, labelledBy, model, judges: judges.map(({ name, model }) => ({ name, model })), promptHash, capMicros: ledger.capMicros, partial, cases: reported, summary }
   const reportPath = join(outDir, 'report.json')
   await io.writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`)
 
@@ -254,7 +258,7 @@ export const runRoutineEval = async ({ cases: allCases, set, limit, outDir: give
   for (const row of judgeComparison) io.log(judgeLine(row))
   io.log(
     selected === null
-      ? 'Selected judge: none (no judge produced a result), so the bar has no judge to take agreement from'
+      ? `Selected judge: none (${judgeSelfLabelled ? 'every judge made the labels' : 'no judge produced a result'}), so the bar has no judge to take agreement from`
       : `Selected judge: ${selected.name}, ${selected.agreement! >= JUDGE_AGREEMENT_MIN ? `the cheapest with agreement of at least ${JUDGE_AGREEMENT_MIN}%` : `the highest agreement (none reached ${JUDGE_AGREEMENT_MIN}%)`}`,
   )
   io.log(

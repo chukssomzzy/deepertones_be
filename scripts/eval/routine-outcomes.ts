@@ -66,6 +66,7 @@ const sideOf = (counts: OutcomeCounts): OutcomeSide => ({ n: counts.n, netFainte
  */
 export const applyOutcomes = (labels: LabelSet, counts: CountsFile, cases: RoutineCase[], version: string): { labels: LabelSet; changes: LabelChange[]; skippedForCautions: string[]; flagged: FlaggedProduct[] } => {
   // Each case gets its own copy of its gaps (a gap is replaced, never edited), so two cases that share a label object in memory are changed on their own.
+  // `...labels` keeps who made them (`labelledBy`) on purpose: a label revised by outcomes began as the labeller's, so a judge on the labeller's model still has the self-agreement risk.
   const out: LabelSet = { ...labels, version, status: 'outcome', cases: Object.fromEntries(Object.entries(labels.cases).map(([id, gaps]) => [id, { ...gaps }])) }
   const changes: LabelChange[] = []
   const skippedForCautions: string[] = []

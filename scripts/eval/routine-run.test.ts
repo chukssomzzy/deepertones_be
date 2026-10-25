@@ -242,7 +242,7 @@ const setup = ({ cases = CASES, set = 'holdout', labels, limit, capMicros = BIG_
   return { ledger, memory, writer, judge, judges, grounding, order, logs, dirs, files, run }
 }
 
-type JudgeRow = { name: string; model: string; agreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null }
+type JudgeRow = { name: string; model: string; agreement: number | null; fit: number | null; simplicity: number | null; words: number | null; costMicros: number; agreementPerDollar: number | null; selfAgreement: boolean }
 
 type Reported = {
   startedAt: string
@@ -250,6 +250,8 @@ type Reported = {
   snapshotSha256: string
   labelVersion: string | null
   labelSnapshotSha256: string | null
+  /** Who made the labels: a model id, 'human', or null when the run had no labels. */
+  labelledBy: string | null
   model: string
   judges: { name: string; model: string }[]
   promptHash: string
@@ -1442,5 +1444,130 @@ describe('runRoutineEval: the page-support judge', () => {
     const { summary } = reportOf(files)
     expect(summary).toMatchObject({ groundingChecked: 9, groundingSupported: 8, groundingUnverifiable: 1 })
     expect(files.get(REPORT_PATH)).not.toContain(JUDGE_ERROR_SENTINEL)
+  })
+})
+
+
+// --- who made the labels (#152, follow-up to PR D2) ------------------------------------------------------------------------------------------
+// Opus can label the cases (`npm run eval:routine:auto-label`), and a model never grades its own work: a judge whose model made the labels is reported, marked as
+// self-agreement, and left out of choosing the judge. The report names who made the labels (`labelledBy`, top level: a model id, 'human', or null with no labels); a label set
+// without the field is a legacy one and counts as human. The Opus judge runs on 'claude-opus-5-5' (JUDGE_MODELS), which is what the labels name here.
+//   summary.judgeComparison[].selfAgreement: boolean       summary.bar reason 'judge-self-labelled' when every judge made the labels
+//   console: the judge line of a self-agreeing judge ends with "(self-agreement: made the labels)"
+
+const OPUS_LABELS = (cases: RoutineCase[]): LabelSet => ({ ...LABELS_FOR_ALL(cases), labelledBy: JUDGE_MODELS.opus })
+
+describe('runRoutineEval: who made the labels', () => {
+  it('names the model that made the labels at the top of the report', async () => {
+    const { run, files } = setup({ labels: OPUS_LABELS(CASES) })
+
+    await run()
+
+    expect(reportOf(files).labelledBy).toBe('claude-opus-5-5')
+  })
+
+  it('names a human for labels made in the sheet, and for a label set that does not say (a legacy one)', async () => {
+    const sheet = setup({ labels: { ...LABELS_FOR_ALL(CASES), labelledBy: 'human' } })
+    await sheet.run()
+    const legacy = setup({ labels: LABELS_FOR_ALL(CASES) })
+    await legacy.run()
+
+    expect(reportOf(sheet.files).labelledBy).toBe('human')
+    expect(reportOf(legacy.files).labelledBy).toBe('human')
+  })
+
+  it('names nobody when the run had no labels', async () => {
+    const { run, files } = setup({ labels: null })
+
+    await run()
+
+    expect(reportOf(files).labelledBy).toBeNull()
+  })
+})
+
+describe('runRoutineEval: a judge whose model made the labels', () => {
+  // 20 cases. Opus (200 a call) agrees on all 20 = 100%; Haiku (900 a call) gets cleanse wrong on 3: 17 of 20 = 85%. Opus agrees more and is cheaper than Haiku;
+  // both reach 80%. With human labels Opus is the cheapest trusted judge. With labels made by Opus it is not allowed to count, so Haiku is selected.
+  const twentyJudges = (labels: LabelSet) => setup({ cases: TWENTY, labels, judgeMicros: { haiku: 900, opus: 200 }, judgeAnswers: { haiku: wrongOn(3, HAIKU_SCORES), opus: wrongOn(0, OPUS_SCORES) } })
+
+  it('selects Haiku, and feeds its numbers to the bar, even though Opus agrees more and costs less', async () => {
+    const { run, files, logs } = twentyJudges(OPUS_LABELS(TWENTY))
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.selectedJudge).toBe('haiku')
+    expect(summary).toMatchObject({ judgeAgreement: 85, fit: 4, simplicity: 5, words: 3 })
+    expect(summary.bar).toEqual({ status: 'pass' })
+    expect(logs.at(-1)).toBe('Bar: PASS')
+    expect(exitCode).toBe(0)
+  })
+
+  it('selects Opus, as before, when a human made the same labels: the rule is about who made them, not about Opus', async () => {
+    const { run, files } = twentyJudges({ ...LABELS_FOR_ALL(TWENTY), labelledBy: 'human' })
+
+    await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.selectedJudge).toBe('opus')
+    expect(summary.judgeAgreement).toBe(100)
+    expect(summary.judgeComparison.map((row) => row.selfAgreement)).toEqual([false, false])
+  })
+
+  it('still reports the self-agreeing judge in full, marked in the report: its agreement, scores and cost are there', async () => {
+    const { run, files } = twentyJudges(OPUS_LABELS(TWENTY))
+
+    await run()
+
+    const [haiku, opus] = reportOf(files).summary.judgeComparison
+    expect(haiku).toMatchObject({ name: 'haiku', selfAgreement: false, agreement: 85, costMicros: 18000 })
+    expect(opus).toMatchObject({ name: 'opus', model: 'claude-opus-5-5', selfAgreement: true, agreement: 100, fit: 2, simplicity: 3, words: 4, costMicros: 4000 })
+  })
+
+  it('marks it on the console: the judge line of the judge that made the labels says "(self-agreement: made the labels)", and the other does not', async () => {
+    const { run, logs } = twentyJudges(OPUS_LABELS(TWENTY))
+
+    await run()
+
+    const haiku = logs.find((l) => l.startsWith('Judge haiku'))!
+    const opus = logs.find((l) => l.startsWith('Judge opus'))!
+    expect(opus).toContain('(self-agreement: made the labels)')
+    expect(opus).toContain('100.0%')
+    expect(haiku).not.toContain('self-agreement')
+  })
+
+  it('does not mark any judge when a human made the labels', async () => {
+    const { run, logs } = twentyJudges({ ...LABELS_FOR_ALL(TWENTY), labelledBy: 'human' })
+
+    await run()
+
+    expect(logs.filter((l) => l.includes('self-agreement'))).toEqual([])
+  })
+
+  it('has no selected judge, and the bar says judge-self-labelled, when the only judge is the one that made the labels', async () => {
+    const { run, files, logs } = setup({ judgeNames: ['opus'], labels: OPUS_LABELS(CASES) })
+
+    const { exitCode } = await run()
+
+    const { summary } = reportOf(files)
+    expect(summary.selectedJudge).toBeNull()
+    expect(summary.judgeAgreement).toBeNull()
+    expect(summary.judgeComparison).toHaveLength(1)
+    expect(summary.judgeComparison[0]).toMatchObject({ name: 'opus', selfAgreement: true, agreement: 100 })
+    expect(summary.bar).toEqual({ status: 'not-evaluated', reasons: ['judge-self-labelled'] })
+    expect(logs.find((l) => l.startsWith('Selected judge'))).toMatch(/none/i)
+    expect(logs.at(-1)).toBe('Bar: not evaluated (judge-self-labelled)')
+    expect(exitCode).toBe(0)
+  })
+
+  it('says no-judge, not judge-self-labelled, when the judges failed and no labels were the cause', async () => {
+    const fail = () => {
+      throw new FakeJudgeError(JUDGE_ERROR_SENTINEL)
+    }
+    const { run, logs } = setup({ judgeNames: ['opus'], judgeAnswers: { opus: fail }, labels: { ...LABELS_FOR_ALL(CASES), labelledBy: 'human' } })
+
+    await run()
+
+    expect(logs.at(-1)).toBe('Bar: not evaluated (no-judge)')
   })
 })

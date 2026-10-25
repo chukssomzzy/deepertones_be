@@ -37,6 +37,8 @@ export type JudgeComparison = {
   costMicros: number
   /** Agreement % per dollar spent; null when the judge has no agreement or cost nothing. */
   agreementPerDollar: number | null
+  /** The judge's model made the labels, so its agreement with them does not count toward choosing a judge (it is still reported). */
+  selfAgreement: boolean
 }
 
 export type CasePicks = 'right' | 'wrong' | 'unscored'
@@ -54,7 +56,7 @@ export type CaseScore = {
 }
 
 export type BarRule = 'gates' | 'right-product' | 'judge-agreement' | 'forbidden-wording'
-export type BarReason = 'dev-set' | 'partial-run' | 'no-labels' | 'needs-relabel' | 'no-scored-gaps' | 'no-judge'
+export type BarReason = 'dev-set' | 'partial-run' | 'no-labels' | 'needs-relabel' | 'no-scored-gaps' | 'no-judge' | 'judge-self-labelled'
 export type Bar = { status: 'pass' } | { status: 'fail'; rules: BarRule[]; notEvaluated: BarReason[] } | { status: 'not-evaluated'; reasons: BarReason[] }
 
 export type RunScore = {
@@ -100,7 +102,7 @@ export const scoredGapsOf = (input: Pick<RoutineCaseInput, 'gapCodes' | 'labels'
 }
 
 /** A judge's row from its result on each case (null where it judged nothing) and what its calls cost: agreement is pooled over the picks judged, the means are over the cases judged. */
-export const judgeComparisonOf = (judge: { name: string; model: string }, results: (JudgeResult | null)[], costMicros: number): JudgeComparison => {
+export const judgeComparisonOf = (judge: { name: string; model: string }, results: (JudgeResult | null)[], costMicros: number, labelledBy?: string): JudgeComparison => {
   const judged = results.flatMap((result) => (result === null ? [] : [result]))
   const agreement = percent(
     judged.reduce((total, j) => total + j.picksAgreed, 0),
@@ -114,15 +116,18 @@ export const judgeComparisonOf = (judge: { name: string; model: string }, result
     words: mean(judged.map((j) => j.words)),
     costMicros,
     agreementPerDollar: agreement === null || costMicros === 0 ? null : agreement / (costMicros / 1_000_000),
+    // 'human' (and no label maker at all) is no model's.
+    selfAgreement: labelledBy !== undefined && labelledBy !== 'human' && judge.model === labelledBy,
   }
 }
 
 /**
  * The judge whose numbers feed the bar: the cheapest one whose agreement is at least the bar's 80% (higher agreement on a cost tie), else the one with the highest
- * agreement (cheaper on a tie). A judge with no agreement produced no result and is never picked; with none that did, null.
+ * agreement (cheaper on a tie). A judge with no agreement produced no result and is never picked, and neither is one whose model made the labels (a model never grades
+ * its own work; its row is still reported); with none left, null.
  */
 export const selectJudge = (rows: JudgeComparison[]): JudgeComparison | null => {
-  const withResults = rows.filter((row) => row.agreement !== null)
+  const withResults = rows.filter((row) => row.agreement !== null && !row.selfAgreement)
   const agreementOf = (row: JudgeComparison) => row.agreement!
   const trusted = withResults.filter((row) => agreementOf(row) >= JUDGE_AGREEMENT_MIN)
   const best = (candidates: JudgeComparison[], order: (a: JudgeComparison, b: JudgeComparison) => number) => [...candidates].sort(order)[0] ?? null
@@ -154,7 +159,7 @@ export const scoreRoutineCase = (input: RoutineCaseInput): CaseScore => {
  * Why the bar cannot be fully evaluated, in a fixed order. `no-scored-gaps` is for labels that are all there and current but leave no gap to score (every gap
  * has a single candidate, or none): the right product has nothing to be measured on, which is not the same as being 100%.
  */
-const missingOf = (inputs: RoutineCaseInput[], scores: CaseScore[], judgeAgreement: number | null, scoredGaps: number, partial: boolean): BarReason[] => {
+const missingOf = (inputs: RoutineCaseInput[], scores: CaseScore[], judgeAgreement: number | null, scoredGaps: number, partial: boolean, judgeSelfLabelled: boolean): BarReason[] => {
   const reasons: BarReason[] = []
   if (partial) reasons.push('partial-run')
   const noLabels = inputs.some((input) => input.labels === null && withCandidates(input.gapCodes).length > 0)
@@ -163,13 +168,14 @@ const missingOf = (inputs: RoutineCaseInput[], scores: CaseScore[], judgeAgreeme
   if (needsRelabel) reasons.push('needs-relabel')
   if (!noLabels && !needsRelabel && scoredGaps === 0) reasons.push('no-scored-gaps')
   // A case with no routine (the writer failed) has nothing to judge.
-  if (judgeAgreement === null || inputs.some((input) => input.routine !== null && input.judge === null)) reasons.push('no-judge')
+  // When no judge may count because each made the labels, that is the reason, not a missing judge.
+  if (judgeAgreement === null || inputs.some((input) => input.routine !== null && input.judge === null)) reasons.push(judgeSelfLabelled ? 'judge-self-labelled' : 'no-judge')
   return reasons
 }
 
 const RIGHT_PRODUCT_MIN = 85
 
-export const scoreRun = (inputs: RoutineCaseInput[], { set, partial }: { set: RoutineSet; partial: boolean }): RunScore => {
+export const scoreRun = (inputs: RoutineCaseInput[], { set, partial, judgeSelfLabelled = false }: { set: RoutineSet; partial: boolean; judgeSelfLabelled?: boolean }): RunScore => {
   const scores = inputs.map(scoreRoutineCase)
   const sum = (pick: (score: CaseScore) => number) => scores.reduce((total, score) => total + pick(score), 0)
   const scoredGaps = sum((s) => s.scoredGaps)
@@ -184,7 +190,7 @@ export const scoreRun = (inputs: RoutineCaseInput[], { set, partial }: { set: Ro
     pickedJudged,
   )
 
-  const missing = missingOf(inputs, scores, judgeAgreement, scoredGaps, partial)
+  const missing = missingOf(inputs, scores, judgeAgreement, scoredGaps, partial, judgeSelfLabelled)
   // One rule for the whole bar: a rule that can be evaluated and fails is a FAIL, whatever else is missing, and a trial (a partial run) can fail but never pass.
   // Gates and forbidden wording can always be evaluated; judge agreement when some case was judged; right product only when every case with candidates has
   // labels and none needs re-labelling, because otherwise the percentage would leave cases out and could look better than the run was.

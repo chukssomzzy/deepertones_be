@@ -124,8 +124,8 @@ export const resolveRoutineModels = (overrides: Partial<Record<AiJob, string>>):
 export const resolveRoutineJudges = (names: readonly JudgeName[]): { name: JudgeName; model: string }[] => names.map((name) => ({ name, model: JUDGE_MODELS[name] }))
 
 /** The model a job will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
-export const requirePricedModel = (job: AiJob, model: string): void => {
-  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the ${job} job), so its spend could not be capped. Use a model with a price. ${USAGE}`)
+export const requirePricedModel = (job: AiJob, model: string, usage: string = USAGE): void => {
+  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the ${job} job), so its spend could not be capped. Use a model with a price. ${usage}`)
 }
 
 export const SHEET_USAGE = `Usage: npm run eval:routine:sheet -- [--set dev|holdout|all] [--snapshot PATH] [--out PATH] (default: all cases, the snapshot ${DEFAULT_SNAPSHOT_PATH}, out eval-data/routine/label-sheet-<set>.xlsx)`
@@ -198,4 +198,43 @@ export const parseOutcomesArgs = (argv: string[]): OutcomesArgs => {
   if (out === undefined) fail('--out is needed')
   if (out === labels) fail('--out must be a new version: a label set is never overwritten')
   return { counts: counts!, labels: labels!, out: out! }
+}
+
+const DEFAULT_AUTO_LABEL_MODEL = 'claude-opus-5-5'
+const DEFAULT_AUTO_LABEL_MAX_USD = 10
+
+export const AUTO_LABEL_USAGE = `Usage: npm run eval:routine:auto-label -- --version VERSION [--set all|dev|holdout] [--snapshot PATH] [--model label-routine=MODEL] [--max-usd N] [--limit N] (an AI labeller labels the cases as a dermatologist would; writes eval-data/routine/labels/VERSION.json, status provisional, and a filled copy of the label sheet; the default set is all, the model ${DEFAULT_AUTO_LABEL_MODEL}, the cap ${DEFAULT_AUTO_LABEL_MAX_USD} dollars and the snapshot ${DEFAULT_SNAPSHOT_PATH})`
+
+export type AutoLabelArgs = { version: string; set: RoutineSet | 'all'; snapshot: string; model: string; maxUsd: number; limit: number | undefined }
+
+/**
+ * The labelling model is not in DEFAULT_MODELS (that table is held to wrangler.jsonc, which has the job on Haiku): the command defaults it to Opus itself, so the
+ * parsed args carry it. `--model` takes only the label-routine job here.
+ */
+export const parseAutoLabelArgs = (argv: string[]): AutoLabelArgs => {
+  const fail = (reason: string): never => {
+    throw new RoutineUsageError(`${reason}. ${AUTO_LABEL_USAGE}`)
+  }
+  let version: string | undefined
+  const args: Omit<AutoLabelArgs, 'version'> = { set: 'all', snapshot: DEFAULT_SNAPSHOT_PATH, model: DEFAULT_AUTO_LABEL_MODEL, maxUsd: DEFAULT_AUTO_LABEL_MAX_USD, limit: undefined }
+  for (const { flag, value } of read(argv, ['--version', '--set', '--snapshot', '--model', '--max-usd', '--limit'], [], AUTO_LABEL_USAGE)) {
+    if (flag === '--version') {
+      if (!isLabelVersion(value)) fail('--version must be a plain version name such as v1')
+      version = value
+    } else if (flag === '--set') {
+      if (value !== 'all' && value !== 'dev' && value !== 'holdout') fail(`Unknown set "${value}" (all, dev or holdout)`)
+      args.set = value as AutoLabelArgs['set']
+    } else if (flag === '--snapshot') args.snapshot = value
+    else if (flag === '--model') {
+      const split = value.indexOf('=')
+      if (split === -1 || value.slice(0, split) !== 'label-routine' || split === value.length - 1) fail('--model must be label-routine=MODEL')
+      args.model = value.slice(split + 1)
+    } else if (flag === '--max-usd') args.maxUsd = dollars(value, flag, AUTO_LABEL_USAGE)
+    else {
+      if (!wholeNumber(value) || Number(value) < 1) fail('--limit must be a whole number of at least 1')
+      args.limit = Number(value)
+    }
+  }
+  if (version === undefined) fail('--version is needed')
+  return { version: version!, ...args }
 }

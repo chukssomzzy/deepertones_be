@@ -124,6 +124,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         'draft-catalog-row': env.ANTHROPIC_MODEL_RESEARCH,
         'judge-draft': env.ANTHROPIC_MODEL_JUDGE,
         'judge-routine': env.ANTHROPIC_MODEL_JUDGE,
+        'label-routine': env.ANTHROPIC_MODEL_JUDGE,
         'judge-grounding': env.ANTHROPIC_MODEL_JUDGE,
         'write-routine': env.ANTHROPIC_MODEL_ROUTINE,
       },
