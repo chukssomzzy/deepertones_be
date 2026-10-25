@@ -358,6 +358,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         repository: new D1VerdictsRepository(db()),
         fitter: new AnthropicVerdictFitter(verdictFitterAnthropic()),
         jobs: jobQueue(),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
         workbook: catalogWorkbook(),
         catalog: catalog(),
         shelf: shelf(),
