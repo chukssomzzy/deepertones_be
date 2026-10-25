@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import ExcelJS from 'exceljs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { labelSetPath, LabelSheetError, readLabelSheet, writeLabelSheet } from './routine-labels'
+import { type LabelSet, LabelSetError, labelSetPath, LabelSheetError, loadLabelSet, readLabelSheet, saveLabelSet, writeLabelSheet } from './routine-labels'
 import { candidate, skeletonOf } from './routine.fixture'
 
 // The label sheet and the reader, through a real temp .xlsx: the sheet lists every case x gap x candidate with an empty `label` column, a person fills it in
@@ -181,10 +181,12 @@ describe('readLabelSheet', () => {
 
     const labels = await readLabelSheet(path, { version: 'v1', status: 'provisional' })
 
+    // A person made this set in the sheet, so it says so: `labelledBy: 'human'` (changed for #152's follow-up; the judge selection reads it).
     expect(labels).toEqual({
       version: 'v1',
       status: 'provisional',
       snapshotSha256: SHA,
+      labelledBy: 'human',
       cases: {
         // Sorted by code, whatever order the sheet listed them in (cheapest first: Z, A, M).
         'dev-01': {
@@ -283,6 +285,145 @@ describe('readLabelSheet', () => {
 
     expect(error).toBeInstanceOf(LabelSheetError)
     expect((error as LabelSheetError).problems.map((p) => `${p.caseId}/${p.step}`)).toEqual(['dev-01/cleanse', 'dev-02/moisturise'])
+  })
+})
+
+describe('readLabelSheet: who labelled', () => {
+  it.each(['provisional', 'clinical', 'outcome'] as const)('says a set read from a sheet was labelled by a human, whatever its status (%s)', async (status) => {
+    await writeLabelSheet(path, ENTRIES, SHA)
+    await fill({ 'dev-01/cleanse/C-A': 'best', 'dev-02/moisturise/M-1': 'best' })
+
+    const labels = await readLabelSheet(path, { version: 'v1', status })
+
+    expect(labels.labelledBy).toBe('human')
+  })
+})
+
+// An AI-made label set comes with a filled copy of the sheet, so a person can spot-check or correct it and read it back with `eval:routine:labels`. writeLabelSheet takes the
+// labels as a last, optional argument and fills the `label` column from them: best, acceptable, or blank (which the reader takes as not). The proof is the reader's own:
+// what it reads back is the labels that were put in.
+describe('writeLabelSheet: a sheet filled from labels', () => {
+  // dev-01 cleanse: C-A best, C-M acceptable, C-Z not. dev-02 moisturise: M-2 best, M-3 acceptable, M-1 not. Single-candidate gaps (dev-01 protect) are best, as the reader makes them.
+  const FILLED: LabelSet['cases'] = {
+    'dev-01': {
+      cleanse: { candidates: ['C-A', 'C-M', 'C-Z'], best: 'C-A', acceptable: ['C-M'] },
+      protect: { candidates: ['P-1'], best: 'P-1', acceptable: [] },
+    },
+    'dev-02': { moisturise: { candidates: ['M-1', 'M-2', 'M-3'], best: 'M-2', acceptable: ['M-3'] } },
+  }
+
+  it('writes best, acceptable and a blank into the label column of each candidate row', async () => {
+    await writeLabelSheet(path, ENTRIES, SHA, [], FILLED)
+
+    const rows = rowsOf(await open())
+
+    const labelOf = (caseId: string, code: string) => rows.find((r) => r.case === caseId && r.code === code)!.label
+    expect(labelOf('dev-01', 'C-A')).toBe('best')
+    expect(labelOf('dev-01', 'C-M')).toBe('acceptable')
+    expect(labelOf('dev-01', 'C-Z')).toBe('')
+    expect(labelOf('dev-02', 'M-2')).toBe('best')
+    expect(labelOf('dev-02', 'M-3')).toBe('acceptable')
+    expect(labelOf('dev-02', 'M-1')).toBe('')
+  })
+
+  it('reads back, through readLabelSheet, as exactly the labels that were put in', async () => {
+    await writeLabelSheet(path, ENTRIES, SHA, [], FILLED)
+
+    const labels = await readLabelSheet(path, { version: 'v2', status: 'provisional' })
+
+    expect(labels.cases).toEqual(FILLED)
+    expect(labels.snapshotSha256).toBe(SHA)
+  })
+
+  it('still lists every row and leaves the sheet empty when no labels are given, as before', async () => {
+    await writeLabelSheet(path, ENTRIES, SHA, [])
+
+    const rows = rowsOf(await open())
+
+    expect(rows).toHaveLength(7)
+    expect(rows.every((r) => r.label === '')).toBe(true)
+  })
+
+  it('does not overwrite a sheet that exists, filled or not', async () => {
+    await writeLabelSheet(path, ENTRIES, SHA)
+
+    const error = await writeLabelSheet(path, ENTRIES, SHA, [], FILLED).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LabelSheetError)
+    expect(rowsOf(await open()).every((r) => r.label === '')).toBe(true)
+  })
+})
+
+// The label set file. Its path is the gitignored eval-data/ folder, relative to where the command runs, so these tests run from a temporary working directory: they never
+// read or write the real folder. (Scripts tests run in plain Node processes, where a process may change its directory.)
+describe('saveLabelSet and loadLabelSet: who labelled', () => {
+  const SET: LabelSet = {
+    version: 'v7',
+    status: 'provisional',
+    snapshotSha256: SHA,
+    labelledBy: 'claude-opus-5-5',
+    cases: { 'dev-01': { cleanse: { candidates: ['C-A', 'C-M'], best: 'C-A', acceptable: ['C-M'] } } },
+  }
+  let before: string
+  beforeEach(() => {
+    before = process.cwd()
+    process.chdir(dir)
+  })
+  afterEach(() => {
+    process.chdir(before)
+  })
+
+  /** Writes a label set file the way an earlier version of the eval did, by hand: that is the only way to get a legacy set. */
+  const writeRaw = async (version: string, body: unknown) => {
+    const file = labelSetPath(version)
+    await mkdir(join(dir, 'eval-data/routine/labels'), { recursive: true })
+    await writeFile(join(dir, file), JSON.stringify(body))
+  }
+
+  it('keeps who made the labels through a save and a load: labelledBy is the model that made them', async () => {
+    await saveLabelSet(SET)
+
+    expect(await loadLabelSet('v7')).toEqual(SET)
+    expect(JSON.parse(await readFile(join(dir, labelSetPath('v7')), 'utf8')).labelledBy).toBe('claude-opus-5-5')
+  })
+
+  it('keeps a set that a human made as human through a save and a load', async () => {
+    await saveLabelSet({ ...SET, version: 'v8', labelledBy: 'human' })
+
+    expect((await loadLabelSet('v8')).labelledBy).toBe('human')
+  })
+
+  it('loads a legacy set written before labelledBy existed, and treats it as made by a human', async () => {
+    const { labelledBy: _left, ...legacy } = SET
+    await writeRaw('v1', legacy)
+
+    const loaded = await loadLabelSet('v1')
+
+    expect(loaded.labelledBy).toBe('human')
+    expect(loaded.cases).toEqual(SET.cases)
+    expect(loaded.status).toBe('provisional')
+  })
+
+  it.each([
+    ['a number', 5],
+    ['an empty string', ''],
+    ['null', null],
+  ])('refuses a set whose labelledBy is %s: it is not a label set', async (_label, labelledBy) => {
+    await writeRaw('v9', { ...SET, version: 'v9', labelledBy })
+
+    const error = await loadLabelSet('v9').catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LabelSetError)
+  })
+
+  it('never overwrites a version that exists, and leaves the first set as it was', async () => {
+    await saveLabelSet(SET)
+
+    const error = await saveLabelSet({ ...SET, labelledBy: 'human' }).catch((e: unknown) => e)
+
+    expect(error).toBeInstanceOf(LabelSetError)
+    expect((error as Error).message).toMatch(/exists already/)
+    expect((await loadLabelSet('v7')).labelledBy).toBe('claude-opus-5-5')
   })
 })
 

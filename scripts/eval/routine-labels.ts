@@ -19,6 +19,11 @@ export type LabelSet = {
   version: string
   status: LabelStatus
   snapshotSha256: string
+  /**
+   * Who made the labels: the model id of an AI labeller, or 'human' for a sheet a person filled. A judge on the same model as the labeller is not trusted to agree with
+   * its own labels (see selectJudge). Absent in a set written before the field existed: loadLabelSet reads that as 'human'.
+   */
+  labelledBy?: string
   /** Per case, a label for each gap that has candidates (a gap with none is "use what you have" and has nothing to label). */
   cases: Record<string, Partial<Record<RoutineStep, GapLabel>>>
 }
@@ -55,6 +60,7 @@ const LabelSetSchema = z.object({
   version: z.string(),
   status: z.enum(LABEL_STATUSES),
   snapshotSha256: z.string(),
+  labelledBy: z.string().min(1).optional(),
   cases: z.record(z.string(), z.object(Object.fromEntries(ROUTINE_STEPS.map((step) => [step, GapLabelSchema.optional()])))),
 })
 
@@ -69,7 +75,9 @@ export const loadLabelSet = async (version: string): Promise<LabelSet> => {
     throw error
   }
   try {
-    return LabelSetSchema.parse(JSON.parse(text)) as LabelSet
+    const parsed = LabelSetSchema.parse(JSON.parse(text)) as LabelSet
+    // A set from before the field existed was filled in a sheet by a person.
+    return { ...parsed, labelledBy: parsed.labelledBy ?? 'human' }
   } catch {
     throw new LabelSetError(`${path} is not a label set.`)
   }
@@ -103,9 +111,15 @@ export type SheetEntry = { id: string; skeleton: RoutineSkeleton; country?: stri
 
 /**
  * One row per case x gap x candidate, in the skeleton's order, with the label column empty. Nothing in it comes from a model. `countries` (the snapshot's
- * Countries tab) gives each case's currency. A sheet that exists is never overwritten: it may hold hours of someone's labels, so this refuses.
+ * Countries tab) gives each case's currency. `filled` fills the label column from a label set's cases. A sheet that exists is never overwritten: it may hold hours of someone's labels, so this refuses.
  */
-export const writeLabelSheet = async (path: string, entries: SheetEntry[], snapshotSha256: string, countries: readonly { code: string; currency: string }[] = []): Promise<void> => {
+export const writeLabelSheet = async (
+  path: string,
+  entries: SheetEntry[],
+  snapshotSha256: string,
+  countries: readonly { code: string; currency: string }[] = [],
+  filled?: LabelSet['cases'],
+): Promise<void> => {
   const book = new ExcelJS.Workbook()
   const sheet = book.addWorksheet(SHEET)
   sheet.addRow([...COLUMNS])
@@ -121,7 +135,10 @@ export const writeLabelSheet = async (path: string, entries: SheetEntry[], snaps
     const { person } = skeleton
     const levels = (list: { concern: string; level: string }[]) => list.map((s) => `${s.concern}: ${s.level}`).join('; ')
     for (const gap of skeleton.gaps) {
+      const labelled = filled?.[id]?.[gap.step]
       for (const candidate of gap.candidates) {
+        // An AI-made set comes with a filled copy of the sheet so a person can spot-check it: best, acceptable, or blank (not), as the reader takes them.
+        const word = labelled === undefined ? null : candidate.code === labelled.best ? 'best' : labelled.acceptable.includes(candidate.code) ? 'acceptable' : null
         const row = sheet.addRow([
           id,
           country ?? '',
@@ -142,7 +159,7 @@ export const writeLabelSheet = async (path: string, entries: SheetEntry[], snaps
           candidate.priceMin,
           candidate.priceMax,
           candidate.frequency,
-          null,
+          word,
         ])
         row.getCell(labelColumn).dataValidation = { type: 'list', allowBlank: true, formulae: [`"${LABEL_WORDS.join(',')}"`] }
       }
@@ -220,5 +237,5 @@ export const readLabelSheet = async (path: string, { version, status }: { versio
     const shown = problems.map((p) => `  ${p.caseId} ${p.step}${p.problem === 'unknown-label' ? ` ${p.code}` : ''}: ${p.problem}`)
     throw new LabelSheetError(`The label sheet has ${problems.length} problem${problems.length > 1 ? 's' : ''} (best, acceptable or not; one best per gap):\n${shown.join('\n')}`, problems)
   }
-  return { version, status, snapshotSha256, cases }
+  return { version, status, snapshotSha256, labelledBy: 'human', cases }
 }

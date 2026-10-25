@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import type { GateFailure } from '../../src/modules/routines/routines.types'
-import { barExitCode, compare, formatBarLine, scoreRoutineCase, scoreRun, type RoutineCaseInput } from './routine-score'
+import { barExitCode, compare, formatBarLine, type JudgeComparison, judgeComparisonOf, scoreRoutineCase, scoreRun, selectJudge, type RoutineCaseInput } from './routine-score'
 import { routineOf } from './routine.fixture'
 
 // The pure half of `npm run eval:routine` (routine-run.ts is the orchestration): a case's gate result, its picks against the labels, and the run's
@@ -451,5 +451,194 @@ describe('compare', () => {
     expect(compare(scores({ fit: null }), scores({ fit: 5, simplicity: 3 }))).toEqual({ verdict: 'worse', decidedBy: 'simplicity' })
     // The right product is null now (nothing was scored): it is skipped, and fit decides.
     expect(compare(scores(), scores({ rightProduct: null, fit: 5 }))).toEqual({ verdict: 'better', decidedBy: 'fit' })
+  })
+})
+
+// --- selectJudge (#152, PR 4c) -------------------------------------------------------------------------------------------------------------------
+// The run judges every routine with each judge on the list and compares them. The one that feeds the bar is the CHEAPEST judge whose agreement with the labels is at
+// least 80% (80 itself counts: the bar's own rule fails only below 80). When none reaches 80, the judge with the highest agreement; a judge with no agreement
+// (it produced no result) is neither trusted nor highest. With no judge that produced results: null. It returns the whole comparison row, because the run
+// feeds that row's agreement, fit, simplicity and words to scoreRun.
+
+const judgeRow = (name: string, agreement: number | null, costMicros: number, over: Partial<JudgeComparison> = {}): JudgeComparison => ({
+  name,
+  model: `claude-${name}-5-5`,
+  agreement,
+  fit: agreement === null ? null : 4,
+  simplicity: agreement === null ? null : 4,
+  words: agreement === null ? null : 4,
+  costMicros,
+  agreementPerDollar: agreement === null || costMicros === 0 ? null : agreement / (costMicros / 1_000_000),
+  // Changed for the follow-up to PR D2: every row says whether its judge's model made the labels (see judgeComparisonOf below). Human labels, and every test above, are false.
+  selfAgreement: false,
+  ...over,
+})
+
+describe('selectJudge: the cheapest judge that is trusted', () => {
+  it('picks the cheaper of two judges that both reach 80% (85 at 4000 micros beats 95 at 18000), whichever order they are listed in', () => {
+    const haiku = judgeRow('haiku', 85, 4000)
+    const opus = judgeRow('opus', 95, 18000)
+
+    expect(selectJudge([haiku, opus])?.name).toBe('haiku')
+    expect(selectJudge([opus, haiku])?.name).toBe('haiku')
+  })
+
+  it('picks the dearer judge when only it reaches 80% (haiku 75 is not trusted, opus 90 is)', () => {
+    expect(selectJudge([judgeRow('haiku', 75, 4000), judgeRow('opus', 90, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 90, 18000), judgeRow('haiku', 75, 4000)])?.name).toBe('opus')
+  })
+
+  it('counts exactly 80% as trusted: the boundary, with 79.99 on the other side of it', () => {
+    // 80 at the lower cost is trusted and wins over 100 at the higher cost.
+    expect(selectJudge([judgeRow('haiku', 80, 4000), judgeRow('opus', 100, 18000)])?.name).toBe('haiku')
+    // 79.99 is not trusted: the dearer judge that is trusted (exactly 80) wins.
+    expect(selectJudge([judgeRow('haiku', 79.99, 4000), judgeRow('opus', 80, 18000)])?.name).toBe('opus')
+  })
+
+  it('returns the whole comparison row of the judge it picked, so the run can feed its agreement, fit, simplicity and words to the bar', () => {
+    const haiku = judgeRow('haiku', 85, 4000, { fit: 3.5, simplicity: 4.5, words: 2.5 })
+
+    expect(selectJudge([haiku, judgeRow('opus', 95, 18000)])).toEqual(haiku)
+  })
+
+  it('picks the only judge there is when it is trusted, and when it is not', () => {
+    expect(selectJudge([judgeRow('opus', 90, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 40, 18000)])?.name).toBe('opus')
+  })
+})
+
+describe('selectJudge: when neither judge is trusted, the highest agreement', () => {
+  it('picks the judge with the higher agreement, though it costs more (haiku 70 at 4000, opus 75 at 18000)', () => {
+    expect(selectJudge([judgeRow('haiku', 70, 4000), judgeRow('opus', 75, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('haiku', 79.99, 4000), judgeRow('opus', 60, 18000)])?.name).toBe('haiku')
+  })
+})
+
+describe('selectJudge: ties and missing results', () => {
+  it('picks the higher agreement when the two trusted judges cost the same (90 beats 85 at 5000 micros each)', () => {
+    expect(selectJudge([judgeRow('haiku', 85, 5000), judgeRow('opus', 90, 5000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 90, 5000), judgeRow('haiku', 85, 5000)])?.name).toBe('opus')
+  })
+
+  it('picks the higher agreement when neither is trusted and they cost the same', () => {
+    expect(selectJudge([judgeRow('haiku', 50, 5000), judgeRow('opus', 60, 5000)])?.name).toBe('opus')
+  })
+
+  it('returns null when no judge produced results: an empty list, and judges whose agreement is null', () => {
+    expect(selectJudge([])).toBeNull()
+    expect(selectJudge([judgeRow('haiku', null, 4000), judgeRow('opus', null, 18000)])).toBeNull()
+  })
+
+  it('never picks a judge with no result, however cheap: it is neither trusted nor the highest', () => {
+    // The failed judge is the cheapest (0 micros) and would win a plain sort by cost.
+    expect(selectJudge([judgeRow('haiku', null, 0), judgeRow('opus', 85, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('haiku', null, 0), judgeRow('opus', 40, 18000)])?.name).toBe('opus')
+    expect(selectJudge([judgeRow('opus', 40, 18000), judgeRow('haiku', null, 0)])?.name).toBe('opus')
+  })
+})
+
+// --- a judge never counts agreement with labels from its own model (#152, follow-up to PR D2) -----------------------------------------------------------
+// Opus can make the labels (`npm run eval:routine:auto-label`), and the owner's rule is that a model never grades its own work. So a judge whose MODEL made the labels is
+// reported but does not count toward choosing the judge: its row says `selfAgreement: true`, and selectJudge leaves it out. The labels' maker comes from the label set
+// (`labelledBy`: a model id, or 'human' for labels from a sheet, which no judge is).
+//   judgeComparisonOf(judge, results, costMicros, labelledBy?: string): JudgeComparison   (the new last argument; a row gets `selfAgreement: boolean`, true exactly when judge.model === labelledBy)
+//   selectJudge(rows): reads the row's flag, so its signature is as it was
+//   scoreRun(inputs, { set, partial, judgeSelfLabelled?: boolean }): when true, the bar's reason for having no judge is 'judge-self-labelled' in place of 'no-judge'
+
+const RESULT = (agreed: number, judged: number) => ({ picksAgreed: agreed, picksJudged: judged, fit: 4, simplicity: 5, words: 3 })
+
+describe('judgeComparisonOf: self-agreement', () => {
+  const opus = { name: 'opus', model: 'claude-opus-5-5' }
+  const haiku = { name: 'haiku', model: 'claude-haiku-5-5' }
+
+  it('marks a judge whose model made the labels, and still reports its agreement and cost', () => {
+    // 3 of 4 + 1 of 1 = 4 of 5 = 80%.
+    const row = judgeComparisonOf(opus, [RESULT(3, 4), RESULT(1, 1)], 18000, 'claude-opus-5-5')
+
+    expect(row.selfAgreement).toBe(true)
+    expect(row).toMatchObject({ name: 'opus', model: 'claude-opus-5-5', agreement: 80, fit: 4, simplicity: 5, words: 3, costMicros: 18000 })
+  })
+
+  it('does not mark a judge of another model than the one that made the labels', () => {
+    expect(judgeComparisonOf(haiku, [RESULT(4, 4)], 4000, 'claude-opus-5-5').selfAgreement).toBe(false)
+  })
+
+  it('compares the model, not the name: a judge named for one model that runs on another is judged by what it runs on', () => {
+    expect(judgeComparisonOf({ name: 'opus', model: 'claude-haiku-5-5' }, [RESULT(4, 4)], 4000, 'claude-opus-5-5').selfAgreement).toBe(false)
+    expect(judgeComparisonOf({ name: 'haiku', model: 'claude-opus-5-5' }, [RESULT(4, 4)], 4000, 'claude-opus-5-5').selfAgreement).toBe(true)
+  })
+
+  it.each([['human'], [undefined]])('never marks a judge when the labels were made by %s', (labelledBy) => {
+    expect(judgeComparisonOf(opus, [RESULT(4, 4)], 18000, labelledBy).selfAgreement).toBe(false)
+    expect(judgeComparisonOf(haiku, [RESULT(4, 4)], 4000, labelledBy).selfAgreement).toBe(false)
+  })
+
+  it('marks a self-agreeing judge that produced nothing, too', () => {
+    expect(judgeComparisonOf(opus, [null, null], 900, 'claude-opus-5-5')).toMatchObject({ selfAgreement: true, agreement: null })
+  })
+})
+
+describe('selectJudge: a judge whose model made the labels is never selected', () => {
+  it('selects Haiku when Opus made the labels, even though Opus agrees more AND costs less', () => {
+    // Opus (self-agreeing) 100% at 1000 micros; Haiku 85% at 4000. Without the rule Opus wins on both counts.
+    const opus = judgeRow('opus', 100, 1000, { selfAgreement: true })
+    const haiku = judgeRow('haiku', 85, 4000)
+
+    expect(selectJudge([opus, haiku])?.name).toBe('haiku')
+    expect(selectJudge([haiku, opus])?.name).toBe('haiku')
+  })
+
+  it('selects the other judge even when it is below 80% and the self-agreeing one is above it: the rule beats the threshold', () => {
+    const selected = selectJudge([judgeRow('opus', 95, 18000, { selfAgreement: true }), judgeRow('haiku', 70, 4000)])
+
+    expect(selected?.name).toBe('haiku')
+  })
+
+  it('still picks the highest agreement among the judges that count when none of them reaches 80%', () => {
+    const rows = [judgeRow('a', 99, 1000, { selfAgreement: true }), judgeRow('b', 60, 1000), judgeRow('c', 70, 9000)]
+
+    expect(selectJudge(rows)?.name).toBe('c')
+  })
+
+  it('selects nothing when every judge made the labels', () => {
+    expect(selectJudge([judgeRow('opus', 100, 1000, { selfAgreement: true })])).toBeNull()
+    expect(selectJudge([judgeRow('opus', 100, 1000, { selfAgreement: true }), judgeRow('opus2', 90, 500, { selfAgreement: true })])).toBeNull()
+  })
+
+  it('selects nothing when the only other judge produced no result: the self-agreeing one is not a fallback', () => {
+    expect(selectJudge([judgeRow('opus', 100, 1000, { selfAgreement: true }), judgeRow('haiku', null, 4000)])).toBeNull()
+  })
+
+  it('behaves as it did with human labels: no row is self-agreeing, so the cheapest trusted judge is still selected', () => {
+    expect(selectJudge([judgeRow('haiku', 85, 4000), judgeRow('opus', 95, 18000)])?.name).toBe('haiku')
+    expect(selectJudge([judgeRow('haiku', 75, 4000), judgeRow('opus', 90, 18000)])?.name).toBe('opus')
+  })
+})
+
+describe('scoreRun: when every judge made the labels', () => {
+  const unjudged = () => perfect(20, () => ({ judge: null }))
+
+  it('is not evaluated for judge-self-labelled, which says why there is no judge, in place of no-judge', () => {
+    const run = scoreRun(unjudged(), { set: 'holdout', partial: false, judgeSelfLabelled: true })
+
+    expect(run.bar).toEqual({ status: 'not-evaluated', reasons: ['judge-self-labelled'] })
+  })
+
+  it('keeps no-judge when the judges are simply missing', () => {
+    expect(scoreRun(unjudged(), { set: 'holdout', partial: false }).bar).toEqual({ status: 'not-evaluated', reasons: ['no-judge'] })
+    expect(scoreRun(unjudged(), { set: 'holdout', partial: false, judgeSelfLabelled: false }).bar).toEqual({ status: 'not-evaluated', reasons: ['no-judge'] })
+  })
+
+  it('still fails on a rule that can be evaluated, and lists judge-self-labelled beside it as not evaluated', () => {
+    const inputs = perfect(20, (i) => ({ judge: null, ...(i === 0 ? { failures: [WORDING] } : {}) }))
+
+    expect(scoreRun(inputs, { set: 'holdout', partial: false, judgeSelfLabelled: true }).bar).toEqual({ status: 'fail', rules: ['gates', 'forbidden-wording'], notEvaluated: ['judge-self-labelled'] })
+  })
+
+  it('prints the reason on the bar line, and a trial exits 0', () => {
+    const bar = scoreRun(unjudged(), { set: 'holdout', partial: false, judgeSelfLabelled: true }).bar
+
+    expect(formatBarLine(bar)).toBe('Bar: not evaluated (judge-self-labelled)')
+    expect(barExitCode(bar)).toBe(0)
   })
 })

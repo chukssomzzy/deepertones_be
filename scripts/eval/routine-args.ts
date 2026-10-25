@@ -1,5 +1,6 @@
 import { AI_JOBS, type AiJob } from '../../src/providers/anthropic/ai-spend.provider'
 import { priceOf } from '../../src/providers/anthropic/anthropic.provider'
+import { DEFAULT_MODELS } from './models'
 import type { RoutineSet } from './routine-cases'
 import { isLabelVersion, LABEL_STATUSES, type LabelStatus } from './routine-labels'
 import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
@@ -7,22 +8,35 @@ import { DEFAULT_SNAPSHOT_PATH } from './routine-snapshot'
 /** A bad command line: the CLI prints the message, which holds the usage, and exits 2 before anything is spent. */
 export class RoutineUsageError extends Error {}
 
+/** The rubric judges there can be, and the model each runs on. Nothing else judges a routine. */
+export const JUDGE_MODELS = { haiku: 'claude-haiku-5-5', opus: 'claude-opus-5-5' } as const
+export type JudgeName = keyof typeof JUDGE_MODELS
+const JUDGE_NAMES = Object.keys(JUDGE_MODELS) as JudgeName[]
+
+/** What a run is over: the dev or holdout cases, or the hint cases built from a label set. */
+export type RoutineRunSet = RoutineSet | 'hints'
+
 export type RoutineArgs = {
-  set: RoutineSet
+  set: RoutineRunSet
   limit: number | undefined
   models: Partial<Record<AiJob, string>>
   labels: string | undefined
   maxUsd: number
+  /** The most page-support checks (fetch calls) for the whole run. */
+  maxGrounding: number
+  /** The rubric judges, in the order given: each judges every routine, and the run compares them. */
+  judges: JudgeName[]
   snapshot: string
   outDir: string | undefined
   compare: string | undefined
 }
 
 const DEFAULT_MAX_USD = 5
+const DEFAULT_MAX_GROUNDING = 40
 
 export const USAGE =
-  'Usage: npm run eval:routine -- [--set dev|holdout] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
-  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars and the snapshot ${DEFAULT_SNAPSHOT_PATH})`
+  'Usage: npm run eval:routine -- [--set dev|holdout|hints] [--limit N] [--model JOB=MODEL]... [--labels VERSION] [--max-usd N] [--max-grounding N] [--judges haiku|opus|haiku,opus] [--snapshot PATH] [--out-dir DIR] [--compare REPORT.json] ' +
+  `(JOB is one of ${AI_JOBS.join(', ')}; the default set is holdout, the cap ${DEFAULT_MAX_USD} dollars, at most ${DEFAULT_MAX_GROUNDING} page-support checks, the rubric judge haiku (opus can be added to compare; a model never judges its own routines), and the snapshot ${DEFAULT_SNAPSHOT_PATH}; the hints set is built from a label set, so it needs --labels)`
 
 type Reading = { flag: string; value: string }
 
@@ -48,6 +62,8 @@ const read = (argv: string[], known: readonly string[], repeatable: readonly str
   return readings
 }
 
+const wholeNumber = (value: string): boolean => /^\d+$/.test(value)
+
 const dollars = (value: string, flag: string, usage: string): number => {
   if (!/^\d+(\.\d+)?$/.test(value) || !(Number(value) > 0) || !Number.isFinite(Number(value))) throw new RoutineUsageError(`${flag} must be a number of dollars above 0. ${usage}`)
   return Number(value)
@@ -58,11 +74,11 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${USAGE}`)
   }
-  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
-  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
+  const args: RoutineArgs = { set: 'holdout', limit: undefined, models: {}, labels: undefined, maxUsd: DEFAULT_MAX_USD, maxGrounding: DEFAULT_MAX_GROUNDING, judges: ['haiku'], snapshot: DEFAULT_SNAPSHOT_PATH, outDir: undefined, compare: undefined }
+  for (const { flag, value } of read(argv, ['--set', '--limit', '--model', '--labels', '--max-usd', '--max-grounding', '--judges', '--snapshot', '--out-dir', '--compare'], ['--model'], USAGE)) {
     if (flag === '--set') {
-      if (value !== 'dev' && value !== 'holdout') fail(`Unknown set "${value}" (dev or holdout)`)
-      args.set = value as RoutineSet
+      if (value !== 'dev' && value !== 'holdout' && value !== 'hints') fail(`Unknown set "${value}" (dev, holdout or hints)`)
+      args.set = value as RoutineRunSet
     } else if (flag === '--limit') {
       if (!/^\d+$/.test(value) || Number(value) < 1) fail('--limit must be a whole number of at least 1')
       args.limit = Number(value)
@@ -71,21 +87,45 @@ export const parseRoutineArgs = (argv: string[]): RoutineArgs => {
       const job = value.slice(0, split)
       const model = value.slice(split + 1)
       if (split === -1 || !AI_JOBS.includes(job as AiJob) || model === '') fail('--model must be JOB=MODEL with a known job')
+      if (job === 'judge-routine') fail('--model cannot move the rubric judge: choose the judges with --judges haiku, --judges opus or --judges haiku,opus')
       args.models[job as AiJob] = model
     } else if (flag === '--labels') {
       if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
       args.labels = value
     } else if (flag === '--max-usd') args.maxUsd = dollars(value, flag, USAGE)
-    else if (flag === '--snapshot') args.snapshot = value
+    // 0 is allowed: it runs the whole eval without the page-support checks.
+    else if (flag === '--max-grounding') {
+      if (!wholeNumber(value)) fail('--max-grounding must be a whole number of fetch calls (0 for none)')
+      args.maxGrounding = Number(value)
+    }
+    else if (flag === '--judges') {
+      const names = value.split(',')
+      if (names.some((name) => !JUDGE_NAMES.includes(name as JudgeName))) fail(`--judges must be a comma list of ${JUDGE_NAMES.join(' and ')} with no empty name`)
+      if (new Set(names).size !== names.length) fail('--judges names a judge twice')
+      args.judges = names as JudgeName[]
+    } else if (flag === '--snapshot') args.snapshot = value
     else if (flag === '--out-dir') args.outDir = value
     else args.compare = value
   }
+  // A hint run asks the writer alone, so nothing judges and nothing can judge itself.
+  const writer = args.models['write-routine'] ?? DEFAULT_MODELS['write-routine']
+  if (args.set !== 'hints' && args.judges.some((name) => JUDGE_MODELS[name] === writer)) {
+    const others = JUDGE_NAMES.filter((name) => JUDGE_MODELS[name] !== writer)
+    fail(`A model never judges its own routines: write-routine runs on ${writer}, which is also a judge in --judges. Pass --judges ${others.join(',')}`)
+  }
+  if (args.set === 'hints' && args.labels === undefined) fail('--set hints is built from a label set, so it needs --labels VERSION')
   return args
 }
 
-/** The model the writer will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
-export const requirePricedWriterModel = (model: string): void => {
-  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the write-routine job), so its spend could not be capped. Use a model with a price. ${USAGE}`)
+/** The models of a run: the eval defaults, then the `--model` overrides. The rubric judges' models come from `--judges` (resolveRoutineJudges), one client each. */
+export const resolveRoutineModels = (overrides: Partial<Record<AiJob, string>>): Record<AiJob, string> => ({ ...DEFAULT_MODELS, ...overrides })
+
+/** The judges of a run with their models, in the order given. */
+export const resolveRoutineJudges = (names: readonly JudgeName[]): { name: JudgeName; model: string }[] => names.map((name) => ({ name, model: JUDGE_MODELS[name] }))
+
+/** The model a job will run on must have a price, or the spend cap could not count its calls: said before any case is run, not as a key problem when the first one is. */
+export const requirePricedModel = (job: AiJob, model: string, usage: string = USAGE): void => {
+  if (!priceOf(model)) throw new RoutineUsageError(`No price is known for model "${model}" (the ${job} job), so its spend could not be capped. Use a model with a price. ${usage}`)
 }
 
 export const SHEET_USAGE = `Usage: npm run eval:routine:sheet -- [--set dev|holdout|all] [--snapshot PATH] [--out PATH] (default: all cases, the snapshot ${DEFAULT_SNAPSHOT_PATH}, out eval-data/routine/label-sheet-<set>.xlsx)`
@@ -130,4 +170,71 @@ export const parseLabelsArgs = (argv: string[]): LabelsArgs => {
   if (sheet === undefined) fail('--sheet is needed')
   if (version === undefined) fail('--version is needed')
   return { sheet: sheet!, version: version!, status }
+}
+
+export const OUTCOMES_USAGE = 'Usage: npm run eval:routine:outcomes -- --counts FILE.json --labels VERSION --out NEWVERSION (reads eval-data/routine/labels/VERSION.json, writes NEWVERSION.json with status outcome and NEWVERSION.note.md beside it)'
+
+export type OutcomesArgs = { counts: string; labels: string; out: string }
+
+export const parseOutcomesArgs = (argv: string[]): OutcomesArgs => {
+  const fail = (reason: string): never => {
+    throw new RoutineUsageError(`${reason}. ${OUTCOMES_USAGE}`)
+  }
+  let counts: string | undefined
+  let labels: string | undefined
+  let out: string | undefined
+  for (const { flag, value } of read(argv, ['--counts', '--labels', '--out'], [], OUTCOMES_USAGE)) {
+    if (flag === '--counts') counts = value
+    else if (flag === '--labels') {
+      if (!isLabelVersion(value)) fail('--labels must be a plain version name such as v1')
+      labels = value
+    } else {
+      if (!isLabelVersion(value)) fail('--out must be a plain version name such as v2')
+      out = value
+    }
+  }
+  if (counts === undefined) fail('--counts is needed')
+  if (labels === undefined) fail('--labels is needed')
+  if (out === undefined) fail('--out is needed')
+  if (out === labels) fail('--out must be a new version: a label set is never overwritten')
+  return { counts: counts!, labels: labels!, out: out! }
+}
+
+const DEFAULT_AUTO_LABEL_MODEL = 'claude-opus-5-5'
+const DEFAULT_AUTO_LABEL_MAX_USD = 10
+
+export const AUTO_LABEL_USAGE = `Usage: npm run eval:routine:auto-label -- --version VERSION [--set all|dev|holdout] [--snapshot PATH] [--model label-routine=MODEL] [--max-usd N] [--limit N] (an AI labeller labels the cases as a dermatologist would; writes eval-data/routine/labels/VERSION.json, status provisional, and a filled copy of the label sheet; the default set is all, the model ${DEFAULT_AUTO_LABEL_MODEL}, the cap ${DEFAULT_AUTO_LABEL_MAX_USD} dollars and the snapshot ${DEFAULT_SNAPSHOT_PATH})`
+
+export type AutoLabelArgs = { version: string; set: RoutineSet | 'all'; snapshot: string; model: string; maxUsd: number; limit: number | undefined }
+
+/**
+ * The labelling model is not in DEFAULT_MODELS (that table is held to wrangler.jsonc, which has the job on Haiku): the command defaults it to Opus itself, so the
+ * parsed args carry it. `--model` takes only the label-routine job here.
+ */
+export const parseAutoLabelArgs = (argv: string[]): AutoLabelArgs => {
+  const fail = (reason: string): never => {
+    throw new RoutineUsageError(`${reason}. ${AUTO_LABEL_USAGE}`)
+  }
+  let version: string | undefined
+  const args: Omit<AutoLabelArgs, 'version'> = { set: 'all', snapshot: DEFAULT_SNAPSHOT_PATH, model: DEFAULT_AUTO_LABEL_MODEL, maxUsd: DEFAULT_AUTO_LABEL_MAX_USD, limit: undefined }
+  for (const { flag, value } of read(argv, ['--version', '--set', '--snapshot', '--model', '--max-usd', '--limit'], [], AUTO_LABEL_USAGE)) {
+    if (flag === '--version') {
+      if (!isLabelVersion(value)) fail('--version must be a plain version name such as v1')
+      version = value
+    } else if (flag === '--set') {
+      if (value !== 'all' && value !== 'dev' && value !== 'holdout') fail(`Unknown set "${value}" (all, dev or holdout)`)
+      args.set = value as AutoLabelArgs['set']
+    } else if (flag === '--snapshot') args.snapshot = value
+    else if (flag === '--model') {
+      const split = value.indexOf('=')
+      if (split === -1 || value.slice(0, split) !== 'label-routine' || split === value.length - 1) fail('--model must be label-routine=MODEL')
+      args.model = value.slice(split + 1)
+    } else if (flag === '--max-usd') args.maxUsd = dollars(value, flag, AUTO_LABEL_USAGE)
+    else {
+      if (!wholeNumber(value) || Number(value) < 1) fail('--limit must be a whole number of at least 1')
+      args.limit = Number(value)
+    }
+  }
+  if (version === undefined) fail('--version is needed')
+  return { version: version!, ...args }
 }
