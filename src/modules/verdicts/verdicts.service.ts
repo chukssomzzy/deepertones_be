@@ -25,7 +25,7 @@ export type VerdictServiceDeps = {
   repository: VerdictsRepository
   fitter: VerdictFitter
   jobs: JobQueue
-  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor'>
+  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>
   shelf: Pick<ShelfService, 'activeEntriesFor'>
   scans: Pick<ScanService, 'noLabelFacts' | 'hasShelfWorkInFlight'>
@@ -266,7 +266,8 @@ export class VerdictService {
     const entries = await this.shelf.activeEntriesFor(profileId)
     const shelfFacts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
     const noLabelFacts = await this.scans.noLabelFacts(entries.flatMap((entry) => (entry.kind === 'no-label' ? [entry.itemId] : [])))
-    const steps = await this.workbook.stepsFor([...new Set([...shelfFacts.values()].map((product) => product.productId))])
+    const productIds = [...new Set([...shelfFacts.values()].map((product) => product.productId))]
+    const [steps, skinConcerns] = await Promise.all([this.workbook.stepsFor(productIds), this.workbook.skinConcernsFor(productIds)])
     const mentionIngredients = new Map<string, string[]>()
     for (const productId of new Set(safety.mentions.flatMap(({ productId }) => (productId === null ? [] : [productId])))) {
       const ingredients = await this.catalog.latestIngredients(productId)
@@ -279,6 +280,7 @@ export class VerdictService {
       shelfFacts,
       noLabelFacts,
       steps,
+      skinConcerns,
       safety,
       mentionIngredients,
       scan: await this.faceScans.latestConcernLevelsFor(profileId),

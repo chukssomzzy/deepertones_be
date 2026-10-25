@@ -766,3 +766,32 @@ describe('CatalogWorkbookService.stepsFor', () => {
     expect((await service.stepsFor([])).size).toBe(0)
   })
 })
+
+describe('CatalogWorkbookService.skinConcernsFor', () => {
+  it('gives the skin concerns an approved recommended product is for, in the vocabulary order, by the id of its catalog product', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product({ skin_concerns: 'hd_moisture; hd_redness' })))
+    const [row] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+
+    const concerns = await service.skinConcernsFor([row!.productId, 'product-nobody-recommends'])
+
+    expect([...concerns.keys()]).toEqual([row!.productId])
+    // Redness comes before moisture in the vocabulary, though the Products tab lists moisture first.
+    expect(concerns.get(row!.productId)).toEqual(['hd_redness', 'hd_moisture'])
+  })
+
+  it('leaves out a product whose recommended row was retired', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product()))
+    const [row] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+    await applied(service, (w) => Object.assign(w.products.rows.find((p) => p.code === 'PRD-ONE')!, { status: 'retired' }))
+
+    expect((await service.skinConcernsFor([row!.productId])).size).toBe(0)
+  })
+
+  it('answers an empty map for no products', async () => {
+    const { service } = build()
+
+    expect((await service.skinConcernsFor([])).size).toBe(0)
+  })
+})

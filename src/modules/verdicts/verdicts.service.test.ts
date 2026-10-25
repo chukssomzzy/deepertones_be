@@ -31,7 +31,7 @@ import { VerdictService } from './verdicts.service'
 //
 // Shapes assumed (the contract this file pins):
 //   new VerdictService({ repository, fitter, jobs, workbook, catalog, shelf, scans, safety, goals, faceScans, now })
-//     workbook  Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor'>
+//     workbook  Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
 //     catalog   Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>       (latestIngredients gives the ingredients of a product the user named)
 //     shelf     Pick<ShelfService, 'activeEntriesFor'>        scans  Pick<ScanService, 'noLabelFacts' | 'hasShelfWorkInFlight'>
 //     safety    Pick<SafetyService, 'snapshotFor'>            goals  Pick<GoalsService, 'goalFor'>      faceScans  Pick<FaceScanService, 'latestConcernLevelsFor'>
@@ -90,6 +90,8 @@ type World = {
   facts: Map<string, ShelfFacts>
   noLabels: Map<string, { purpose: NoLabelPurpose; category: Category }>
   steps: Map<string, RoutineStep[]>
+  /** The skin concerns the recommendation catalog gives a product, by catalog product id. */
+  skinConcerns: Map<string, ShownConcern[]>
   safety: { view: SafetyView | null; parseState: ParseState | null; mentions: SafetyMentionRow[] }
   mentionIngredients: Map<string, string[]>
   scan: { skinType: SkinTypeLabel | null; concerns: { concern: ShownConcern; band: Band }[] } | null
@@ -142,6 +144,7 @@ const newWorld = (): World => ({
   facts: new Map(),
   noLabels: new Map(),
   steps: new Map(),
+  skinConcerns: new Map(),
   safety: { view: safetyView(['reaction'], { reactionText: 'I react to fragrance' }), parseState: 'done', mentions: [mention()] },
   mentionIngredients: new Map(),
   scan: { skinType: 'combination', concerns: [{ concern: 'hd_age_spot', band: 'some' }] },
@@ -239,7 +242,9 @@ beforeEach(() => {
         return new Map(codes.flatMap((code): [string, TaperRow][] => (world.tapers.has(code) ? [[code, structuredClone(world.tapers.get(code)!)]] : [])))
       },
       stepsFor: async (productIds: string[]) => new Map(productIds.flatMap((id): [string, RoutineStep[]][] => (world.steps.has(id) ? [[id, [...world.steps.get(id)!]]] : []))),
-    } satisfies Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor'>,
+      skinConcernsFor: async (productIds: string[]) =>
+        new Map(productIds.flatMap((id): [string, ShownConcern[]][] => (world.skinConcerns.has(id) ? [[id, [...world.skinConcerns.get(id)!]]] : []))),
+    } satisfies Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>,
     catalog: {
       shelfFacts: async (formulationIds: string[]) => new Map(formulationIds.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
       latestIngredients: async (productId: string) => world.mentionIngredients.get(productId) ?? null,
@@ -420,6 +425,36 @@ describe('VerdictService.build: a verdict from the shelf', () => {
         { entryId: 'entry-b', group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' } },
       ],
     })
+  })
+
+  it('tells the fit judge what a recommended product is for from the recommendation catalog, joined with what its ingredient rules help, and leaves a product the catalog does not recommend with its rules alone', async () => {
+    // entry-a is a recommended product the rules know nothing about; entry-c is niacinamide (its rule helps radiance) and is not recommended;
+    // entry-d is niacinamide and recommended for moisture and redness.
+    addProduct('entry-c', ['Aqua', 'Niacinamide'])
+    addProduct('entry-d', ['Aqua', 'Niacinamide'])
+    world.skinConcerns.set('prod-entry-a', ['hd_redness', 'hd_moisture'])
+    world.skinConcerns.set('prod-entry-d', ['hd_redness', 'hd_moisture'])
+    await current()
+
+    await build(lastBody())
+
+    expect(fitter.calls).toHaveLength(1)
+    expect(fitter.calls[0]!.shelf.filter((p) => p.floor.status === 'open').map((p) => [p.id, p.skinConcerns])).toEqual([
+      ['entry-a', ['hd_moisture', 'hd_redness']],
+      ['entry-c', ['hd_radiance']],
+      ['entry-d', ['hd_moisture', 'hd_radiance', 'hd_redness']],
+    ])
+  })
+
+  it('does not rebuild a ready verdict because the catalog\'s skin concerns for a product changed, since they are not part of its fingerprint', async () => {
+    await built()
+    const before = (await rowOf()).fingerprint
+
+    world.skinConcerns.set('prod-entry-a', ['hd_acne'])
+    await current()
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect((await rowOf()).fingerprint).toBe(before)
   })
 
   it('saves what the verdict was built from: the fingerprint it was requested with, the versions, the model and prompt, the time, and ids and codes only', async () => {

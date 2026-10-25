@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
-import type { ShownConcern, SkinTypeLabel } from '../face-scans/face-scans.tables'
+import { SHOWN_CONCERNS, type ShownConcern, type SkinTypeLabel } from '../face-scans/face-scans.tables'
 import { formulations, productAliases, products } from './catalog.table'
 import type { NewProduct } from './catalog.types'
 import type { ReferenceEntry } from './catalog.reference'
@@ -234,6 +234,23 @@ export class D1CatalogWorkbookRepository {
       for (const row of rows) found.set(row.productId, [...new Set([...(found.get(row.productId) ?? []), ...row.steps])])
     }
     return found
+  }
+
+  /**
+   * For each catalog product id, the skin concerns its approved recommended rows are for (the union of the rows, a concern once, in the order of the
+   * vocabulary). A product with no approved row is absent: a draft or retired row says nothing.
+   */
+  async skinConcernsOf(productIds: string[]): Promise<Map<string, ShownConcern[]>> {
+    const listed = new Map<string, Set<ShownConcern>>()
+    for (const chunk of chunked([...new Set(productIds)])) {
+      const rows = await this.db
+        .select({ productId: recommendedProducts.productId, skinConcerns: recommendedProducts.skinConcerns })
+        .from(recommendedProducts)
+        .where(and(eq(recommendedProducts.status, 'approved'), inArray(recommendedProducts.productId, chunk)))
+        .orderBy(asc(recommendedProducts.code))
+      for (const row of rows) listed.set(row.productId, new Set([...(listed.get(row.productId) ?? []), ...row.skinConcerns]))
+    }
+    return new Map([...listed].map(([productId, concerns]) => [productId, SHOWN_CONCERNS.filter((concern) => concerns.has(concern))]))
   }
 
   /** Every country, retired ones included, by code. */

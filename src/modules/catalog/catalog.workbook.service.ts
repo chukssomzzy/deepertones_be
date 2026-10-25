@@ -1,6 +1,7 @@
 import { ConflictError, UnavailableError, ValidationError } from '../../lib/errors'
 import { MAX_WORKBOOK_BYTES, type WorkbookArchive } from '../../providers/workbook-archive/workbook-archive.provider'
 import { brandKey, identityKey, normaliseText } from './catalog.identity'
+import type { ShownConcern } from '../face-scans/face-scans.tables'
 import { ingredientsKey } from './catalog.ingredients'
 import type { ReferenceEntry } from './catalog.reference'
 import type { NewProduct } from './catalog.types'
@@ -222,6 +223,11 @@ export class CatalogWorkbookService {
   /** The routine steps each of these catalog products fills, for those an approved recommended row names. */
   stepsFor(productIds: string[]): Promise<Map<string, RoutineStep[]>> {
     return this.repository.stepsOf(productIds)
+  }
+
+  /** The skin concerns each of these catalog products is for, in the vocabulary order, for those an approved recommended row names. */
+  skinConcernsFor(productIds: string[]): Promise<Map<string, ShownConcern[]>> {
+    return this.repository.skinConcernsOf(productIds)
   }
 
   /**

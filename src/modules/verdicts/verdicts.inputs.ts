@@ -27,6 +27,8 @@ export type VerdictFacts = {
   noLabelFacts: ReadonlyMap<string, { purpose: NoLabelPurpose; category: Category }>
   /** The routine steps of each catalog product, by catalog product id. */
   steps: ReadonlyMap<string, readonly RoutineStep[]>
+  /** The skin concerns the recommendation catalog says each product is for, by catalog product id; a product the catalog does not recommend is absent. */
+  skinConcerns: ReadonlyMap<string, readonly ShownConcern[]>
   safety: { view: SafetyView | null; parseState: ParseState | null; mentions: readonly SafetyMentionRow[] }
   /** The ingredient list of each product the user named, by catalog product id: the one input the accessors do not already give. */
   mentionIngredients: ReadonlyMap<string, string[]>
@@ -152,6 +154,7 @@ export const fitRequestOf = (facts: VerdictFacts, floor: FloorResult): FitReques
       if (!decision) throw new Error(`The floor has no answer for the shelf product ${entry.id}`)
       const ingredients = entry.kind === 'product' ? entry.ingredients : []
       const matched = matchedRules(ingredients, facts.reference)
+      const catalogConcerns = (entry.kind === 'product' ? facts.skinConcerns.get(entry.productId) : undefined) ?? []
       return {
         id: entry.id,
         brand: entry.brand,
@@ -161,7 +164,7 @@ export const fitRequestOf = (facts: VerdictFacts, floor: FloorResult): FitReques
         form,
         ingredients,
         cautions: sortedUnique(matched.map((rule) => rule.kind)),
-        skinConcerns: sortedUnique(matched.flatMap((rule) => rule.helps)),
+        skinConcerns: sortedUnique([...matched.flatMap((rule) => rule.helps), ...catalogConcerns]),
         floor: fitFloorOf(decision),
       }
     })
