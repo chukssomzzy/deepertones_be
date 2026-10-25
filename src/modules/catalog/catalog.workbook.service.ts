@@ -9,10 +9,19 @@ import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbo
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, validateWorkbook, type ProductRow, type RawWorkbook, type Workbook } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type Workbook } from './catalog.workbook.schema'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
 export type NewProductSummary = { code: string; brand: string; name: string; variant: string | null; form: string | null }
+
+/**
+ * Ingredient rules as the matcher reads them (`ReferenceEntry`), in code order. Pure and exported so the routine eval maps its snapshot's rules through the
+ * same lines as the service, which passes it only the approved ones.
+ */
+export const referenceEntriesOf = (rules: readonly Pick<IngredientRule, 'code' | 'name' | 'aliases' | 'kind' | 'statement' | 'sourceUrl'>[]): ReferenceEntry[] =>
+  [...rules]
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+    .map((rule) => ({ name: rule.name, aliases: rule.aliases, kind: rule.kind, rule: rule.statement, source: rule.sourceUrl }))
 
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
@@ -204,10 +213,7 @@ export class CatalogWorkbookService {
 
   /** The approved rules an upload leaves in force, in code order, as the matcher reads them: the set the rules version names. */
   private static approvedRules(workbook: Workbook): ReferenceEntry[] {
-    return workbook.ingredients
-      .filter((rule) => rule.status === 'approved')
-      .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
-      .map((rule) => ({ name: rule.name, aliases: rule.aliases, kind: rule.kind, rule: rule.statement, source: rule.sourceUrl }))
+    return referenceEntriesOf(workbook.ingredients.filter((rule) => rule.status === 'approved'))
   }
 
   private static counts(changes: WorkbookDiff): Record<keyof WorkbookDiff, Record<keyof TabDiff, number>> {

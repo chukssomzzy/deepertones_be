@@ -34,6 +34,8 @@
     "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
     "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+    // The routine writer: its words reach users, so it is the better model, not the cheap one.
+    "ANTHROPIC_MODEL_ROUTINE": "claude-sonnet-5-5",
     // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
     "AI_DAILY_BUDGET_USD": "1",
     // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
@@ -275,6 +277,8 @@
         "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // The routine writer: its words reach users, so it is the better model, not the cheap one.
+        "ANTHROPIC_MODEL_ROUTINE": "claude-sonnet-5-5",
         // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
         "AI_DAILY_BUDGET_USD": "5",
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.
@@ -479,6 +483,8 @@
         "ANTHROPIC_MODEL_RECOGNIZE_SHELF": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_JUDGE": "claude-haiku-5-5",
         "ANTHROPIC_MODEL_ANALYSIS": "claude-sonnet-5-5",
+        // The routine writer: its words reach users, so it is the better model, not the cheap one.
+        "ANTHROPIC_MODEL_ROUTINE": "claude-sonnet-5-5",
         // Daily AI spend figure in USD, per UTC day. Alert-only: every request is still reserved and settled in the ledger, and the first call past it emails OPS_ALERT_EMAIL (once a day); no call is ever refused. There is no Console backstop, by the owner's decision.
         "AI_DAILY_BUDGET_USD": "30",
         // Where ops alerts go (Claude refusing our account, a daily limit passed). Empty = alerts are logged and dropped. Not a secret.

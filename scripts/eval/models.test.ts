@@ -7,7 +7,7 @@ import { JOBS, parseArgs } from './score'
 
 const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wrangler.jsonc', 'utf8')).config as { vars: Record<string, string> }
 
-// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions and judge-draft.
+// The same mapping as the container: vision covers image-check, recognize and read-label; recognize-shelf has its own variable so the eval can move it alone; judge covers same-product, split-name, read-goal, read-mentions and judge-draft; write-routine has its own variable, because the routine's words reach users.
 const VAR_OF_JOB: Record<AiJob, string> = {
   research: 'ANTHROPIC_MODEL_RESEARCH',
   analysis: 'ANTHROPIC_MODEL_ANALYSIS',
@@ -21,6 +21,7 @@ const VAR_OF_JOB: Record<AiJob, string> = {
   'read-mentions': 'ANTHROPIC_MODEL_JUDGE',
   'draft-catalog-row': 'ANTHROPIC_MODEL_RESEARCH',
   'judge-draft': 'ANTHROPIC_MODEL_JUDGE',
+  'write-routine': 'ANTHROPIC_MODEL_ROUTINE',
 }
 
 describe('the eval default models', () => {
@@ -46,6 +47,11 @@ describe('the eval default models', () => {
   it('run the mention read on the cheap judge model: it names what the person wrote for the app, it is not text the user reads', () => {
     expect(AI_JOBS).toContain('read-mentions')
     expect((DEFAULT_MODELS as Record<string, string>)['read-mentions']).toBe('claude-haiku-5-5')
+  })
+
+  it('run the routine writer on Sonnet: its words reach users, so it is not on the cheap model', () => {
+    expect(AI_JOBS).toContain('write-routine')
+    expect((DEFAULT_MODELS as Record<string, string>)['write-routine']).toBe('claude-sonnet-5-5')
   })
 
   it('cover exactly the jobs there are', () => {
