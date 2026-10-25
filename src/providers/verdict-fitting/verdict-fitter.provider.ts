@@ -34,10 +34,18 @@ export type FitRequest = {
   clashes: { ids: [string, string]; groups: [IngredientGroup, IngredientGroup] }[]
 }
 
+/**
+ * The judge's word on one open product. `reason` is one plain sentence, not empty and at most 200 characters. A redundant product names the product that
+ * does its job and stays in `sameJobAs`: an open product this same answer labels helping, or a fixed prescribed one. It is null for helping and blocking.
+ */
+export type FitProductResult =
+  | { id: string; label: 'helping' | 'blocking'; reason: string; sameJobAs: null }
+  | { id: string; label: 'redundant'; reason: string; sameJobAs: string }
+
 export type FitResult = {
   /** One entry for each open product on the shelf, and none for a fixed one. */
-  products: { id: string; label: FitLabel; reason: string }[]
-  /** One entry for each clash pair the judge settled; a pair left out is the floor's to settle. */
+  products: FitProductResult[]
+  /** One entry for each clash pair the judge settled, with `ids` in the request's order; a pair left out is the floor's to settle. */
   clashes: { ids: [string, string]; reduceId: string }[]
 }
 
@@ -47,6 +55,9 @@ export type FitResult = {
  * the caller can act on, and never return a partial result.
  */
 export interface VerdictFitter {
-  /** Judges the shelf. The caller keeps the floor's fixed verdicts whatever this returns. */
+  /**
+   * Judges the shelf. The caller keeps the floor's fixed verdicts whatever this returns, and skips the call when no product is open and there are no clashes.
+   * The floor's `taper-missing` entries are passed as fixed, in the group likely-the-problem, since the product is the likely problem.
+   */
   fit(request: FitRequest): Promise<FitResult>
 }
