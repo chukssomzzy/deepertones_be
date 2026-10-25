@@ -150,6 +150,11 @@ export class NotificationsService {
     await this.enqueue({ kind: 'face-scan-needs-retake', ...input })
   }
 
+  /** Queues "time for your check-in" for the profile whose chase reached its review point, keyed by the chase's day-one scan. A failed enqueue is logged and swallowed. */
+  async faceCheckInDue(input: { userId: string; profileId: string; dayOneScanId: string }): Promise<void> {
+    await this.enqueue({ kind: 'face-check-in-due', ...input })
+  }
+
   /**
    * Queues the security alert for the account's phones. Without an `eventId` each call is its own event and is sent; a caller
    * that passes one (the sign-in's own id) makes a repeated call for the same sign-in the same notification. `at` (default now)
@@ -254,7 +259,7 @@ export class NotificationsService {
       await this.jobs.enqueue(sendPushSpec, body)
     } catch {
       // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
-      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}) })
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}) })
     }
   }
 
@@ -268,6 +273,7 @@ export class NotificationsService {
         return switches.scanFinished
       case 'scan-needs-you':
       case 'face-scan-needs-retake':
+      case 'face-check-in-due':
         return switches.scanNeedsYou
     }
   }
@@ -312,6 +318,12 @@ export class NotificationsService {
           title: 'Your face photo needs a retake',
           body: NotificationsService.RETAKE_TEXT[body.reason],
           data: { url: deepLinkFor(body.kind, { faceScanId: body.faceScanId }), kind: body.kind, faceScanId: body.faceScanId, reason: body.reason, profileId: body.profileId },
+        }
+      case 'face-check-in-due':
+        return {
+          title: 'Time for your check-in',
+          body: 'Take a face scan to see how your skin is doing on your goal.',
+          data: { url: deepLinkFor(body.kind, {}), kind: body.kind, profileId: body.profileId, dayOneScanId: body.dayOneScanId },
         }
       case 'new-sign-in': {
         const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''

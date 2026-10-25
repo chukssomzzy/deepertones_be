@@ -78,6 +78,7 @@ type Reply = { json(): Promise<unknown>; text(): Promise<string>; status: number
 type Answer = { title: string; howLong: string; helps: string; inTheWay: string; note: string | null }
 type GoalBody = { goal: string | null; wantsLighter: boolean; text: string | null; answer: Answer | null; answersVersion: number; updatedAt: string }
 type OnboardingBody = { goal: GoalBody | null; safety: null; next: string }
+type SwitchPreviewBody = { goal: string; outcome: 'resume' | 'fresh'; dayOneAt: string | null; resumeUntil: string | null }
 
 const read = async <T>(res: Reply) => (await res.json()) as Envelope<T>
 const dataOf = async <T>(res: Reply): Promise<T> => {
@@ -159,6 +160,14 @@ const putGoal = (bearer: string | undefined, json: Record<string, unknown>, from
   v1.me.goal.$put({ json: json as never }, { headers: { ...headers(bearer), ...(from === undefined ? {} : { 'cf-connecting-ip': from }) } })
 const getGoal = (bearer: string | undefined) => v1.me.goal.$get({}, { headers: headers(bearer) })
 const getOnboarding = (bearer: string | undefined) => v1.me.onboarding.$get({}, { headers: headers(bearer) })
+// The heads-up before a switch (issue #145): it sits with the goal routes and has the same auth, and it changes nothing.
+// `as never` on the query, as putGoal does on its body: these tests send values the schema refuses on purpose.
+const getSwitchPreview = (bearer: string | undefined, goal?: string) =>
+  v1.me.goal['switch-preview'].$get({ query: (goal === undefined ? {} : { goal }) as never }, { headers: headers(bearer) })
+
+const DAY_MS = 24 * 60 * 60 * 1000
+/** The window the spec sets: a goal taken up again no more than 90 days after it was left resumes its chase. */
+const RESUME_WINDOW_MS = 90 * DAY_MS
 
 const chip = async (bearer: string, goal: string) => dataOf<GoalBody>(await putGoal(bearer, { goal }))
 const typed = async (bearer: string, text: string) => dataOf<GoalBody>(await putGoal(bearer, { text }))
@@ -641,6 +650,94 @@ describe('GET /api/v1/me/goal', () => {
   })
 })
 
+// The switch preview (issue #145): before Ngozi changes her goal, the app asks what switching would do. It reads only, so nothing it answers
+// changes her goal or costs a face scan. The logic is FaceScanService's (the day one comes from the face-scan tables); this is the route.
+describe('GET /api/v1/me/goal/switch-preview', () => {
+  it('tells Ngozi a goal she left for another would pick up where she left off, and when that window closes', async () => {
+    const { accessToken } = await newGuest()
+    await chip(accessToken, 'clear-skin')
+    const left = await chip(accessToken, 'calm-repair')
+
+    const res = await getSwitchPreview(accessToken, 'clear-skin')
+
+    expect(res.status).toBe(200)
+    // Clear skin was left the moment calm-repair was saved, so the window closes 90 days after that. No face scan was ever taken, so the
+    // chase has no day one to show.
+    expect(await dataOf<SwitchPreviewBody>(res)).toEqual({
+      goal: 'clear-skin',
+      outcome: 'resume',
+      dayOneAt: null,
+      resumeUntil: new Date(Date.parse(left.updatedAt) + RESUME_WINDOW_MS).toISOString(),
+    })
+  })
+
+  it('tells her a goal she never had would start fresh', async () => {
+    const { accessToken } = await newGuest()
+    await chip(accessToken, 'clear-skin')
+
+    const res = await getSwitchPreview(accessToken, 'glow')
+
+    expect(res.status).toBe(200)
+    expect(await dataOf<SwitchPreviewBody>(res)).toEqual({ goal: 'glow', outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+  })
+
+  it('answers a profile with no goal yet, where every goal starts fresh and none is already current', async () => {
+    const { accessToken } = await newGuest()
+
+    for (const goal of GOALS as readonly Goal[]) {
+      const res = await getSwitchPreview(accessToken, goal)
+
+      expect(res.status, goal).toBe(200)
+      expect(await dataOf<SwitchPreviewBody>(res), goal).toEqual({ goal, outcome: 'fresh', dayOneAt: null, resumeUntil: null })
+    }
+  })
+
+  it('refuses the goal the profile is already on with 400 GOAL_ALREADY_CURRENT', async () => {
+    const { accessToken } = await newGuest()
+    await chip(accessToken, 'glow')
+
+    const res = await getSwitchPreview(accessToken, 'glow')
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('GOAL_ALREADY_CURRENT')
+  })
+
+  it.each([
+    ['a word that is not one of the six goals', 'not-a-goal'],
+    ['a goal that differs only in case', 'Glow'],
+    ['an empty goal', ''],
+    ['no goal at all', undefined],
+  ])('answers 400 VALIDATION_FAILED for %s', async (_label, goal) => {
+    const { accessToken } = await newGuest()
+    await chip(accessToken, 'clear-skin')
+
+    const res = await getSwitchPreview(accessToken, goal)
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+  })
+
+  it('leaves the goal exactly as it was: the preview is a read', async () => {
+    const { accessToken } = await newGuest()
+    await chip(accessToken, 'clear-skin')
+    const current = await chip(accessToken, 'calm-repair')
+
+    const resume = await getSwitchPreview(accessToken, 'clear-skin')
+    const fresh = await getSwitchPreview(accessToken, 'glow')
+
+    expect([resume.status, fresh.status]).toEqual([200, 200])
+    expect(await dataOf<GoalBody>(await getGoal(accessToken))).toEqual(current)
+  })
+
+  it('documents the route in the OpenAPI document, with the statuses it can answer', async () => {
+    const res = await fetchWorker('http://deepertones.test/openapi.json')
+    expect(res.status).toBe(200)
+    const doc = (await res.json()) as { paths: Record<string, { get?: { responses: Record<string, unknown> } }> }
+
+    expect(Object.keys(doc.paths['/api/v1/me/goal/switch-preview']!.get!.responses)).toEqual(expect.arrayContaining(['200', '400', '401']))
+  })
+})
+
 describe('GET /api/v1/me/onboarding', () => {
   it('sends a new guest to the goal step, with no goal and no safety answer', async () => {
     const { accessToken } = await newGuest()
@@ -697,13 +794,14 @@ describe('a guest who signs up', () => {
 })
 
 describe('the goal routes without a session', () => {
-  it('answers 401 AUTH_REQUIRED from PUT, GET and onboarding', async () => {
+  it('answers 401 AUTH_REQUIRED from PUT, GET, onboarding and the switch preview', async () => {
     const put = await putGoal(undefined, { goal: 'glow' })
     const putWords = await putGoal(undefined, { text: 'make my face clear' })
     const got = await getGoal(undefined)
     const onboarding = await getOnboarding(undefined)
+    const preview = await getSwitchPreview(undefined, 'glow')
 
-    for (const res of [put, putWords, got, onboarding]) {
+    for (const res of [put, putWords, got, onboarding, preview]) {
       expect(res.status).toBe(401)
       expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
     }

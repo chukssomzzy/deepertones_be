@@ -46,3 +46,14 @@ export const OnboardingResponse = z
     next: z.enum(['goal', 'safety', 'shelf']).openapi({ description: 'The first-run step to show next.' }),
   })
   .openapi('Onboarding')
+
+export const SwitchPreviewQuery = z.object({ goal: GoalName })
+
+export const SwitchPreviewResponse = z
+  .object({
+    goal: GoalName,
+    outcome: z.enum(['resume', 'fresh']).openapi({ description: '`resume` when switching continues the chase the goal had; `fresh` when it starts a new one.' }),
+    dayOneAt: z.string().openapi({ format: 'date-time' }).nullable().openapi({ description: 'When the chase\'s first ready scan was taken. Null for a fresh start, or while the chase has no ready scan.' }),
+    resumeUntil: z.string().openapi({ format: 'date-time' }).nullable().openapi({ description: 'The last moment the goal can be taken up again and still resume. Null for a fresh start.' }),
+  })
+  .openapi('SwitchPreview')

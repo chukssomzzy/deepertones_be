@@ -1,10 +1,13 @@
-import { and, asc, desc, eq, gt, inArray, isNull, lt, lte, max, ne, or, sql } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/sqlite-core'
+import { and, asc, desc, eq, exists, gte, inArray, isNull, lt, lte, ne, not, or, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import { chunked, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import type { Goal } from '../goals/goals.vocabulary'
-import { faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
+import { profileGoals } from '../goals/goals.table'
+import { faceCheckInPushes, faceConsents, faceMasks, faceResults, faceScanPhotos, faceScans, profileFitzpatrick } from './face-scans.table'
 import type {
+  FaceCheckInPush,
   FaceConsent,
   FaceMask,
   FaceResult,
@@ -19,7 +22,7 @@ import type {
   ProfileFitzpatrick,
 } from './face-scans.types'
 
-export type { FaceConsent, FaceMask, FaceResult, FaceScan, FaceScanCompletion, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan, ProfileFitzpatrick }
+export type { FaceCheckInPush, FaceConsent, FaceMask, FaceResult, FaceScan, FaceScanCompletion, FaceScanPatch, FaceScanPhoto, GiveFaceConsent, NewFacePhoto, NewFaceScan, ProfileFitzpatrick }
 
 const batchOf = (statements: BatchItem<'sqlite'>[]) => statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]]
 
@@ -61,19 +64,20 @@ export class D1FaceScansRepository {
   async createFaceScan(scan: NewFaceScan, photos: NewFacePhoto[], options?: { expectLatestId: string | null }): Promise<boolean> {
     if (!options) {
       const statements: BatchItem<'sqlite'>[] = [
-        this.db.insert(faceScans).values({ ...scan, updatedAt: scan.createdAt }),
+        this.db.insert(faceScans).values({ ...scan, checkIn: scan.checkIn ?? false, updatedAt: scan.createdAt }),
         ...photos.map((photo) => this.db.insert(faceScanPhotos).values(photo)),
       ]
       await this.db.batch(batchOf(statements))
       return true
     }
     const at = scan.createdAt.getTime()
+    const checkIn = scan.checkIn ? 1 : 0
     // insert ... select takes its values by column position, so each select lists the table's columns in order.
     const statements: BatchItem<'sqlite'>[] = [
       this.db
         .insert(faceScans)
         .select(
-          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}, NULL
+          sql`SELECT ${scan.id}, ${scan.userId}, ${scan.profileId}, 'analysing', NULL, ${scan.goalAtScan}, NULL, NULL, NULL, NULL, NULL, NULL, ${at}, ${at}, NULL, ${checkIn}
             WHERE (SELECT id FROM ${faceScans} WHERE ${faceScans.profileId} = ${scan.profileId} AND ${faceScans.state} <> 'failed' ORDER BY ${faceScans.createdAt} DESC, rowid DESC LIMIT 1) IS ${options.expectLatestId}`,
         )
         .returning({ id: faceScans.id }),
@@ -119,6 +123,20 @@ export class D1FaceScansRepository {
   }
 
   /**
+   * The profile's newest scan that has not failed and is not a check-in, under any goal: its last day-one scan, or null. Scans made at the same
+   * time go to the one written last, the same as `latestForProfile`.
+   */
+  async latestDayOneForProfile(profileId: string): Promise<FaceScan | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceScans)
+      .where(and(eq(faceScans.profileId, profileId), ne(faceScans.state, 'failed'), eq(faceScans.checkIn, false)))
+      .orderBy(desc(faceScans.createdAt), sql`rowid desc`)
+      .limit(1)
+    return row ?? null
+  }
+
+  /**
    * The profile's newest scan that is `ready`, or null. Unlike `latestForProfile`, a newer scan that is analysing or needs a retake does not hide it: a
    * reader of what a scan found (the skin type) wants the last scan that found something. Scans made at the same time go to the one written last.
    */
@@ -138,34 +156,105 @@ export class D1FaceScansRepository {
   }
 
   /**
-   * The day-one scan of the scan taken at `at` under `goal`: the profile's earliest ready scan under that goal, taken at or before `at`, with no ready scan
-   * under another goal between it and `at`. That is the earliest ready same-goal scan newer than the latest ready other-goal scan before `at`, found in one
-   * query (profile_id, created_at serves it). It is the scan itself when nothing earlier qualifies, and null when no ready scan does. Only ready scans count
-   * either way: one that failed, needs a retake or is analysing neither starts a day one nor ends one.
+   * The day-one scan of the chase that the scan taken at `at` belongs to: the profile's earliest `ready` scan under `goal`, taken no earlier
+   * than `since` (the start of that chase, worked out by the caller from the goal history) and no later than `at`. It is the scan itself when
+   * nothing earlier qualifies, and null when no ready scan does. Only ready scans count: one that failed, needs a retake or is analysing is
+   * never a day one. A scan under another goal inside the window is no cut-off here: the chase already decided that for the caller, by way
+   * of `since`.
    *
-   * The cut-off and the upper bound (`at`) are by timestamp alone, and candidates that share a timestamp go to the lower id. Two scans of one profile cannot share
-   * a millisecond in practice (each is a person's upload), so no scan is ever ordered against itself by id. `scanId` is kept for that tie-break, should one be needed.
+   * `since` and the upper bound (`at`) are by timestamp alone, and candidates that share a timestamp go to the lower id. Two scans of one
+   * profile cannot share a millisecond in practice (each is a person's upload), so no scan is ever ordered against itself by id. `scanId` is
+   * kept for that tie-break, should one be needed.
    */
-  async dayOneFor({ profileId, goal, at }: { profileId: string; goal: Goal; at: Date; scanId: string }): Promise<FaceScan | null> {
-    const cutOff = this.db
-      .select({ at: max(faceScans.createdAt) })
-      .from(faceScans)
-      .where(and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready'), ne(faceScans.goalAtScan, goal), lt(faceScans.createdAt, at)))
+  async dayOneFor({ profileId, goal, at, since }: { profileId: string; goal: Goal; at: Date; since: Date; scanId: string }): Promise<FaceScan | null> {
     const [row] = await this.db
       .select()
       .from(faceScans)
       .where(
-        and(
-          eq(faceScans.profileId, profileId),
-          eq(faceScans.state, 'ready'),
-          eq(faceScans.goalAtScan, goal),
-          lte(faceScans.createdAt, at),
-          gt(faceScans.createdAt, sql`coalesce((${cutOff}), -1)`),
-        ),
+        and(eq(faceScans.profileId, profileId), eq(faceScans.state, 'ready'), eq(faceScans.goalAtScan, goal), gte(faceScans.createdAt, since), lte(faceScans.createdAt, at)),
       )
       .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
       .limit(1)
     return row ?? null
+  }
+
+  /**
+   * Every scan the profile has under `goal` since `since` (the start of the chase the caller worked out from the goal history, inclusive), whatever
+   * state it is in: the due rule's own read (issue #145). The read judges nothing; the policy decides what a failed, analysing or check-in scan means.
+   */
+  async scansUnderGoalSince(profileId: string, goal: Goal, since: Date): Promise<FaceScan[]> {
+    return this.db.select().from(faceScans).where(and(eq(faceScans.profileId, profileId), eq(faceScans.goalAtScan, goal), gte(faceScans.createdAt, since)))
+  }
+
+  /**
+   * Records that the chase whose day one is `dayOneScanId` has been dealt with, and says whether this write landed: false means the chase was already recorded, and
+   * the first record stands. The caller records BEFORE it queues the push and queues only on true, so a chase is told at most once. Rejects for a profile that
+   * does not exist.
+   */
+  async recordCheckInPush(push: FaceCheckInPush): Promise<boolean> {
+    const rows = await this.db.insert(faceCheckInPushes).values(push).onConflictDoNothing().returning({ id: faceCheckInPushes.dayOneScanId })
+    return rows.length > 0
+  }
+
+  async checkInPushFor(profileId: string, dayOneScanId: string): Promise<FaceCheckInPush | null> {
+    const [row] = await this.db
+      .select()
+      .from(faceCheckInPushes)
+      .where(and(eq(faceCheckInPushes.profileId, profileId), eq(faceCheckInPushes.dayOneScanId, dayOneScanId)))
+    return row ?? null
+  }
+
+  /**
+   * The day ones that might be due a check-in push, the longest overdue first and at most `limit`: ready scans that are not themselves check-ins, taken at or
+   * before `createdBefore`, whose chase has not been recorded as told and has no check-in that is not failed (a later scan of the same profile and goal that
+   * is one). It judges nothing else: the caller keeps the ones whose own goal and review point say so.
+   *
+   * Only day ones taken under the profile's current goal (its newest `profile_goals` row) are listed, so scans of goals the profile has left cannot fill the
+   * limit and starve the ones that can be told; they count again if the goal is taken up again. A profile with no goal row has no current goal to compare with,
+   * so it is not filtered.
+   */
+  async checkInPushCandidates({ createdBefore, limit }: { createdBefore: Date; limit: number }): Promise<FaceScan[]> {
+    const checkIn = alias(faceScans, 'check_in_scan')
+    return this.db
+      .select()
+      .from(faceScans)
+      .where(
+        and(
+          eq(faceScans.state, 'ready'),
+          eq(faceScans.checkIn, false),
+          lte(faceScans.createdAt, createdBefore),
+          not(
+            exists(
+              this.db
+                .select({ one: sql`1` })
+                .from(faceCheckInPushes)
+                .where(and(eq(faceCheckInPushes.profileId, faceScans.profileId), eq(faceCheckInPushes.dayOneScanId, faceScans.id))),
+            ),
+          ),
+          not(
+            exists(
+              this.db
+                .select({ one: sql`1` })
+                .from(checkIn)
+                .where(
+                  and(
+                    eq(checkIn.profileId, faceScans.profileId),
+                    eq(checkIn.goalAtScan, faceScans.goalAtScan),
+                    eq(checkIn.checkIn, true),
+                    ne(checkIn.state, 'failed'),
+                    sql`${checkIn.createdAt} > ${faceScans.createdAt}`,
+                  ),
+                ),
+            ),
+          ),
+          or(
+            not(exists(this.db.select({ one: sql`1` }).from(profileGoals).where(eq(profileGoals.profileId, faceScans.profileId)))),
+            sql`${faceScans.goalAtScan} IS (SELECT ${profileGoals.goal} FROM ${profileGoals} WHERE ${profileGoals.profileId} = ${faceScans.profileId} ORDER BY ${profileGoals.createdAt} DESC, rowid DESC LIMIT 1)`,
+          ),
+        ),
+      )
+      .orderBy(asc(faceScans.createdAt), asc(faceScans.id))
+      .limit(limit)
   }
 
   /**
@@ -286,7 +375,7 @@ export class D1FaceScansRepository {
     return keys
   }
 
-  /** Deletes these users' face data in one batch: results, masks, photos, scans, Fitzpatrick reads and consents. Safe to repeat; an empty list deletes nothing. */
+  /** Deletes these users' face data in one batch: results, masks, photos, scans, Fitzpatrick reads, consents and check-in push records. Safe to repeat; an empty list deletes nothing. */
   async deleteForUsers(userIds: string[]): Promise<void> {
     if (userIds.length === 0) return
     const statements: BatchItem<'sqlite'>[] = chunked(userIds).flatMap((ids) => [
@@ -296,6 +385,7 @@ export class D1FaceScansRepository {
       this.db.delete(faceScans).where(inArray(faceScans.userId, ids)),
       this.db.delete(profileFitzpatrick).where(inArray(profileFitzpatrick.userId, ids)),
       this.db.delete(faceConsents).where(inArray(faceConsents.userId, ids)),
+      this.db.delete(faceCheckInPushes).where(inArray(faceCheckInPushes.userId, ids)),
     ])
     await this.db.batch(batchOf(statements))
   }

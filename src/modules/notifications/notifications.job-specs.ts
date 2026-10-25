@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 
-export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake'] as const
+export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due'] as const
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number]
 
 const scanFinishedBody = z.object({
@@ -52,6 +52,14 @@ const faceScanNeedsRetakeBody = z.object({
   at: z.number().int(),
 })
 
+const faceCheckInDueBody = z.object({
+  kind: z.literal('face-check-in-due'),
+  userId: z.string(),
+  profileId: z.string(),
+  /** The chase's day-one scan: one chase is one notification. */
+  dayOneScanId: z.string(),
+})
+
 /**
  * What the send job carries: the kind and ids only, never a token, text or link. Those are resolved when the job runs, so a
  * logout, a profile switch or a changed setting between the event and the send is respected.
@@ -59,7 +67,7 @@ const faceScanNeedsRetakeBody = z.object({
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -76,6 +84,8 @@ export const sendPushSpec = jobSpec({
         return `face-scan-ready:${body.faceScanId}`
       case 'face-scan-needs-retake':
         return `face-scan-needs-retake:${body.faceScanId}:${body.at}`
+      case 'face-check-in-due':
+        return `face-check-in-due:${body.dayOneScanId}`
     }
   },
   // A person is waiting for the notification, as with an OTP: 5 attempts finish within a couple of minutes.
