@@ -74,12 +74,16 @@ const holds = (column: ColumnDefinition): string => {
     case 'draft-cells':
       parts.push('List of column=https-link pairs, separated by semicolons')
       break
+    case 'schedule':
+      parts.push(`Steps separated by semicolons, each ${code('<weeks>: <frequency>')}, the frequency one of: ${CONTRACT.vocabularies[column.vocabulary!].map(code).join(', ')}`)
+      break
   }
   if (column.exclusive !== undefined) parts.push(`${code(column.exclusive)} only on its own, never next to another value`)
   if (column.maxLength !== undefined) parts.push(`Up to ${column.maxLength} characters`)
   if (column.maxItems !== undefined) parts.push(`1 to ${column.maxItems} items`)
   if (column.itemMaxLength !== undefined) parts.push(`Each item up to ${column.itemMaxLength} characters`)
   if (column.plainText) parts.push('No links or markup')
+  if (column.lowerCase) parts.push('Lower case only')
   if (column.unique) parts.push('Unique in the tab')
   if (column.draftable === false) parts.push('Cannot be a draft cell')
   return `${parts.join('. ')}.`
@@ -94,6 +98,7 @@ const rulesOf = (column: ColumnDefinition): RuleCode[] => {
     case 'text':
       if (column.maxLength !== undefined) rules.push('TOO_LONG')
       if (column.plainText) rules.push('HAS_LINK_OR_MARKUP')
+      if (column.lowerCase) rules.push('NOT_LOWER_CASE')
       break
     case 'list':
       if (column.maxItems !== undefined) rules.push('TOO_MANY_ITEMS')
@@ -130,6 +135,9 @@ const rulesOf = (column: ColumnDefinition): RuleCode[] => {
       break
     case 'draft-cells':
       rules.push('INVALID_DRAFT_CELL', 'DRAFT_CELL_COLUMN', 'NOT_HTTPS_URL')
+      break
+    case 'schedule':
+      rules.push('TOO_LONG', 'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'SCHEDULE_MISSING_STOP', 'SCHEDULE_STOP_NOT_LAST', 'SCHEDULE_FREQUENCY_INCREASES')
       break
   }
   if (column.exclusive !== undefined) rules.push('ALL_MIXED_WITH_OTHERS')
@@ -192,7 +200,7 @@ export const renderContractDoc = async (): Promise<string> =>
     '',
     '## How the workbook is read',
     '',
-    'The workbook has four tabs: Products, Availability, Ingredients and Countries. The first row of a tab is its header: one column name for each',
+    'The workbook has six tabs: Products, Availability, Ingredients, Countries, Claim words and Tapers. The first row of a tab is its header: one column name for each',
     'column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not',
     'listed here is a problem. A tab with no rows is fine, but it still needs its header row.',
     '',

@@ -15,12 +15,14 @@ type Row = RawWorkbook['products']['rows'][number]
 export const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
+  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 /** The tab names a workbook file has, in order. */
-export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries' } as const satisfies Record<Tab, string>
+export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers' } as const satisfies Record<Tab, string>
 
 export const product = (over: Row = {}): Row => ({
   code: 'PRD-CERAVE-CLEANSER',
@@ -58,6 +60,34 @@ export const ingredient = (over: Row = {}): Row => ({
   statement: 'Can make skin burn more easily in the sun, so sunscreen matters while using it.',
   source_url: null,
   helps: null,
+  group: null,
+  clashes_with: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+export const claimWord = (over: Row = {}): Row => ({
+  code: 'CLM-WHITENING',
+  phrase: 'whitening',
+  claim: 'lightening',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+export const taper = (over: Row = {}): Row => ({
+  code: 'TPR-STEROID-1',
+  kind: 'steroid',
+  schedule: '1-2: alternate-days; 3-4: weekly; 5: stop',
+  what_to_expect: 'Skin may flare or look redder for a few days after each step down. This is expected and passes.',
+  see_a_professional_if: 'The redness spreads, the skin weeps or blisters, or you feel unwell.',
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
   approved_on: day(-3),
@@ -74,4 +104,6 @@ export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbo
   availability: { headers: [...HEADERS.availability], rows: over.availability ?? [availability()] },
   ingredients: { headers: [...HEADERS.ingredients], rows: over.ingredients ?? [ingredient()] },
   countries: { headers: [...HEADERS.countries], rows: over.countries ?? [country()] },
+  claimWords: { headers: [...HEADERS.claimWords], rows: over.claimWords ?? [claimWord()] },
+  tapers: { headers: [...HEADERS.tapers], rows: over.tapers ?? [taper()] },
 })

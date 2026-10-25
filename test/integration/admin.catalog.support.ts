@@ -27,6 +27,12 @@ export const ORIGIN = 'http://deepertones.test'
 export const EXPORT_URL = `${ORIGIN}/api/v1/admin/catalog/export`
 export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
 
+/**
+ * The contract version this checkout serves, written out: the version of the contract that has the Claim words and Tapers tabs. A literal, not read
+ * from the code, so a bump has to be made here too.
+ */
+export const CONTRACT_VERSION = '2.0.0'
+
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
 // --- one clock for every date in these tests ---
@@ -56,8 +62,10 @@ export const code = (prefix: string) => `${prefix}-${runSalt}-${next()}`
 export const HEADERS = {
   products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
-  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
+  claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 export const TABS = Object.keys(HEADERS) as Tab[]
 
@@ -110,6 +118,39 @@ export const ruleRow = (over: RawRow = {}): RawRow => ({
   statement: 'Commonly reported to sting skin with a weakened barrier.',
   source_url: null,
   helps: null,
+  group: null,
+  clashes_with: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** A Claim words row: a phrase no other test uses (lower-case, one word), so phrases never clash across the shared database. */
+export const claimWordRow = (over: RawRow = {}): RawRow => ({
+  code: code('CLM'),
+  phrase: word('zqphrase'),
+  claim: 'lightening',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** The schedule every taper here has unless a test says otherwise. */
+export const SCHEDULE = '1-2: alternate-days; 3-4: weekly; 5: stop'
+
+/** A Tapers row. The approver is the one every row here has, 'Dr A. Reviewer'. */
+export const taperRow = (over: RawRow = {}): RawRow => ({
+  code: code('TPR'),
+  kind: 'steroid',
+  schedule: SCHEDULE,
+  what_to_expect: 'Skin may flare or look redder for a few days after each step down. This is expected and passes.',
+  see_a_professional_if: 'The redness spreads, the skin weeps or blisters, or you feel unwell.',
   status: 'approved',
   approved_by: 'Dr A. Reviewer',
   approved_on: APPROVED_ON,
@@ -142,12 +183,12 @@ export const errorOf = async (res: Reply) => {
 
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 export type NewProduct = { code: string; brand: string; name: string; variant: string | null; form: string | null }
-export type ImportDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; newProducts: NewProduct[] }
+export type ImportDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; newProducts: NewProduct[] }
 export type ImportResult = { applied: boolean; catalogVersion: number; diff: ImportDiff }
 export type ExportResult = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 
 export const NO_CHANGE: TabDiff = { added: [], updated: [], retired: [], reactivated: [] }
-export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, newProducts: [] }
+export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, claimWords: NO_CHANGE, tapers: NO_CHANGE, newProducts: [] }
 /** A TabDiff with only the lists given; the lists are compared sorted, because the order of codes within a list is not part of the contract. */
 export const diffOf = (over: Partial<TabDiff>): TabDiff => ({ ...NO_CHANGE, ...over })
 /** Codes inside a diff in a fixed order, so a test compares the codes and not the order they came in. */
@@ -156,6 +197,8 @@ export const sorted = (diff: ImportDiff): ImportDiff => ({
   availability: sortTab(diff.availability),
   ingredients: sortTab(diff.ingredients),
   countries: sortTab(diff.countries),
+  claimWords: sortTab(diff.claimWords),
+  tapers: sortTab(diff.tapers),
   newProducts: [...diff.newProducts].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0)),
 })
 const sortTab = (tab: TabDiff): TabDiff => ({ added: [...tab.added].sort(), updated: [...tab.updated].sort(), retired: [...tab.retired].sort(), reactivated: [...tab.reactivated].sort() })
@@ -188,19 +231,23 @@ export type ImportInput = {
   /** Left out of the request when undefined, so the default can be tested. */
   dryRun?: boolean | string
   file?: Uint8Array | null
-  /** Left out when null. */
+  /** Left out when null. Sent as the contract version this checkout serves unless a test says another. */
   uploadedBy?: string | null
+  contractVersion?: string | null
   headers?: Record<string, string>
+  /** The bindings the Worker is handed, for a test that changes the environment (ENVIRONMENT, QUALIFIED_APPROVERS). */
+  workerEnv?: typeof env
 }
 
-export const importRaw = ({ workbook, baseVersion, dryRun, file = null, uploadedBy = 'Test Editor', headers = adminHeaders() }: ImportInput) => {
+export const importRaw = ({ workbook, baseVersion, dryRun, file = null, uploadedBy = 'Test Editor', contractVersion = CONTRACT_VERSION, headers = adminHeaders(), workerEnv }: ImportInput) => {
   const form = new FormData()
   form.set('workbook', typeof workbook === 'string' ? workbook : JSON.stringify(workbook))
   form.set('baseVersion', String(baseVersion))
   if (dryRun !== undefined) form.set('dryRun', String(dryRun))
   if (file) form.set('file', new Blob([file], { type: XLSX_MEDIA_TYPE }), 'catalog.xlsx')
   if (uploadedBy !== null) form.set('uploadedBy', uploadedBy)
-  return fetchWorker(IMPORT_URL, { method: 'POST', body: form, headers })
+  if (contractVersion !== null) form.set('contractVersion', contractVersion)
+  return fetchWorker(IMPORT_URL, { method: 'POST', body: form, headers }, workerEnv)
 }
 
 /** The workbook with the tabs' rows changed by `edit`; the live export is never touched. */

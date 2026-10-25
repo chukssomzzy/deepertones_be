@@ -4,7 +4,7 @@ import type { Workbook } from './catalog.workbook.schema'
 /** What an upload does to one tab, as codes. Availability is keyed "<product code>:<country>", and a row that is gone is listed under `retired`. */
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 
-export type WorkbookDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff }
+export type WorkbookDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff }
 
 // Rows are compared by what they mean: both sides are parsed, so "a;b" and "a; b" are one list, and a date is a day, not a string.
 const meaning = (row: object): string => stableJson(JSON.parse(JSON.stringify(row)))
@@ -36,4 +36,6 @@ export const diffWorkbooks = (live: Workbook, next: Workbook): WorkbookDiff => (
   availability: diffTab(live.availability, next.availability, (row) => `${row.productCode}:${row.country}`, () => false),
   ingredients: diffTab(live.ingredients, next.ingredients, (row) => row.code, rowStatus),
   countries: diffTab(live.countries, next.countries, (row) => row.code, (row) => row.status === 'retired'),
+  claimWords: diffTab(live.claimWords, next.claimWords, (row) => row.code, rowStatus),
+  tapers: diffTab(live.tapers, next.tapers, (row) => row.code, rowStatus),
 })

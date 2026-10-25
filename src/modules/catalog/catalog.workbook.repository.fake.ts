@@ -2,7 +2,7 @@ import { REFERENCE, REFERENCE_VERSION } from './catalog.reference'
 import { seedRuleCode } from './catalog.workbook.seed'
 import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type LiveRules, type Recommendation, type WorkbookPlan } from './catalog.workbook.repository'
 import type { RuleRow } from './catalog.workbook.repository.contract'
-import type { AvailabilityRow, IngredientRule, ProductRow, Workbook } from './catalog.workbook.schema'
+import type { AvailabilityRow, ClaimWordRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
 import type { RoutineStep } from './catalog.vocabulary'
 
 const day = (text: string | null): Date | null => (text === null ? null : new Date(`${text}T00:00:00.000Z`))
@@ -24,6 +24,8 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     statement: entry.rule,
     sourceUrl: entry.source,
     helps: [],
+    group: null,
+    clashesWith: [],
     status: 'approved',
     approvedBy: 'reference seed',
     approvedOn: '2026-10-21',
@@ -33,6 +35,8 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
   private products: ProductRow[] = []
   private availability: AvailabilityRow[] = []
   private countryRows: Country[] = []
+  private claimWordRows: ClaimWordRow[] = []
+  private taperRows: TaperRow[] = []
   /** The catalog products a row can join: identity key to product id. A product an upload makes is added. */
   private readonly productIds = new Map<string, string>()
   /** Other spellings of a product: alias key to the product's identity key. */
@@ -60,6 +64,7 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       ...rule,
       aliases: [...rule.aliases],
       helps: [...rule.helps],
+      clashesWith: [...rule.clashesWith],
       approvedOn: day(rule.approvedOn),
       auditedOn: day(rule.auditedOn),
     }))
@@ -70,6 +75,8 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
         availability: structuredClone([...this.availability].sort((a, b) => (`${a.productCode}:${a.country}` < `${b.productCode}:${b.country}` ? -1 : 1))),
         ingredients,
         countries: structuredClone([...this.countryRows].sort(byCode)),
+        claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
+        tapers: structuredClone([...this.taperRows].sort(byCode)),
       },
     }
   }
@@ -129,7 +136,11 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       batches(plan.retiredProducts.length, rows.codes) +
       (plan.availability === null ? 0 : 1 + batches(plan.availability.length, rows.availability)) +
       batches(plan.ingredients.length, rows.rules) +
-      batches(plan.retiredIngredients.length, rows.codes)
+      batches(plan.retiredIngredients.length, rows.codes) +
+      batches(plan.claimWords.length, rows.claimWords) +
+      batches(plan.retiredClaimWords.length, rows.codes) +
+      batches(plan.tapers.length, rows.tapers) +
+      batches(plan.retiredTapers.length, rows.codes)
     )
   }
 
@@ -163,10 +174,14 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     for (const country of plan.countries) this.countryRows = [...this.countryRows.filter((row) => row.code !== country.code), { ...country }]
     for (const code of plan.retiredCountries) this.countryRows = this.countryRows.map((row) => (row.code === code ? { ...row, status: 'retired' } : row))
     for (const rule of plan.ingredients) {
-      const stored: RuleRow = { ...rule, aliases: [...rule.aliases], helps: [...rule.helps], approvedOn: text(rule.approvedOn), auditedOn: text(rule.auditedOn) }
+      const stored: RuleRow = { ...rule, aliases: [...rule.aliases], helps: [...rule.helps], clashesWith: [...rule.clashesWith], approvedOn: text(rule.approvedOn), auditedOn: text(rule.auditedOn) }
       this.rules = [...this.rules.filter((existing) => existing.code !== rule.code), stored]
     }
     for (const code of plan.retiredIngredients) this.rules = this.rules.map((rule) => (rule.code === code ? { ...rule, status: 'retired' } : rule))
+    for (const word of plan.claimWords) this.claimWordRows = [...this.claimWordRows.filter((existing) => existing.code !== word.code), structuredClone(word)]
+    for (const code of plan.retiredClaimWords) this.claimWordRows = this.claimWordRows.map((word) => (word.code === code ? { ...word, status: 'retired' } : word))
+    for (const taper of plan.tapers) this.taperRows = [...this.taperRows.filter((existing) => existing.code !== taper.code), structuredClone(taper)]
+    for (const code of plan.retiredTapers) this.taperRows = this.taperRows.map((taper) => (taper.code === code ? { ...taper, status: 'retired' } : taper))
     this.catalogNumber = plan.baseVersion + 1
     this.version = plan.rulesVersion
     return true
@@ -176,7 +191,7 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
   publishRules(rulesVersion: string, rules: RuleRow[]): void {
     this.version = rulesVersion
     this.catalogNumber += 1
-    this.rules = rules.map((rule) => ({ ...rule, aliases: [...rule.aliases] }))
+    this.rules = rules.map((rule) => ({ ...rule, aliases: [...rule.aliases], clashesWith: [...rule.clashesWith] }))
   }
 
   /** Makes a catalog product exist, as a scan would, so a Products row with its identity key joins it. Not part of the repository type. */

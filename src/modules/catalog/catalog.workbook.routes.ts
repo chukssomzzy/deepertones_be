@@ -33,9 +33,10 @@ const importCatalog = defineRoute({
   summary: 'Check, and optionally apply, an edited catalog workbook',
   description:
     'Multipart. The whole workbook is the upload: a product, rule or country code it leaves out is retired, never deleted. The server checks the workbook against the contract itself, ' +
-    'refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. ' +
+    'refuses one made for another contract version (409 `CONTRACT_MISMATCH`, checked before anything else), refuses one made from a catalog version that is not live (409 `CATALOG_STALE`), and reports the diff per tab. The default is a dry run that writes nothing. ' +
     'With `dryRun=false` and the original `.xlsx` as `file`, the file is archived and the change applied in one atomic write, which the catalog version guards. ' +
     'Problems with the workbook come as 400 `CATALOG_INVALID` with `error.details.problems`: `{ tab, row, column, rule }`, never a cell value. ' +
+    'In production, an approved Tapers row whose `approved_by` is not on the server\'s list of qualified approvers is such a problem too (`UNQUALIFIED_APPROVER`). ' +
     'Other 400 codes: `CATALOG_FILE_REQUIRED` (applying without a file), `CATALOG_FILE_TOO_LARGE` (over 10 MB), `CATALOG_FILE_NOT_XLSX` (not a zip, so not an .xlsx) and ' +
     '`CATALOG_TOO_LARGE` (the change is too many rows for one atomic write; it is never split, so make it in smaller uploads). ' +
     '503 `CATALOG_ARCHIVE_FAILED` means the file could not be archived and nothing was applied; try again.',
@@ -48,13 +49,14 @@ const importCatalog = defineRoute({
 export const adminCatalogRoutes = openapiApp()
   .openapi(exportCatalog, async (c) => ok(c, toExportCatalogResponse(await c.var.services.catalogWorkbook.exportWorkbook()), 'Catalog exported'))
   .openapi(importCatalog, async (c) => {
-    const { workbook, file, baseVersion, dryRun, uploadedBy } = c.req.valid('form')
+    const { workbook, file, baseVersion, dryRun, uploadedBy, contractVersion } = c.req.valid('form')
     const result = await c.var.services.catalogWorkbook.importWorkbook({
       workbook,
       file: file ? new Uint8Array(await file.arrayBuffer()) : null,
       baseVersion,
       dryRun,
       uploadedBy,
+      contractVersion,
     })
     return ok(c, toImportCatalogResponse(result), result.applied ? 'Catalog updated' : 'Catalog checked, nothing written')
   })

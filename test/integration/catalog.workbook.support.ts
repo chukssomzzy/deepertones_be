@@ -11,7 +11,7 @@ export const APPROVED_ON = new Date().toISOString().slice(0, 10)
 type Cell = string | number | boolean | null
 export type RawRow = Record<string, Cell>
 export type RawTab = { headers: string[]; rows: RawRow[] }
-export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab }
+export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab }
 export type Exported = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>
 
@@ -83,6 +83,8 @@ export const applyCatalogChange = async (fetchWorker: Fetch, change: (workbook: 
   form.set('baseVersion', String(live.catalogVersion))
   form.set('dryRun', 'false')
   form.set('uploadedBy', 'integration test')
+  // The contract version the export said: the file is, in life, exactly what the export gave, edited.
+  form.set('contractVersion', live.contractVersion)
   const res = await fetchAdmin('http://deepertones.test/api/v1/admin/catalog/import', {
     method: 'POST',
     headers: { 'X-Admin-Token': adminToken(), 'cf-connecting-ip': freshIp() },

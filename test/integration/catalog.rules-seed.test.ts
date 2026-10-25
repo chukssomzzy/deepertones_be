@@ -116,7 +116,7 @@ describe('the seeded ingredient rules', () => {
     }))
 
     const tab = (headers: string[], rows: Record<string, string | null>[] = []) => ({ headers, rows })
-    const headers = ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']
+    const headers = ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']
 
     expect(
       validateWorkbook({
@@ -124,6 +124,8 @@ describe('the seeded ingredient rules', () => {
         availability: tab(['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url']),
         ingredients: tab(headers, ingredients),
         countries: tab(['code', 'currency', 'low_max', 'mid_max', 'status']),
+        claimWords: tab(['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
+        tapers: tab(['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
       }),
     ).toMatchObject({ ok: true })
   })

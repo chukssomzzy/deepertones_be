@@ -9,7 +9,7 @@ import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbo
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type Workbook } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
 export type NewProductSummary = { code: string; brand: string; name: string; variant: string | null; form: string | null }
@@ -25,7 +25,7 @@ export const referenceEntriesOf = (rules: readonly Pick<IngredientRule, 'code' |
 
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
-export type ImportInput = { workbook: RawWorkbook; file: Uint8Array | null; baseVersion: number; dryRun: boolean; uploadedBy: string }
+export type ImportInput = { workbook: RawWorkbook; file: Uint8Array | null; baseVersion: number; dryRun: boolean; uploadedBy: string; contractVersion: string }
 export type ImportResult = { applied: boolean; catalogVersion: number; diff: ImportDiff }
 export type ExportResult = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 
@@ -34,10 +34,14 @@ type Deps = {
   archive: WorkbookArchive
   now: () => Date
   newId: () => string
+  /** Which environment this is. Left out, no approver is checked. */
+  environment?: string
+  /** The labels of the people who may approve a step-down template in production, separated by commas. Left out or empty, nobody may. */
+  qualifiedApprovers?: string
 }
 
 /**
- * The catalog workbook: what the Products, Availability, Ingredients and Countries tabs hold, served as an export, changed by an import, and read
+ * The catalog workbook: what the Products, Availability, Ingredients, Countries, Claim words and Tapers tabs hold, served as an export, changed by an import, and read
  * by the modules that need the live rules, the countries or the approved products. No actor is needed: the admin routes are guarded by a token
  * before this is called, and a user never reaches it. Nothing here asks a model or a web page anything: a row's product is found by exact
  * identity key or alias, else made.
@@ -53,12 +57,16 @@ export class CatalogWorkbookService {
   private readonly archive: WorkbookArchive
   private readonly now: () => Date
   private readonly newId: () => string
+  private readonly environment: string | undefined
+  private readonly qualifiedApprovers: ReadonlySet<string>
 
   constructor(deps: Deps) {
     this.repository = deps.repository
     this.archive = deps.archive
     this.now = deps.now
     this.newId = deps.newId
+    this.environment = deps.environment
+    this.qualifiedApprovers = new Set((deps.qualifiedApprovers ?? '').split(',').map((label) => label.trim()).filter((label) => label !== ''))
   }
 
   /** Every row of every tab as the import takes it back, retired rows included, with the version they are at. */
@@ -68,17 +76,28 @@ export class CatalogWorkbookService {
   }
 
   /**
-   * Checks the workbook against the contract, refuses it if it was made from a version that is not live, and works out what it would change. A
+   * Refuses a file made for another contract version, checks the workbook against the contract, refuses it if it was made from a catalog version
+   * that is not live, and works out what it would change. A
    * dry run stops there and writes nothing. An apply needs the original file: it is archived first, under a key of its own, and then the whole
    * change is one atomic write, which loses cleanly to a concurrent upload from the same version.
    */
   async importWorkbook(input: ImportInput): Promise<ImportResult> {
+    // First of all: a file made for another contract cannot be judged by this one, so its problems would only mislead.
+    if (input.contractVersion !== CONTRACT_VERSION) {
+      console.info({ outcome: 'catalog-import-contract-mismatch' })
+      throw new ConflictError('CONTRACT_MISMATCH', `The workbook was made for a different contract version than this server's (${CONTRACT_VERSION}); export it again and redo the edit`)
+    }
     const checked = validateWorkbook(input.workbook)
     if (!checked.ok) {
       console.info({ outcome: 'catalog-import-invalid', problems: checked.problems.length })
       throw new ValidationError('CATALOG_INVALID', 'The workbook does not follow the contract', { problems: checked.problems })
     }
     const next = checked.workbook
+    const unqualified = this.unqualifiedApprovals(next)
+    if (unqualified.length > 0) {
+      console.info({ outcome: 'catalog-import-unqualified-approver', problems: unqualified.length })
+      throw new ValidationError('CATALOG_INVALID', 'A step-down template is approved by someone who may not approve it', { problems: unqualified })
+    }
     const live = await this.repository.readWorkbook()
     if (input.baseVersion !== live.catalogVersion) {
       console.info({ outcome: 'catalog-import-stale', catalogVersion: live.catalogVersion })
@@ -143,6 +162,17 @@ export class CatalogWorkbookService {
     return this.repository.liveRules()
   }
 
+  /**
+   * In production only, the approved Tapers rows whose approver is not on the list: a template is shown to people, so a qualified person has to
+   * have approved it. The approver is a label in a cell, so this is a process control and not authentication. The problem never holds the name.
+   */
+  private unqualifiedApprovals(workbook: Workbook): WorkbookProblem[] {
+    if (this.environment !== 'production') return []
+    return workbook.tapers.flatMap((taper, i): WorkbookProblem[] =>
+      taper.status === 'approved' && !this.qualifiedApprovers.has(taper.approvedBy ?? '') ? [{ tab: 'tapers', row: i + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] : [],
+    )
+  }
+
   private stale(): ConflictError {
     return new ConflictError('CATALOG_STALE', 'The catalog has changed since this workbook was exported; export it again and redo the edit')
   }
@@ -178,6 +208,8 @@ export class CatalogWorkbookService {
 
     const ruleCodes = written(changes.ingredients)
     const countryCodes = written(changes.countries)
+    const claimCodes = written(changes.claimWords)
+    const taperCodes = written(changes.tapers)
     const availabilityChanged = Object.values(changes.availability).some((codes) => codes.length > 0)
     return {
       plan: {
@@ -189,6 +221,10 @@ export class CatalogWorkbookService {
         retiredProducts: gone(changes.products, next.products),
         retiredIngredients: gone(changes.ingredients, next.ingredients),
         retiredCountries: gone(changes.countries, next.countries),
+        claimWords: next.claimWords.filter((word) => claimCodes.has(word.code)),
+        tapers: next.tapers.filter((taper) => taperCodes.has(taper.code)),
+        retiredClaimWords: gone(changes.claimWords, next.claimWords),
+        retiredTapers: gone(changes.tapers, next.tapers),
       },
       newProducts,
     }
@@ -218,6 +254,13 @@ export class CatalogWorkbookService {
 
   private static counts(changes: WorkbookDiff): Record<keyof WorkbookDiff, Record<keyof TabDiff, number>> {
     const of = (tab: TabDiff) => ({ added: tab.added.length, updated: tab.updated.length, retired: tab.retired.length, reactivated: tab.reactivated.length })
-    return { products: of(changes.products), availability: of(changes.availability), ingredients: of(changes.ingredients), countries: of(changes.countries) }
+    return {
+      products: of(changes.products),
+      availability: of(changes.availability),
+      ingredients: of(changes.ingredients),
+      countries: of(changes.countries),
+      claimWords: of(changes.claimWords),
+      tapers: of(changes.tapers),
+    }
   }
 }

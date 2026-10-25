@@ -172,6 +172,9 @@ export const buildContainer = (env: CloudflareBindings) => {
         archive: new R2WorkbookArchive({ bucket: env.PRIVATE_PHOTOS, environment: photoEnvironment(env.ENVIRONMENT) }),
         now: () => new Date(),
         newId: () => crypto.randomUUID(),
+        // In production only, an approved step-down template must be approved by someone on this list.
+        environment: env.ENVIRONMENT,
+        qualifiedApprovers: env.QUALIFIED_APPROVERS,
       }),
   )
 
