@@ -11,6 +11,7 @@ import type { CatalogWorkbookService, VerdictReference } from '../catalog/catalo
 import type { FaceScanService } from '../face-scans/face-scans.service'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 import type { SafetyService } from '../safety/safety.service'
 import type { ScanService } from '../scans/scans.service'
 import type { ShelfService } from '../shelf/shelf.service'
@@ -36,6 +37,8 @@ export type VerdictServiceDeps = {
   safety: Pick<SafetyService, 'snapshotFor'>
   goals: Pick<GoalsService, 'goalFor'>
   faceScans: Pick<FaceScanService, 'latestConcernLevelsFor'>
+  /** Asks for the profile's routine to follow a verdict just saved. A failure of it never changes what the build does. */
+  onRoutineTrigger?: RoutineTrigger
   now?: () => Date
 }
 
@@ -79,6 +82,7 @@ export class VerdictService {
   private readonly safety: VerdictServiceDeps['safety']
   private readonly goals: VerdictServiceDeps['goals']
   private readonly faceScans: VerdictServiceDeps['faceScans']
+  private readonly onRoutineTrigger: RoutineTrigger | undefined
   private readonly now: () => Date
 
   constructor(deps: VerdictServiceDeps) {
@@ -93,6 +97,7 @@ export class VerdictService {
     this.safety = deps.safety
     this.goals = deps.goals
     this.faceScans = deps.faceScans
+    this.onRoutineTrigger = deps.onRoutineTrigger
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -214,6 +219,15 @@ export class VerdictService {
     const fingerprintNow = (await this.assemble(profileId, asNow.reference, asNow.goal, await this.safety.snapshotFor(profileId))).fingerprint
     const outdated = fingerprintNow !== fingerprint
     if (outdated) await this.claimAndEnqueue(profileId, fingerprintNow)
+    // The routine follows a verdict that is saved, current and ready: an outdated one is followed by the build just queued, and a not-ready one would only make the
+    // routine wait. Before the stream is told anything and in a try of its own, so a failure of either never costs the other.
+    if (!outdated && merged.fit === 'ready') {
+      try {
+        await this.onRoutineTrigger?.(profileId, 'verdict', fingerprint)
+      } catch {
+        console.error({ outcome: 'routine-trigger-failed', reason: 'verdict', profileId })
+      }
+    }
     // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream. The frame joins the
     // shelf's products and can fail on that; `done` does not depend on it, so it is sent whatever became of the frame.
     try {

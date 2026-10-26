@@ -5,6 +5,7 @@ import type { CompletedRoutineBuild, RoutineRequestRetry, RoutineRequestRow, Rou
 export class FakeRoutinesRepository implements RoutinesRepository {
   private rows = new Map<string, RoutineVersionRow>()
   private requests = new Map<string, RoutineRequestRow>()
+  private retired = new Map<string, number>()
 
   async append(row: RoutineVersionRow): Promise<void> {
     if (this.rows.has(row.id)) throw new Error(`routine version ${row.id} already exists`)
@@ -71,6 +72,40 @@ export class FakeRoutinesRepository implements RoutinesRepository {
   async setRequestRetry(profileId: string, { retried, retryDueAt }: RoutineRequestRetry): Promise<void> {
     const held = this.requests.get(profileId)
     if (held) this.requests.set(profileId, { ...held, retried, retryDueAt: retryDueAt ? new Date(retryDueAt) : null })
+  }
+
+  async dueRequests(now: Date, limit: number): Promise<RoutineRequestRow[]> {
+    return [...this.requests.values()]
+      .filter((row) => row.retryDueAt !== null && row.retryDueAt.getTime() <= now.getTime())
+      .sort((a, b) => a.retryDueAt!.getTime() - b.retryDueAt!.getTime() || (a.profileId < b.profileId ? -1 : a.profileId > b.profileId ? 1 : 0))
+      .slice(0, limit)
+      .map((row) => structuredClone(row))
+  }
+
+  async writerRetriesDue(now: Date, limit: number): Promise<RoutineVersionRow[]> {
+    return this.inForce()
+      .filter((row) => row.writerRetryDueAt !== null && row.writerRetryDueAt.getTime() <= now.getTime())
+      .sort((a, b) => a.writerRetryDueAt!.getTime() - b.writerRetryDueAt!.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+      .slice(0, limit)
+      .map((row) => structuredClone(row))
+  }
+
+  async retiredCodeVersions(limit: number): Promise<RoutineVersionRow[]> {
+    return this.inForce()
+      .filter((row) => row.catalogVersion !== null && row.steps.some((entry) => entry.product.kind === 'candidate' && (this.retired.get(entry.product.code) ?? -Infinity) > row.catalogVersion!))
+      .slice(0, limit)
+      .map((row) => structuredClone(row))
+  }
+
+  /** Test support, not part of the repository: tells the fake the catalog retired the recommended product `code` as of catalog version `updatedInVersion` (D1 reads recommended_products). */
+  retireCode(code: string, updatedInVersion: number): void {
+    this.retired.set(code, updatedInVersion)
+  }
+
+  // The routine in force of every profile that has one.
+  private inForce(): RoutineVersionRow[] {
+    const profiles = new Set([...this.rows.values()].map((row) => row.profileId))
+    return [...profiles].flatMap((profileId) => this.newestReady(profileId, (row) => row.status === 'ready') ?? [])
   }
 
   // Newest is the latest creation time, then the larger id, as in D1.

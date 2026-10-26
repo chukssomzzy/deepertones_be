@@ -64,7 +64,7 @@ export const routineVersions = sqliteTable(
 
 /**
  * A profile's routine build request (spec #189), ONE row per profile: the claim that keeps the same request from being queued twice, and the state of the
- * dead-letter retry. `request_key` is what the request was for (a routine fingerprint, `review-point:<scanId>` or `writer-retry:<versionId>`) and `requested_at`
+ * dead-letter retry. `request_key` is what the request was for (a routine fingerprint, `first`, `review-point:<scanId>`, `writer-retry:<versionId>` or `catalog-retired:<versionId>`; the dead-letter sweep reads the reason back from this prefix) and `requested_at`
  * when it was claimed: a claim older than the stale cut-off is a build that died and is taken over, and a released claim has its time moved to the epoch.
  * `retry_due_at` is when the one more try after a dead letter is due (null when none is) and `retried` whether it has been given. A new claim resets both.
  * Rows go with their profile (cascade).

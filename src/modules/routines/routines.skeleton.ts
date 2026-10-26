@@ -63,8 +63,8 @@ const allowedFor = (shelf: readonly SkeletonShelfProduct[]): Record<RoutineStep,
   return allowed
 }
 
-/** Sun protection stays daily: a reduced sunscreen is kept, so the morning-only rule for protect holds and the routine never asks for it less often. */
-const sunscreenKept = (product: SkeletonShelfProduct): SkeletonShelfProduct =>
+/** Sun protection stays daily: a reduced sunscreen is kept, so the morning-only rule for protect holds and the routine never asks for it less often. Exported for the stale read, which fingerprints the shelf as the skeleton holds it. */
+export const sunscreenKept = (product: SkeletonShelfProduct): SkeletonShelfProduct =>
   product.step === 'protect' && product.verdict.kind === 'reduce' ? { ...product, verdict: { kind: 'keep' } } : product
 
 export const assembleSkeleton = (input: SkeletonInput): RoutineSkeleton => {
