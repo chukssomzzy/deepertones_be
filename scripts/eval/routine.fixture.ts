@@ -39,6 +39,8 @@ export const row = (code: string, over: Partial<Recommendation> = {}): Recommend
   ownCautions: [],
   evidenceUrls: [`https://evidence.example/${code}/a`],
   ingredientsSourceUrl: `https://ingredients.example/${code}`,
+  keyIngredient: null,
+  strength: null,
   origin: 'sourced',
   priceMin: 1000,
   priceMax: 2000,
