@@ -22,6 +22,8 @@ export const productRow = (over: RawRow): RawRow => ({
   category: 'skin',
   ingredients: 'Aqua; Glycerin; Cetearyl Alcohol',
   ingredients_source_url: 'https://shop.example/product',
+  key_ingredient: null,
+  strength: null,
   skin_concerns: 'hd_moisture',
   skin_types: 'all',
   steps: 'moisturise',

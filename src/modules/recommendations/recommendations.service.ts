@@ -169,6 +169,8 @@ export class RecommendationService {
         ingredients: [...row.ingredients],
         evidenceUrls: [...row.evidenceUrls],
         ingredientsSourceUrl: row.ingredientsSourceUrl,
+        keyIngredient: row.keyIngredient,
+        strength: row.strength,
         passed: [...passed],
         sharedWithReaction: reacted.flatMap(({ productId, parts }) => {
           const shared = row.ingredients.filter((ingredient) => anyIn(ingredientParts(ingredient), parts))

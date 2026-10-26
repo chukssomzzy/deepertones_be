@@ -83,6 +83,8 @@ export const workbookProduct = (over: Partial<ProductRow> = {}) => {
     category: 'skin',
     ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'],
     ingredientsSourceUrl: 'https://example.com/list',
+    keyIngredient: 'Azelaic acid',
+    strength: '10%',
     skinConcerns: ['hd_moisture', 'hd_redness'],
     skinTypes: ['dry', 'combination'],
     steps: ['cleanse', 'treat'],
@@ -303,6 +305,34 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         const [recommendation] = await repo.approvedFor({ country: nigeria.code, step: 'cleanse' })
         expect(recommendation).toMatchObject({ code: one.row.code, formulationId: one.formulation.id, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], skinTypes: ['dry', 'combination'], priceMin: 3000, whereSold: 'Pharmacies' })
         expect((await repo.liveRules()).version).toMatch(/^rules-contract-apply/)
+      })
+
+      it('stores key_ingredient and strength with the row, reads them back, changes them in place, and clears them to null', async () => {
+        const { repo } = await make()
+        const one = workbookProduct({ keyIngredient: 'Azelaic acid', strength: '10%' })
+        const where = fresh('N')
+        await repo.applyWorkbook(await planOf(repo, { countries: [country(where)], newProducts: [one.newProduct], products: [one.planned], availability: [sale(one.row.code, where)] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+
+        await repo.applyWorkbook(await planOf(repo, { products: [{ ...one.planned, row: { ...one.row, keyIngredient: 'Niacinamide', strength: '4%' } }] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: 'Niacinamide', strength: '4%' })
+
+        await repo.applyWorkbook(await planOf(repo, { products: [{ ...one.planned, row: { ...one.row, keyIngredient: null, strength: null } }] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: null, strength: null })
+      })
+
+      it('gives key_ingredient and strength on the row approvedFor returns, and null when the product has neither', async () => {
+        const { repo } = await make()
+        const [with_, without] = [workbookProduct({ keyIngredient: 'Azelaic acid', strength: '10%' }), workbookProduct({ keyIngredient: null, strength: null })]
+        const where = fresh('N')
+        await repo.applyWorkbook(
+          await planOf(repo, { countries: [country(where)], newProducts: [with_.newProduct, without.newProduct], products: [with_.planned, without.planned], availability: [sale(with_.row.code, where), sale(without.row.code, where)] }),
+        )
+
+        const rows = await repo.approvedFor({ country: where, step: 'cleanse' })
+
+        expect(rows.find((row) => row.code === with_.row.code)).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+        expect(rows.find((row) => row.code === without.row.code)).toMatchObject({ keyIngredient: null, strength: null })
       })
 
       it('applied twice from the same base version, the second is a lost race: it returns false and writes nothing, not its product, row, availability or version', async () => {

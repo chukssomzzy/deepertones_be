@@ -27,7 +27,7 @@ type Tab = keyof RawWorkbook
 
 // The header row of each tab, as a literal written from the spec's tables (not read back from CONTRACT), in the order the workbook has them.
 const HEADERS = {
-  products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
+  products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
   ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
@@ -49,6 +49,8 @@ const product = (over: Raw = {}): Raw => ({
   category: 'skin',
   ingredients: 'Aqua; Glycerin; Cetearyl Alcohol',
   ingredients_source_url: 'https://www.cerave.com/hydrating-cleanser',
+  key_ingredient: null,
+  strength: null,
   skin_concerns: 'hd_moisture;hd_redness',
   skin_types: 'dry;combination',
   steps: 'cleanse',
@@ -154,8 +156,8 @@ const parsed = (raw: RawWorkbook) => {
 const text = (length: number, char = 'a') => char.repeat(length)
 
 describe('the contract', () => {
-  it('is version 2.0.0: the contract that adds the Claim words and Tapers tabs and the Ingredients group and clashes_with columns', () => {
-    expect(CONTRACT_VERSION).toBe('2.0.0')
+  it('is version 2.1.0: the contract that adds the optional key_ingredient and strength columns to the Products tab', () => {
+    expect(CONTRACT_VERSION).toBe('2.1.0')
   })
 
   it('is plain data: it survives JSON unchanged, so nothing in it (a pattern, a limit) can be left out of the fingerprint', () => {
@@ -200,11 +202,11 @@ describe('the contract', () => {
   })
 })
 
-// The fingerprint of the contract as released at CONTRACT_VERSION 2.0.0, written out. A contract change that does not bump the version (and,
+// The fingerprint of the contract as released at CONTRACT_VERSION 2.1.0, written out. A contract change that does not bump the version (and,
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
-// The fingerprint of contract 2.0.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.0.0', fingerprint: '4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca' }
+// The fingerprint of contract 2.1.0 (`await contractFingerprint()`, pinned at release as this file describes).
+const RELEASED = { version: '2.1.0', fingerprint: '486bec22781b4822eb8fb379ac5e40ce7814ce3bf712fcc17f84957e94c27630' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -266,6 +268,8 @@ describe('validateWorkbook: a valid workbook', () => {
           product({
             variant: 'Night',
             form: 'cream',
+            key_ingredient: 'Azelaic acid',
+            strength: '10%',
             own_cautions: 'irritation;allergen',
             evidence_urls: 'https://a.example.com/study;https://b.example.com/review',
             audited_by: 'Nneka Audit',
@@ -295,6 +299,8 @@ describe('validateWorkbook: a valid workbook', () => {
         category: 'skin',
         ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'],
         ingredientsSourceUrl: 'https://www.cerave.com/hydrating-cleanser',
+        keyIngredient: 'Azelaic acid',
+        strength: '10%',
         skinConcerns: ['hd_moisture', 'hd_redness'],
         skinTypes: ['dry', 'combination'],
         steps: ['cleanse'],
@@ -369,7 +375,7 @@ describe('validateWorkbook: a valid workbook', () => {
   it('reads an optional cell left empty as null, or as an empty list for a list', () => {
     const result = parsed(workbook({ availability: [availability({ where_sold: null })] }))
 
-    expect(result.products[0]).toMatchObject({ variant: null, form: null, ownCautions: [], evidenceUrls: [], auditedBy: null, auditedOn: null, draftCells: [] })
+    expect(result.products[0]).toMatchObject({ variant: null, form: null, keyIngredient: null, strength: null, ownCautions: [], evidenceUrls: [], auditedBy: null, auditedOn: null, draftCells: [] })
     expect(result.availability[0]).toMatchObject({ whereSold: null })
     expect(result.ingredients[0]).toMatchObject({ strengthLimit: null, sourceUrl: null, helps: [], group: null, clashesWith: [] })
   })
@@ -484,6 +490,8 @@ describe('validateWorkbook: columns', () => {
   it.each([
     ['products', 'brand'],
     ['products', 'variant'],
+    ['products', 'key_ingredient'],
+    ['products', 'strength'],
     ['availability', 'price_min'],
     ['ingredients', 'statement'],
     ['countries', 'currency'],
@@ -493,6 +501,12 @@ describe('validateWorkbook: columns', () => {
     ['tapers', 'schedule'],
   ] as const)('reports %s without a %s header once, as MISSING_COLUMN on the header row, and nothing else about that column', (name, column) => {
     expectProblems(withTab(name, without(name, column), omitting(workbook()[name].rows, column)), [problem(name, 1, column, 'MISSING_COLUMN')])
+  })
+
+  it('says only MISSING_COLUMN for a strength whose key_ingredient header is gone: with no column there is no cell to be missing an ingredient', () => {
+    const rows = omitting([product({ strength: '10%' })], 'key_ingredient')
+
+    expectProblems(withTab('products', without('products', 'key_ingredient'), rows), [problem('products', 1, 'key_ingredient', 'MISSING_COLUMN')])
   })
 
   it('reports a missing header even when the rows still carry a value under that name, since the headers decide', () => {
@@ -639,6 +653,78 @@ describe('validateWorkbook: Products', () => {
           expectProblems(inProducts(product({ ingredients_source_url: bad, status })), [problem('products', 2, 'ingredients_source_url', 'NOT_HTTPS_URL')])
         }
       }
+    })
+  })
+
+  describe('key_ingredient and strength', () => {
+    // Both are optional plain-text cells shown to people ("what to look for") and never read by a rule. Over-length is judged first, as for any text.
+    it('are optional: a row with both empty is valid and reads back both as null', () => {
+      for (const empty of [null, '', '   ']) expectValid(inProducts(product({ key_ingredient: empty, strength: empty })))
+      expect(parsed(inProducts(product())).products[0]).toMatchObject({ keyIngredient: null, strength: null })
+    })
+
+    it('are read back as written, trimmed, when both are filled', () => {
+      const result = parsed(inProducts(product({ key_ingredient: '  Azelaic acid ', strength: ' 10% ' })))
+
+      expect(result.products[0]).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+    })
+
+    it('accepts a key ingredient with no strength: the label may not state one', () => {
+      expect(parsed(inProducts(product({ key_ingredient: 'Niacinamide', strength: null }))).products[0]).toMatchObject({ keyIngredient: 'Niacinamide', strength: null })
+    })
+
+    it('holds a key_ingredient of at most 80 characters: 80 is fine, 81 is TOO_LONG', () => {
+      expectValid(inProducts(product({ key_ingredient: text(80) })))
+      expectProblems(inProducts(product({ key_ingredient: text(81) })), [problem('products', 2, 'key_ingredient', 'TOO_LONG')])
+    })
+
+    it('holds a strength of at most 40 characters: 40 is fine, 41 is TOO_LONG', () => {
+      expectValid(inProducts(product({ key_ingredient: 'Azelaic acid', strength: text(40) })))
+      expectProblems(inProducts(product({ key_ingredient: 'Azelaic acid', strength: text(41) })), [problem('products', 2, 'strength', 'TOO_LONG')])
+    })
+
+    it.each(['key_ingredient', 'strength'])('%s carries no link or markup', (column) => {
+      for (const bad of ['Buy at https://shop.example.com', 'see www.shop.example.com', '<b>10%</b>']) {
+        expectProblems(inProducts(product({ key_ingredient: 'Azelaic acid', [column]: bad })), [problem('products', 2, column, 'HAS_LINK_OR_MARKUP')])
+      }
+    })
+
+    it.each(['key_ingredient', 'strength'])('says only TOO_LONG for a %s over its length that also holds a link or markup', (column) => {
+      expectProblems(inProducts(product({ key_ingredient: 'Azelaic acid', [column]: `https://shop.example.com/${text(100)}` })), [problem('products', 2, column, 'TOO_LONG')])
+    })
+
+    it('lets a strength hold percent signs and a key ingredient hold ordinary punctuation', () => {
+      expectValid(inProducts(product({ key_ingredient: 'Vitamin C (L-ascorbic acid)', strength: '0.5% - 2%' })))
+    })
+
+    it('reports a strength with no key_ingredient as STRENGTH_WITHOUT_INGREDIENT on the strength cell of that row, since a strength alone means nothing', () => {
+      for (const empty of [null, '', '   ']) {
+        expectProblems(inProducts(product({ key_ingredient: empty, strength: '10%' })), [problem('products', 2, 'strength', 'STRENGTH_WITHOUT_INGREDIENT')])
+      }
+    })
+
+    it('reports STRENGTH_WITHOUT_INGREDIENT only for the row that has it, and for a draft row as well as an approved one', () => {
+      expectProblems(inProducts(product({ code: 'PRD-A', name: 'A', key_ingredient: 'Azelaic acid', strength: '10%' }), product({ code: 'PRD-B', name: 'B', strength: '10%', status: 'draft', approved_by: null, approved_on: null })), [
+        problem('products', 3, 'strength', 'STRENGTH_WITHOUT_INGREDIENT'),
+      ])
+    })
+
+    it('can be named in draft_cells, like any other Products column', () => {
+      expectValid(inProducts(product({ status: 'draft', approved_by: null, approved_on: null, key_ingredient: 'Azelaic acid', draft_cells: 'key_ingredient=https://example.com/azelaic' })))
+    })
+
+    it('explains the new rule in the contract in plain words, and lists it among the Products checks', () => {
+      expect(CONTRACT.rules.STRENGTH_WITHOUT_INGREDIENT).toMatch(/\S/)
+      expect(CONTRACT.tabs.find((tab) => tab.key === 'products')!.checks.map((check) => check.rule)).toContain('STRENGTH_WITHOUT_INGREDIENT')
+    })
+
+    it('declares both as optional plain-text columns with the lengths 80 and 40', () => {
+      const columns = CONTRACT.tabs.find((tab) => tab.key === 'products')!.columns
+      const keyIngredient = columns.find((column) => column.name === 'key_ingredient')
+      const strength = columns.find((column) => column.name === 'strength')
+
+      expect(keyIngredient).toMatchObject({ type: 'text', required: 'optional', maxLength: 80, plainText: true })
+      expect(strength).toMatchObject({ type: 'text', required: 'optional', maxLength: 40, plainText: true })
     })
   })
 
