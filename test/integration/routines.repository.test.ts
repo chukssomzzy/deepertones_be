@@ -33,6 +33,7 @@ const rowFor = (profileId: string, createdAt: Date, over: Partial<Appended> = {}
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: [],
   goal: 'fade-dark-marks',
+  readyAt: createdAt,
   startedOn: null,
   servedAt: null,
   model: 'claude-sonnet-5-5',
@@ -57,7 +58,7 @@ describe('routine_versions in D1', () => {
     const guest = await newGuest()
     const kept = await newGuest()
     await repository.append(rowFor(guest.profileId, BASE))
-    await repository.append(rowFor(guest.profileId, new Date(BASE.getTime() + HOUR), { status: 'pending', steps: [], expectation: null, cautions: null, goal: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 }))
+    await repository.append(rowFor(guest.profileId, new Date(BASE.getTime() + HOUR), { status: 'pending', steps: [], expectation: null, cautions: null, goal: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 }))
     await repository.append(rowFor(kept.profileId, BASE))
 
     expect(await users.deleteUsers([guest.userId])).toBe(1)

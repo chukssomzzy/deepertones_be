@@ -1,5 +1,5 @@
-import { and, asc, desc, eq, isNull } from 'drizzle-orm'
-import type { Db } from '../../lib/db'
+import { and, asc, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profileProducts } from './shelf.table'
 import type { ShelfEntryRow, ShelfRemovedReason } from './shelf.types'
@@ -22,6 +22,17 @@ export class D1ShelfRepository {
       .orderBy(desc(profileProducts.lastScannedAt), asc(profileProducts.id))
       .$dynamic()
     return limit === undefined ? query : query.limit(limit)
+  }
+
+  /** The profile's entries among these ids that are not removed, by id; an id that is unknown, removed or another profile's is left out. Not capped, however many ids are asked for. */
+  async activeByIds(profileId: string, entryIds: string[]): Promise<ShelfEntryRow[]> {
+    const rows = await queryByIds(entryIds, (chunk) =>
+      this.db
+        .select()
+        .from(profileProducts)
+        .where(and(eq(profileProducts.profileId, profileId), inArray(profileProducts.id, chunk), isNull(profileProducts.removedAt))),
+    )
+    return rows.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   }
 
   /** The profile's entry for this product if it is on the shelf (not removed); a no-label entry is never one. */

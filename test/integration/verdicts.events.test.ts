@@ -33,6 +33,8 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 //               whose next try is a day on, or the spent 24 hour retry); then the server closes the stream. A `verdict` whose fit is 'not-ready' and which the queue is
 //               still to retry (attempts 1 and 2) is followed by no `done`: the stream stays open for that retry's `verdict`. A ready verdict that is already current
 //               gets `snapshot` and then `done` on the same rule.
+// Each product of a `snapshot` or `verdict` frame carries the shelf entry's own `kind` and `product` (or `noLabel`), as GET /me/shelf shows it: a client following the stream
+// reads the verdict without a second call.
 // No frame ever carries `facts`, `step`, `sourceUrls`, or a step-down's status and audit columns: the body is the same public one GET answers.
 // The errors before the stream starts (401, 503 VERDICT_UNAVAILABLE, 409 GOAL_REQUIRED) are the usual JSON envelopes, in GET's order.
 
@@ -81,7 +83,7 @@ const dataOf = async <T>(res: Reply): Promise<T> => {
   return body.data
 }
 
-type PublicProduct = { entryId: string; group: string; verdict: { kind: string; taperCode?: string }; reason: string; escalate: boolean }
+type PublicProduct = { entryId: string; kind: 'product' | 'no-label'; product?: Record<string, unknown>; noLabel?: Record<string, unknown>; group: string; verdict: { kind: string; taperCode?: string }; reason: string; escalate: boolean }
 type ReadyView = { status: 'ready'; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: { code: string }[] }
 
 // --- people: a guest of one install ---
@@ -105,6 +107,16 @@ const readyGuest = async () => {
   await putGoal(guest)
   await putSafety(guest, { choices: ['none'] })
   return guest
+}
+
+/** What GET /me/shelf shows of each entry: the independent source for what a verdict product must carry. Read after the shelf is made, by entry id. */
+const shelfShows = async (guest: Guest) => {
+  const { entries } = await dataOf<{ entries: { id: string; kind: 'product' | 'no-label'; product?: object; noLabel?: object }[] }>(await v1.me.shelf.$get({}, { headers: guest.headers() }))
+  return (entryId: string) => {
+    const entry = entries.find((candidate) => candidate.id === entryId)
+    if (!entry) throw new Error(`entry ${entryId} is not on the shelf`)
+    return { kind: entry.kind, ...(entry.product ? { product: entry.product } : {}), ...(entry.noLabel ? { noLabel: entry.noLabel } : {}) }
+  }
 }
 
 const getVerdict = (guest: Guest) => v1.me.verdict.$get({}, { headers: guest.headers() })
@@ -215,13 +227,13 @@ const buildWithFitFailingForTheDay = async (guest: Guest) => {
 const STEROID_TAPER = code('TPR-STEROID')
 const LIGHTENING_TAPER = code('TPR-LIGHTENING')
 const STEROID_INGREDIENT = `${word('zq')} corticoidum`
-const helpingBody = (entryId: string, fit: 'ready' | 'not-ready' = 'ready') => ({
+const helpingBody = (entryId: string, shown: object, fit: 'ready' | 'not-ready' = 'ready') => ({
   status: 'ready',
   fit,
   products: [
     fit === 'ready'
-      ? { entryId, group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }
-      : { entryId, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
+      ? { entryId, ...shown, group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }
+      : { entryId, ...shown, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
   ],
   tapers: [],
 })
@@ -295,6 +307,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
   it('sends the verdict, the same body GET answers, when the queued build saves, and then done and closes the stream', async () => {
     const guest = await readyGuest()
     const entryId = await onShelf(guest)
+    const shows = await shelfShows(guest)
     const { stream } = await watch(guest)
     expect(parseFrame((await stream.read(1)).frames[0]!).data).toEqual({ status: 'pending' })
 
@@ -302,7 +315,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
     const { frames, ended } = await stream.read(3)
     const [verdict, done] = frames.map(parseFrame)
-    expect(verdict).toEqual({ event: 'verdict', data: helpingBody(entryId), comment: null })
+    expect(verdict).toEqual({ event: 'verdict', data: helpingBody(entryId, shows(entryId)), comment: null })
     expect(done!.event).toBe('done')
     expect(frames).toHaveLength(2)
     expect(ended).toBe(true)
@@ -314,6 +327,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     const guest = await readyGuest()
     const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
     await onShelf(guest)
+    const shows = await shelfShows(guest)
     const { stream } = await watch(guest)
     await stream.read(1)
 
@@ -325,6 +339,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     expect(Object.keys(view).sort()).toEqual(['fit', 'products', 'status', 'tapers'])
     expect(view.products.find((product) => product.entryId === steroid)).toEqual({
       entryId: steroid,
+      ...shows(steroid),
       group: 'likely-the-problem',
       verdict: { kind: 'stop', taperCode: STEROID_TAPER },
       reason: expect.any(String),
@@ -339,13 +354,14 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     it('sends the verdict from the rules alone with the fit not ready, leaves the stream open, then sends the retry\'s verdict with the fit ready, then done', async () => {
       const guest = await readyGuest()
       const entryId = await onShelf(guest)
+      const shows = await shelfShows(guest)
       const { stream } = await watch(guest)
       await stream.read(1)
 
       await buildWithFitFailing(guest)
 
       const first = await stream.read(2, QUIET_MS)
-      expect(first.frames.map(parseFrame)).toEqual([{ event: 'verdict', data: helpingBody(entryId, 'not-ready'), comment: null }])
+      expect(first.frames.map(parseFrame)).toEqual([{ event: 'verdict', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null }])
       expect(first.ended).toBe(false)
 
       // The queue hands the same message to the build again, and this time the judge answers.
@@ -353,7 +369,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
       const { frames, ended } = await stream.read(3)
       expect(frames.map(parseFrame)).toEqual([
-        { event: 'verdict', data: helpingBody(entryId), comment: null },
+        { event: 'verdict', data: helpingBody(entryId, shows(entryId)), comment: null },
         { event: 'done', data: {}, comment: null },
       ])
       expect(ended).toBe(true)
@@ -362,6 +378,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     it('sends done after the verdict of the third failed attempt of the day, since the next try is a day away, and closes the stream', async () => {
       const guest = await readyGuest()
       const entryId = await onShelf(guest)
+      const shows = await shelfShows(guest)
       const { stream } = await watch(guest)
       await stream.read(1)
 
@@ -369,9 +386,9 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
       const { frames, ended } = await stream.read(5)
       expect(frames.map(parseFrame)).toEqual([
-        { event: 'verdict', data: helpingBody(entryId, 'not-ready'), comment: null },
-        { event: 'verdict', data: helpingBody(entryId, 'not-ready'), comment: null },
-        { event: 'verdict', data: helpingBody(entryId, 'not-ready'), comment: null },
+        { event: 'verdict', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null },
+        { event: 'verdict', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null },
+        { event: 'verdict', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null },
         { event: 'done', data: {}, comment: null },
       ])
       expect(ended).toBe(true)
@@ -382,6 +399,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     it('sends the ready verdict as the snapshot, then done at once and no second copy of the verdict, and queues nothing more', async () => {
       const guest = await readyGuest()
       const entryId = await onShelf(guest)
+      const shows = await shelfShows(guest)
       await getVerdict(guest)
       await buildQueued(guest)
 
@@ -389,7 +407,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
       const { frames, ended } = await stream.read(3)
       expect(frames.map(parseFrame)).toEqual([
-        { event: 'snapshot', data: helpingBody(entryId), comment: null },
+        { event: 'snapshot', data: helpingBody(entryId, shows(entryId)), comment: null },
         { event: 'done', data: {}, comment: null },
       ])
       expect(ended).toBe(true)
@@ -399,6 +417,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     it('sends the snapshot and then done, and closes the stream, when the fit is not ready and the day\'s attempts are spent, since nothing is coming soon', async () => {
       const guest = await readyGuest()
       const entryId = await onShelf(guest)
+      const shows = await shelfShows(guest)
       await getVerdict(guest)
       await buildWithFitFailingForTheDay(guest)
 
@@ -406,7 +425,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
       const { frames, ended } = await stream.read(3)
       expect(frames.map(parseFrame)).toEqual([
-        { event: 'snapshot', data: helpingBody(entryId, 'not-ready'), comment: null },
+        { event: 'snapshot', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null },
         { event: 'done', data: {}, comment: null },
       ])
       expect(ended).toBe(true)
@@ -415,13 +434,14 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     it('sends the snapshot and keeps the stream open when the fit is not ready and the queue is still to retry it (the first attempt failed)', async () => {
       const guest = await readyGuest()
       const entryId = await onShelf(guest)
+      const shows = await shelfShows(guest)
       await getVerdict(guest)
       await buildWithFitFailing(guest)
 
       const { stream } = await watch(guest)
 
       const { frames, ended } = await stream.read(2, QUIET_MS)
-      expect(frames.map(parseFrame)).toEqual([{ event: 'snapshot', data: helpingBody(entryId, 'not-ready'), comment: null }])
+      expect(frames.map(parseFrame)).toEqual([{ event: 'snapshot', data: helpingBody(entryId, shows(entryId), 'not-ready'), comment: null }])
       expect(ended).toBe(false)
     })
 

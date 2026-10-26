@@ -7,6 +7,7 @@ const fetchWorker = (path: string, init?: RequestInit) => exports.default.fetch(
 
 const SCAN_ID = '00000000-0000-4000-8000-000000000001'
 const ITEM_ID = '00000000-0000-4000-8000-000000000002'
+const ENTRY_ID = '00000000-0000-4000-8000-000000000003'
 
 type Operation = { operationId?: string; summary?: string; tags?: string[] }
 type Document = { paths: Record<string, Record<string, Operation>> }
@@ -90,6 +91,7 @@ describe('the versioned API', () => {
   })
 
   it.each([
+    ['GET', `/api/v1/me/shelf/${ENTRY_ID}`],
     ['GET', '/api/v1/me/face-consent'],
     ['PUT', '/api/v1/me/face-consent'],
     ['DELETE', '/api/v1/me/face-consent'],
@@ -156,6 +158,7 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/face-consent',
         'DELETE /api/v1/me/face-consent',
         'GET /api/v1/me/shelf',
+        'GET /api/v1/me/shelf/{entryId}',
         'DELETE /api/v1/me/shelf/{entryId}',
         'POST /api/v1/me/shelf',
         'GET /api/v1/me/verdict',

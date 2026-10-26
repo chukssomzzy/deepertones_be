@@ -138,19 +138,23 @@ export class RoutineService {
    */
   async build(profileId: string, reason: RoutineBuildReason, options: RoutineBuildOptions = {}): Promise<RoutineBuildResult> {
     const profile = await this.profiles.find(profileId)
-    if (!profile) return 'waiting'
+    if (!profile) {
+      console.log({ outcome: 'routine-profile-missing', profileId })
+      return 'waiting'
+    }
     return runAs(RoutineService.actorOf(profile.userId, profileId), () => this.buildAs(profileId, reason, options))
   }
 
   /**
    * The routine to show: the one in force (`ready`), `updating` while a newer build is under way, and `pending` when there is nothing to show yet or the one in force
-   * no longer fits the person's safety answers (then it is hidden until the build under way replaces it). A build that died long ago is not under way.
+   * no longer fits the person's safety answers. That hides it whether or not a build is under way (even a dead one, or none could start yet), until a build that
+   * stores the new cautions replaces it. A build that died long ago is not under way.
    */
   async current(profileId: string): Promise<RoutineView> {
     const [ready, latest] = await Promise.all([this.repository.current(profileId), this.repository.latest(profileId)])
-    if (!ready) return { status: 'pending' }
+    if (!ready || (await this.hiddenBySafety(profileId, ready))) return { status: 'pending' }
     if (latest?.status !== 'pending' || this.now().getTime() - latest.createdAt.getTime() >= RoutineService.STALE_AFTER_MS) return { status: 'ready', version: ready }
-    return (await this.hiddenBySafety(profileId, ready)) ? { status: 'pending' } : { status: 'updating', version: ready }
+    return { status: 'updating', version: ready }
   }
 
   /** Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one. Starting again changes nothing. */
@@ -179,8 +183,14 @@ export class RoutineService {
       // The shelf first: if it refuses (a limit, an unknown product) no got-it version is left behind, and asking again does both.
       await this.shelf.add(found.product.id, clientIp)
     })
-    const steps = ready.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' ? { ...entry, gotIt: true } : entry))
-    await this.repository.append({ ...structuredClone(ready), id: this.newId(), status: 'ready', createdAt: this.now(), steps, reason: 'got-it', writerCalls: 0, servedAt: null })
+    // A build may have finished while the product was being added: the copy is of the routine in force now, and only if it still recommends this product.
+    // Otherwise the product is on the shelf already, and the next rebuild swaps it in.
+    const inForce = (await this.repository.current(profileId)) ?? ready
+    const holdsIt = (version: RoutineVersionRow) => version.steps.some((entry) => entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code)
+    if (!holdsIt(inForce)) throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
+    const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true } : entry))
+    const now = this.now()
+    await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
   }
 
@@ -263,6 +273,7 @@ export class RoutineService {
     const assemble = (answer: Routine): SplicedRoutine => (merge ? spliceFixed(merge, answer) : { steps: answer.steps.map((e) => ({ ...e, gotIt: false, fixedFrom: null })), tapers: RoutineService.stoppedOf(skeleton), expectation: answer.expectation })
 
     const at = this.now()
+    const today = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await routineFingerprint({
       goal: skeleton.goal,
@@ -279,6 +290,7 @@ export class RoutineService {
       expectation: null,
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
+      readyAt: null,
       startedOn: current?.startedOn ?? null,
       servedAt: null,
       model: null,
@@ -293,51 +305,76 @@ export class RoutineService {
       writerRetryDueAt: null,
       writerCalls: 0,
     }
-    const ready = (built: SplicedRoutine, over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({ ...base, id: this.newId(), steps: built.steps, tapers: built.tapers, expectation: built.expectation, ...over })
+    // A step-down that begins after Start (a new stop) begins the day of the rebuild.
+    const ready = (built: SplicedRoutine, over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
+      ...base,
+      id: this.newId(),
+      steps: built.steps,
+      tapers: RoutineService.datedFrom(built.tapers, base.startedOn, today),
+      expectation: built.expectation,
+      ...over,
+    })
 
     // Nothing is broken: the routine is kept as it is, and only a change to what it shows (or the cautions it was built under) is worth a version.
     if (merge && merge.writerSkeleton === null) {
-      const kept = { steps: merge.fixed, tapers: merge.carriedTapers, expectation: merge.expectation ?? expectationFor(skeleton.goal) }
+      const kept = { steps: merge.fixed, tapers: RoutineService.datedFrom(merge.carriedTapers, base.startedOn, today), expectation: merge.expectation ?? expectationFor(skeleton.goal) }
       if (RoutineService.sameAs(current!, kept) && stableJson(current!.cautions) === stableJson(skeleton.person.cautions)) {
+        // A retry that finds nothing to rewrite is done with: the version is not due another.
+        if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
       }
-      await this.repository.append(ready(kept, { writerRetryDueAt: current!.writerRetryDueAt }))
+      await this.appendReady(ready(kept, { writerRetryDueAt: reason === 'writer-retry' ? null : current!.writerRetryDueAt }))
       console.log({ outcome: 'routine-built', profileId, source: 'rules', writerCalls: 0 })
       return 'built'
     }
 
+    // What the writer is asked is also what the rules write from: a broken step is never given a product the person's country does not sell.
+    const asked = merge?.writerSkeleton ?? skeleton
     const since = new Date(at.getTime() - RoutineService.DAY_MS)
     if ((await this.repository.writerBuildsSince(profileId, since)) >= RoutineService.WRITER_BUILDS_PER_DAY) {
-      await this.repository.append(ready(assemble(rulesOnlyRoutine(checking)), { writerRetryDueAt: new Date(at.getTime() + RoutineService.DAY_MS) }))
+      await this.appendReady(ready(assemble(rulesOnlyRoutine(asked)), { writerRetryDueAt: new Date(at.getTime() + RoutineService.DAY_MS) }))
       console.log({ outcome: 'routine-built', profileId, source: 'rules', writerCalls: 0, limited: true })
       return 'built'
     }
 
     const pending: RoutineVersionRow = { ...base, id: this.newId(), status: 'pending', cautions: null, goal: null, routineFingerprint: null, catalogVersion: null, source: null }
     await this.repository.append(pending)
+    // Start may have landed after the routine in force was read: the pending version is then started too (as Start does for a pending version it finds).
+    const startedBefore = pending.startedOn === null ? (await this.repository.current(profileId))?.startedOn : null
+    if (startedBefore) await this.repository.markStarted(profileId, startedBefore)
 
-    const { written, calls } = await this.write(profileId, pending.id, merge?.writerSkeleton ?? skeleton, checking, assemble)
-    const built = written ?? assemble(rulesOnlyRoutine(checking))
-    const startedOn = await this.startedMeanwhile(profileId, pending)
+    const { written, calls } = await this.write(profileId, pending.id, asked, checking, assemble)
+    const built = written ?? assemble(rulesOnlyRoutine(asked))
+    const after = await this.afterWrite(profileId, pending, built.steps)
+    const day = pending.startedOn ? today : after.startedOn
     const done: CompletedRoutineBuild = {
-      steps: built.steps,
-      tapers: startedOn ? built.tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn ?? startedOn })) : built.tapers,
+      steps: after.steps,
+      tapers: RoutineService.datedFrom(built.tapers, day, day ?? today),
       expectation: built.expectation,
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
-      model: written ? this.writerIdentity.model : null,
-      promptHash: written ? this.writerIdentity.promptHash : null,
+      // The writer is named whenever it was called, even if the rules wrote the routine in the end.
+      model: calls > 0 ? this.writerIdentity.model : null,
+      promptHash: calls > 0 ? this.writerIdentity.promptHash : null,
       catalogVersion,
       routineFingerprint: routine,
       hintsShown: false,
       source: written ? 'writer' : 'rules',
       writerRetryDueAt: written ? null : new Date(at.getTime() + RoutineService.DAY_MS),
       writerCalls: calls,
+      readyAt: this.now(),
     }
     if (!(await this.repository.complete(pending.id, done))) console.error({ outcome: 'routine-complete-skipped', profileId, versionId: pending.id })
     console.log({ outcome: 'routine-built', profileId, versionId: pending.id, source: done.source, writerCalls: calls })
     return 'built'
+  }
+
+  /** Appends a version that needs no pending phase, ready now. If Start landed after the routine in force was read, the version is started too. */
+  private async appendReady(row: RoutineVersionRow): Promise<void> {
+    const startedOn = row.startedOn ?? (await this.repository.current(row.profileId))?.startedOn ?? null
+    const tapers = row.startedOn === null && startedOn !== null ? RoutineService.datedFrom(row.tapers, startedOn, startedOn) : row.tapers
+    await this.repository.append({ ...row, readyAt: this.now(), startedOn, tapers })
   }
 
   /**
@@ -369,11 +406,17 @@ export class RoutineService {
     return { written: null, calls: RoutineService.WRITER_TRIES }
   }
 
-  /** The day the routine was started while this build was under way (Start dates the pending version too), or null. */
-  private async startedMeanwhile(profileId: string, pending: RoutineVersionRow): Promise<Date | null> {
-    if (pending.startedOn !== null) return null
-    const latest = await this.repository.latest(profileId)
-    return latest?.id === pending.id ? latest.startedOn : null
+  /**
+   * What happened to the routine while the writer worked: the day it was started, if Start landed meanwhile (Start dates the pending version too), and the steps with
+   * the "I got it" marks of any version made meanwhile, so a mark tapped during the build is not lost to it.
+   */
+  private async afterWrite(profileId: string, pending: RoutineVersionRow, steps: StoredRoutineStep[]): Promise<{ startedOn: Date | null; steps: StoredRoutineStep[] }> {
+    const [latest, inForce] = await Promise.all([this.repository.latest(profileId), this.repository.current(profileId)])
+    const got = new Set((inForce?.steps ?? []).flatMap((entry) => (entry.gotIt && entry.product.kind === 'candidate' ? [`${entry.step}:${entry.product.code}`] : [])))
+    return {
+      startedOn: pending.startedOn === null && latest?.id === pending.id ? latest.startedOn : null,
+      steps: steps.map((entry) => (entry.product.kind === 'candidate' && got.has(`${entry.step}:${entry.product.code}`) ? { ...entry, gotIt: true } : entry)),
+    }
   }
 
   /** Reads what the skeleton is built from, as the profile's user. Null while the goal, the safety answers or the shopping country are missing. */
@@ -457,6 +500,11 @@ export class RoutineService {
   /** The routine in force as the merge reads it. A row written before versions stored their goal is taken to have the current one. */
   private static previousOf(row: RoutineVersionRow, goal: Goal) {
     return { id: row.id, goal: row.goal ?? goal, expectation: row.expectation ?? '', steps: row.steps, tapers: row.tapers }
+  }
+
+  /** The step-downs with the undated ones dated `day`, when the routine is started (`startedOn` set); before Start none has a date. */
+  private static datedFrom(tapers: StoredTaper[], startedOn: Date | null, day: Date): StoredTaper[] {
+    return startedOn === null ? tapers : tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn ?? day }))
   }
 
   private static stoppedOf(skeleton: RoutineSkeleton): StoredTaper[] {

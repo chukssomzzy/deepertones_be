@@ -24,7 +24,7 @@ export type StableMerge = {
   fixed: StoredRoutineStep[]
   /** The new skeleton with the carried candidates put back in their gaps: the real skeleton for every final gate check. */
   checking: RoutineSkeleton
-  /** What the writer is asked: `checking` with each fixed recommended step's gap narrowed to its one candidate. Null when no step is broken and the goal is unchanged. */
+  /** What the writer is asked: `checking` with each fixed recommended step's gap narrowed to its one candidate, and a broken step's gap holding only what the new skeleton offered. Null when no step is broken and the goal is unchanged. */
   writerSkeleton: RoutineSkeleton | null
   /** One per stopped shelf product of the new skeleton, in shelf order: the start date kept while the template is unchanged. */
   carriedTapers: StoredTaper[]
@@ -99,9 +99,13 @@ export const stableMerge = (previous: StablePrevious, skeleton: RoutineSkeleton,
   const fixedSteps = new Set(fixed.map((e) => e.step))
 
   const needsWriter = goalChanged || skeleton.steps.some((step) => !fixedSteps.has(step))
+  // A fixed step's gap is narrowed to its one product, which may be a carried one (sold elsewhere). A broken step is picked again from what the person's own country
+  // offers, so a carried candidate is left out of its gap: the writer, or the rules, must never re-pick a product not sold here.
   const narrowed = checking.gaps.map((gap): SkeletonGap => {
     const codes = fixed.flatMap((e) => (e.step === gap.step && e.product.kind === 'candidate' ? [e.product.code] : []))
-    return codes.length === 0 ? gap : { step: gap.step, candidates: gap.candidates.filter((c) => codes.includes(c.code)) }
+    if (codes.length > 0) return { step: gap.step, candidates: gap.candidates.filter((c) => codes.includes(c.code)) }
+    const own = new Set(skeleton.gaps.find((g) => g.step === gap.step)?.candidates.map((c) => c.code))
+    return { step: gap.step, candidates: gap.candidates.filter((c) => own.has(c.code)) }
   })
 
   return {
