@@ -22,6 +22,20 @@ const getShelf = defineRoute({
   responses: { 200: success(ShelfResponse, 'The shelf'), ...errorResponses(401) },
 })
 
+const getShelfEntry = defineRoute({
+  method: 'get',
+  path: '/shelf/{entryId}',
+  operationId: 'getShelfEntry',
+  tags: ['Shelf'],
+  summary: 'One product on the shelf',
+  description:
+    'Guests included. The entry exactly as `GET /api/v1/me/shelf` shows it: a `product` entry carries `product`, a `no-label` entry carries `noLabel`. ' +
+    'An entry that is unknown, removed, another profile\'s, or whose product can no longer be read is 404 `SHELF_ENTRY_NOT_FOUND`, and the first three are not told apart.',
+  security: bearer,
+  request: { params: EntryParams },
+  responses: { 200: success(ShelfEntryResponse, 'The entry'), ...errorResponses(400, 401, 404) },
+})
+
 const addShelfProduct = defineRoute({
   method: 'post',
   path: '/shelf',
@@ -90,6 +104,7 @@ shelfApp.openAPIRegistry.register('ProductSummary', ProductSummary)
 
 export const shelfRoutes = shelfApp
   .openapi(getShelf, async (c) => ok(c, toShelfResponse(await c.var.services.shelf.list()), 'Shelf'))
+  .openapi(getShelfEntry, async (c) => ok(c, toEntryResponse(await c.var.services.shelf.entry(c.req.valid('param').entryId)), 'Shelf entry'))
   .openapi(addShelfProductServed, async (c) => {
     const { productId } = readBody(await c.req.text(), AddShelfProductBody)
     const added = await c.var.services.shelf.add(productId, c.req.header('cf-connecting-ip') ?? FALLBACK_IP)
