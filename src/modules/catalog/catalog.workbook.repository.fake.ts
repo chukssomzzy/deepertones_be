@@ -144,6 +144,8 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
             ownCautions: [...row.ownCautions],
             evidenceUrls: [...row.evidenceUrls],
             ingredientsSourceUrl: row.ingredientsSourceUrl,
+            keyIngredient: row.keyIngredient,
+            strength: row.strength,
             origin: row.origin,
             priceMin: sold.priceMin,
             priceMax: sold.priceMax,

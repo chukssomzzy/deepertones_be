@@ -108,6 +108,8 @@ export const recommendedProducts = sqliteTable(
     category: text('category', { enum: CATEGORIES }).notNull(),
     ingredients: text('ingredients', { mode: 'json' }).$type<string[]>().notNull(),
     ingredientsSourceUrl: text('ingredients_source_url'),
+    keyIngredient: text('key_ingredient'),
+    strength: text('strength'),
     skinConcerns: text('skin_concerns', { mode: 'json' }).$type<ShownConcern[]>().notNull(),
     skinTypes: text('skin_types', { mode: 'json' }).$type<(SkinTypeLabel | 'all')[]>().notNull(),
     steps: text('steps', { mode: 'json' }).$type<RoutineStep[]>().notNull(),

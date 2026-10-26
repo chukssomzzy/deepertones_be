@@ -244,9 +244,12 @@ describe('buildSkeleton: what a candidate carries', () => {
     origin: 'brand-submitted',
     evidenceUrls: ['https://evidence.example/full/a', 'https://evidence.example/full/b'],
     ingredientsSourceUrl: 'https://ingredients.example/full',
+    // Shown to users by the routine stage, never to the writer: the skeleton below must not carry them, or what the eval measured would change.
+    keyIngredient: 'Niacinamide',
+    strength: '4%',
   })
 
-  it('maps a candidate to the fields the writer sees, with the evidence links and no outcome hint', async () => {
+  it('maps a candidate to the fields the writer sees, with the evidence links and no outcome hint, and without the key ingredient or strength', async () => {
     const snapshot = snapshotOf([offer('NG', full, { brand: 'Glow Co', name: 'Night Cream', form: 'cream' })])
 
     const { skeleton } = await buildSkeleton(caseOf(), snapshot, { hintsShown: false })
