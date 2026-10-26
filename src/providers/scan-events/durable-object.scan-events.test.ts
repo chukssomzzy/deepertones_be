@@ -14,6 +14,9 @@ const ITEM = { id: 'item-1', position: 0, state: 'matching', reason: null }
 const itemEvent = { type: 'item', item: ITEM } as unknown as ScanEvent
 const PHOTO = { id: 'photo-1', position: 0, state: 'rejected', skipped: { notBeauty: 1, unreadable: 0, overLimit: 0, dailyLimit: 0 } }
 const photoEvent = { type: 'photo', photo: PHOTO } as unknown as ScanEvent
+// A shelf verdict's stream is keyed `verdict:<profileId>` (spec #171, D3): the same Durable Object class, one per profile.
+const VERDICT = { status: 'ready', fit: 'not-ready', products: [], tapers: [] }
+const verdictEvent = { type: 'verdict', verdict: VERDICT } as unknown as ScanEvent
 const DONE: ScanEvent = { type: 'done' }
 
 const opened: SseReader[] = []
@@ -50,6 +53,17 @@ describe('DurableObjectScanEvents', () => {
     await new DurableObjectScanEvents(env.SCAN_STREAM).publish(scanId, photoEvent)
 
     expect((await stream.read(1)).frames).toEqual([`event: photo\ndata: ${JSON.stringify(PHOTO)}`])
+  })
+
+  it('delivers a published verdict event to a client watching that profile\'s verdict stream, as a verdict frame, and to no other profile\'s', async () => {
+    const profileId = crypto.randomUUID()
+    const mine = await watch(`verdict:${profileId}`)
+    const theirs = await watch(`verdict:${crypto.randomUUID()}`)
+
+    await new DurableObjectScanEvents(env.SCAN_STREAM).publish(`verdict:${profileId}`, verdictEvent)
+
+    expect((await mine.read(1)).frames).toEqual([`event: verdict\ndata: ${JSON.stringify(VERDICT)}`])
+    expect((await theirs.read(1, 200)).frames).toEqual([])
   })
 
   it('delivers done to a client watching that scan, and the stream ends', async () => {
