@@ -29,6 +29,7 @@ import { RecommendationService } from './modules/recommendations/recommendations
 import { D1OutcomeCountsRepository } from './modules/routines/routines.outcome-counts.repository'
 import { D1RoutinesRepository } from './modules/routines/routines.repository'
 import { RoutineService } from './modules/routines/routines.service'
+import { RoutineViewService } from './modules/routines/routines.viewer.service'
 import type { RoutineTrigger } from './modules/routines/routines.trigger'
 import { D1SafetyRepository } from './modules/safety/safety.repository'
 import { SafetyService } from './modules/safety/safety.service'
@@ -403,10 +404,27 @@ export const buildContainer = (env: CloudflareBindings) => {
       outcomeCounts: new D1OutcomeCountsRepository(db()),
       jobs: jobQueue(),
       enabled: env.ROUTINES_ENABLED === 'true',
+      // Lazy: the viewer reads this service, so wiring it here is deferred to the first announcement.
+      announce: async (profileId: string): Promise<void> => routineViewer().announce(profileId),
       now: () => new Date(),
       newId: () => crypto.randomUUID(),
     })
   })
+
+  const routineViewer = once(
+    () =>
+      new RoutineViewService({
+        routines: routines(),
+        goals: goals(),
+        workbook: catalogWorkbook(),
+        catalog: catalog(),
+        shelf: shelf(),
+        recommendations: recommendations(),
+        repository: new D1RoutinesRepository(db()),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        now: () => new Date(),
+      }),
+  )
 
   const auth = once(
     () =>
@@ -463,6 +481,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get routines() {
       return routines()
+    },
+    get routineViewer() {
+      return routineViewer()
     },
     get scans() {
       return scans()

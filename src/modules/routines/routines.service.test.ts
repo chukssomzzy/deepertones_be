@@ -20,7 +20,7 @@ import type { ProfilesService } from '../profiles/profiles.service'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
 import type { SavedVerdictProduct } from '../verdicts/verdicts.types'
 import { checkRoutine } from './routines.gates'
-import type { BuildRoutineMessage } from './routines.job-specs'
+import { buildRoutineSpec, type BuildRoutineMessage } from './routines.job-specs'
 import { routineFingerprint } from './routines.fingerprint'
 import { FakeOutcomeCountsRepository } from './routines.outcome-counts.repository.fake'
 import { hintsShown } from './routines.outcomes'
@@ -110,12 +110,12 @@ const safetyView = (choices: SafetyChoice[]): SafetyView => ({
 const candidate = (code: string, priceMin: number, frequency: Candidate['frequency']): Candidate => ({
   code,
   product: { id: `prod-${code}`, kind: 'named', brand: `Brand ${code}`, name: `Name ${code}`, variant: null, form: 'cream', category: 'skin', imageUrl: null },
+  keyIngredient: null,
+  strength: null,
   skinConcerns: ['hd_age_spot'],
   ingredients: ['Aqua', 'Niacinamide'],
   evidenceUrls: [`https://example.org/evidence/${code}`],
   ingredientsSourceUrl: `https://example.org/ingredients/${code}`,
-  keyIngredient: null,
-  strength: null,
   passed: ['country', 'step'],
   sharedWithReaction: [],
   origin: 'sourced',
@@ -251,6 +251,8 @@ let service: RoutineService
 /** How many times the writer was asked, failed asks included. The words of the n-th ask are tagged "Written n". */
 let attempts: number
 let ids: number
+/** The profile ids the service told the live stream about (PR 4b), in order. */
+let announces: string[]
 
 const setClock = (offsetMs: number) => {
   clock = at(offsetMs)
@@ -318,6 +320,7 @@ beforeEach(() => {
   verdictRevision = 1
   attempts = 0
   ids = 0
+  announces = []
   world = newWorld()
   // Amara's shelf: a cleanser the rules keep, and a cream with a steroid in it, which the rules stop (with the steroid step-down).
   addProduct('entry-a', CLEAN, { name: 'Calm Cleanser' })
@@ -376,6 +379,7 @@ beforeEach(() => {
     outcomeCounts,
     jobs,
     enabled: true,
+    announce: async (profileId: string) => void announces.push(profileId),
     now: () => clock,
     newId: () => `version-${++ids}`,
   }
@@ -1616,6 +1620,122 @@ describe('RoutineService.build: a profile that does not exist', () => {
 
     expect(log).toHaveBeenCalledWith({ outcome: 'routine-profile-missing', profileId: 'profile-nobody' })
     expect(await repository.latest('profile-nobody')).toBeNull()
+  })
+})
+
+// ---- PR 4b: "find one sold here" reaches the job, and the live stream is told ----
+//
+// request(profileId, reason, requestKey, options?: { exclude?: { step, code } }) carries the exclusion in the queued message, `run` hands it to `build`, and the
+// job message schema keeps it. The service is also given `announce: (profileId) => Promise<void>` (the viewer's, which publishes the routine's body on
+// `routine:<profileId>`; wired lazily in the container since the viewer reads the service): it is called when a build has put a pending version in place (the
+// routine is now `updating`) and again when that build is done. A failing announce never fails a build, and the log carries ids only.
+
+const EXCLUDE = { step: 'treat', code: 'SERUM-1' } as const
+
+describe('RoutineService.request: find one sold here', () => {
+  it('queues the exclusion with the message, and the job message schema keeps it', async () => {
+    await service.request(AMARA_PROFILE, 'sold-here', 'sold-here:version-1:treat', { exclude: EXCLUDE })
+
+    expect(queued()).toEqual([
+      { job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'sold-here', requestKey: 'sold-here:version-1:treat', requestedAt: T0.getTime(), waits: 0, exclude: EXCLUDE } },
+    ])
+    expect(buildRoutineSpec.schema.parse(queuedBody())).toEqual(queuedBody())
+  })
+
+  it('queues no exclusion with an ordinary request', async () => {
+    await request('shelf', 'routine-fp-2')
+
+    expect(queuedBody()).not.toHaveProperty('exclude')
+  })
+
+  it('is held off by a request already being worked on, the exclusion included', async () => {
+    await request('shelf', 'routine-fp-2')
+
+    await service.request(AMARA_PROFILE, 'sold-here', 'sold-here:version-1:treat', { exclude: EXCLUDE })
+
+    expect(queued()).toHaveLength(1)
+  })
+})
+
+describe('RoutineService.run: find one sold here', () => {
+  it('builds the routine again with that product out of its step, changing only that step', async () => {
+    const before = await started()
+    setClock(2 * DAY + HOUR)
+    await service.request(AMARA_PROFILE, 'sold-here', `sold-here:${before.id}:treat`, { exclude: EXCLUDE })
+
+    await run(queuedBody())
+
+    const row = await currentRow()
+    expect(row.reason).toBe('sold-here')
+    expect(shapeOf(row)).toEqual([FIRST_SHAPE[0], { step: 'treat', product: { kind: 'candidate', code: 'SERUM-2' }, frequency: 'alternate-days' }, FIRST_SHAPE[2], FIRST_SHAPE[3]])
+    expect([0, 2, 3].map((i) => row.steps[i])).toEqual([0, 2, 3].map((i) => ({ ...before.steps[i], fixedFrom: before.id })))
+  })
+
+  it('gives the claim back once it is done, as for any build', async () => {
+    const before = await started()
+    setClock(2 * DAY + HOUR)
+    await service.request(AMARA_PROFILE, 'sold-here', `sold-here:${before.id}:treat`, { exclude: EXCLUDE })
+    await run(queuedBody())
+    setClock(2 * DAY + 2 * HOUR)
+
+    await service.request(AMARA_PROFILE, 'sold-here', `sold-here:${before.id}:moisturise`, { exclude: { step: 'moisturise', code: 'MOIST-1' } })
+
+    expect(queued()).toHaveLength(2)
+  })
+})
+
+describe('RoutineService: telling the live stream', () => {
+  it('announces once when the build has put its pending version in place, before the writer is asked, and again when the build is done', async () => {
+    let announcedWhileWriting: string[] | null = null
+    writer.hook = async () => {
+      announcedWhileWriting ??= [...announces]
+    }
+
+    expect(await build('first')).toBe('built')
+
+    expect(announcedWhileWriting).toEqual([AMARA_PROFILE])
+    expect(announces).toEqual([AMARA_PROFILE, AMARA_PROFILE])
+  })
+
+  it('announces only the profile that was built', async () => {
+    await build('first')
+
+    expect(new Set(announces)).toEqual(new Set([AMARA_PROFILE]))
+  })
+
+  it('announces nothing when there is nothing to build from yet', async () => {
+    world.saved = null
+
+    expect(await build('first')).toBe('waiting')
+
+    expect(announces).toEqual([])
+  })
+
+  it('announces nothing when a rebuild after Start finds nothing to change', async () => {
+    await started()
+    announces.length = 0
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('unchanged')
+
+    expect(announces).toEqual([])
+  })
+
+  it('still builds, and logs the failure by profile id, when the announcement fails', async () => {
+    const spies = spyOnConsole()
+    let tried = 0
+    deps = { ...deps, announce: async () => { tried++; throw new Error('the stream is down') } }
+    service = new RoutineService(deps)
+
+    expect(await build('first')).toBe('built')
+
+    expect(tried).toBeGreaterThan(0)
+
+    expect((await currentRow()).status).toBe('ready')
+    const logged = loggedText(spies)
+    expect(logged).toContain(AMARA_PROFILE)
+    expect(logged).not.toContain('Calm Cleanser')
+    expect(logged).not.toContain('Karo Glow Cream')
   })
 })
 
