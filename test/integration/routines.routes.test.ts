@@ -401,10 +401,10 @@ describe.each(ENDPOINTS)('%s: who may ask, and the verdict being unavailable', (
   })
 
   it('answers 503 VERDICT_UNAVAILABLE to a signed-up account with a goal while no step-down template is approved, and queues nothing', async () => {
-    routinesEnabled = true
     const guest = await newGuest()
     await guest.signUp()
     await putGoal(guest)
+    routinesEnabled = true
 
     const res = await call(guest)
 
@@ -820,8 +820,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
     })
 
     it('answers 409 ROUTINE_NOT_READY before there is a routine, and queues nothing', async () => {
-      routinesEnabled = true
       const guest = await account()
+      routinesEnabled = true
 
       const res = await findSoldHere('treat', guest)
 
@@ -835,8 +835,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       ['a product of her own', 'cleanse'],
       ['nothing to recommend', 'protect'],
     ])('answers 409 STEP_NOT_RECOMMENDED for a step with %s, and queues nothing', async (_why, step) => {
-      routinesEnabled = true
       const { guest } = await withRoutine()
+      routinesEnabled = true
 
       const res = await findSoldHere(step, guest)
 
@@ -846,8 +846,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
     })
 
     it('answers 202 with the routine as updating, and queues one build for the step without that product, none in the request itself', async () => {
-      routinesEnabled = true
       const { guest, version } = await withRoutine()
+      routinesEnabled = true
 
       const res = await findSoldHere('treat', guest)
 
@@ -871,8 +871,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
     })
 
     it('queues no second build when asked again for the same step of the same routine', async () => {
-      routinesEnabled = true
       const { guest } = await withRoutine()
+      routinesEnabled = true
       await findSoldHere('treat', guest)
 
       const again = await findSoldHere('treat', guest)
@@ -897,7 +897,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const { guest } = await withRoutine()
       const { res, stream } = await watch(guest)
 
-      const { frames, ended } = await stream.read(2)
+      const { frames, ended } = await stream.read(3)
 
       expect(res.headers.get('Content-Type')).toContain('text/event-stream')
       expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['snapshot', 'done'])

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { ProductSummary } from '../catalog/catalog.service'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
@@ -347,6 +347,24 @@ describe('toRoutineResponse: the step-downs and their dates', () => {
 
     expect(body.tapers.map((t: any) => t.entryId)).toEqual(['entry-c', 'entry-b'])
     expect(body.tapers[0]).toMatchObject({ brand: null, name: 'A product with no label' })
+  })
+
+  it('still shows a step-down whose product has left the shelf, under its stored entry id and a neutral name, with the template\'s steps and dates', () => {
+    const body = wire(toRoutineResponse(input({ own, version: version({ startedOn: at(0), tapers: [stopped(at(0), 'entry-gone')] }) })))
+
+    expect(body.tapers).toHaveLength(1)
+    expect(body.tapers[0]).toMatchObject({ entryId: 'entry-gone', brand: null, name: "A product you're stepping down", code: 'TPR-STEROID-1' })
+    expect(body.tapers[0].steps[0]).toMatchObject({ fromWeek: 1, toWeek: 2, frequency: 'alternate-days', fromDate: dayOf(0), toDate: dayOf(13) })
+  })
+
+  it('drops a step-down whose template cannot be found, and logs the profile and the template id', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const body = wire(toRoutineResponse(input({ own, version: version({ tapers: [stopped(null, 'entry-b', 'TPR-UNKNOWN'), stopped(null, 'entry-c')] }) })))
+
+    expect(body.tapers.map((t: any) => t.entryId)).toEqual(['entry-c'])
+    expect(error).toHaveBeenCalledWith({ outcome: 'routine-taper-template-missing', profileId: 'profile-amara', templateId: 'TPR-UNKNOWN' })
+    error.mockRestore()
   })
 })
 

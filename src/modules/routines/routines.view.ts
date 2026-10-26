@@ -29,6 +29,9 @@ export type RoutineViewInput = {
   tapers: ReadonlyMap<string, TaperRow>
 }
 
+/** What a step-down names when its product has left the shelf since the version was built: the plan is still the person's, and the schedule is what matters. */
+const GONE_PRODUCT_NAME = "A product you're stepping down"
+
 const DAY_MS = 24 * 60 * 60 * 1000
 const WEEK_DAYS = 7
 
@@ -87,9 +90,13 @@ const productOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewI
 const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
   input.version.tapers.flatMap((stopped) => {
     const template = input.tapers.get(stopped.templateId)
-    const own = input.own.get(stopped.shelfProductId)
-    // A stopped product taken off the shelf since, or a template the workbook no longer holds, has nothing to show.
-    if (!template || !own) return []
+    // A template the workbook no longer holds has no schedule to show: the step-down is dropped, and logged so it is noticed.
+    if (!template) {
+      console.error({ outcome: 'routine-taper-template-missing', profileId: input.version.profileId, templateId: stopped.templateId })
+      return []
+    }
+    // A stopped product taken off the shelf since is still stepped down, so it stays, under a neutral name; hiding it would hide a schedule the person is on.
+    const own = input.own.get(stopped.shelfProductId) ?? { brand: null, name: GONE_PRODUCT_NAME }
     // A step-down begun after Start begins the day of its rebuild, so its weeks count from its own day.
     const began = stopped.startedOn === null ? null : utcDay(stopped.startedOn)
     return [
