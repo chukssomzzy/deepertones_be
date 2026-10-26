@@ -1,0 +1,1 @@
+ALTER TABLE `routine_versions` ADD `not_in_routine` text;

@@ -6,7 +6,7 @@ import { stableJson } from '../../lib/stable-json'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { RoutineRetry, RoutineWriter } from '../../providers/routine-writing/routine-writer.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
-import { ROUTINE_STEPS, type RoutineStep } from '../catalog/catalog.vocabulary'
+import { ROUTINE_STEPS, type ProductForm, type RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
 import type { FaceScanService } from '../face-scans/face-scans.service'
 import type { GoalsService } from '../goals/goals.service'
@@ -18,7 +18,7 @@ import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
-import { expectationFor } from './routines.copy'
+import { expectationFor, titleFor } from './routines.copy'
 import { checkRoutine } from './routines.gates'
 import { routineFingerprint } from './routines.fingerprint'
 import { applyOutcomeHints } from './routines.hints'
@@ -30,7 +30,7 @@ import { rulesOnlyRoutine } from './routines.rules-only'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
 import { assembleSkeleton, candidateOf, cautionsOf, sunscreenKept } from './routines.skeleton'
 import { asRoutine, spliceFixed, stableMerge, type SplicedRoutine, type StableCarry } from './routines.stable'
-import type { ShelfCounts } from './routines.table'
+import type { NotInRoutineItem, ShelfCounts } from './routines.table'
 import type { CautionState, GateFailure, Routine, RoutineSkeleton, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
 
 export type RoutineServiceDeps = {
@@ -78,6 +78,8 @@ type Facts = {
   /** Every step's candidates in the shopping country, as the recommendation rules gave them (the excluded code already out). */
   offered: Record<RoutineStep, Candidate[]>
   entries: ShelfActiveEntry[]
+  /** For each shelf product the skeleton is built from (by entry id): the form of its product and the verdict item's one-line reason, for the "Not in your routine" list. */
+  noted: ReadonlyMap<string, { form: ProductForm | null; reason: string }>
   country: string
 }
 
@@ -433,6 +435,7 @@ export class RoutineService {
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
     const shelfCounts = RoutineService.countsOf(skeleton.shelf)
+    const notInRoutine = RoutineService.leftOutOf(skeleton.shelf, facts.noted)
     const base: Omit<RoutineVersionRow, 'id'> = {
       profileId,
       status: 'ready',
@@ -443,6 +446,7 @@ export class RoutineService {
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
       shelfCounts,
+      notInRoutine,
       readyAt: null,
       startedOn: current?.startedOn ?? null,
       servedAt: null,
@@ -475,10 +479,11 @@ export class RoutineService {
         // A retry that finds nothing to rewrite is done with: the version is not due another.
         if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
         // The inputs changed (or the stale read would ask again on every read) but the routine did not: it now stands for the inputs it was just checked against.
-        // The counts go first and the fingerprint last: if the second write fails the fingerprint still differs, so the next attempt writes both again. A routine built
-        // before the column has no counts; with the fingerprint equal, the shelf as it stands is the shelf the routine was built from, so they are filled in too.
+        // The counts and the list go first and the fingerprint last: if a later write fails the fingerprint still differs, so the next attempt writes them all again. A routine
+        // built before the columns has no counts or list; with the fingerprint equal, the shelf as it stands is the shelf the routine was built from, so they are filled in too.
         const moved = current!.routineFingerprint !== routine
         if (moved || current!.shelfCounts === null) await this.repository.setShelfCounts(current!.id, shelfCounts)
+        if (moved || current!.notInRoutine === null) await this.repository.setNotInRoutine(current!.id, notInRoutine)
         if (moved) await this.repository.setRoutineFingerprint(current!.id, routine)
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
@@ -497,7 +502,7 @@ export class RoutineService {
       return 'built'
     }
 
-    const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, shelfCounts: null, routineFingerprint: null, catalogVersion: null, source: null }
+    const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, shelfCounts: null, notInRoutine: null, routineFingerprint: null, catalogVersion: null, source: null }
     await this.repository.append(pending)
     await this.tell(profileId)
     // Start may have landed after the routine in force was read: the pending version is then started too (as Start does for a pending version it finds).
@@ -515,6 +520,7 @@ export class RoutineService {
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
       shelfCounts,
+      notInRoutine,
       // The writer is named whenever it was called, even if the rules wrote the routine in the end.
       model: calls > 0 ? this.writerIdentity.model : null,
       promptHash: calls > 0 ? this.writerIdentity.promptHash : null,
@@ -607,7 +613,7 @@ export class RoutineService {
       throw error
     }
 
-    const { entries, shelf } = await this.shelfOf(profileId, saved)
+    const { entries, shelf, noted } = await this.shelfOf(profileId, saved)
     const seen = await this.faceScans.seenFor(profileId)
     const skeleton = assembleSkeleton({
       goal,
@@ -620,23 +626,25 @@ export class RoutineService {
       candidates: offered,
       hintsShown: false,
     })
-    return { profileId, skeleton, offered, entries, country: shopping.country }
+    return { profileId, skeleton, offered, entries, noted, country: shopping.country }
   }
 
   /** The active shelf entries, and the ones the skeleton is built from: those the verdict decided on and whose product can be found. */
-  private async shelfOf(profileId: string, saved: SavedVerdictView): Promise<{ entries: ShelfActiveEntry[]; shelf: SkeletonShelfProduct[] }> {
+  private async shelfOf(profileId: string, saved: SavedVerdictView): Promise<{ entries: ShelfActiveEntry[]; shelf: SkeletonShelfProduct[]; noted: Facts['noted'] }> {
     const entries = await this.shelf.activeEntriesFor(profileId)
     const shelfFacts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
     const decided = new Map(saved.products.map((product) => [product.entryId, product]))
+    const noted = new Map<string, { form: ProductForm | null; reason: string }>()
     // An entry the verdict has no decision for, or whose product cannot be found, is left out: there is nothing to build it from.
     const shelf = entries.flatMap((entry): SkeletonShelfProduct[] => {
       const verdict = decided.get(entry.id)
       if (!verdict) return []
       const named = entry.kind === 'no-label' ? { brand: null, name: NO_LABEL_NAME, ingredients: [] } : shelfFacts.get(entry.formulationId)
       if (!named) return []
+      noted.set(entry.id, { form: 'form' in named ? named.form : null, reason: verdict.reason })
       return [{ id: entry.id, brand: named.brand, name: named.name, ingredients: [...named.ingredients], step: verdict.step, verdict: verdict.verdict, sourceUrls: [...verdict.sourceUrls] }]
     })
-    return { entries, shelf }
+    return { entries, shelf, noted }
   }
 
   /** The one fingerprint of a routine's inputs, for the build to record and the stale read to compare: `shelf` is the skeleton's own (a reduced sunscreen already kept). */
@@ -713,6 +721,16 @@ export class RoutineService {
     const counts: ShelfCounts = { keep: 0, reduce: 0, drop: 0, stop: 0 }
     for (const { verdict } of shelf) counts[verdict.kind]++
     return counts
+  }
+
+  /** The shelf products the build leaves out, in the shelf's order: a stopped one is stepping down, a dropped one is left out. Titles and reasons are fixed here, from the form and the verdict item's own words. */
+  private static leftOutOf(shelf: readonly SkeletonShelfProduct[], noted: Facts['noted']): NotInRoutineItem[] {
+    return shelf.flatMap((p): NotInRoutineItem[] => {
+      if (p.verdict.kind !== 'stop' && p.verdict.kind !== 'drop') return []
+      // Every product of the skeleton's shelf came through `shelfOf`, which noted it.
+      const { form, reason } = noted.get(p.id)!
+      return [{ entryId: p.id, title: titleFor({ step: p.step, form }), status: p.verdict.kind === 'stop' ? 'stepping-down' : 'left-out', reason }]
+    })
   }
 
   private static stoppedOf(skeleton: RoutineSkeleton): StoredTaper[] {

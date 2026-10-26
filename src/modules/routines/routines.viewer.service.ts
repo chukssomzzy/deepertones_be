@@ -3,7 +3,7 @@ import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, UnavailableError } from '../../lib/errors'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
-import type { RoutineStep } from '../catalog/catalog.vocabulary'
+import type { ProductForm, RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
 import type { GoalsService } from '../goals/goals.service'
 import type { RecommendationService } from '../recommendations/recommendations.service'
@@ -181,12 +181,12 @@ export class RoutineViewerService {
       this.workbook.tapersByCode([...new Set(version.tapers.map(({ templateId }) => templateId))]),
     ])
     const facts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
-    const own = new Map<string, { brand: string | null; name: string; formulationId?: string }>()
+    const own = new Map<string, { brand: string | null; name: string; formulationId?: string; form?: ProductForm | null }>()
     for (const entry of entries) {
       if (entry.kind === 'no-label') own.set(entry.id, { brand: null, name: NO_LABEL_NAME })
       else {
         const named = facts.get(entry.formulationId)
-        if (named) own.set(entry.id, { brand: named.brand, name: named.name, formulationId: entry.formulationId })
+        if (named) own.set(entry.id, { brand: named.brand, name: named.name, formulationId: entry.formulationId, form: named.form })
       }
     }
     const summaries = await this.catalog.productSummaries([...recommended.values()].flatMap((row) => (row.formulationId ? [row.formulationId] : [])))

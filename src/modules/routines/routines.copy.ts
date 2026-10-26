@@ -1,4 +1,4 @@
-import type { RoutineStep } from '../catalog/catalog.vocabulary'
+import type { Frequency, ProductForm, RoutineStep } from '../catalog/catalog.vocabulary'
 import { answerFor } from '../goals/goals.answers'
 import type { Goal } from '../goals/goals.vocabulary'
 import { FORBIDDEN_WORDING } from './routines.wording'
@@ -39,6 +39,44 @@ const REASONS: Record<RoutineStep, Record<ReasonKind, string>> = {
 }
 
 export const reasonFor = (step: RoutineStep, kind: ReasonKind): string => REASONS[step][kind]
+
+const WHEN: Record<Frequency, string> = {
+  am: 'Every day',
+  pm: 'Every day',
+  'am-pm': 'Every day',
+  'alternate-days': '3 evenings a week',
+  weekly: 'Once a week',
+  'as-needed': 'When you need it',
+}
+
+/** The "when" label of a routine card. */
+export const whenFor = (frequency: Frequency): string => WHEN[frequency]
+
+// The forms that name a treatment better than "Treatment" does. A cleanser takes the form before its noun for its own list, and is plain "Cleanser" for the rest.
+const TREAT_FORMS: readonly ProductForm[] = ['cream', 'lotion', 'gel', 'serum', 'oil', 'balm']
+const CLEANSER_FORMS: readonly ProductForm[] = ['gel', 'cream', 'lotion', 'oil', 'balm', 'bar']
+
+const capitalised = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1)
+
+/**
+ * The plain name of a product on the routine screen, built by rules and never by the AI, with a capital and no full stop. The step's noun ("Cleanser", "Treatment",
+ * "Moisturiser", "Sunscreen") unless the form names the product better: a sunscreen is always "Sunscreen"; a treatment is "Serum", "Cream" and so on; a cleanser is
+ * "Gel cleanser" and so on; a moisturiser is "Moisturiser" whatever its form, except a gel. A key ingredient goes in front of the noun ("Niacinamide serum",
+ * "Salicylic acid gel cleanser", "Shea butter moisturiser"). A product with no step is its form ("Cream"), or "Product" when that is not known either.
+ */
+export const titleFor = ({ step, form, keyIngredient }: { step: RoutineStep | null; form: ProductForm | null; keyIngredient?: string | null }): string => {
+  const noun = ((): string => {
+    if (step === null) return form === null ? 'Product' : capitalised(form)
+    if (step === 'protect') return 'Sunscreen'
+    if (step === 'moisturise') return form === 'gel' ? 'Gel moisturiser' : 'Moisturiser'
+    if (step === 'treat') return form !== null && TREAT_FORMS.includes(form) ? capitalised(form) : 'Treatment'
+    return form !== null && CLEANSER_FORMS.includes(form) ? `${capitalised(form)} cleanser` : 'Cleanser'
+  })()
+  const ingredient = keyIngredient?.trim()
+  if (!ingredient) return noun
+  // A moisturiser with a key ingredient is "{ingredient} moisturiser" whatever its form: "Shea butter moisturiser", not "Shea butter gel moisturiser".
+  return `${capitalised(ingredient)} ${step === 'moisturise' ? 'moisturiser' : noun.toLowerCase()}`
+}
 
 /** What to expect and when: the goal's own answer, so the routine and the goal screen never say different things. */
 export const expectationFor = (goal: Goal): string => answerFor(goal, false).howLong

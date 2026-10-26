@@ -1574,12 +1574,29 @@
             "type": "string",
             "description": "What to expect and when, in plain words."
           },
-          "steps": {
+          "morning": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RoutineStep"
+              "$ref": "#/components/schemas/RoutineEntry"
             },
-            "description": "In routine order."
+            "description": "The morning list, in routine order (cleanse, treat, moisturise, protect). The sunscreen is only ever here."
+          },
+          "evening": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineEntry"
+            },
+            "description": "The evening list, in routine order. Anything used less than daily (every other day, weekly, as needed) is here."
+          },
+          "notInRoutine": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RoutineNotInRoutine"
+            },
+            "description": "The shelf products the routine was built without, in the shelf's order: stopped ones (`stepping-down`) and dropped ones (`left-out`). Products used less often stay in the lists. Fixed when the routine was built. Null for a routine built before the list was kept (unknown, not none); it gains one at its next rebuild."
           },
           "tapers": {
             "type": "array",
@@ -1594,7 +1611,9 @@
           "summary",
           "startedOn",
           "expectation",
-          "steps",
+          "morning",
+          "evening",
+          "notInRoutine",
           "tapers"
         ]
       },
@@ -1685,7 +1704,7 @@
         ],
         "description": "Null for a routine built before summaries were kept; it gains one at its next rebuild."
       },
-      "RoutineStep": {
+      "RoutineEntry": {
         "type": "object",
         "properties": {
           "step": {
@@ -1697,16 +1716,13 @@
               "protect"
             ]
           },
-          "frequency": {
+          "title": {
             "type": "string",
-            "enum": [
-              "am",
-              "pm",
-              "am-pm",
-              "alternate-days",
-              "weekly",
-              "as-needed"
-            ]
+            "description": "The product in plain words (\"Gel cleanser\", \"Niacinamide serum\", \"Sunscreen\"): a capital, no full stop."
+          },
+          "when": {
+            "type": "string",
+            "description": "How often, in words for the card: \"Every day\", \"3 evenings a week\", \"Once a week\" or \"When you need it\"."
           },
           "reason": {
             "type": "string",
@@ -1740,11 +1756,13 @@
         },
         "required": [
           "step",
-          "frequency",
+          "title",
+          "when",
           "reason",
           "changed",
           "product"
-        ]
+        ],
+        "description": "One card of the Morning or Evening list. A step used morning and evening is the same entry in both lists."
       },
       "RoutineOwnProduct": {
         "type": "object",
@@ -1900,6 +1918,37 @@
         ],
         "description": "\"Use what you have\": nothing to recommend for this step."
       },
+      "RoutineNotInRoutine": {
+        "type": "object",
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "description": "The shelf entry: its `id` from `GET /api/v1/me/shelf`. It may have left the shelf since the routine was built."
+          },
+          "title": {
+            "type": "string",
+            "description": "The product in plain words, as the routine titles one."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "stepping-down",
+              "left-out"
+            ],
+            "description": "`stepping-down`: being stopped step by step (see `tapers`). `left-out`: not part of the routine."
+          },
+          "reason": {
+            "type": "string",
+            "description": "The verdict's own one-line reason for the product, as it was when the routine was built."
+          }
+        },
+        "required": [
+          "entryId",
+          "title",
+          "status",
+          "reason"
+        ]
+      },
       "RoutineTaper": {
         "type": "object",
         "properties": {
@@ -2010,12 +2059,29 @@
             "type": "string",
             "description": "What to expect and when, in plain words."
           },
-          "steps": {
+          "morning": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/RoutineStep"
+              "$ref": "#/components/schemas/RoutineEntry"
             },
-            "description": "In routine order."
+            "description": "The morning list, in routine order (cleanse, treat, moisturise, protect). The sunscreen is only ever here."
+          },
+          "evening": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineEntry"
+            },
+            "description": "The evening list, in routine order. Anything used less than daily (every other day, weekly, as needed) is here."
+          },
+          "notInRoutine": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/RoutineNotInRoutine"
+            },
+            "description": "The shelf products the routine was built without, in the shelf's order: stopped ones (`stepping-down`) and dropped ones (`left-out`). Products used less often stay in the lists. Fixed when the routine was built. Null for a routine built before the list was kept (unknown, not none); it gains one at its next rebuild."
           },
           "tapers": {
             "type": "array",
@@ -2030,7 +2096,9 @@
           "summary",
           "startedOn",
           "expectation",
-          "steps",
+          "morning",
+          "evening",
+          "notInRoutine",
           "tapers"
         ]
       },
@@ -6152,8 +6220,8 @@
         "tags": [
           "Routine"
         ],
-        "summary": "The routine: steps in order, with a dated step-down for each product being stopped",
-        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. The routine is built in the background, never in this request. `{ status: 'pending' }`: nothing to show yet (a build is on its way, which this ask requests when none is fresh), or the routine no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force; `updating` is the same body while a newer build is under way. A step's `product` is `own` (a product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` (\"use what you have\"). A recommended product the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.",
+        "summary": "The routine as Morning and Evening lists, what is not in it, and a dated step-down for each product being stopped",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. The routine is built in the background, never in this request. `{ status: 'pending' }`: nothing to show yet (a build is on its way, which this ask requests when none is fresh), or the routine no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force, as `morning` and `evening` lists of entries (a step used morning and evening is in both) and `notInRoutine`; `updating` is the same body while a newer build is under way. An entry's `product` is `own` (a product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` (\"use what you have\"). A recommended product the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.",
         "security": [
           {
             "bearerAuth": []

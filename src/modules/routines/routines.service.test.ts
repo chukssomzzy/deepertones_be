@@ -51,6 +51,14 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 // The counts are the version's own: a copy ("I got it") carries them unchanged, a rebuild counts the shelf it was built from, and a rebuild that finds nothing
 // to change appends nothing and so leaves them. And Start makes TOMORROW (the next UTC midnight) day 1, a step-down never beginning before day 1.
 //
+// PR 6 (the "Your routine" screen): every version a build writes also records what the routine was built without, `notInRoutine: { entryId, title, status, reason }[]`,
+// frozen at build. One item for each product of the skeleton's shelf (the products the build used, in the shelf's order, not the verdict's) whose verdict is `stop`
+// (status 'stepping-down') or `drop` ('left-out'), with `reason` the verdict item's own one-line reason (SavedVerdictProduct.reason, which the skeleton does not carry:
+// the service reads it from the saved verdict) and `title` from the title rule (routines.view.test.ts) using the product's form (shelfFacts) and the verdict's step.
+// It is stored, carried and refreshed exactly as `shelfCounts` is: null while pending, [] for none, carried by the "I got it" copy, rewritten by a build that writes a
+// version, refreshed (before the fingerprint) by a rebuild that finds nothing to change when the inputs moved or the version has none, and left alone otherwise.
+// Assumed repository method: setNotInRoutine(id, items), the sibling of setShelfCounts.
+//
 // PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
 //   request(profileId, reason, requestKey): Promise<boolean>   (whether a build was queued) never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
 //       repository.claim(profileId, requestKey, now, now - a stale cut-off) and, when it wins, enqueues the job `build-routine` with
@@ -505,7 +513,7 @@ describe('RoutineService.build: the first build', () => {
 
     await build('first')
 
-    expect(during).toMatchObject({ status: 'pending', id: 'version-1', reason: 'first', steps: [], tapers: [], expectation: null, source: null, shelfCounts: null, verdictFingerprint: 'verdict-fp-1' })
+    expect(during).toMatchObject({ status: 'pending', id: 'version-1', reason: 'first', steps: [], tapers: [], expectation: null, source: null, shelfCounts: null, notInRoutine: null, verdictFingerprint: 'verdict-fp-1' })
     expect(viewDuring).toEqual({ status: 'pending' })
     expect((await latestRow()).id).toBe('version-1')
     expect(ids).toBe(1)
@@ -750,6 +758,245 @@ describe('RoutineService.build: how the shelf was sorted (the plan summary count
     await gotIt('treat')
 
     expect(await currentRow()).toMatchObject({ reason: 'got-it', shelfCounts: FIRST_COUNTS })
+  })
+})
+
+describe('RoutineService.build: what is left out of the routine (the "Not in your routine" list)', () => {
+  // Amara's shelf: a cleanser the rules keep, and a steroid cream (a cream, treat step) they stop. The default reason of a verdict product is 'A test reason.'.
+  const STEROID_REASON = 'It has a steroid in it, so we stop it slowly.'
+  const STOPPED = { entryId: 'entry-b', title: 'Cream', status: 'stepping-down' as const, reason: 'A test reason.' }
+
+  /** More products on the shelf, each with the verdict the rules gave it and the reason the verdict screen shows. */
+  const shelve = (...products: [id: string, verdict: ShelfVerdict, step: RoutineStep | null, reason: string, facts?: Partial<ShelfFacts>][]) => {
+    for (const [id, , , , facts] of products) addProduct(id, CLEAN, facts)
+    saveVerdict([...productsOfVerdict(), ...products.map(([id, verdict, step, reason]) => verdictProduct(id, verdict, step, { reason }))])
+  }
+  /** The verdict saved again, the reason of one product changed. */
+  const rewordVerdict = (entryId: string, reason: string) => saveVerdict(productsOfVerdict().map((p) => (p.entryId === entryId ? { ...p, reason } : p)))
+  const listOf = async () => (await latestRow()).notInRoutine
+
+  it('records the steroid cream, which the rules stop, as stepping down with the verdict\'s own reason and a plain title, and leaves the kept cleanser out', async () => {
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('takes each reason from the verdict item of that product, not from the routine\'s words', async () => {
+    saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, reason: STEROID_REASON } : p)))
+
+    await build('first')
+
+    expect(await listOf()).toEqual([{ ...STOPPED, reason: STEROID_REASON }])
+    expect((await latestRow()).steps.map((s) => s.reason).join(' ')).not.toContain(STEROID_REASON)
+  })
+
+  it('lists a stopped product as stepping-down and a dropped one as left-out, titled by form and step, in the order of the shelf and not of the verdict', async () => {
+    shelve(
+      ['entry-c', { kind: 'drop' }, 'cleanse', 'It does the same job as your cleanser.', { form: 'gel' }],
+      ['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.', { form: 'serum' }],
+    )
+    // The verdict names them in the opposite order to the shelf.
+    saveVerdict([...productsOfVerdict()].reverse())
+
+    await build('first')
+
+    expect(await listOf()).toEqual([
+      STOPPED,
+      { entryId: 'entry-c', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+      { entryId: 'entry-d', title: 'Serum', status: 'left-out', reason: 'It holds back the goal you chose.' },
+    ])
+  })
+
+  it('lists a dropped product that fills no step, and titles one with no label by its step', async () => {
+    world.entries.push({ id: 'entry-nl', kind: 'no-label', addedAt: at(10 * MINUTE), itemId: 'item-nl' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-nl', { kind: 'drop' }, 'treat', { reason: 'We could not tell what is in it.' })])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED, { entryId: 'entry-nl', title: 'Treatment', status: 'left-out', reason: 'We could not tell what is in it.' }])
+  })
+
+  it('keeps reduced products out of the list (they stay in the routine), a reduced sunscreen too, and kept spares', async () => {
+    shelve(
+      ['entry-m', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'moisturise', 'Better used less often.'],
+      ['entry-spf', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'protect', 'Better used less often.'],
+      ['entry-k', { kind: 'keep' }, null, 'It suits you.'],
+    )
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('leaves out a verdict entry whose product is no longer on the shelf, and one whose product cannot be found: the routine was not built from them', async () => {
+    addProduct('entry-lost', CLEAN)
+    world.facts.delete('form-entry-lost')
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-lost', { kind: 'drop' }, null), verdictProduct('entry-ghost', { kind: 'drop' }, null)])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('records an empty list, not null, when nothing was left out', async () => {
+    world.entries = []
+    saveVerdict([])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([])
+  })
+
+  it('has none recorded (null) while the version is pending, and the very version it is filled in to has the list', async () => {
+    let during: Row | null = null
+    writer.hook = async () => {
+      during = await repository.latest(AMARA_PROFILE)
+    }
+
+    await build('first')
+
+    expect(during).toMatchObject({ status: 'pending', notInRoutine: null })
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('records the same list when the rules wrote the routine because the writer failed three times', async () => {
+    script(throws(), throws(), throws())
+
+    await build('first')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', notInRoutine: [STOPPED] })
+  })
+
+  it('records the same list when the rules wrote the routine because the day\'s writer limit was spent', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    setClock(10 * MINUTE)
+
+    await build('shelf')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0, notInRoutine: [STOPPED] })
+  })
+
+  it('lists the shelf as it is when the build is made, with the verdict\'s words of that time, while the routine is not started yet', async () => {
+    await build('first')
+    shelve(['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(HOUR)
+
+    await build('shelf')
+
+    expect(await listOf()).toEqual([{ ...STOPPED, reason: STEROID_REASON }, { entryId: 'entry-d', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+  })
+
+  it('lists it again in a rebuild after Start that changes the routine: the cleanser gone, and what the verdict now says about the cream', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect((await currentRow()).notInRoutine).toEqual([{ ...STOPPED, reason: STEROID_REASON }])
+  })
+
+  it('lists it again in a rebuild after Start that only keeps the routine under new cautions: it is written from the shelf it was built from, not copied', async () => {
+    await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    setClock(3 * DAY)
+
+    expect(await build('safety')).toBe('built')
+
+    expect((await currentRow()).notInRoutine).toEqual([STOPPED, { entryId: 'entry-c', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+  })
+
+  it('keeps the words of the build when the verdict is reworded and nothing else moved: the rebuild finds nothing to change and writes nothing', async () => {
+    const before = await started()
+    rewordVerdict('entry-b', STEROID_REASON)
+    const setList = vi.spyOn(repository, 'setNotInRoutine')
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(setList).not.toHaveBeenCalled()
+    expect(await currentRow()).toEqual(before)
+    expect((await currentRow()).notInRoutine).toEqual([STOPPED])
+  })
+
+  it('refreshes the list with the counts on a rebuild that finds nothing to change but whose inputs moved: the shelf as it sorts now, in the verdict\'s words now', async () => {
+    const before = await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(3 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    const now = await currentRow()
+    expect(now.id).toBe(before.id)
+    expect(now.notInRoutine).toEqual([{ ...STOPPED, reason: STEROID_REASON }, { entryId: 'entry-c', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+    expect(now.shelfCounts).toEqual({ keep: 1, reduce: 0, drop: 1, stop: 1 })
+  })
+
+  it('gives a routine built before the column its list on an unchanged rebuild, though its counts and fingerprint are the build\'s already', async () => {
+    const before = await started()
+    await repository.append({ ...structuredClone(before), id: 'version-old', notInRoutine: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+    expect((await currentRow()).notInRoutine).toBeNull()
+    const setFingerprint = vi.spyOn(repository, 'setRoutineFingerprint')
+    setClock(4 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ id: 'version-old', notInRoutine: [STOPPED], routineFingerprint: before.routineFingerprint })
+    expect(setFingerprint).not.toHaveBeenCalled()
+  })
+
+  it('writes the list before the fingerprint, so a failure between them leaves the fingerprint unrecorded and the next attempt records both', async () => {
+    const before = await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    setClock(3 * DAY)
+    vi.spyOn(repository, 'setNotInRoutine').mockRejectedValueOnce(new Error('d1 down'))
+
+    await expect(build('verdict')).rejects.toThrow('d1 down')
+
+    expect((await currentRow()).routineFingerprint).toBe(before.routineFingerprint)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect((await currentRow()).notInRoutine).toHaveLength(2)
+    expect((await currentRow()).routineFingerprint).not.toBe(before.routineFingerprint)
+  })
+
+  it('writes no list when the fingerprint is already the build\'s and the version has one', async () => {
+    const before = await started()
+    const setList = vi.spyOn(repository, 'setNotInRoutine')
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(setList).not.toHaveBeenCalled()
+    expect(await currentRow()).toEqual(before)
+  })
+
+  it('is carried unchanged into the copy that "I got it" appends, even when the shelf and the verdict\'s words have changed since (the copy is not a rebuild)', async () => {
+    const before = await started()
+    expect(before.notInRoutine).toEqual([STOPPED])
+    shelve(['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', notInRoutine: [STOPPED] })
+  })
+
+  it('carries null into the copy of a routine built before the column: the copy does not invent a list', async () => {
+    const before = await started()
+    await repository.append({ ...structuredClone(before), id: 'version-old', notInRoutine: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+
+    setClock(3 * DAY + HOUR)
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', notInRoutine: null })
   })
 })
 

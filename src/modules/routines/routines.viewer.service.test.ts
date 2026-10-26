@@ -40,6 +40,10 @@ import { RoutineViewerService } from './routines.viewer.service'
 //                                                   and, when it is ready, `{ type: 'done' }`. It never marks a version served.
 // PR 5 adds `summary` to the body (see routines.view.test.ts for what it holds): every way the body leaves the service (a read, the stream's snapshot and the frames
 // the build publishes) carries the one summary, worked out from the version's stored counts.
+// PR 6 replaces `steps` in that body (a read, the stream's snapshot and the frames the build publishes alike) with `morning` and `evening` lists of entries
+// { step, title, product, when, reason, changed }, and adds `notInRoutine` (the version's stored list, or null for a version built before the column); the placement
+// and the words are pinned in routines.view.test.ts. What this file adds is the reads that feed them: the form of a shelf product (catalog.shelfFacts) and of a
+// recommended one (catalog.productSummaries) for the title, and the recommended row's key ingredient.
 // The gates, in order, for all five session methods: 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
 // the verdict not approved). Note the order: the verdict itself answers 503 before 409; the routine answers 409 before 503.
 
@@ -61,6 +65,14 @@ const SYSTEM: Actor = { kind: 'system', job: 'build-routine' }
 const IP = '203.0.113.7'
 
 type Step = RoutineVersionRow['steps'][number]
+const ROUTINE_ORDER = ['cleanse', 'treat', 'moisturise', 'protect']
+/** The entries of a body once each, in routine order: a step in both lists is one entry. */
+const entriesOf = (routine: any): any[] => {
+  const byStep = new Map<string, any>()
+  for (const entry of [...routine.morning, ...routine.evening]) if (!byStep.has(entry.step)) byStep.set(entry.step, entry)
+  return ROUTINE_ORDER.flatMap((step) => (byStep.has(step) ? [byStep.get(step)] : []))
+}
+
 const stepOf = (step: RoutineStep, product: Step['product'], frequency: Step['frequency']): Step => ({ step, product, frequency, reason: `Reason for ${step}.`, grounding: ['https://internal.example/g'], gotIt: false, fixedFrom: null })
 
 // Cleanse is on the shelf, treat is SERUM-1 (sold in NG, where Amara shops), moisturise is MOIST-GH (sold in GH only), protect has nothing to recommend.
@@ -84,6 +96,8 @@ const versionRow = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow =>
   goal: 'fade-dark-marks',
   // As the build counted Amara's shelf: two kept, nothing reduced, one dropped, and the steroid cream (the one step-down below) stopped.
   shelfCounts: { keep: 2, reduce: 0, drop: 1, stop: 1 },
+  // What the build left out, frozen with the counts: the steroid cream, which the one step-down above stops.
+  notInRoutine: [{ entryId: 'entry-b', title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' }],
   readyAt: at(-HOUR),
   startedOn: null,
   servedAt: null,
@@ -334,24 +348,71 @@ describe('RoutineViewerService.current', () => {
     expect((await repository.current(PROFILE))!.servedAt).toBeNull()
   })
 
-  it('answers a ready routine as the body: its steps in order with each product as the shelf and the catalog know it, and the step-down the verdict stopped', async () => {
+  it('answers a ready routine as the body: its morning and evening lists in order with each product as the shelf and the catalog know it, and the step-down the verdict stopped', async () => {
     await showing(versionRow())
 
     const routine = await body(asVerified(() => viewer.current()))
 
     expect(routine).toMatchObject({ status: 'ready', startedOn: null, expectation: 'Give it 8 to 12 weeks before judging.' })
-    expect(routine.steps.map((s: any) => [s.step, s.frequency, s.changed])).toEqual([
-      ['cleanse', 'am', false],
-      ['treat', 'pm', false],
-      ['moisturise', 'am-pm', false],
-      ['protect', 'am', false],
+    expect(routine).not.toHaveProperty('steps')
+    // Cleanse am, treat pm, moisturise am-pm, protect am.
+    expect(routine.morning.map((e: any) => [e.step, e.when, e.changed])).toEqual([
+      ['cleanse', 'Every day', false],
+      ['moisturise', 'Every day', false],
+      ['protect', 'Every day', false],
     ])
-    expect(routine.steps[0].product).toEqual({ kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' })
-    expect(routine.steps[1].product).toMatchObject({ kind: 'recommended', code: 'SERUM-1', brand: 'Lumina', name: 'Bright Serum', soldInCurrentCountry: true, soldElsewhere: [], price: { min: 3000, max: 4500, currency: 'NGN' } })
-    expect(routine.steps[2].product).toMatchObject({ kind: 'recommended', code: 'MOIST-GH', brand: 'Accra Skin', soldInCurrentCountry: false, soldElsewhere: ['GH'], price: null })
-    expect(routine.steps[3].product).toEqual({ kind: 'none' })
+    expect(routine.evening.map((e: any) => [e.step, e.when, e.changed])).toEqual([
+      ['treat', 'Every day', false],
+      ['moisturise', 'Every day', false],
+    ])
+    const entries = entriesOf(routine)
+    expect(entries[0].product).toEqual({ kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' })
+    expect(entries[1].product).toMatchObject({ kind: 'recommended', code: 'SERUM-1', brand: 'Lumina', name: 'Bright Serum', soldInCurrentCountry: true, soldElsewhere: [], price: { min: 3000, max: 4500, currency: 'NGN' } })
+    expect(entries[2].product).toMatchObject({ kind: 'recommended', code: 'MOIST-GH', brand: 'Accra Skin', soldInCurrentCountry: false, soldElsewhere: ['GH'], price: null })
+    expect(entries[3].product).toEqual({ kind: 'none' })
     expect(routine.tapers).toHaveLength(1)
     expect(routine.tapers[0]).toMatchObject({ entryId: 'entry-b', brand: 'Karo', name: 'Karo Glow Cream', code: 'TPR-STEROID-1', kind: 'steroid' })
+  })
+
+  it('titles each entry from the forms the catalog knows: a shelf product by the form its shelf facts give, a recommended one by its summary\'s form and its row\'s key ingredient', async () => {
+    world.facts.set('form-a', { ...world.facts.get('form-a')!, form: 'gel' })
+    world.recommended.set('SERUM-1', recommended('SERUM-1', 'form-serum-1', ['NG'], { keyIngredient: 'Niacinamide' }))
+    await showing(versionRow())
+
+    const routine = await body(asVerified(() => viewer.current()))
+
+    // cleanse: own gel; treat: Niacinamide, a serum; moisturise: a serum with no key ingredient (a moisturiser step is "Moisturiser" whatever the form); protect: nothing recommended.
+    expect(entriesOf(routine).map((e: any) => [e.step, e.title])).toEqual([
+      ['cleanse', 'Gel cleanser'],
+      ['treat', 'Niacinamide serum'],
+      ['moisturise', 'Moisturiser'],
+      ['protect', 'Sunscreen'],
+    ])
+  })
+
+  it('titles a shelf product with no label, which has no form, by its step', async () => {
+    world.entries = [{ id: 'entry-a', kind: 'no-label', addedAt: T0, itemId: 'item-1' }]
+    await showing(versionRow())
+
+    const routine = await body(asVerified(() => viewer.current()))
+
+    expect(entriesOf(routine)[0]).toMatchObject({ step: 'cleanse', title: 'Cleanser' })
+  })
+
+  it('answers what the build left out as the version stored it, whatever the shelf holds now', async () => {
+    const stored = [
+      { entryId: 'entry-b', title: 'Cream', status: 'stepping-down' as const, reason: 'It has a steroid in it, so we stop it slowly.' },
+      { entryId: 'entry-gone', title: 'Gel cleanser', status: 'left-out' as const, reason: 'It does the same job as your cleanser.' },
+    ]
+    await showing(versionRow({ notInRoutine: stored }))
+
+    expect((await body(asVerified(() => viewer.current()))).notInRoutine).toEqual(stored)
+  })
+
+  it('answers null for what was left out, not an empty list, for a version built before the column', async () => {
+    await showing(versionRow({ notInRoutine: null }))
+
+    expect(await body(asVerified(() => viewer.current()))).toHaveProperty('notInRoutine', null)
   })
 
   it('answers the plan summary with the goal, the stored counts and the step-down of the product the verdict stopped, named from the shelf', async () => {
@@ -388,8 +449,8 @@ describe('RoutineViewerService.current', () => {
 
     const routine = await body(asVerified(() => viewer.current()))
 
-    expect(routine.steps[2].product).toMatchObject({ code: 'MOIST-GH', soldInCurrentCountry: true, price: { min: 3000, max: 4500, currency: 'GHS' } })
-    expect(routine.steps[1].product).toMatchObject({ code: 'SERUM-1', soldInCurrentCountry: false, soldElsewhere: ['NG'] })
+    expect(entriesOf(routine)[2].product).toMatchObject({ code: 'MOIST-GH', soldInCurrentCountry: true, price: { min: 3000, max: 4500, currency: 'GHS' } })
+    expect(entriesOf(routine)[1].product).toMatchObject({ code: 'SERUM-1', soldInCurrentCountry: false, soldElsewhere: ['NG'] })
   })
 
   it('shows a shelf product with no label under the no-label name and no brand', async () => {
@@ -398,7 +459,7 @@ describe('RoutineViewerService.current', () => {
 
     const routine = await body(asVerified(() => viewer.current()))
 
-    expect(routine.steps[0].product).toEqual({ kind: 'own', entryId: 'entry-a', brand: null, name: NO_LABEL_NAME })
+    expect(entriesOf(routine)[0].product).toEqual({ kind: 'own', entryId: 'entry-a', brand: null, name: NO_LABEL_NAME })
   })
 
   it('answers an updating routine with the routine in force and the status updating', async () => {
@@ -407,7 +468,7 @@ describe('RoutineViewerService.current', () => {
     const routine = await body(asVerified(() => viewer.current()))
 
     expect(routine.status).toBe('updating')
-    expect(routine.steps).toHaveLength(4)
+    expect(entriesOf(routine)).toHaveLength(4)
   })
 
   it('keeps a retired recommended product on the screen rather than hiding it', async () => {
@@ -416,7 +477,7 @@ describe('RoutineViewerService.current', () => {
 
     const routine = await body(asVerified(() => viewer.current()))
 
-    expect(routine.steps[1].product).toMatchObject({ kind: 'recommended', code: 'SERUM-1', brand: 'Lumina', soldInCurrentCountry: false, soldElsewhere: [], price: null })
+    expect(entriesOf(routine)[1].product).toMatchObject({ kind: 'recommended', code: 'SERUM-1', brand: 'Lumina', soldInCurrentCountry: false, soldElsewhere: [], price: null })
   })
 
   it('asks for a build when none is fresh whatever it answers, and does not wait for it', async () => {
@@ -476,7 +537,7 @@ describe('RoutineViewerService.current: marking the routine served', () => {
     const routine = await body(asVerified(() => viewer.current()))
 
     expect(routine.status).toBe('ready')
-    expect(routine.steps).toHaveLength(4)
+    expect(entriesOf(routine)).toHaveLength(4)
     expect(error).toHaveBeenCalled()
     const logged = JSON.stringify(error.mock.calls)
     expect(logged).toContain(PROFILE)
@@ -487,7 +548,7 @@ describe('RoutineViewerService.current: marking the routine served', () => {
 describe('RoutineViewerService.current: what changed since the routine was last shown', () => {
   const served = (over: Partial<RoutineVersionRow> = {}) => versionRow({ createdAt: at(-3 * DAY), readyAt: at(-3 * DAY), servedAt: at(-2 * DAY), ...over })
   const withTreat = (code: string, frequency: Step['frequency'] = 'pm') => defaultSteps().map((s) => (s.step === 'treat' ? stepOf('treat', { kind: 'candidate', code }, frequency) : s))
-  const changedOf = (routine: any) => routine.steps.map((s: any) => s.changed)
+  const changedOf = (routine: any) => entriesOf(routine).map((s: any) => s.changed)
 
   it('marks nothing changed the first time the routine is shown: there is nothing to compare it with', async () => {
     await showing(versionRow())
@@ -518,7 +579,7 @@ describe('RoutineViewerService.current: what changed since the routine was last 
 
     const routine = await body(asVerified(() => viewer.current()))
 
-    expect(routine.steps[1].product).toMatchObject({ kind: 'own', entryId: 'entry-s' })
+    expect(entriesOf(routine)[1].product).toMatchObject({ kind: 'own', entryId: 'entry-s' })
     expect(changedOf(routine)).toEqual([false, false, false, false])
   })
 
@@ -553,7 +614,8 @@ describe('RoutineViewerService.watch', () => {
     expect(events.subscribed[0]!.scanId).toBe(`routine:${PROFILE}`)
     const snapshot = JSON.parse(JSON.stringify(events.subscribed[0]!.snapshot))
     expect(snapshot).toMatchObject({ status: 'ready', startedOn: null })
-    expect(snapshot.steps).toHaveLength(4)
+    expect(snapshot).not.toHaveProperty('steps')
+    expect(entriesOf(snapshot)).toHaveLength(4)
     expect(snapshot).toEqual(await body(asVerified(() => viewer.current())))
   })
 
@@ -565,6 +627,19 @@ describe('RoutineViewerService.watch', () => {
     const snapshot = JSON.parse(JSON.stringify(events.subscribed[0]!.snapshot))
     expect(snapshot.summary).toMatchObject({ goal: { id: 'fade-dark-marks', label: 'Fade dark marks' }, keepUsing: 2, useLessOrChange: 1, stepDown: { products: [{ brand: 'Karo', name: 'Karo Glow Cream' }] } })
     expect(snapshot.summary).toEqual((await body(asVerified(() => viewer.current()))).summary)
+  })
+
+  it('carries the morning and evening lists and what was left out in the snapshot, the very ones a read answers', async () => {
+    await showing(versionRow())
+
+    await asVerified(() => viewer.watch())
+
+    const snapshot = JSON.parse(JSON.stringify(events.subscribed[0]!.snapshot))
+    const read = await body(asVerified(() => viewer.current()))
+    expect(snapshot.morning.map((e: any) => e.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+    expect(snapshot.evening.map((e: any) => e.step)).toEqual(['treat', 'moisturise'])
+    expect(snapshot.notInRoutine).toEqual([{ entryId: 'entry-b', title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' }])
+    expect([snapshot.morning, snapshot.evening, snapshot.notInRoutine]).toEqual([read.morning, read.evening, read.notInRoutine])
   })
 
   it('answers the stream the events provider opened', async () => {
@@ -634,7 +709,7 @@ describe('RoutineViewerService.gotIt', () => {
 
     expect(routines.gotIt).toHaveBeenCalledWith(PROFILE, 'treat', IP)
     expect(routine.status).toBe('ready')
-    expect(routine.steps).toHaveLength(4)
+    expect(entriesOf(routine)).toHaveLength(4)
   })
 
   it('shows the product as got once the routine in force says it is', async () => {
@@ -646,7 +721,7 @@ describe('RoutineViewerService.gotIt', () => {
 
     const routine = await body(asVerified(() => viewer.gotIt('treat', IP)))
 
-    expect(routine.steps[1].product).toMatchObject({ code: 'SERUM-1', notYetGot: false })
+    expect(entriesOf(routine)[1].product).toMatchObject({ code: 'SERUM-1', notYetGot: false })
   })
 
   it('passes on what the routine refuses: 409 STEP_NOT_RECOMMENDED', async () => {
@@ -666,8 +741,8 @@ describe('RoutineViewerService.findSoldHere', () => {
     expect(routines.request).toHaveBeenCalledTimes(1)
     expect(routines.request).toHaveBeenCalledWith(PROFILE, 'sold-here', `sold-here:${row.id}:moisturise`, { exclude: { step: 'moisturise', code: 'MOIST-GH' } })
     expect(routine.status).toBe('updating')
-    expect(routine.steps).toHaveLength(4)
-    expect(routine.steps[2].product).toMatchObject({ code: 'MOIST-GH' })
+    expect(entriesOf(routine)).toHaveLength(4)
+    expect(entriesOf(routine)[2].product).toMatchObject({ code: 'MOIST-GH' })
   })
 
   it('refuses with 409 BUILD_IN_PROGRESS when nothing was queued (another build holds the claim), so the exclusion is not silently lost', async () => {
@@ -761,6 +836,17 @@ describe('RoutineViewerService.announce', () => {
     world.routine = { status: 'updating', version: row }
     await announce()
     expect((events.eventsFor(key).at(-1) as any).routine).toMatchObject({ status: 'updating', summary: { keepUsing: 2, useLessOrChange: 1 } })
+  })
+
+  it('carries the morning and evening lists and what was left out in the frame it publishes, in place of steps', async () => {
+    await showing(versionRow())
+    await announce()
+    const frame = JSON.parse(JSON.stringify((events.eventsFor(key)[0] as any).routine))
+
+    expect(frame).not.toHaveProperty('steps')
+    expect(frame.morning.map((e: any) => e.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+    expect(frame.evening.map((e: any) => e.step)).toEqual(['treat', 'moisturise'])
+    expect(frame.notInRoutine).toEqual([{ entryId: 'entry-b', title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' }])
   })
 
   it('publishes an updating routine without done: the build under way is still to land', async () => {

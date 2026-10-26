@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { ProductSummary } from '../catalog/catalog.service'
+import { PRODUCT_FORMS, type ProductForm } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
 import { GOALS } from '../goals/goals.vocabulary'
 import { contentFor } from '../onboarding/onboarding.content'
+import { titleFor } from './routines.copy'
 import type { RoutineVersionRow } from './routines.repository'
 import { toRoutineResponse, type RoutineViewInput } from './routines.view'
 import { FORBIDDEN_WORDING } from './routines.wording'
@@ -34,6 +36,20 @@ import { FORBIDDEN_WORDING } from './routines.wording'
 //   body.summary: { goal: { id, label }, keepUsing, useLessOrChange, stepDown: { products: { brand, name }[], message } | null } | null
 //   keepUsing = keep; useLessOrChange = reduce + drop; stepDown is null when stop is 0 and otherwise names the version's step-downs (brand + name, in stored
 //   order); summary is null for a version with no stored counts. The goal label is the one the goal chips show (the six pinned in the onboarding content test).
+// PR 6 (the "Your routine" screen) replaces `steps` in the body with two ordered lists and adds the plain-language parts:
+//   body = { status, startedOn, expectation, morning: Entry[], evening: Entry[], notInRoutine: NotInRoutine[] | null, tapers, summary }   (no `steps`, no `frequency` on an entry)
+//   Entry = { step, title, product, when, reason, changed }: `product` is today's own / recommended / none shape; `when` is server copy; `title` is built by the server.
+//   NotInRoutine = { entryId, title, status: 'stepping-down' | 'left-out', reason }, read from `RoutineVersionRow.notInRoutine` (same shape, or null on a row built before
+//   the column): the build froze the title (by the same title rule) and the verdict's own one-line reason, so the view passes the stored list through as it is.
+//   RoutineViewInput.own gains an optional `form: ProductForm | null` (the viewer reads it from catalog.shelfFacts); a recommended product's form is its summary's `form`.
+//   Placement: am -> morning; pm -> evening; am-pm -> both; alternate-days, weekly, as-needed -> evening; protect is always morning only.
+// THE TITLE RULE pinned below (the brief leaves the table to the test-writer): the noun is the step's (Cleanser / Treatment / Moisturiser / Sunscreen) unless the form
+// names the product better. protect is always "Sunscreen". treat takes the form for cream, lotion, gel, serum, oil, balm ("Cream", "Serum") and the step
+// noun for any other form (or none). moisturise is "Moisturiser" for every form except gel ("Gel moisturiser"). cleanse puts the form before the step noun for gel, cream,
+// lotion, oil, balm, bar ("Gel cleanser") and is plain "Cleanser" for any other form (or none). A recommended product with a key ingredient is "{keyIngredient} {noun in
+// lower case}" ("Niacinamide serum", "Salicylic acid gel cleanser"), except a moisturiser, which is "{keyIngredient} moisturiser" for every form. A product with no step
+// is titled by its form ("Cream"), or "Product" with no form either (titleFor, below).
+// The first letter is a capital, there is no full stop. A shelf product's key ingredient is not in the view's input, so a shelf product is titled by form and step only.
 // Two choices the brief leaves open, pinned here and flagged in the report: a taper's dates count from the taper's own `startedOn` (a step-down begun after Start
 // begins the day of its rebuild), and a step the previously served version had no entry for counts as changed.
 
@@ -83,6 +99,8 @@ const version = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
   goal: 'fade-dark-marks',
   // Counts that no sum or pairing can be mistaken for: keep 3, reduce 2, drop 4, stop 0 (the default version stops nothing).
   shelfCounts: { keep: 3, reduce: 2, drop: 4, stop: 0 },
+  // Nothing left out, as a build with a shelf of only kept products stores it (an old row has null: see the describe below).
+  notInRoutine: [],
   readyAt: at(-1),
   startedOn: null,
   servedAt: null,
@@ -155,7 +173,14 @@ const input = (over: Partial<RoutineViewInput> = {}): RoutineViewInput => ({
   ...over,
 })
 
-const stepsOf = (over: Partial<RoutineViewInput>) => wire(toRoutineResponse(input(over))).steps as any[]
+const ROUTINE_ORDER = ['cleanse', 'treat', 'moisturise', 'protect']
+/** The entries of a body once each, in routine order: a step in both lists (am-pm) is one entry. Placement is pinned separately. */
+const entriesOf = (body: any): any[] => {
+  const byStep = new Map<string, any>()
+  for (const entry of [...body.morning, ...body.evening]) if (!byStep.has(entry.step)) byStep.set(entry.step, entry)
+  return ROUTINE_ORDER.flatMap((step) => (byStep.has(step) ? [byStep.get(step)] : []))
+}
+const stepsOf = (over: Partial<RoutineViewInput>) => entriesOf(wire(toRoutineResponse(input(over))))
 const recommendedOf = (row: RecommendedByCode, over: Partial<RoutineViewInput> = {}) => {
   const [, treat] = stepsOf({
     recommended: new Map([[row.code, row]]),
@@ -167,12 +192,18 @@ const recommendedOf = (row: RecommendedByCode, over: Partial<RoutineViewInput> =
 }
 
 describe('toRoutineResponse: the routine as a whole', () => {
-  it('answers a ready routine as its start day, what to expect, its steps in routine order and its step-downs', () => {
+  it('answers a ready routine as its start day, what to expect, its morning and evening lists, what is not in it and its step-downs', () => {
     const body = wire(toRoutineResponse(input()))
 
-    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'summary', 'tapers'])
+    expect(Object.keys(body).sort()).toEqual(['evening', 'expectation', 'morning', 'notInRoutine', 'startedOn', 'status', 'summary', 'tapers'])
     expect(body).toMatchObject({ status: 'ready', startedOn: null, expectation: 'Give it 8 to 12 weeks before judging.', tapers: [] })
-    expect(body.steps.map((s: any) => s.step)).toEqual(['cleanse', 'treat', 'protect'])
+    // The default routine: cleanse am, treat pm, protect am.
+    expect(body.morning.map((e: any) => e.step)).toEqual(['cleanse', 'protect'])
+    expect(body.evening.map((e: any) => e.step)).toEqual(['treat'])
+  })
+
+  it('no longer answers a single list of steps', () => {
+    expect(wire(toRoutineResponse(input()))).not.toHaveProperty('steps')
   })
 
   it('answers an updating routine with the same body as a ready one, the status the only difference', () => {
@@ -193,7 +224,7 @@ describe('toRoutineResponse: the product of a step', () => {
   it('shows a product on the shelf as the shelf entry with its brand and name', () => {
     const [cleanse] = stepsOf({})
 
-    expect(cleanse).toEqual({ step: 'cleanse', frequency: 'am', reason: 'Keep entry-a.', changed: false, product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } })
+    expect(cleanse).toEqual({ step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } })
   })
 
   it('shows a shelf product with no brand as brand null', () => {
@@ -378,10 +409,241 @@ describe('toRoutineResponse: the step-downs and their dates', () => {
   })
 })
 
+describe('toRoutineResponse: the morning and evening lists', () => {
+  const FREQUENCIES_ALL = ['am', 'pm', 'am-pm', 'alternate-days', 'weekly', 'as-needed'] as const
+  const listsFor = (step: Step['step'], frequency: Step['frequency']) => {
+    const body = wire(toRoutineResponse(input({ version: version({ steps: [noneStep(step, frequency)] }) })))
+    return { morning: body.morning.map((e: any) => e.step), evening: body.evening.map((e: any) => e.step) }
+  }
+
+  // [frequency, in the morning, in the evening] for a step that is not the sunscreen.
+  it.each([
+    ['am', true, false],
+    ['pm', false, true],
+    ['am-pm', true, true],
+    ['alternate-days', false, true],
+    ['weekly', false, true],
+    ['as-needed', false, true],
+  ] as const)('puts a cleanse, treat or moisturise step used "%s" in the morning: %s, in the evening: %s', (frequency, morning, evening) => {
+    for (const step of ['cleanse', 'treat', 'moisturise'] as const) {
+      expect(listsFor(step, frequency), `${step} ${frequency}`).toEqual({ morning: morning ? [step] : [], evening: evening ? [step] : [] })
+    }
+  })
+
+  it.each(FREQUENCIES_ALL)('keeps the sunscreen in the morning only, whatever it is stored as: "%s"', (frequency) => {
+    expect(listsFor('protect', frequency)).toEqual({ morning: ['protect'], evening: [] })
+  })
+
+  it('answers an empty list, not a missing one, when nothing is used in the morning or in the evening', () => {
+    const eveningOnly = wire(toRoutineResponse(input({ version: version({ steps: [noneStep('treat', 'pm')] }) })))
+    const morningOnly = wire(toRoutineResponse(input({ version: version({ steps: [noneStep('cleanse', 'am')] }) })))
+
+    expect(eveningOnly.morning).toEqual([])
+    expect(morningOnly.evening).toEqual([])
+  })
+
+  it('puts a step used morning and evening in both lists, as the very same entry (the same product, words and changed mark)', () => {
+    const previous = version({ servedAt: at(-2), steps: [ownStep('cleanse', 'entry-a', 'am'), noneStep('treat', 'pm')] })
+    const body = wire(toRoutineResponse(input({ previous, version: version({ steps: [ownStep('cleanse', 'entry-a', 'am-pm'), noneStep('treat', 'pm')] }) })))
+
+    const inMorning = body.morning.find((e: any) => e.step === 'cleanse')
+    const inEvening = body.evening.find((e: any) => e.step === 'cleanse')
+    expect(inMorning).toEqual(inEvening)
+    // Its frequency moved from am to am-pm, so it is changed, in both places.
+    expect(inMorning).toMatchObject({ when: 'Every day', changed: true, product: { kind: 'own', entryId: 'entry-a' } })
+    expect(body.evening.find((e: any) => e.step === 'treat')).toMatchObject({ changed: false })
+  })
+
+  it('keeps routine order (cleanse, treat, moisturise, protect) within each list', () => {
+    const steps = [ownStep('cleanse', 'entry-a', 'am-pm'), noneStep('treat', 'pm'), noneStep('moisturise', 'am-pm'), noneStep('protect', 'am')]
+    const body = wire(toRoutineResponse(input({ version: version({ steps }) })))
+
+    expect(body.morning.map((e: any) => e.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+    expect(body.evening.map((e: any) => e.step)).toEqual(['cleanse', 'treat', 'moisturise'])
+  })
+
+  it('gives an entry its step, reason and product as the step has them, with a changed mark of its own', () => {
+    const body = wire(toRoutineResponse(input({ version: version({ steps: [ownStep('cleanse', 'entry-a', 'am'), candidateStep('treat', 'SERUM-1', 'pm')] }) })))
+
+    expect(body.morning).toEqual([
+      { step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } },
+    ])
+    expect(body.evening[0]).toMatchObject({ step: 'treat', reason: 'Use SERUM-1.', product: { kind: 'recommended', code: 'SERUM-1', notYetGot: true } })
+  })
+})
+
+describe('toRoutineResponse: the "when" label of an entry', () => {
+  it.each([
+    ['am', 'Every day'],
+    ['pm', 'Every day'],
+    ['am-pm', 'Every day'],
+    ['alternate-days', '3 evenings a week'],
+    ['weekly', 'Once a week'],
+    ['as-needed', 'When you need it'],
+  ] as const)('says "%s" as "%s"', (frequency, label) => {
+    const body = wire(toRoutineResponse(input({ version: version({ steps: [noneStep('treat', frequency)] }) })))
+
+    expect([...body.morning, ...body.evening].map((e: any) => e.when)).toSatisfy((labels: string[]) => labels.length >= 1 && labels.every((l) => l === label))
+  })
+
+  it('says "Every day" for the sunscreen in the morning', () => {
+    expect(wire(toRoutineResponse(input({ version: version({ steps: [noneStep('protect', 'am')] }) }))).morning[0].when).toBe('Every day')
+  })
+})
+
+describe('toRoutineResponse: the plain title of an entry', () => {
+  // The expected titles are written out here, form by form, so this table is the rule's spec and not a copy of the code. Every form there is has a row (checked below).
+  const TREAT_OR_MOISTURISE = { cream: 'Cream', lotion: 'Lotion', gel: 'Gel', serum: 'Serum', oil: 'Oil', balm: 'Balm' }
+  const GENERIC = ['spray', 'roll-on', 'stick', 'liquid', 'bar', 'powder'] as const
+  const titleTable = (stepNoun: string): Record<ProductForm, string> => ({ ...(Object.fromEntries(GENERIC.map((form) => [form, stepNoun])) as any), ...Object.fromEntries(Object.entries(TREAT_OR_MOISTURISE).map(([form, noun]) => [form, noun])) })
+  const TITLES: Record<Step['step'], Record<ProductForm, string>> = {
+    treat: titleTable('Treatment'),
+    // A moisturiser is "Moisturiser" whatever its form, except a gel.
+    moisturise: { ...(Object.fromEntries(PRODUCT_FORMS.map((form) => [form, 'Moisturiser'])) as Record<ProductForm, string>), gel: 'Gel moisturiser' },
+    // The form goes before the noun where it describes a cleanser; a form that does not is plain "Cleanser".
+    cleanse: { gel: 'Gel cleanser', cream: 'Cream cleanser', lotion: 'Lotion cleanser', oil: 'Oil cleanser', balm: 'Balm cleanser', bar: 'Bar cleanser', serum: 'Cleanser', spray: 'Cleanser', 'roll-on': 'Cleanser', stick: 'Cleanser', liquid: 'Cleanser', powder: 'Cleanser' },
+    // Whatever the form, it is a sunscreen.
+    protect: Object.fromEntries(PRODUCT_FORMS.map((form) => [form, 'Sunscreen'])) as Record<ProductForm, string>,
+  }
+  const STEP_NOUN = { cleanse: 'Cleanser', treat: 'Treatment', moisturise: 'Moisturiser', protect: 'Sunscreen' } as const
+
+  const ownTitle = (step: Step['step'], form: ProductForm | null) =>
+    stepsOf({ version: version({ steps: [ownStep(step, 'entry-a', 'am')] }), own: new Map([['entry-a', { brand: 'Orbis', name: 'Some Product', form }]]) })[0].title as string
+  const recommendedTitle = (step: Step['step'], form: ProductForm | null, keyIngredient: string | null = null) =>
+    stepsOf({
+      version: version({ steps: [candidateStep(step, 'REC-1', 'am')] }),
+      recommended: new Map([['REC-1', recommendedRow('REC-1', { keyIngredient })]]),
+      summaries: new Map([['form-REC-1', summary('form-REC-1', { form })]]),
+    })[0].title as string
+
+  it('has a row for every form there is', () => {
+    for (const step of Object.keys(TITLES)) expect(Object.keys(TITLES[step as Step['step']]).sort(), step).toEqual([...PRODUCT_FORMS].sort())
+  })
+
+  for (const step of ['cleanse', 'treat', 'moisturise', 'protect'] as const) {
+    it.each(PRODUCT_FORMS.map((form) => [form, TITLES[step][form]] as const))(`titles a ${step} step's shelf product of form %s as "%s"`, (form, title) => {
+      expect(ownTitle(step, form)).toBe(title)
+    })
+
+    it.each(PRODUCT_FORMS.map((form) => [form, TITLES[step][form]] as const))(`titles a ${step} step's recommended product of form %s with no key ingredient as "%s"`, (form, title) => {
+      expect(recommendedTitle(step, form)).toBe(title)
+    })
+
+    it(`falls back to the step noun "${STEP_NOUN[step]}" for a ${step} product whose form is not known`, () => {
+      expect(ownTitle(step, null)).toBe(STEP_NOUN[step])
+      expect(recommendedTitle(step, null)).toBe(STEP_NOUN[step])
+    })
+
+    it(`titles "use what you have" for a ${step} step with the step noun "${STEP_NOUN[step]}"`, () => {
+      expect(stepsOf({ version: version({ steps: [noneStep(step, 'am')] }) })[0].title).toBe(STEP_NOUN[step])
+    })
+  }
+
+  it('uses the step noun for a shelf product the shelf no longer holds, which shows as "use what you have"', () => {
+    expect(stepsOf({ version: version({ steps: [ownStep('moisturise', 'entry-gone', 'am')] }), own: new Map() })[0]).toMatchObject({ title: 'Moisturiser', product: { kind: 'none' } })
+  })
+
+  it.each([
+    ['Niacinamide', 'treat', 'serum', 'Niacinamide serum'],
+    ['Vitamin C', 'treat', 'serum', 'Vitamin C serum'],
+    ['azelaic acid', 'treat', 'cream', 'Azelaic acid cream'],
+    ['Shea butter', 'moisturise', 'balm', 'Shea butter moisturiser'],
+    ['Ceramides', 'moisturise', 'spray', 'Ceramides moisturiser'],
+    ['Salicylic acid', 'cleanse', 'gel', 'Salicylic acid gel cleanser'],
+    ['Salicylic acid', 'cleanse', 'serum', 'Salicylic acid cleanser'],
+    ['Zinc oxide', 'protect', 'cream', 'Zinc oxide sunscreen'],
+    ['Retinol', 'treat', null, 'Retinol treatment'],
+    ['Zinc oxide', 'protect', null, 'Zinc oxide sunscreen'],
+  ] as const)('titles a recommended product with key ingredient "%s" (%s, %s) as "%s": the ingredient, then the noun in lower case', (keyIngredient, step, form, title) => {
+    expect(recommendedTitle(step, form, keyIngredient)).toBe(title)
+  })
+
+  it('starts every title with a capital and never ends it with a full stop', () => {
+    const titles = [
+      ...PRODUCT_FORMS.flatMap((form) => (['cleanse', 'treat', 'moisturise', 'protect'] as const).map((step) => ownTitle(step, form))),
+      recommendedTitle('treat', 'serum', 'azelaic acid'),
+    ]
+
+    for (const title of titles) {
+      expect(title).toMatch(/^[A-Z]/)
+      expect(title).not.toMatch(/\.$/)
+    }
+  })
+})
+
+describe('titleFor: a product with no step (a left-out product that fills none of the four)', () => {
+  it.each(PRODUCT_FORMS)('is titled by its form: %s', (form) => {
+    expect(titleFor({ step: null, form })).toBe(form.charAt(0).toUpperCase() + form.slice(1))
+  })
+
+  it('is "Product" when the form is not known either', () => {
+    expect(titleFor({ step: null, form: null })).toBe('Product')
+  })
+
+  it('still puts a key ingredient in front, and never ends with a full stop', () => {
+    expect(titleFor({ step: null, form: 'serum', keyIngredient: 'niacinamide' })).toBe('Niacinamide serum')
+    expect(titleFor({ step: null, form: null })).not.toMatch(/\.$/)
+  })
+
+  it('is "{ingredient} moisturiser" for a gel moisturiser with a key ingredient too', () => {
+    expect(titleFor({ step: 'moisturise', form: 'gel', keyIngredient: 'Ceramides' })).toBe('Ceramides moisturiser')
+    expect(titleFor({ step: 'moisturise', form: 'gel' })).toBe('Gel moisturiser')
+  })
+})
+
+describe('toRoutineResponse: what is not in the routine', () => {
+  const STORED = [
+    { entryId: 'entry-b', title: 'Cream', status: 'stepping-down' as const, reason: 'It has a steroid in it, so we stop it slowly.' },
+    { entryId: 'entry-c', title: 'Gel cleanser', status: 'left-out' as const, reason: 'It does the same job as your cleanser.' },
+    { entryId: 'entry-d', title: 'Treatment', status: 'left-out' as const, reason: 'It holds back the goal you chose.' },
+  ]
+  const listOf = (stored: RoutineVersionRow['notInRoutine'], over: Partial<RoutineViewInput> = {}) => wire(toRoutineResponse(input({ version: version({ notInRoutine: stored }), ...over }))).notInRoutine
+
+  it('lists what the build left out, in the order stored (the shelf\'s), each with its entry id, title, status and the verdict\'s own reason', () => {
+    expect(listOf(STORED)).toEqual(STORED)
+  })
+
+  it('has exactly the documented keys on each item', () => {
+    for (const item of listOf(STORED)) expect(Object.keys(item).sort()).toEqual(['entryId', 'reason', 'status', 'title'])
+  })
+
+  it('says an empty list when nothing was left out, which is not the same as not knowing', () => {
+    expect(listOf([])).toEqual([])
+  })
+
+  it('says null for a version built before the column: the app can tell "unknown" from "none"', () => {
+    expect(listOf(null)).toBeNull()
+  })
+
+  it.each(['ready', 'updating'] as const)('is the same on a %s routine', (status) => {
+    expect(wire(toRoutineResponse(input({ status, version: version({ notInRoutine: STORED }) }))).notInRoutine).toEqual(STORED)
+  })
+
+  it('keeps the title and reason stored at the build, whatever the shelf holds now: a product gone from the shelf still shows, and a product that is there is not retitled', () => {
+    const own = new Map([['entry-c', { brand: 'Orbis', name: 'Calm Cleanser', form: 'oil' as const }]])
+
+    // entry-b and entry-d are gone from the shelf; entry-c is there as an oil, but its stored title says gel.
+    expect(listOf(STORED, { own })).toEqual(STORED)
+  })
+
+  it('does not list a left-out product among the steps, and does not count it twice', () => {
+    const body = wire(toRoutineResponse(input({ version: version({ notInRoutine: STORED }) })))
+
+    const shown = entriesOf(body).flatMap((e: any) => (e.product.kind === 'own' ? [e.product.entryId] : []))
+    for (const { entryId } of STORED) expect(shown).not.toContain(entryId)
+  })
+
+  it('carries nothing of how the list was stored or built: no verdict, group, step or counts', () => {
+    const text = JSON.stringify(listOf(STORED))
+
+    for (const stored of ['verdict', 'group', 'taper', 'sourceUrls', 'facts', 'escalate', 'shelfCounts']) expect(text, stored).not.toContain(stored)
+  })
+})
+
 describe('toRoutineResponse: what changed since the routine was last shown', () => {
   const served = (steps: Step[]) => version({ steps, servedAt: at(-2), readyAt: at(-2), createdAt: at(-2) })
   const changedFlags = (current: Step[], previous: RoutineVersionRow | null) =>
-    wire(toRoutineResponse(input({ version: version({ steps: current }), previous }))).steps.map((s: any) => s.changed)
+    entriesOf(wire(toRoutineResponse(input({ version: version({ steps: current }), previous })))).map((s: any) => s.changed)
   const BASE_STEPS = () => [ownStep('cleanse', 'entry-a', 'am'), candidateStep('treat', 'SERUM-1', 'pm'), noneStep('protect', 'am')]
 
   it('marks no step changed when nothing was shown before', () => {
@@ -413,7 +675,7 @@ describe('toRoutineResponse: what changed since the routine was last shown', () 
         ['entry-s', { brand: 'Lumina', name: 'Bright Serum', ...(formulationId === undefined ? {} : { formulationId }) }],
       ])
       const current = [ownStep('cleanse', 'entry-a', 'am'), ownStep('treat', 'entry-s', 'pm'), noneStep('protect', 'am')]
-      return wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own }))).steps.map((s: any) => s.changed)
+      return entriesOf(wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own })))).map((s: any) => s.changed)
     }
 
     it('does not mark the step changed when the shelf entry is the same formulation as the recommended product it replaces', () => {
@@ -429,7 +691,7 @@ describe('toRoutineResponse: what changed since the routine was last shown', () 
       const own = new Map([['entry-s', { brand: 'Lumina', name: 'Bright Serum', formulationId: 'form-SERUM-1' }]])
       const current = [ownStep('cleanse', 'entry-a', 'am'), ownStep('treat', 'entry-s', 'am'), noneStep('protect', 'am')]
 
-      expect(wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own }))).steps.map((s: any) => s.changed)).toEqual([false, true, false])
+      expect(entriesOf(wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own })))).map((s: any) => s.changed)).toEqual([false, true, false])
     })
   })
 
@@ -509,6 +771,10 @@ describe('toRoutineResponse: nothing internal is shown', () => {
         steps: [ownStep('cleanse', 'entry-a'), candidateStep('treat', 'SERUM-1', 'pm', { gotIt: true }), noneStep('protect')],
         tapers: [{ shelfProductId: 'entry-b', templateId: STEROID_TEMPLATE.code, startedOn: at(0) }],
         shelfCounts: { keep: 3, reduce: 2, drop: 4, stop: 1 },
+        notInRoutine: [
+          { entryId: 'entry-b', title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it.' },
+          { entryId: 'entry-d', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+        ],
       }),
       previous: version({ steps: [ownStep('cleanse', 'entry-a', 'pm')], servedAt: at(-2) }),
       own: new Map([
@@ -529,13 +795,14 @@ describe('toRoutineResponse: nothing internal is shown', () => {
   it('has exactly the documented keys on the routine, a step, each kind of product and a step-down', () => {
     const body = wire(toRoutineResponse(full()))
 
-    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'summary', 'tapers'])
-    for (const step of body.steps) expect(Object.keys(step).sort()).toEqual(['changed', 'frequency', 'product', 'reason', 'step'])
-    expect(Object.keys(body.steps[0].product).sort()).toEqual(['brand', 'entryId', 'kind', 'name'])
-    expect(Object.keys(body.steps[1].product).sort()).toEqual(
+    expect(Object.keys(body).sort()).toEqual(['evening', 'expectation', 'morning', 'notInRoutine', 'startedOn', 'status', 'summary', 'tapers'])
+    const entries = entriesOf(body)
+    for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'step', 'title', 'when'])
+    expect(Object.keys(entries[0].product).sort()).toEqual(['brand', 'entryId', 'kind', 'name'])
+    expect(Object.keys(entries[1].product).sort()).toEqual(
       ['brand', 'code', 'imageUrl', 'keyIngredient', 'kind', 'name', 'notYetGot', 'origin', 'price', 'soldElsewhere', 'soldInCurrentCountry', 'strength', 'whereSold'].sort(),
     )
-    expect(Object.keys(body.steps[2].product)).toEqual(['kind'])
+    expect(Object.keys(entries[2].product)).toEqual(['kind'])
     expect(Object.keys(body.tapers[0]).sort()).toEqual(['brand', 'code', 'entryId', 'kind', 'name', 'seeAProfessionalIf', 'steps', 'whatToExpect'])
     expect(Object.keys(body.tapers[0].steps[0]).sort()).toEqual(['frequency', 'fromDate', 'fromWeek', 'toDate', 'toWeek'])
   })
@@ -728,7 +995,7 @@ describe('toRoutineResponse: the summary of the plan (the "Your plan is ready" s
       const body = wire(toRoutineResponse(input({ status, own: NAMES, version: version({ shelfCounts: null, tapers: [stopped('stop-1')] }) })))
 
       expect(body).toHaveProperty('summary', null)
-      expect(body.steps).toHaveLength(3)
+      expect(entriesOf(body)).toHaveLength(3)
     })
   })
 

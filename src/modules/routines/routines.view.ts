@@ -1,15 +1,16 @@
 import type { z } from '@hono/zod-openapi'
 import type { ProductSummary } from '../catalog/catalog.service'
+import { ROUTINE_STEPS, type ProductForm } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
 import { GOAL_LABELS } from '../goals/goals.vocabulary'
-import { stepDownMessage } from './routines.copy'
+import { stepDownMessage, titleFor, whenFor } from './routines.copy'
 import type { RoutineVersionRow } from './routines.repository'
 import type { ReadyRoutineResponse, UpdatingRoutineResponse } from './routines.schemas'
 
 type RoutineBody = z.infer<typeof ReadyRoutineResponse> | z.infer<typeof UpdatingRoutineResponse>
-type PublicStep = RoutineBody['steps'][number]
-type PublicProduct = PublicStep['product']
+type PublicEntry = RoutineBody['morning'][number]
+type PublicProduct = PublicEntry['product']
 
 /** Everything the routine screen is made of, read by the viewer service and handed over: a stored version and the reads around it. */
 export type RoutineViewInput = {
@@ -21,8 +22,8 @@ export type RoutineViewInput = {
   /** The country the profile shops in. */
   country: string
   countries: readonly CountryRow[]
-  /** The shelf entries the version names, with the formulation of a product entry (a no-label entry has none): what makes an entry the product the user was recommended. */
-  own: ReadonlyMap<string, { brand: string | null; name: string; formulationId?: string }>
+  /** The shelf entries the version names, with the formulation of a product entry (a no-label entry has none): what makes an entry the product the user was recommended. `form` is the product's own, for its title. */
+  own: ReadonlyMap<string, { brand: string | null; name: string; formulationId?: string; form?: ProductForm | null }>
   /** The recommended rows the version names and the one shown before names, retired ones included. */
   recommended: ReadonlyMap<string, RecommendedByCode>
   /** By formulation id: the brand, name and image of a recommended product. */
@@ -65,37 +66,50 @@ const changedSince = (step: RoutineVersionRow['steps'][number], previous: Routin
 }
 
 // Written out field by field: grounding, where a step came from and the stored version's own columns are how the routine was reached, and a field added to the
-// stored version later must not reach a client unless it is named here.
-const productOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): PublicProduct => {
+// stored version later must not reach a client unless it is named here. `form` is the product's, for the title; a step that falls back to "none" has none.
+const productOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): { product: PublicProduct; form: ProductForm | null } => {
   const { product } = step
   if (product.kind === 'shelf') {
     const own = input.own.get(product.id)
     // An entry taken off the shelf since this version was built has no name to show: the rebuild that follows drops it.
-    return own ? { kind: 'own', entryId: product.id, brand: own.brand, name: own.name } : { kind: 'none' }
+    return own ? { product: { kind: 'own', entryId: product.id, brand: own.brand, name: own.name }, form: own.form ?? null } : { product: { kind: 'none' }, form: null }
   }
-  if (product.kind === 'none') return { kind: 'none' }
+  if (product.kind === 'none') return { product: { kind: 'none' }, form: null }
   const row = input.recommended.get(product.code)
   const summary = row?.formulationId ? input.summaries.get(row.formulationId) : undefined
   // A code that names no row, or a row with no product to name, cannot be shown; "use what you have" is what it falls back to.
-  if (!row || !summary) return { kind: 'none' }
+  if (!row || !summary) return { product: { kind: 'none' }, form: null }
   const here = isSoldIn(row, input.country) ? row.availability.find((sold) => sold.country === input.country) : undefined
   const currency = input.countries.find((country) => country.code === input.country)?.currency
   return {
-    kind: 'recommended',
-    code: row.code,
-    brand: summary.brand,
-    name: summary.name,
-    imageUrl: summary.imageUrl,
-    ...(row.origin === 'brand-submitted' ? { origin: 'brand-submitted' as const } : {}),
-    price: here && currency ? { min: here.priceMin, max: here.priceMax, currency } : null,
-    whereSold: here?.whereSold ?? null,
-    soldInCurrentCountry: here !== undefined,
-    soldElsewhere: row.status === 'approved' ? row.availability.filter((sold) => sold.country !== input.country).map((sold) => sold.country) : [],
-    keyIngredient: row.keyIngredient,
-    strength: row.strength,
-    notYetGot: !step.gotIt,
+    form: summary.form,
+    product: {
+      kind: 'recommended',
+      code: row.code,
+      brand: summary.brand,
+      name: summary.name,
+      imageUrl: summary.imageUrl,
+      ...(row.origin === 'brand-submitted' ? { origin: 'brand-submitted' as const } : {}),
+      price: here && currency ? { min: here.priceMin, max: here.priceMax, currency } : null,
+      whereSold: here?.whereSold ?? null,
+      soldInCurrentCountry: here !== undefined,
+      soldElsewhere: row.status === 'approved' ? row.availability.filter((sold) => sold.country !== input.country).map((sold) => sold.country) : [],
+      keyIngredient: row.keyIngredient,
+      strength: row.strength,
+      notYetGot: !step.gotIt,
+    },
   }
 }
+
+const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
+  const { product, form } = productOf(step, input)
+  const keyIngredient = product.kind === 'recommended' ? product.keyIngredient : null
+  return { step: step.step, title: titleFor({ step: step.step, form, keyIngredient }), when: whenFor(step.frequency), reason: step.reason, changed: changedSince(step, previous, input), product }
+}
+
+// Morning is am and am-pm; evening is pm, am-pm and anything used less than daily, which the routine places in the evening. The sunscreen is only ever a morning step.
+const inMorning = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step === 'protect' || frequency === 'am' || frequency === 'am-pm'
+const inEvening = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step !== 'protect' && frequency !== 'am'
 
 const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
   input.version.tapers.flatMap((stopped) => {
@@ -147,11 +161,15 @@ const summaryOf = (input: RoutineViewInput, tapers: RoutineBody['tapers']): Rout
 export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
   const { version, previous } = input
   const tapers = tapersOf(input)
+  const ordered = [...version.steps].sort((a, b) => ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step))
   return {
     status: input.status,
     startedOn: version.startedOn === null ? null : dayString(utcDay(version.startedOn)),
     expectation: version.expectation ?? '',
-    steps: version.steps.map((step) => ({ step: step.step, frequency: step.frequency, reason: step.reason, changed: changedSince(step, previous, input), product: productOf(step, input) })),
+    morning: ordered.filter(inMorning).map((step) => entryOf(step, previous, input)),
+    evening: ordered.filter(inEvening).map((step) => entryOf(step, previous, input)),
+    // The stored list as it is: its titles and reasons were fixed at the build, and a product since gone from the shelf still shows.
+    notInRoutine: version.notInRoutine,
     tapers,
     summary: summaryOf(input, tapers),
   }
