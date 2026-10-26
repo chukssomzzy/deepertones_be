@@ -4,6 +4,7 @@ import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type Live
 import type { RuleRow } from './catalog.workbook.repository.contract'
 import type { AvailabilityRow, ClaimWordRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
 import type { RoutineStep } from './catalog.vocabulary'
+import { SHOWN_CONCERNS, type ShownConcern } from '../face-scans/face-scans.tables'
 
 const day = (text: string | null): Date | null => (text === null ? null : new Date(`${text}T00:00:00.000Z`))
 const text = (date: Date | null): string | null => (date === null ? null : date.toISOString().slice(0, 10))
@@ -96,6 +97,16 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       found.set(productId, [...new Set([...(found.get(productId) ?? []), ...row.steps])])
     }
     return found
+  }
+
+  async skinConcernsOf(productIds: string[]): Promise<Map<string, ShownConcern[]>> {
+    const listed = new Map<string, Set<ShownConcern>>()
+    for (const row of [...this.products].sort(byCode)) {
+      const productId = this.productOf.get(row.code)
+      if (row.status !== 'approved' || productId === undefined || !productIds.includes(productId)) continue
+      listed.set(productId, new Set([...(listed.get(productId) ?? []), ...row.skinConcerns]))
+    }
+    return new Map([...listed].map(([productId, concerns]) => [productId, SHOWN_CONCERNS.filter((concern) => concerns.has(concern))]))
   }
 
   private ingredientRules(): IngredientRule[] {

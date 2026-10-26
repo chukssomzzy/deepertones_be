@@ -15,8 +15,9 @@ import { assembleVerdictInputs, fingerprintInputOf, fitRequestOf, provenanceOf }
 // the saved provenance. No I/O, no clock. Expected values are worked out by hand from the spec and the vocabularies, never from the code under test.
 //
 // Shapes assumed (the contract this file pins):
-//   Facts  { reference, goal, entries, shelfFacts, noLabelFacts, steps, safety, mentionIngredients, scan, fitter }, where
-//          shelfFacts is keyed by FORMULATION id, noLabelFacts by no-label ITEM id, steps by catalog PRODUCT id (as their accessors give them), and
+//   Facts  { reference, goal, entries, shelfFacts, noLabelFacts, steps, skinConcerns, safety, mentionIngredients, scan, fitter }, where
+//          shelfFacts is keyed by FORMULATION id, noLabelFacts by no-label ITEM id, steps and skinConcerns (the skin concerns the recommendation catalog says a
+//          product is for; absent for a product the catalog does not recommend) by catalog PRODUCT id (as their accessors give them), and
 //          mentionIngredients (productId -> ingredient list of a product the user named, which the floor matches by ingredients) is the one input the
 //          accessors do not already supply.
 //   assembleVerdictInputs(facts)       { floorInput, entries: {id, category}[] (for mergeVerdict), unresolved: string[] (entry ids), perEntry: Map<entryId, { step, sourceUrls }> }
@@ -62,10 +63,10 @@ const REFERENCE: VerdictReference = {
 
 // ---- the shelf, as the accessors give it ----
 
-type ProductSpec = { id: string; ingredients: string[]; facts?: Partial<ShelfFacts>; steps?: RoutineStep[] }
+type ProductSpec = { id: string; ingredients: string[]; facts?: Partial<ShelfFacts>; steps?: RoutineStep[]; skinConcerns?: ShownConcern[] }
 type NoLabelSpec = { id: string; purpose: NoLabelPurpose; category?: 'skin' | 'hair' | 'body' | 'makeup' | 'other' }
 
-const shelfOf = (products: ProductSpec[], noLabels: NoLabelSpec[] = []): Pick<Facts, 'entries' | 'shelfFacts' | 'noLabelFacts' | 'steps'> => ({
+const shelfOf = (products: ProductSpec[], noLabels: NoLabelSpec[] = []): Pick<Facts, 'entries' | 'shelfFacts' | 'noLabelFacts' | 'steps' | 'skinConcerns'> => ({
   entries: [
     ...products.map((p, i): ShelfActiveEntry => ({ id: p.id, kind: 'product', addedAt: new Date(AT.getTime() + i * MINUTE), productId: `prod-${p.id}`, formulationId: `form-${p.id}` })),
     ...noLabels.map((n, i): ShelfActiveEntry => ({ id: n.id, kind: 'no-label', addedAt: new Date(AT.getTime() + (products.length + i) * MINUTE), itemId: `item-${n.id}` })),
@@ -78,6 +79,7 @@ const shelfOf = (products: ProductSpec[], noLabels: NoLabelSpec[] = []): Pick<Fa
   ),
   noLabelFacts: new Map(noLabels.map((n): [string, { purpose: NoLabelPurpose; category: NonNullable<NoLabelSpec['category']> }] => [`item-${n.id}`, { purpose: n.purpose, category: n.category ?? 'skin' }])),
   steps: new Map(products.flatMap((p): [string, RoutineStep[]][] => (p.steps ? [[`prod-${p.id}`, p.steps]] : []))),
+  skinConcerns: new Map(products.flatMap((p): [string, ShownConcern[]][] => (p.skinConcerns ? [[`prod-${p.id}`, p.skinConcerns]] : []))),
 })
 
 const mentionOf = (over: Partial<SafetyMentionRow> = {}): SafetyMentionRow => ({
@@ -338,6 +340,39 @@ describe('fitRequestOf', () => {
     ])
   })
 
+  describe('the skin concerns the recommendation catalog gives a product', () => {
+    // niacinamide's rule helps radiance and age spots, so the catalog's concerns below are told apart from the rules'.
+    const concernsOf = (spec: Partial<ProductSpec> & Pick<ProductSpec, 'skinConcerns'>) => {
+      const facts = factsOf(shelfOf([{ id: 'e-one', ingredients: ['Aqua', 'Niacinamide'], ...spec }]))
+      return fitRequestOf(facts, floorOf(facts))!.shelf[0]!.skinConcerns
+    }
+
+    it('are the concerns of a product the rules say nothing about, so the judge learns what it is for', () => {
+      const facts = factsOf(shelfOf([{ id: 'e-plain', ingredients: ['Aqua', 'Glycerin'], skinConcerns: ['hd_moisture', 'hd_redness'] }]))
+
+      expect(fitRequestOf(facts, floorOf(facts))!.shelf[0]).toMatchObject({ cautions: [], skinConcerns: ['hd_moisture', 'hd_redness'] })
+    })
+
+    it('join the concerns the matching rules help, sorted, with a concern both name listed once', () => {
+      // The rules give hd_age_spot and hd_radiance; the catalog gives hd_redness and hd_radiance (the one both name).
+      expect(concernsOf({ skinConcerns: ['hd_redness', 'hd_radiance'] })).toEqual(['hd_age_spot', 'hd_radiance', 'hd_redness'])
+    })
+
+    it('are sorted whatever order the catalog lists them in', () => {
+      expect(concernsOf({ skinConcerns: ['hd_texture', 'hd_acne', 'hd_dark_circle'] })).toEqual(['hd_acne', 'hd_age_spot', 'hd_dark_circle', 'hd_radiance', 'hd_texture'])
+    })
+
+    it('leave a product the catalog does not recommend with the concerns of its rules alone', () => {
+      expect(concernsOf({ skinConcerns: undefined })).toEqual(['hd_age_spot', 'hd_radiance'])
+    })
+
+    it('belong to the product they are keyed to and are not given to another on the shelf', () => {
+      const facts = factsOf(shelfOf([{ id: 'e-a', ingredients: ['Aqua'], skinConcerns: ['hd_pore'] }, { id: 'e-b', ingredients: ['Aqua', 'Glycerin'] }]))
+
+      expect(fitRequestOf(facts, floorOf(facts))!.shelf.map((product) => [product.id, product.skinConcerns])).toEqual([['e-a', ['hd_pore']], ['e-b', []]])
+    })
+  })
+
   it('unions the concerns of every rule an ingredient matches, and lists a caution kind once', () => {
     const shelf = shelfOf([{ id: 'e-b3', ingredients: ['Niacinamide (Vitamin B3)'] }])
     const facts = factsOf(shelf)
@@ -432,6 +467,16 @@ describe('fingerprintInputOf', () => {
       model: 'claude-sonnet-5-5',
       promptHash: 'prompt-hash-1',
     })
+  })
+
+  it('does not change when the skin concerns the recommendation catalog gives a product change, since catalog facts (like the routine step) are not part of what a verdict is hashed from', async () => {
+    const hash = (facts: Facts) => verdictFingerprint(fingerprintInputOf(facts, floorOf(facts)))
+    const none = factsOf(shelfOf([SERUM, CREAM]))
+    const some = factsOf(shelfOf([{ ...SERUM, skinConcerns: ['hd_moisture'] }, CREAM]))
+    const other = factsOf(shelfOf([{ ...SERUM, skinConcerns: ['hd_acne', 'hd_redness'] }, CREAM]))
+
+    expect(fingerprintInputOf(some, floorOf(some))).toEqual(fingerprintInputOf(none, floorOf(none)))
+    expect(await hash(other)).toBe(await hash(none))
   })
 
   it('lists the resolved entries by what the verdict reads of them: a product by its formulation id, a no-label entry by its purpose', () => {

@@ -759,6 +759,50 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         })
       })
 
+      describe('skinConcernsOf', () => {
+        it('gives the skin concerns of the approved rows of each product named, by the id of its catalog product, and leaves out a draft row, a retired row and a product nobody names', async () => {
+          const { repo } = await make()
+          const [approved, draft, retired, unasked] = [
+            workbookProduct({ skinConcerns: ['hd_moisture', 'hd_redness'] }),
+            workbookProduct({ status: 'draft', approvedBy: null, approvedOn: null, skinConcerns: ['hd_acne'] }),
+            workbookProduct({ status: 'retired', skinConcerns: ['hd_acne'] }),
+            workbookProduct({ skinConcerns: ['hd_pore'] }),
+          ]
+          const all = [approved, draft, retired, unasked]
+          await repo.applyWorkbook(await planOf(repo, { newProducts: all.map((one) => one.newProduct), products: all.map((one) => one.planned) }))
+
+          const found = await repo.skinConcernsOf([approved, draft, retired].map((one) => one.newProduct.id).concat('product-nobody-has'))
+
+          // In the vocabulary's order (redness before moisture), not the order the row listed them in.
+          expect([...found]).toEqual([[approved.newProduct.id, ['hd_redness', 'hd_moisture']]])
+        })
+
+        it('gives the union of the approved rows of one product, each concern once and in the vocabulary order, and ignores a draft row of the same product', async () => {
+          const { repo } = await make()
+          const first = workbookProduct({ skinConcerns: ['hd_redness', 'hd_acne'] })
+          const second = workbookProduct({ skinConcerns: ['hd_moisture', 'hd_redness'] })
+          const draft = workbookProduct({ status: 'draft', approvedBy: null, approvedOn: null, skinConcerns: ['hd_texture'] })
+          // The same catalog product under three codes.
+          const [sameSecond, sameDraft] = [{ ...second.planned, productKey: first.identityKey }, { ...draft.planned, productKey: first.identityKey }]
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [first.newProduct], products: [first.planned, sameSecond, sameDraft] }))
+
+          const found = await repo.skinConcernsOf([first.newProduct.id])
+
+          // The vocabulary order is acne, redness, moisture: not the order the rows list them in (redness, acne, moisture).
+          expect(found.get(first.newProduct.id)).toEqual(['hd_acne', 'hd_redness', 'hd_moisture'])
+        })
+
+        it('answers for more products than one query binds, and for none', async () => {
+          const { repo } = await make()
+          const one = workbookProduct({ skinConcerns: ['hd_pore'] })
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [one.newProduct], products: [one.planned] }))
+          const ids = [...Array.from({ length: 250 }, (_, i) => `product-missing-${runSalt}-${i}`), one.newProduct.id]
+
+          expect([...(await repo.skinConcernsOf(ids))]).toEqual([[one.newProduct.id, ['hd_pore']]])
+          expect((await repo.skinConcernsOf([])).size).toBe(0)
+        })
+      })
+
       describe('matchProducts', () => {
         it('maps each key to the identity key of the product it names, exactly, and leaves out a key that names none', async () => {
           const { repo } = await make()
