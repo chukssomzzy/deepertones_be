@@ -959,7 +959,7 @@ the face scan, the catalog and the workbook through their services, never their 
   cannot be found is left out and logged as `candidate-product-missing` with its code only, so one bad row cannot fail the list. `passed` names the rules the row passed, in the fixed order
   `country, step, skin-concern, skin-type, budget, ingredient-rules, reactions`: `budget` only when a band was given, `reactions` only when the user named something that could be checked
   (an ingredient, or a product with an id).
-- **A candidate carries its row's facts for the routine writer.** `approvedFor` maps the row's `evidenceUrls` and `ingredientsSourceUrl` (an empty list and a null when the workbook has none, and such a row is still a candidate) as well as its `skinConcerns` and `ingredients`, and `candidatesFor` copies all four onto the candidate (the three lists as new arrays, so changing one candidate's cannot change the row or the next candidate). The evidence links are context for the AI and the team only: **they never reach an API response or a screen**, so no presenter or schema carries them. `Candidate` is internal and no route returns it.
+- **A candidate carries its row's facts for the routine writer.** `approvedFor` maps the row's `evidenceUrls` and `ingredientsSourceUrl` (an empty list and a null when the workbook has none, and such a row is still a candidate) as well as its `skinConcerns` and `ingredients`, and `candidatesFor` copies all four onto the candidate, plus `keyIngredient` and `strength` for the routine screen's "what to look for" (no rule and no routine writer input reads them) (the three lists as new arrays, so changing one candidate's cannot change the row or the next candidate). The evidence links are context for the AI and the team only: **they never reach an API response or a screen**, so no presenter or schema carries them. `Candidate` is internal and no route returns it.
 - **`sharedWithReaction` is information, not a filter.** For each product the user named in the **reaction** text that the parse resolved, in the order they named them, it lists the candidate's
   ingredients, spelled as the candidate has them, that the product's latest list also holds (compared through `ingredientParts`, expanded through the live rules' labels as above). A product with no list, or one not resolved, has no entry, and so
   does one that shares nothing. `ProductCatalogService.latestIngredients(productId)` reads the list: the latest formulation's ingredients or null (also for an unknown product), never throws for
@@ -1830,7 +1830,7 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
 - **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: six tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers; contract 2.0.0), their columns, accepted values and
+  Countries, Claim words, Tapers; contract 2.1.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2731,9 +2731,17 @@ parts, `--part matching|images|shelf` (default `all`), sharing one dollar cap fo
 - **Recording:** `source` (`writer` or `rules`; null while pending, set on completion) and `reason` (why it was built) say how and why; `model` and `prompt_hash` are null for a rules-built version; `rules_version` (`ROUTINE_RULES_VERSION`), `catalog_version` and `verdict_fingerprint` say what it was built from; `routine_fingerprint` identifies what came out; `hints_shown` records whether the writer saw outcome hints; `writer_calls` (0 to 3, default 0) is how many writer calls the build made; `writer_retry_due_at` is when a rules-built version is due another try by the writer (its partial index is for the sweep). `reason`, `rules_version` and `verdict_fingerprint` are known when the row is appended, so they stay not null.
 - **The daily limit** counts `writerBuildsSince(profileId, since)`: the profile's rows created at or after `since` with `writer_calls > 0`, whatever their source. A rules-only fallback after failed writer calls counts, because those calls were paid for; a pending row with no calls yet does not. A build is one row, so it is counted once.
 
+### Routines (outcome counts)
+
+`routine_outcome_counts` (`routines.outcome-counts.table.ts`, `D1OutcomeCountsRepository` in `routines.outcome-counts.repository.ts`, spec #189) holds what happened to users who had a product in their routine at the review point: one row per `(goal, skin_type, country, code)` with `n`, `fainter`, `flared`, `flared_or_stopped` and `fainter_and_flared_or_stopped` (the `OutcomeCounts` of `routines.outcomes.ts`). `skin_type` is `''` for users with no face scan, so it can be part of the key; a null skin type maps to `''` both ways. There are no foreign keys: the counts are about groups, not accounts.
+
+- **Empty for now.** Nothing fills the table yet; a later collector will (`upsert` replaces a row). Until then every lookup finds nothing and every candidate has no hint.
+- **Hints.** `applyOutcomeHints(skeleton, counts, shown)` (`routines.hints.ts`, pure) fills each gap candidate's `outcomeHint` from its row. A hint exists only for 30 or more users (`MIN_USERS`); a missing row, a smaller group or a corrupt row gives no hint, and one bad row never costs the routine.
+- **Held-back tenth.** About 1 in 10 routines are built without hints, chosen by `hintsShown(versionId)`, so the same version always answers the same and the hidden tenth can be compared with the rest. When hints are not shown the lookup is skipped. The service that does this is wired in PR 3.
+
 ### Routines
 
-`src/modules/routines` is the routine stage (#152, #189): the contracts, schema, gates and rules are pure code, and the storage above is its only repository so far; there is no service or route yet. Its pure code imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`. The writer is a provider (below).
+`src/modules/routines` is the routine stage (#152, #189): the contracts, schema, gates and rules are pure code, and the storage above holds its two repositories (versions and outcome counts); there is no service or route yet. Its pure code imports only types and vocabularies from `catalog.vocabulary`, `face-scans.tables` and `goals.vocabulary`, plus `zod`. The writer is a provider (below).
 
 - **Contracts.** `routines.types.ts` holds `RoutineSkeleton` (what the rules decided: shelf verdicts, gaps with their safe candidates, limits) and `Routine` (what the AI writer answers). They are the seam between the rules, the writer, the eval and, later, production. `SkeletonCandidate` has no `origin` field on purpose: who paid for a review must never reach a choice.
 - **Schema.** `RoutineSchema` (`routines.schema.ts`) is made of closed zod objects; an extra field is a parse failure. Its product is a `z.union` so the JSON Schema sent to Claude has `anyOf`.
@@ -2790,6 +2798,13 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
   3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
      `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
      reused, and a retired code put back is reactivated. A product's availability that is gone is listed under `retired` and the row is removed.
+  3a. **`key_ingredient` and `strength`** are two optional plain-text Products columns (at most 80 and 40 characters) after `ingredients_source_url`: the
+     ingredient that does the product's main job in plain words ("Azelaic acid") and its strength as the label states it ("10%"). They are stored,
+     exported and diffed like every other Products column, and are shown to people in "what to look for"; **no rule, matcher or routine writer reads them**
+     (`Recommendation` and `Candidate` carry them, `SkeletonCandidate` does not). A strength without a key ingredient is `STRENGTH_WITHOUT_INGREDIENT` on the
+     `strength` cell, because a strength alone means nothing; it is not raised when the `key_ingredient` header is missing (that is `MISSING_COLUMN`, once).
+     **After the 2.1.0 deploy, re-export the staging catalog sheet before its next edit and upload**, and re-export any saved eval snapshot workbook
+     (`eval-data/routine/catalog-snapshot.xlsx`): a 2.0.0 file is refused as `409 CONTRACT_MISMATCH`, with no special case.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of

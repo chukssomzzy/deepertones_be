@@ -33,7 +33,7 @@ import {
 // The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
-export const CONTRACT_VERSION = '2.0.0'
+export const CONTRACT_VERSION = '2.1.0'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
@@ -84,6 +84,7 @@ const RULES = {
     'A rule says its group clashes with another group, but no rule of that group says the same back (or the other group has no rule at all). Both sides are reported. Retired rules neither ask for an answer nor give one; draft rules count.',
   CLASH_WITHOUT_GROUP: 'A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with.',
   SELF_CLASH: 'A rule lists its own group in clashes_with. A group does not clash with itself.',
+  STRENGTH_WITHOUT_INGREDIENT: 'A product has a strength but no key ingredient. A strength on its own means nothing, so name the key ingredient it belongs to, or clear the strength.',
   DUPLICATE_PHRASE: 'Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one.',
   NOT_A_LIGHTENING_CLAIM:
     'The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out.',
@@ -284,6 +285,15 @@ export const CONTRACT: Contract = {
           about: 'The full ingredient list in label order (INCI names), separated by ;. A retired product may leave it empty.',
         },
         { name: 'ingredients_source_url', type: 'url', required: 'when-approved', about: 'The page the ingredient list was read from. Needed when the status is approved.' },
+        {
+          name: 'key_ingredient',
+          type: 'text',
+          required: 'optional',
+          maxLength: 80,
+          plainText: true,
+          about: 'The ingredient that does the main job, in plain words: for example "Azelaic acid". Shown to users in \'what to look for\'; never used by a rule.',
+        },
+        { name: 'strength', type: 'text', required: 'optional', maxLength: 40, plainText: true, about: 'Its strength as the label states it: for example "10%". Leave empty when the label does not say.' },
         { name: 'skin_concerns', type: 'vocabulary-list', required: 'always', vocabulary: 'skinConcerns', about: 'The skin concerns the product is for: one or more, separated by ;. These are the concerns a face scan can show.' },
         { name: 'skin_types', type: 'vocabulary-list', required: 'always', vocabulary: 'skinTypes', exclusive: 'all', about: 'The skin types it suits: one or more, separated by ;, or "all" on its own.' },
         { name: 'steps', type: 'vocabulary-list', required: 'always', vocabulary: 'steps', about: 'The routine steps it is used for: one or more, separated by ;.' },
@@ -310,6 +320,7 @@ export const CONTRACT: Contract = {
         { rule: 'APPROVED_WITH_DRAFT_CELLS', about: 'An approved row has no draft cells.' },
         { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
         { rule: 'ALL_MIXED_WITH_OTHERS', about: 'skin_types is "all" alone, or a list of types without "all".' },
+        { rule: 'STRENGTH_WITHOUT_INGREDIENT', about: 'A product with a strength has a key_ingredient.' },
       ],
     },
     {
@@ -438,6 +449,8 @@ export type ProductRow = {
   category: Category
   ingredients: string[]
   ingredientsSourceUrl: string | null
+  keyIngredient: string | null
+  strength: string | null
   skinConcerns: ShownConcern[]
   skinTypes: (SkinTypeLabel | 'all')[]
   steps: RoutineStep[]
@@ -926,6 +939,7 @@ class WorkbookValidator {
     const s = this.products
     const status = s.vocabulary<RowStatus>(i, 'status')
     s.checkAudit(i)
+    if (s.isEmpty(i, 'key_ingredient') && s.has('strength') && s.value(i, 'strength') !== null) s.fail(i, 'strength', 'STRENGTH_WITHOUT_INGREDIENT')
     return {
       code: s.pattern(i, 'code')!,
       brand: s.text(i, 'brand')!,
@@ -935,6 +949,8 @@ class WorkbookValidator {
       category: s.vocabulary<Category>(i, 'category')!,
       ingredients: s.list(i, 'ingredients'),
       ingredientsSourceUrl: s.url(i, 'ingredients_source_url'),
+      keyIngredient: s.text(i, 'key_ingredient'),
+      strength: s.text(i, 'strength'),
       skinConcerns: s.vocabularyList<ShownConcern>(i, 'skin_concerns'),
       skinTypes: s.vocabularyList<SkinTypeLabel | 'all'>(i, 'skin_types'),
       steps: s.vocabularyList<RoutineStep>(i, 'steps'),

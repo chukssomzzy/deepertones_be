@@ -120,7 +120,7 @@ describe('the seeded ingredient rules', () => {
 
     expect(
       validateWorkbook({
-        products: tab(['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells']),
+        products: tab(['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells']),
         availability: tab(['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url']),
         ingredients: tab(headers, ingredients),
         countries: tab(['code', 'currency', 'low_max', 'mid_max', 'status']),

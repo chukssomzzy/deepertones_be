@@ -42,12 +42,12 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(Object.keys(body.data.workbook as object).sort()).toEqual([...TABS].sort())
   })
 
-  it('is catalog version 1, served under the current contract version 2.0.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
+  it('is catalog version 1, served under the current contract version 2.1.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
     const live = await exportLive()
 
     expect(live.catalogVersion).toBe(1)
     expect(live.contractVersion).toBe(CONTRACT_VERSION)
-    expect(CONTRACT_VERSION).toBe('2.0.0')
+    expect(CONTRACT_VERSION).toBe('2.1.0')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 
@@ -107,7 +107,7 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
 })
 
 describe('GET /api/v1/admin/catalog/export after an upload', () => {
-  const product = productRow({ variant: 'Night', form: 'cream', skin_types: 'all', own_cautions: 'irritation; drying', evidence_urls: 'https://example.com/study-1; https://example.com/study-2', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+  const product = productRow({ variant: 'Night', form: 'cream', key_ingredient: 'Azelaic acid', strength: '10%', skin_types: 'all', own_cautions: 'irritation; drying', evidence_urls: 'https://example.com/study-1; https://example.com/study-2', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
   const rule = ruleRow({ aliases: 'zq extractum oil; zq extract', strength_limit: '2% in leave-on products', source_url: 'https://example.com/rule', helps: 'hd_redness; hd_texture', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
   const availability = availabilityRow(product.code as string, { where_sold: null, source_url: 'https://example.com/price-list' })
 
