@@ -1,13 +1,19 @@
+import type { ProductSummary } from '../catalog/catalog.service'
 import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import type { Band, ShownConcern, SkinTypeLabel } from '../face-scans/face-scans.tables'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { ParseState, SafetyMentionRow } from '../safety/safety.types'
 import type { SafetyChoice } from '../safety/safety.vocabulary'
+import type { NoLabelView } from '../scans/scans.service'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import type { VerdictProduct } from './verdicts.merge'
 
 /** A product of the saved verdict as the routine reads it (spec #171, #152): the merged verdict plus its routine step and the sources of the rules that match its ingredients. */
 export type SavedVerdictProduct = VerdictProduct & { step: RoutineStep | null; sourceUrls: string[] }
+
+/** A saved product with its shelf entry's own kind and product or noLabel, joined when the verdict is read: what a client is shown, never what is saved or fingerprinted. */
+// With neither when the shelf entry can no longer be shown: the product stays, as saved.
+export type ShownVerdictProduct = SavedVerdictProduct & ({ kind: 'product'; product: ProductSummary } | { kind: 'no-label'; noLabel: NoLabelView } | { kind?: undefined })
 
 /** What a saved verdict was built from: ids, codes and bands only, never a word the user typed or a product name. */
 export type VerdictProvenance = {

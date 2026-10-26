@@ -1131,6 +1131,124 @@
             "type": "string",
             "description": "The shelf entry this is about: its `id` from `GET /api/v1/me/shelf`."
           },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "product",
+              "no-label"
+            ],
+            "description": "The shelf entry's own kind: `product` carries `product`; `no-label` carries `noLabel`. Absent only when the shelf entry can no longer be shown (it was taken off the shelf since the verdict was built): the product is still here, with its verdict, and carries neither."
+          },
+          "product": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/ProductSummary"
+              },
+              {
+                "description": "Only on a `product` entry: the same summary `GET /api/v1/me/shelf` shows for it."
+              }
+            ]
+          },
+          "noLabel": {
+            "type": "object",
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "market-vendor",
+                  "pharmacy",
+                  "online",
+                  "gift",
+                  "not-sure"
+                ],
+                "description": "Where the product came from."
+              },
+              "purpose": {
+                "type": "string",
+                "enum": [
+                  "lighten",
+                  "moisturise",
+                  "treat-spots",
+                  "not-sure"
+                ],
+                "description": "What the product is used for."
+              },
+              "usedFor": {
+                "type": "string",
+                "enum": [
+                  "under-1-month",
+                  "1-6-months",
+                  "6-months-2-years",
+                  "over-2-years"
+                ],
+                "description": "How long the product has been used."
+              },
+              "description": {
+                "type": "string",
+                "description": "What the user noted, if anything."
+              },
+              "concerns": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "type": "string"
+                    },
+                    "severity": {
+                      "type": "string"
+                    },
+                    "ingredients": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "why": {
+                      "type": "string"
+                    },
+                    "whoShouldTakeCare": {
+                      "type": "string"
+                    },
+                    "traits": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "sources": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "severity",
+                    "ingredients",
+                    "why",
+                    "whoShouldTakeCare",
+                    "traits",
+                    "sources"
+                  ]
+                },
+                "description": "Cautions for a product of unknown contents, worked out from the answers each time the item is shown. Not an analysis of any label."
+              },
+              "rulesVersion": {
+                "type": "integer",
+                "description": "Which version of the caution rules wrote `concerns`."
+              }
+            },
+            "required": [
+              "source",
+              "purpose",
+              "usedFor",
+              "concerns",
+              "rulesVersion"
+            ],
+            "description": "Only on a `no-label` entry: the same view `GET /api/v1/me/shelf` shows for it."
+          },
           "group": {
             "type": "string",
             "enum": [
@@ -2834,7 +2952,7 @@
           },
           "contractVersion": {
             "type": "string",
-            "example": "2.0.0",
+            "example": "2.1.0",
             "description": "The contract version of the workbook: send it back as `contractVersion` when importing the edited workbook."
           },
           "workbook": {
@@ -5083,6 +5201,110 @@
       }
     },
     "/api/v1/me/shelf/{entryId}": {
+      "get": {
+        "operationId": "getShelfEntry",
+        "tags": [
+          "Shelf"
+        ],
+        "summary": "One product on the shelf",
+        "description": "Guests included. The entry exactly as `GET /api/v1/me/shelf` shows it: a `product` entry carries `product`, a `no-label` entry carries `noLabel`. An entry that is unknown, removed, another profile's, or whose product can no longer be read is 404 `SHELF_ENTRY_NOT_FOUND`, and the first three are not told apart.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`."
+            },
+            "required": true,
+            "description": "The shelf entry's `id`, from `GET /api/v1/me/shelf`.",
+            "name": "entryId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The entry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/ShelfEntry"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
       "delete": {
         "operationId": "removeShelfEntry",
         "tags": [
@@ -7996,7 +8218,7 @@
                     "minLength": 1,
                     "maxLength": 20,
                     "description": "The `contractVersion` of the export the workbook was edited from. A workbook made for another contract version is refused with 409 `CONTRACT_MISMATCH`, before anything else is checked.",
-                    "example": "2.0.0"
+                    "example": "2.1.0"
                   },
                   "uploadedBy": {
                     "type": "string",

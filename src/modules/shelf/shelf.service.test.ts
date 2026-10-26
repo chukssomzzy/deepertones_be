@@ -66,6 +66,7 @@ const put = (profileId: string, n: number, over: Partial<ShelfEntryRow> = {}): S
 }
 
 const list = (who: Actor) => runAs(who, () => service.list())
+const entry = (who: Actor, entryId: string) => runAs(who, () => service.entry(entryId))
 const remove = (who: Actor, entryId: string, reason?: 'finished' | 'stopped' | 'not-mine') => runAs(who, () => service.remove(entryId, reason))
 
 beforeEach(() => {
@@ -216,6 +217,140 @@ describe('ShelfService.activeEntriesFor', () => {
 
   it('answers an empty list for a profile with no shelf', async () => {
     expect(await service.activeEntriesFor('profile-nobody')).toEqual([])
+  })
+})
+
+// One entry, by id (spec #171 follow-up): the same view `list` builds for it, or SHELF_ENTRY_NOT_FOUND, the answer `remove` gives for an entry that is not the caller's.
+describe('ShelfService.entry', () => {
+  it('gives a product entry exactly as list shows it, through the same view path', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+
+    const { entries } = await list(AMARA)
+
+    expect(await entry(AMARA, 'entry-2')).toEqual(entries.find((e) => e.id === 'entry-2'))
+    expect(await entry(AMARA, 'entry-2')).toMatchObject({ id: 'entry-2', kind: 'product', source: { scanId: 'scan-2', itemId: 'item-2' }, product: summaryOf('formulation-2') })
+  })
+
+  it('gives a no-label entry exactly as list shows it', async () => {
+    put(AMARA.profileId, 1, { kind: 'no-label', productId: null, formulationId: null })
+
+    const { entries } = await list(AMARA)
+
+    expect(await entry(AMARA, 'entry-1')).toEqual(entries[0])
+    expect(await entry(AMARA, 'entry-1')).toMatchObject({ kind: 'no-label', noLabel: { source: 'market-vendor', rulesVersion: 1 } })
+    expect(await entry(AMARA, 'entry-1')).not.toHaveProperty('product')
+  })
+
+  it('reads only the one entry\'s product, not the shelf\'s', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    put(AMARA.profileId, 3, { kind: 'no-label', productId: null, formulationId: null })
+
+    await entry(AMARA, 'entry-2')
+
+    expect(summaryCalls.flat()).toEqual(['formulation-2'])
+    expect(noLabelCalls.flat()).toEqual([])
+  })
+
+  it('refuses an unknown id with SHELF_ENTRY_NOT_FOUND', async () => {
+    put(AMARA.profileId, 1)
+
+    expect((await errorOf(entry(AMARA, 'entry-nobody'))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+  })
+
+  it('refuses an entry taken off the shelf, which remove still answers as done', async () => {
+    put(AMARA.profileId, 1, { removedAt: at(5 * MINUTE), removedReason: 'finished' })
+
+    expect((await errorOf(entry(AMARA, 'entry-1'))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+  })
+
+  it('refuses another profile\'s entry the same way as one that does not exist, and the owner still has it', async () => {
+    put(AMARA.profileId, 1)
+
+    const refused = await errorOf(entry(TOLU, 'entry-1'))
+    const unknown = await errorOf(entry(TOLU, 'entry-nobody'))
+
+    expect(refused.code).toBe('SHELF_ENTRY_NOT_FOUND')
+    expect(refused.message).toBe(unknown.message)
+    expect((await entry(AMARA, 'entry-1')).id).toBe('entry-1')
+  })
+
+  it('refuses an entry whose product no longer resolves, as list leaves it out, and logs only its id', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    put(AMARA.profileId, 1)
+    known.delete('formulation-1')
+
+    expect((await errorOf(entry(AMARA, 'entry-1'))).code).toBe('SHELF_ENTRY_NOT_FOUND')
+
+    expect(error).toHaveBeenCalledWith({ outcome: 'shelf-entry-unresolved', entryId: 'entry-1' })
+  })
+})
+
+// The views the shelf verdict joins to its products (and the routine and the events publisher can too): by the profile id given, with no session, for the ids asked.
+describe('ShelfService.viewsFor', () => {
+  it('gives each asked entry as the view list shows it, by entry id', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2, { kind: 'no-label', productId: null, formulationId: null })
+    put(AMARA.profileId, 3)
+    const { entries } = await list(AMARA)
+
+    const views = await service.viewsFor(AMARA.profileId, ['entry-1', 'entry-2'])
+
+    expect([...views.keys()].sort()).toEqual(['entry-1', 'entry-2'])
+    expect(views.get('entry-1')).toEqual(entries.find((e) => e.id === 'entry-1'))
+    expect(views.get('entry-2')).toEqual(entries.find((e) => e.id === 'entry-2'))
+  })
+
+  it('answers for the profile it is given and never for the caller: it needs no session, and a session of another profile changes nothing', async () => {
+    put(AMARA.profileId, 1)
+    put(TOLU.profileId, 2)
+
+    expect([...(await service.viewsFor(AMARA.profileId, ['entry-1'])).keys()]).toEqual(['entry-1'])
+    expect([...(await runAs(TOLU, () => service.viewsFor(AMARA.profileId, ['entry-1']))).keys()]).toEqual(['entry-1'])
+    expect((await runAs(TOLU, () => service.viewsFor(AMARA.profileId, ['entry-2']))).size).toBe(0)
+  })
+
+  it('leaves out an entry that is removed, another profile\'s, unknown or unresolved, without throwing', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2, { removedAt: at(5 * MINUTE), removedReason: 'stopped' })
+    put(TOLU.profileId, 3)
+    put(AMARA.profileId, 4)
+    known.delete('formulation-4')
+
+    const views = await service.viewsFor(AMARA.profileId, ['entry-1', 'entry-2', 'entry-3', 'entry-4', 'entry-nobody'])
+
+    expect([...views.keys()]).toEqual(['entry-1'])
+  })
+
+  it('reads the products in one batched call and the no-label answers in one, for the whole ask', async () => {
+    put(AMARA.profileId, 1)
+    put(AMARA.profileId, 2)
+    put(AMARA.profileId, 3, { kind: 'no-label', productId: null, formulationId: null })
+    put(AMARA.profileId, 4, { kind: 'no-label', productId: null, formulationId: null })
+
+    await service.viewsFor(AMARA.profileId, ['entry-1', 'entry-2', 'entry-3', 'entry-4'])
+
+    expect(summaryCalls).toHaveLength(1)
+    expect([...summaryCalls[0]!].sort()).toEqual(['formulation-1', 'formulation-2'])
+    expect(noLabelCalls).toHaveLength(1)
+    expect([...noLabelCalls[0]!].sort()).toEqual(['item-3', 'item-4'])
+  })
+
+  it('is not capped at the 200 entries list shows: the least recently scanned of 201 is still answered', async () => {
+    for (let n = 1; n <= SHELF_POLICY.maxEntries + 1; n++) put(AMARA.profileId, n)
+
+    const views = await service.viewsFor(AMARA.profileId, ['entry-1'])
+
+    expect([...views.keys()]).toEqual(['entry-1'])
+  })
+
+  it('answers an empty map for no ids, or for a profile with no shelf', async () => {
+    put(AMARA.profileId, 1)
+
+    expect((await service.viewsFor(AMARA.profileId, [])).size).toBe(0)
+    expect((await service.viewsFor('profile-nobody', ['entry-1'])).size).toBe(0)
   })
 })
 
