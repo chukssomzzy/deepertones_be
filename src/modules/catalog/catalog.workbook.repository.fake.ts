@@ -1,6 +1,6 @@
 import { REFERENCE, REFERENCE_VERSION } from './catalog.reference'
 import { seedRuleCode } from './catalog.workbook.seed'
-import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type LiveRules, type Recommendation, type WorkbookPlan } from './catalog.workbook.repository'
+import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type LiveRules, type Recommendation, type RecommendedByCode, type WorkbookPlan } from './catalog.workbook.repository'
 import type { RuleRow } from './catalog.workbook.repository.contract'
 import type { AvailabilityRow, ClaimWordRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
 import type { RoutineStep } from './catalog.vocabulary'
@@ -87,6 +87,25 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
 
   async tapersByCode(codes: string[]): Promise<TaperRow[]> {
     return structuredClone(this.taperRows.filter((row) => codes.includes(row.code)).sort(byCode))
+  }
+
+  async recommendedByCode(codes: string[]): Promise<RecommendedByCode[]> {
+    return this.products
+      .filter((row) => codes.includes(row.code))
+      .sort(byCode)
+      .map((row) => ({
+        code: row.code,
+        status: row.status,
+        productId: this.productOf.get(row.code)!,
+        formulationId: this.pinned.get(row.code) ?? null,
+        origin: row.origin,
+        keyIngredient: row.keyIngredient,
+        strength: row.strength,
+        availability: this.availability
+          .filter((a) => a.productCode === row.code)
+          .map((a) => ({ country: a.country, priceMin: a.priceMin, priceMax: a.priceMax, whereSold: a.whereSold }))
+          .sort((a, b) => (a.country < b.country ? -1 : a.country > b.country ? 1 : 0)),
+      }))
   }
 
   async stepsOf(productIds: string[]): Promise<Map<string, RoutineStep[]>> {
