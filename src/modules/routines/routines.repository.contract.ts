@@ -30,6 +30,7 @@ import type { CautionState } from './routines.types'
 //   clearWriterRetry(id)           sets writerRetryDueAt to null on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   setRoutineFingerprint(id, fingerprint)   sets routineFingerprint on that one row (a rebuild that found nothing to change records the inputs it checked), changing
 //                                  nothing else of it; a row nobody has is ignored. Resolves to undefined.
+//   setShelfCounts(id, counts)     sets shelfCounts on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined.
 //   markStarted(profileId, on)     sets startedOn to `on` on every row of that profile whose startedOn is null, a pending row included, and on no other row:
 //                                  an earlier start is never moved, so calling it again is a no-op. Resolves to undefined; a profile with no rows is ignored.
@@ -921,6 +922,34 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await repository.setRoutineFingerprint(row.id, 'routine-fp-1')
 
         expect((await repository.current(profileId))!.routineFingerprint).toBe('routine-fp-1')
+      })
+    })
+
+    describe('setShelfCounts', () => {
+      it('sets the shelf counts of that version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { shelfCounts: null, routineFingerprint: 'routine-fp-1' })
+        await repository.append(row)
+
+        await expect(repository.setShelfCounts(row.id, { keep: 6, reduce: 1, drop: 2, stop: 3 })).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, shelfCounts: { keep: 6, reduce: 1, drop: 2, stop: 3 } })
+      })
+
+      it('leaves the profile\'s other versions, and a version nobody has, alone', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE)
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR))
+        await repository.append(first)
+        await repository.append(second)
+
+        await repository.setShelfCounts(first.id, { keep: 9, reduce: 9, drop: 9, stop: 9 })
+        await expect(repository.setShelfCounts(crypto.randomUUID(), { keep: 8, reduce: 8, drop: 8, stop: 8 })).resolves.toBeUndefined()
+
+        expect((await repository.current(profileId))!.shelfCounts).toEqual(COUNTS)
+        expect((await repository.latest(profileId))!.shelfCounts).toEqual(COUNTS)
       })
     })
 

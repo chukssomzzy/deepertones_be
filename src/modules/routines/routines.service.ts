@@ -475,11 +475,11 @@ export class RoutineService {
         // A retry that finds nothing to rewrite is done with: the version is not due another.
         if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
         // The inputs changed (or the stale read would ask again on every read) but the routine did not: it now stands for the inputs it was just checked against.
-        if (current!.routineFingerprint !== routine) {
-          await this.repository.setRoutineFingerprint(current!.id, routine)
-          // The shelf may sort differently under the new inputs (a product that joined it and is dropped), and the plan summary must match it.
-          await this.repository.setShelfCounts(current!.id, shelfCounts)
-        }
+        // The counts go first and the fingerprint last: if the second write fails the fingerprint still differs, so the next attempt writes both again. A routine built
+        // before the column has no counts; with the fingerprint equal, the shelf as it stands is the shelf the routine was built from, so they are filled in too.
+        const moved = current!.routineFingerprint !== routine
+        if (moved || current!.shelfCounts === null) await this.repository.setShelfCounts(current!.id, shelfCounts)
+        if (moved) await this.repository.setRoutineFingerprint(current!.id, routine)
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
       }

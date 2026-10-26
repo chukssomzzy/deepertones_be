@@ -91,7 +91,7 @@ const RoutineSummaryResponse = z
 
 const body = {
   summary: RoutineSummaryResponse.nullable().openapi({ description: 'Null for a routine built before summaries were kept; it gains one at its next rebuild.' }),
-  startedOn: z.string().nullable().openapi({ description: 'The day the user tapped Start, as `YYYY-MM-DD` (UTC); null until they do.' }),
+  startedOn: z.string().nullable().openapi({ description: 'Day 1 of the routine, as `YYYY-MM-DD` (UTC): the day after the user tapped Start; null until they do. Step-down dates count from it.' }),
   expectation: z.string().openapi({ description: 'What to expect and when, in plain words.' }),
   steps: z.array(RoutineStepResponse).openapi({ description: 'In routine order.' }),
   tapers: z.array(RoutineTaperResponse).openapi({ description: 'One per product being stopped.' }),

@@ -1,6 +1,7 @@
 import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import { answerFor } from '../goals/goals.answers'
 import type { Goal } from '../goals/goals.vocabulary'
+import { FORBIDDEN_WORDING } from './routines.wording'
 
 // DRAFT copy: needs owner review before launch, like the goal answers.
 //
@@ -42,13 +43,16 @@ export const reasonFor = (step: RoutineStep, kind: ReasonKind): string => REASON
 /** What to expect and when: the goal's own answer, so the routine and the goal screen never say different things. */
 export const expectationFor = (goal: Goal): string => answerFor(goal, false).howLong
 
-// DRAFT copy: needs owner review before launch. The words of the "Your plan is ready" step-down card. Fixed text, so it passes the wording gate whatever it names.
+// The owner's text for the "Your plan is ready" step-down card. The sentence passes the wording gate; the names put into it might not (a product's name is the maker's
+// own words, e.g. "Skin Whitening Cream"), so `stepDownMessage` swaps in a generic subject for any set of names the gate would catch.
 const STEP_DOWN_MESSAGE = (names: string): string => `Stopping ${names} suddenly can make your skin flare. We'll take it step by step, so the rough days are expected, not a surprise.`
 
 /** The step-down card's sentence for the products being stopped (brand and name, or the name alone), in order: "X", "X and Y", or "X, Y and N more". */
 export const stepDownMessage = (products: readonly { brand: string | null; name: string }[]): string => {
-  const [first, second, ...rest] = products.map(({ brand, name }) => (brand ? `${brand} ${name}` : name))
+  const names = products.map(({ brand, name }) => (brand ? `${brand} ${name}` : name))
+  const [first, second, ...rest] = names
   if (first === undefined) throw new Error('stepDownMessage needs at least one product')
+  if (names.some((name) => FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(name)))) return STEP_DOWN_MESSAGE(names.length === 1 ? 'this product' : 'these products')
   if (second === undefined) return STEP_DOWN_MESSAGE(first)
   if (rest.length === 0) return STEP_DOWN_MESSAGE(`${first} and ${second}`)
   return STEP_DOWN_MESSAGE(`${first}, ${second} and ${rest.length} more`)

@@ -2753,6 +2753,36 @@ describe('RoutineService.requestIfStale: after a build that found nothing to cha
     expect((await currentRow()).shelfCounts).toEqual({ keep: 2, reduce: 0, drop: 0, stop: 1 })
   })
 
+  it('writes the counts before the fingerprint, so a failure between them leaves the fingerprint unrecorded and the next attempt records both', async () => {
+    const before = await started()
+    droppedProduct()
+    setClock(3 * DAY)
+    vi.spyOn(repository, 'setShelfCounts').mockRejectedValueOnce(new Error('d1 down'))
+
+    await expect(build('verdict')).rejects.toThrow('d1 down')
+
+    expect(await currentRow()).toEqual(before)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ shelfCounts: { keep: 2, reduce: 0, drop: 0, stop: 1 } })
+    expect((await currentRow()).routineFingerprint).not.toBe(before.routineFingerprint)
+  })
+
+  it('gives a routine built before the column its counts on an unchanged rebuild, though its fingerprint is the build\'s already', async () => {
+    const before = await started()
+    // An old routine in force: the same routine and fingerprint, no counts.
+    await repository.append({ ...structuredClone(before), id: 'version-old', shelfCounts: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+    expect((await currentRow()).shelfCounts).toBeNull()
+    const set = vi.spyOn(repository, 'setRoutineFingerprint')
+    setClock(4 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ id: 'version-old', shelfCounts: { keep: 1, reduce: 0, drop: 0, stop: 1 }, routineFingerprint: before.routineFingerprint })
+    expect(set).not.toHaveBeenCalled()
+  })
+
   it('leaves the fingerprint alone when it is already the build\'s', async () => {
     const before = await started()
     const set = vi.spyOn(repository, 'setRoutineFingerprint')

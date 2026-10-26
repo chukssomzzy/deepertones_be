@@ -691,6 +691,28 @@ describe('toRoutineResponse: the summary of the plan (the "Your plan is ready" s
       for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(stepDown.message), `${count} products: ${code}`).toBe(false)
     })
 
+    it('names no product the gate would catch: "Skin Whitening Cream" is "this product", and the sentence still passes the gate', () => {
+      const own = new Map([['stop-bad', { brand: 'Karo', name: 'Skin Whitening Cream' }]])
+      const { stepDown } = summaryOf(stoppingVersion(['stop-bad']), { own })
+
+      expect(stepDown.message).toBe(`Stopping this product ${SENTENCE_END}`)
+      for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(stepDown.message), code).toBe(false)
+      // The products list is data for the schedule, not the sentence: it still names the product.
+      expect(stepDown.products).toEqual([{ brand: 'Karo', name: 'Skin Whitening Cream' }])
+    })
+
+    it('says "these products" when several are stopped and any one of them would be caught, and names none of them', () => {
+      const own = new Map([...NAMES, ['stop-bad', { brand: null, name: 'Fairer Skin Cream' }]])
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1', 'stop-bad', 'stop-2']), { own })
+
+      expect(stepDown.message).toBe(`Stopping these products ${SENTENCE_END}`)
+      for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(stepDown.message), code).toBe(false)
+    })
+
+    it('leaves a benign name as it is', () => {
+      expect(summaryOf(stoppingVersion(['stop-1'])).stepDown.message).toBe(`Stopping Karo Glow Cream ${SENTENCE_END}`)
+    })
+
     it('lets the sentence through for a product with no brand, and for a product that has left the shelf', () => {
       for (const id of ['stop-plain', 'stop-gone']) {
         const { stepDown } = summaryOf(stoppingVersion([id]))

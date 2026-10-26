@@ -18,9 +18,9 @@ export type ShelfCounts = { keep: number; reduce: number; drop: number; stop: nu
  * The routine is `steps` (the stored step list, with grounding kept here and never served), `tapers` (each with the day its step-down began, null until the
  * routine is started) and `expectation`: `[]`, `[]` and null while pending. `cautions` are the skeleton's cautions the build was made under (null while
  * pending): a later read compares them with the person's current safety answers. `goal` is the goal it was built for (null while pending, and on a row
- * written before the column existed), so a rebuild knows whether the goal has changed. `started_on` is when the routine was started, carried forward by later
+ * written before the column existed), so a rebuild knows whether the goal has changed. `started_on` is day 1 of the routine: the UTC midnight after the person tapped Start (the first step is the morning after the tap), carried forward by later
  * builds; `served_at` is when this version was last returned to the user. `shelf_counts` is how the build sorted the shelf (`keep`, `reduce`, `drop`, `stop`;
- * null while pending, and on a row written before the column): the plan summary shows it, so it is fixed at build time and matches the routine beside it.
+ * null while pending, and on a row written before the column until a rebuild fills it in): the plan summary shows it, so it is fixed at build time and matches the routine beside it.
  *
  * The rest records the build. `source` is who wrote the words (`writer`, or the `rules` alone), null while pending, and `reason` why it was built. `model` and
  * `prompt_hash` name the writer when it was called, even if every try failed and the rules wrote the routine, and are null when it was not called. A got-it copy is the one exception: it keeps the source, model and prompt hash of the version it copies, with
