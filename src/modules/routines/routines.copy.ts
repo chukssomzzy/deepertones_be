@@ -72,10 +72,15 @@ export const titleFor = ({ step, form, keyIngredient }: { step: RoutineStep | nu
     if (step === 'treat') return form !== null && TREAT_FORMS.includes(form) ? capitalised(form) : 'Treatment'
     return form !== null && CLEANSER_FORMS.includes(form) ? `${capitalised(form)} cleanser` : 'Cleanser'
   })()
-  const ingredient = keyIngredient?.trim()
+  // The key ingredient is free text from the workbook: trailing stops and spaces are not part of a name.
+  const ingredient = keyIngredient?.replace(/[\s.]+$/, '').trim()
   if (!ingredient) return noun
   // A moisturiser with a key ingredient is "{ingredient} moisturiser" whatever its form: "Shea butter moisturiser", not "Shea butter gel moisturiser".
-  return `${capitalised(ingredient)} ${step === 'moisturise' ? 'moisturiser' : noun.toLowerCase()}`
+  const rest = step === 'moisturise' ? 'moisturiser' : noun.toLowerCase()
+  // An ingredient that already ends with the noun ("Vitamin C serum") is the title, not "Vitamin C serum serum".
+  const title = capitalised(new RegExp(`(?:^|\\s)${rest}$`, 'i').test(ingredient) ? ingredient : `${ingredient} ${rest}`)
+  // A title never says what the wording gate forbids, whatever the catalog's words: the ingredient is dropped and the plain noun stands.
+  return FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(title)) ? noun : title
 }
 
 /** What to expect and when: the goal's own answer, so the routine and the goal screen never say different things. */

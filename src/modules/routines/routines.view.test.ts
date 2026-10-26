@@ -569,6 +569,43 @@ describe('toRoutineResponse: the plain title of an entry', () => {
       expect(title).not.toMatch(/\.$/)
     }
   })
+
+  it('never puts forbidden wording in a title: every title of the table, with and without a key ingredient, passes the wording gate', () => {
+    const titles = [
+      ...Object.values(TITLES).flatMap((byForm) => Object.values(byForm)),
+      ...(['cleanse', 'treat', 'moisturise', 'protect'] as const).flatMap((step) => PRODUCT_FORMS.map((form) => recommendedTitle(step, form, 'Niacinamide'))),
+      ...PRODUCT_FORMS.map((form) => titleFor({ step: null, form })),
+      titleFor({ step: null, form: null }),
+    ]
+
+    for (const title of titles) for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(title), `${title} / ${code}`).toBe(false)
+  })
+
+  it.each([
+    ['Whitening', 'treat', 'cream', 'Cream'],
+    ['Skin lightening', 'treat', null, 'Treatment'],
+    ['Skin lightening', 'moisturise', 'lotion', 'Moisturiser'],
+    ['Skin whitening', 'cleanse', 'gel', 'Gel cleanser'],
+  ] as const)('drops a key ingredient that makes the title forbidden wording ("%s", %s, %s): "%s"', (keyIngredient, step, form, title) => {
+    expect(recommendedTitle(step, form, keyIngredient)).toBe(title)
+  })
+
+  it.each([
+    ['Vitamin C serum', 'treat', 'serum', 'Vitamin C serum'],
+    ['vitamin c SERUM', 'treat', 'serum', 'Vitamin c SERUM'],
+    ['Azelaic acid.', 'cleanse', 'gel', 'Azelaic acid gel cleanser'],
+    ['  Niacinamide . ', 'treat', 'serum', 'Niacinamide serum'],
+    ['Shea butter moisturiser', 'moisturise', 'balm', 'Shea butter moisturiser'],
+    ['Zinc oxide sunscreen.', 'protect', 'cream', 'Zinc oxide sunscreen'],
+    ['Salicylic acid gel cleanser', 'cleanse', 'gel', 'Salicylic acid gel cleanser'],
+    ['Superserum', 'treat', 'serum', 'Superserum serum'],
+  ] as const)('keeps a free-text key ingredient from making an odd title ("%s", %s, %s): "%s"', (keyIngredient, step, form, title) => {
+    expect(recommendedTitle(step, form, keyIngredient)).toBe(title)
+  })
+
+  it.each(['', '   ', '.', ' . '])('treats a key ingredient of %j as none', (keyIngredient) => {
+    expect(recommendedTitle('treat', 'serum', keyIngredient)).toBe('Serum')
+  })
 })
 
 describe('titleFor: a product with no step (a left-out product that fills none of the four)', () => {
@@ -601,6 +638,15 @@ describe('toRoutineResponse: what is not in the routine', () => {
 
   it('lists what the build left out, in the order stored (the shelf\'s), each with its entry id, title, status and the verdict\'s own reason', () => {
     expect(listOf(STORED)).toEqual(STORED)
+  })
+
+  it('writes each item out field by field: a stored item with an extra field does not leak it', () => {
+    const stored = [{ ...STORED[0]!, verdict: 'stop', group: 'steroid', facts: ['clobetasol'], sourceUrls: ['https://internal.example'] }] as unknown as RoutineVersionRow['notInRoutine']
+
+    const [item] = listOf(stored)
+
+    expect(item).toEqual(STORED[0])
+    expect(Object.keys(item).sort()).toEqual(['entryId', 'reason', 'status', 'title'])
   })
 
   it('has exactly the documented keys on each item', () => {

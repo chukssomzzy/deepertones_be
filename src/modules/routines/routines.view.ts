@@ -168,8 +168,8 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
     expectation: version.expectation ?? '',
     morning: ordered.filter(inMorning).map((step) => entryOf(step, previous, input)),
     evening: ordered.filter(inEvening).map((step) => entryOf(step, previous, input)),
-    // The stored list as it is: its titles and reasons were fixed at the build, and a product since gone from the shelf still shows.
-    notInRoutine: version.notInRoutine,
+    // The stored list as it was built, field by field like everything else here: its titles and reasons were fixed at the build, and a product since gone from the shelf still shows.
+    notInRoutine: version.notInRoutine?.map(({ entryId, title, status, reason }) => ({ entryId, title, status, reason })) ?? null,
     tapers,
     summary: summaryOf(input, tapers),
   }
