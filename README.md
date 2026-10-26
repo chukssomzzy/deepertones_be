@@ -261,6 +261,9 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
+- **Contract 2.1.0: export again after this is deployed.** The Products tab has two new optional columns, `key_ingredient` and `strength`. A file exported at
+  2.0.0 is refused by `catalog:upload` with a message to export again, before anything is sent, and by the server as `409 CONTRACT_MISMATCH`. Export a fresh
+  file and move your edits across. This includes the staging catalog sheet and a saved eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`).
 - **Contract 2.0.0: export again after this is deployed.** The Claim words and Tapers tabs and the Ingredients `group` and `clashes_with` columns are a
   new contract version. A file exported before it (stamped 1.0.0) is refused by `catalog:upload` with a message to export again, before anything is sent. The
   server refuses it too, as `409 CONTRACT_MISMATCH` whatever tabs the body has (the upload sends the file's contract version, and it is checked before the

@@ -42,6 +42,9 @@ const SEEDS: Seed[] = [
   // A draft row is work in progress: it is never recommended.
   { suffix: 'DRAFT', name: 'Draft Cream', price: 700, over: { status: 'draft', approved_by: null, approved_on: null } },
   { suffix: 'GH-ONLY', name: 'Accra Cream', country: 'GH', price: 40 },
+  // The only rows for the treat step: one the workbook names a key ingredient and strength for, and one it does not.
+  { suffix: 'TREAT-NAMED', name: 'Azelaic Treatment', price: 3000, over: { steps: 'treat', key_ingredient: 'Azelaic acid', strength: '10%' } },
+  { suffix: 'TREAT-BARE', name: 'Plain Treatment', price: 3500, over: { steps: 'treat' } },
 ]
 
 const load = (workbook: RawWorkbook) => {
@@ -119,6 +122,15 @@ describe('RecommendationService.candidatesFor against a loaded recommendation ca
 
     expect(codesOf(await kofi.candidates())).toEqual([code('GH-ONLY')])
     expect(codesOf(await amara.candidates())).not.toContain(code('GH-ONLY'))
+  })
+
+  it('carries the key ingredient and strength the workbook holds for a row, and null for both on a row that has neither', async () => {
+    const amara = await userWith()
+
+    const candidates = await amara.candidates('treat')
+
+    expect(candidates.find((candidate) => candidate.code === code('TREAT-NAMED'))).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+    expect(candidates.find((candidate) => candidate.code === code('TREAT-BARE'))).toMatchObject({ keyIngredient: null, strength: null })
   })
 
   it('never recommends a draft row, whatever else it passes', async () => {
