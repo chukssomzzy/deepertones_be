@@ -1,6 +1,6 @@
 import { and, asc, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
-import { chunked, type Db } from '../../lib/db'
+import { chunked, queryByIds, type Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { SHOWN_CONCERNS, type ShownConcern, type SkinTypeLabel } from '../face-scans/face-scans.tables'
 import { formulations, productAliases, products } from './catalog.table'
@@ -26,6 +26,8 @@ export type Recommendation = {
   ownCautions: ConcernKind[]
   evidenceUrls: string[]
   ingredientsSourceUrl: string | null
+  keyIngredient: string | null
+  strength: string | null
   origin: Origin
   priceMin: number
   priceMax: number
@@ -33,6 +35,23 @@ export type Recommendation = {
 }
 
 export type Country = CountryRow
+
+/**
+ * What the routine screen reads of a recommended row by its code, whatever its status: the product and list it pins, where it came from, the key
+ * ingredient and strength, and the price and place in every country the workbook sells it in.
+ */
+export type RecommendedByCode = {
+  code: string
+  status: 'draft' | 'approved' | 'retired'
+  productId: string
+  /** Null only for a retired row uploaded with no list. */
+  formulationId: string | null
+  origin: Origin
+  keyIngredient: string | null
+  strength: string | null
+  /** One entry for each country the row has availability in, in country order; empty for a row sold nowhere. */
+  availability: { country: string; priceMin: number; priceMax: number; whereSold: string | null }[]
+}
 
 /** A Products row that is written, with where it lands in the catalog: the identity key of its product, and the list it pins. */
 export type PlannedProduct = {
@@ -163,6 +182,8 @@ export class D1CatalogWorkbookRepository {
             category: row.category,
             ingredients: row.ingredients,
             ingredientsSourceUrl: row.ingredientsSourceUrl,
+            keyIngredient: row.keyIngredient,
+            strength: row.strength,
             skinConcerns: row.skinConcerns,
             skinTypes: row.skinTypes,
             steps: row.steps,
@@ -217,6 +238,34 @@ export class D1CatalogWorkbookRepository {
       for (const row of await this.db.select().from(tapers).where(inArray(tapers.code, chunk))) found.push(D1CatalogWorkbookRepository.taperOf(row))
     }
     return found.sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+  }
+
+  /**
+   * The recommended rows with these codes, whatever their status (a retired row is returned, as a routine saved with it still shows it), in code order, each
+   * with its availability in every country. Not filtered by country: the caller says where it is sold and where it is not. A code that names no row is absent.
+   */
+  async recommendedByCode(codes: string[]): Promise<RecommendedByCode[]> {
+    const wanted = [...new Set(codes)]
+    const rows = await queryByIds(wanted, (chunk) => this.db.select().from(recommendedProducts).where(inArray(recommendedProducts.code, chunk)))
+    const sold = await queryByIds(
+      rows.map((row) => row.code),
+      (chunk) => this.db.select().from(productAvailability).where(inArray(productAvailability.productCode, chunk)),
+    )
+    return rows
+      .map((row) => ({
+        code: row.code,
+        status: row.status,
+        productId: row.productId,
+        formulationId: row.formulationId,
+        origin: row.origin,
+        keyIngredient: row.keyIngredient,
+        strength: row.strength,
+        availability: sold
+          .filter((a) => a.productCode === row.code)
+          .map((a) => ({ country: a.country, priceMin: a.priceMin, priceMax: a.priceMax, whereSold: a.whereSold }))
+          .sort((a, b) => (a.country < b.country ? -1 : a.country > b.country ? 1 : 0)),
+      }))
+      .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
   }
 
   /**
@@ -288,6 +337,8 @@ export class D1CatalogWorkbookRepository {
       ownCautions: row.ownCautions,
       evidenceUrls: row.evidenceUrls,
       ingredientsSourceUrl: row.ingredientsSourceUrl,
+      keyIngredient: row.keyIngredient,
+      strength: row.strength,
       origin: row.origin,
       priceMin: availability.priceMin,
       priceMax: availability.priceMax,
@@ -505,6 +556,8 @@ export class D1CatalogWorkbookRepository {
               category: row.category,
               ingredients: row.ingredients,
               ingredientsSourceUrl: row.ingredientsSourceUrl,
+              keyIngredient: row.keyIngredient,
+              strength: row.strength,
               skinConcerns: row.skinConcerns,
               skinTypes: row.skinTypes,
               steps: row.steps,
@@ -534,6 +587,8 @@ export class D1CatalogWorkbookRepository {
               category: sql`excluded.category`,
               ingredients: sql`excluded.ingredients`,
               ingredientsSourceUrl: sql`excluded.ingredients_source_url`,
+              keyIngredient: sql`excluded.key_ingredient`,
+              strength: sql`excluded.strength`,
               skinConcerns: sql`excluded.skin_concerns`,
               skinTypes: sql`excluded.skin_types`,
               steps: sql`excluded.steps`,

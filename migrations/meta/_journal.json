@@ -295,6 +295,13 @@
       "when": 1793021949159,
       "tag": "0041_dizzy_elektra",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "6",
+      "when": 1793022185313,
+      "tag": "0042_material_proudstar",
+      "breakpoints": true
     }
   ]
 }

@@ -17,6 +17,8 @@ const product = (row: ProductRow): RawRow => ({
   category: row.category,
   ingredients: list(row.ingredients),
   ingredients_source_url: row.ingredientsSourceUrl,
+  key_ingredient: row.keyIngredient,
+  strength: row.strength,
   skin_concerns: list(row.skinConcerns),
   skin_types: list(row.skinTypes),
   steps: list(row.steps),

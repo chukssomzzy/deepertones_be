@@ -83,6 +83,8 @@ export const workbookProduct = (over: Partial<ProductRow> = {}) => {
     category: 'skin',
     ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'],
     ingredientsSourceUrl: 'https://example.com/list',
+    keyIngredient: 'Azelaic acid',
+    strength: '10%',
     skinConcerns: ['hd_moisture', 'hd_redness'],
     skinTypes: ['dry', 'combination'],
     steps: ['cleanse', 'treat'],
@@ -303,6 +305,34 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         const [recommendation] = await repo.approvedFor({ country: nigeria.code, step: 'cleanse' })
         expect(recommendation).toMatchObject({ code: one.row.code, formulationId: one.formulation.id, ingredients: ['Aqua', 'Glycerin', 'Cetearyl Alcohol'], skinTypes: ['dry', 'combination'], priceMin: 3000, whereSold: 'Pharmacies' })
         expect((await repo.liveRules()).version).toMatch(/^rules-contract-apply/)
+      })
+
+      it('stores key_ingredient and strength with the row, reads them back, changes them in place, and clears them to null', async () => {
+        const { repo } = await make()
+        const one = workbookProduct({ keyIngredient: 'Azelaic acid', strength: '10%' })
+        const where = fresh('N')
+        await repo.applyWorkbook(await planOf(repo, { countries: [country(where)], newProducts: [one.newProduct], products: [one.planned], availability: [sale(one.row.code, where)] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+
+        await repo.applyWorkbook(await planOf(repo, { products: [{ ...one.planned, row: { ...one.row, keyIngredient: 'Niacinamide', strength: '4%' } }] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: 'Niacinamide', strength: '4%' })
+
+        await repo.applyWorkbook(await planOf(repo, { products: [{ ...one.planned, row: { ...one.row, keyIngredient: null, strength: null } }] }))
+        expect(await stored(repo, one.row.code)).toMatchObject({ keyIngredient: null, strength: null })
+      })
+
+      it('gives key_ingredient and strength on the row approvedFor returns, and null when the product has neither', async () => {
+        const { repo } = await make()
+        const [with_, without] = [workbookProduct({ keyIngredient: 'Azelaic acid', strength: '10%' }), workbookProduct({ keyIngredient: null, strength: null })]
+        const where = fresh('N')
+        await repo.applyWorkbook(
+          await planOf(repo, { countries: [country(where)], newProducts: [with_.newProduct, without.newProduct], products: [with_.planned, without.planned], availability: [sale(with_.row.code, where), sale(without.row.code, where)] }),
+        )
+
+        const rows = await repo.approvedFor({ country: where, step: 'cleanse' })
+
+        expect(rows.find((row) => row.code === with_.row.code)).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+        expect(rows.find((row) => row.code === without.row.code)).toMatchObject({ keyIngredient: null, strength: null })
       })
 
       it('applied twice from the same base version, the second is a lost race: it returns false and writes nothing, not its product, row, availability or version', async () => {
@@ -723,6 +753,102 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
 
           expect((await repo.tapersByCode(codes)).map((row) => row.code)).toEqual([one.code])
           expect(await repo.tapersByCode([])).toEqual([])
+        })
+      })
+
+      describe('recommendedByCode', () => {
+        it('gives the rows with the codes asked for, retired ones included, each with its status, product, formulation, origin, key ingredient and strength, and leaves out a code that names none', async () => {
+          const { repo } = await make()
+          const [approved, retired, unasked] = [
+            workbookProduct({ keyIngredient: 'Azelaic acid', strength: '10%', origin: 'sourced' }),
+            workbookProduct({ status: 'retired', keyIngredient: 'Niacinamide', strength: '4%', origin: 'brand-submitted' }),
+            workbookProduct(),
+          ]
+          const all = [approved, retired, unasked]
+          const where = fresh('N')
+          await repo.applyWorkbook(
+            await planOf(repo, {
+              countries: [country(where)],
+              newProducts: all.map((one) => one.newProduct),
+              products: all.map((one) => one.planned),
+              availability: all.map((one) => sale(one.row.code, where)),
+            }),
+          )
+
+          const found = await repo.recommendedByCode([approved.row.code, retired.row.code, fresh('PRD-NONE')])
+
+          expect(found.map((row) => row.code)).toEqual([approved.row.code, retired.row.code].sort())
+          expect(found.find((row) => row.code === approved.row.code)).toMatchObject({
+            status: 'approved',
+            productId: approved.newProduct.id,
+            formulationId: approved.formulation.id,
+            origin: 'sourced',
+            keyIngredient: 'Azelaic acid',
+            strength: '10%',
+          })
+          expect(found.find((row) => row.code === retired.row.code)).toMatchObject({
+            status: 'retired',
+            productId: retired.newProduct.id,
+            formulationId: retired.formulation.id,
+            origin: 'brand-submitted',
+            keyIngredient: 'Niacinamide',
+            strength: '4%',
+          })
+        })
+
+        it('lists the price and place in every country the row is sold in, in country order, and an empty list for a row sold nowhere', async () => {
+          const { repo } = await make()
+          const [sold, nowhere] = [workbookProduct(), workbookProduct()]
+          const [ng, gh] = [fresh('N'), fresh('G')]
+          await repo.applyWorkbook(
+            await planOf(repo, {
+              countries: [country(gh), country(ng)],
+              newProducts: [sold.newProduct, nowhere.newProduct],
+              products: [sold.planned, nowhere.planned],
+              availability: [sale(sold.row.code, gh, { priceMin: 10, priceMax: 20, whereSold: null }), sale(sold.row.code, ng, { priceMin: 3000, priceMax: 4500, whereSold: 'Pharmacies' })],
+            }),
+          )
+
+          const found = await repo.recommendedByCode([sold.row.code, nowhere.row.code])
+
+          expect(found.find((row) => row.code === sold.row.code)?.availability).toEqual(
+            [
+              { country: gh, priceMin: 10, priceMax: 20, whereSold: null },
+              { country: ng, priceMin: 3000, priceMax: 4500, whereSold: 'Pharmacies' },
+            ].sort((a, b) => (a.country < b.country ? -1 : 1)),
+          )
+          expect(found.find((row) => row.code === nowhere.row.code)?.availability).toEqual([])
+        })
+
+        it('gives a null formulation for a retired row uploaded with no list, and a null key ingredient and strength for a row that has neither', async () => {
+          const { repo } = await make()
+          const bare = workbookProduct({ status: 'retired', ingredients: [], keyIngredient: null, strength: null })
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [bare.newProduct], products: [bare.planned] }))
+
+          const [found] = await repo.recommendedByCode([bare.row.code])
+
+          expect(found).toMatchObject({ code: bare.row.code, status: 'retired', formulationId: null, keyIngredient: null, strength: null })
+        })
+
+        it('answers for more codes than one query binds, and for none', async () => {
+          const { repo } = await make()
+          const [first, last] = [workbookProduct(), workbookProduct()]
+          const where = fresh('N')
+          await repo.applyWorkbook(
+            await planOf(repo, {
+              countries: [country(where)],
+              newProducts: [first.newProduct, last.newProduct],
+              products: [first.planned, last.planned],
+              availability: [sale(first.row.code, where), sale(last.row.code, where)],
+            }),
+          )
+          const codes = [first.row.code, ...Array.from({ length: 250 }, (_, i) => `PRD-MISSING-${runSalt}-${i}`), last.row.code]
+
+          const found = await repo.recommendedByCode(codes)
+
+          expect(found.map((row) => row.code)).toEqual([first.row.code, last.row.code].sort())
+          expect(found.every((row) => row.availability.length === 1)).toBe(true)
+          expect(await repo.recommendedByCode([])).toEqual([])
         })
       })
 

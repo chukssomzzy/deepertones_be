@@ -56,7 +56,7 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const live = await service.exportWorkbook()
 
-    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.0.0' })
+    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.1.0' })
     expect(live.workbook.products).toEqual({ headers: expect.arrayContaining(['code', 'status', 'draft_cells']), rows: [] })
     expect(live.workbook.ingredients.rows.length).toBeGreaterThan(0)
     expect(validateWorkbook(live.workbook)).toMatchObject({ ok: true })
@@ -250,6 +250,7 @@ describe('CatalogWorkbookService.importWorkbook', () => {
 describe('CatalogWorkbookService.importWorkbook: the contract version', () => {
   it.each([
     ['an older contract', '1.0.0'],
+    ['the 2.0.0 contract (before key_ingredient and strength)', '2.0.0'],
     ['a newer contract', '9.9.9'],
     ['no version at all', ''],
   ])('refuses a file made for %s with a ConflictError CONTRACT_MISMATCH, for a dry run and an apply alike, and writes nothing', async (_what, contractVersion) => {
@@ -739,6 +740,47 @@ describe('CatalogWorkbookService.tapersByCode', () => {
   })
 })
 
+describe('CatalogWorkbookService.recommendedByCode', () => {
+  it('gives each row asked for by code, an approved one and a retired one, with its facts and every country it is sold in, and leaves an unknown code out of the map', async () => {
+    const { service } = build()
+    await applied(service, (w) => {
+      addProduct(w, product({ key_ingredient: 'Azelaic acid', strength: '10%' }), product({ code: 'PRD-TWO', brand: 'Beta', key_ingredient: null, strength: null }))
+      w.countries.rows.push({ ...ng, code: 'GH', currency: 'GHS' })
+      w.availability.rows.push({ product_code: 'PRD-ONE', country: 'GH', price_min: 20, price_max: 40, where_sold: 'Markets', source_url: null })
+    })
+    const [one] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+    // The next upload leaves PRD-TWO out, which retires it in place.
+    await applied(service, (w) => {
+      w.products.rows = w.products.rows.filter((row) => row.code !== 'PRD-TWO')
+      w.availability.rows = w.availability.rows.filter((row) => row.product_code !== 'PRD-TWO')
+    })
+
+    const found = await service.recommendedByCode(['PRD-ONE', 'PRD-TWO', 'PRD-NO-SUCH'])
+
+    expect([...found.keys()].sort()).toEqual(['PRD-ONE', 'PRD-TWO'])
+    expect(found.get('PRD-ONE')).toEqual({
+      code: 'PRD-ONE',
+      status: 'approved',
+      productId: one!.productId,
+      formulationId: one!.formulationId,
+      origin: 'sourced',
+      keyIngredient: 'Azelaic acid',
+      strength: '10%',
+      availability: [
+        { country: 'GH', priceMin: 20, priceMax: 40, whereSold: 'Markets' },
+        { country: 'NG', priceMin: 3000, priceMax: 4500, whereSold: null },
+      ],
+    })
+    expect(found.get('PRD-TWO')).toMatchObject({ code: 'PRD-TWO', status: 'retired', keyIngredient: null, strength: null, availability: [] })
+  })
+
+  it('answers an empty map for no codes', async () => {
+    const { service } = build()
+
+    expect((await service.recommendedByCode([])).size).toBe(0)
+  })
+})
+
 describe('CatalogWorkbookService.stepsFor', () => {
   it('gives the routine steps an approved recommended product fills, by the id of its catalog product', async () => {
     const { service } = build()
@@ -793,5 +835,75 @@ describe('CatalogWorkbookService.skinConcernsFor', () => {
     const { service } = build()
 
     expect((await service.skinConcernsFor([])).size).toBe(0)
+  })
+})
+
+describe('CatalogWorkbookService: key_ingredient and strength', () => {
+  const rowOf = (workbook: RawWorkbook) => workbook.products.rows.find((row) => row.code === 'PRD-ONE')!
+
+  it('exports both columns in the Products header row, empty on a product that has neither', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product()))
+
+    const { workbook } = await service.exportWorkbook()
+
+    expect(workbook.products.headers).toEqual(expect.arrayContaining(['key_ingredient', 'strength']))
+    expect(rowOf(workbook)).toMatchObject({ key_ingredient: null, strength: null })
+  })
+
+  it('stores what an import holds and writes it back on the next export, so exporting and importing again changes nothing', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product({ key_ingredient: 'Azelaic acid', strength: '10%' })))
+
+    const live = await service.exportWorkbook()
+    const again = await service.importWorkbook({ workbook: live.workbook, file: null, baseVersion: live.catalogVersion, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+
+    expect(rowOf(live.workbook)).toMatchObject({ key_ingredient: 'Azelaic acid', strength: '10%' })
+    expect(again.diff.products).toEqual({ added: [], updated: [], retired: [], reactivated: [] })
+  })
+
+  it('reports a changed key_ingredient as an update of that product, in a dry run that applies nothing', async () => {
+    const { service, repository } = build()
+    await applied(service, (w) => addProduct(w, product({ key_ingredient: 'Azelaic acid', strength: '10%' })))
+    const edit = await edited(service, (w) => Object.assign(rowOf(w), { key_ingredient: 'Niacinamide' }))
+
+    const result = await service.importWorkbook({ ...edit, file: null, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+
+    expect(result.diff.products).toEqual({ added: [], updated: ['PRD-ONE'], retired: [], reactivated: [] })
+    expect(await repository.catalogVersion()).toBe(2)
+  })
+
+  it('reports a changed strength as an update, and a strength cleared as an update', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product({ key_ingredient: 'Azelaic acid', strength: '10%' })))
+
+    for (const strength of ['15%', null]) {
+      const edit = await edited(service, (w) => Object.assign(rowOf(w), { strength }))
+      const result = await service.importWorkbook({ ...edit, file: null, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+
+      expect(result.diff.products.updated).toEqual(['PRD-ONE'])
+    }
+  })
+
+  it('refuses an import that holds a strength with no key_ingredient, with the problem on that row and column, and applies nothing', async () => {
+    const { service, repository } = build()
+    const edit = await edited(service, (w) => addProduct(w, product({ strength: '10%' })))
+
+    await expect(service.importWorkbook({ ...edit, file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })).rejects.toMatchObject({
+      name: 'ValidationError',
+      code: 'CATALOG_INVALID',
+      details: { problems: [{ tab: 'products', row: 2, column: 'strength', rule: 'STRENGTH_WITHOUT_INGREDIENT' }] },
+    })
+    expect(await repository.catalogVersion()).toBe(1)
+  })
+
+  it('gives both on the approved row a consumer reads for a country and step (approvedFor), and null for a product that has neither', async () => {
+    const { service } = build()
+    await applied(service, (w) => addProduct(w, product({ code: 'PRD-WITH', name: 'With', key_ingredient: 'Azelaic acid', strength: '10%' }), product({ code: 'PRD-BARE', name: 'Bare' })))
+
+    const rows = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+
+    expect(rows.find((row) => row.code === 'PRD-WITH')).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
+    expect(rows.find((row) => row.code === 'PRD-BARE')).toMatchObject({ keyIngredient: null, strength: null })
   })
 })
