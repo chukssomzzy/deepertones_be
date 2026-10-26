@@ -73,6 +73,8 @@ export const loadSnapshot = async (path: string): Promise<Snapshot> => {
             ownCautions: product.ownCautions,
             evidenceUrls: product.evidenceUrls,
             ingredientsSourceUrl: product.ingredientsSourceUrl,
+            keyIngredient: product.keyIngredient,
+            strength: product.strength,
             origin: product.origin,
             priceMin: availability.priceMin,
             priceMax: availability.priceMax,

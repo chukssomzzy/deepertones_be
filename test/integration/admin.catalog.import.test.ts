@@ -596,6 +596,7 @@ describe('the rules version', () => {
 describe('the contract version', () => {
   it.each([
     ['an older contract', '1.0.0'],
+    ['the 2.0.0 contract, before key_ingredient and strength', '2.0.0'],
     ['a newer contract', '9.9.9'],
   ])('refuses a file made for %s with 409 CONTRACT_MISMATCH, as a dry run and as an apply, and writes nothing', async (_what, contractVersion) => {
     const live = await exportLive()

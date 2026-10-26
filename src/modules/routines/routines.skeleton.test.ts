@@ -18,6 +18,8 @@ const candidate = (code: string, over: Partial<Candidate> = {}): Candidate => ({
   ingredients: ['Aqua', 'Glycerin'],
   evidenceUrls: [`https://evidence.example/${code}`],
   ingredientsSourceUrl: `https://ingredients.example/${code}`,
+  keyIngredient: null,
+  strength: null,
   passed: ['country', 'step'],
   sharedWithReaction: [],
   origin: 'sourced',

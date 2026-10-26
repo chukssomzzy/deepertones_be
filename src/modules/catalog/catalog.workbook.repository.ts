@@ -26,6 +26,8 @@ export type Recommendation = {
   ownCautions: ConcernKind[]
   evidenceUrls: string[]
   ingredientsSourceUrl: string | null
+  keyIngredient: string | null
+  strength: string | null
   origin: Origin
   priceMin: number
   priceMax: number
@@ -163,6 +165,8 @@ export class D1CatalogWorkbookRepository {
             category: row.category,
             ingredients: row.ingredients,
             ingredientsSourceUrl: row.ingredientsSourceUrl,
+            keyIngredient: row.keyIngredient,
+            strength: row.strength,
             skinConcerns: row.skinConcerns,
             skinTypes: row.skinTypes,
             steps: row.steps,
@@ -288,6 +292,8 @@ export class D1CatalogWorkbookRepository {
       ownCautions: row.ownCautions,
       evidenceUrls: row.evidenceUrls,
       ingredientsSourceUrl: row.ingredientsSourceUrl,
+      keyIngredient: row.keyIngredient,
+      strength: row.strength,
       origin: row.origin,
       priceMin: availability.priceMin,
       priceMax: availability.priceMax,
@@ -505,6 +511,8 @@ export class D1CatalogWorkbookRepository {
               category: row.category,
               ingredients: row.ingredients,
               ingredientsSourceUrl: row.ingredientsSourceUrl,
+              keyIngredient: row.keyIngredient,
+              strength: row.strength,
               skinConcerns: row.skinConcerns,
               skinTypes: row.skinTypes,
               steps: row.steps,
@@ -534,6 +542,8 @@ export class D1CatalogWorkbookRepository {
               category: sql`excluded.category`,
               ingredients: sql`excluded.ingredients`,
               ingredientsSourceUrl: sql`excluded.ingredients_source_url`,
+              keyIngredient: sql`excluded.key_ingredient`,
+              strength: sql`excluded.strength`,
               skinConcerns: sql`excluded.skin_concerns`,
               skinTypes: sql`excluded.skin_types`,
               steps: sql`excluded.steps`,

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "93c60956-b12d-4eff-8945-5928214a1574",
+  "id": "0c2e2983-9f58-4026-8d50-1e3d49b3bebf",
   "prevId": "fac7a847-dad0-4a28-8b0f-3a84792989d6",
   "tables": {
     "job_runs": {
@@ -1226,6 +1226,20 @@
         },
         "ingredients_source_url": {
           "name": "ingredients_source_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "key_ingredient": {
+          "name": "key_ingredient",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "strength": {
+          "name": "strength",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2723,27 +2737,6 @@
         "expectation": {
           "name": "expectation",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "cautions": {
-          "name": "cautions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "goal": {
-          "name": "goal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "ready_at": {
-          "name": "ready_at",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

@@ -111,6 +111,8 @@ const candidate = (code: string, priceMin: number, frequency: Candidate['frequen
   ingredients: ['Aqua', 'Niacinamide'],
   evidenceUrls: [`https://example.org/evidence/${code}`],
   ingredientsSourceUrl: `https://example.org/ingredients/${code}`,
+  keyIngredient: null,
+  strength: null,
   passed: ['country', 'step'],
   sharedWithReaction: [],
   origin: 'sourced',
