@@ -1,6 +1,7 @@
 import { describeError } from '../../jobs/safe-error'
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, UnavailableError } from '../../lib/errors'
+import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
@@ -22,13 +23,15 @@ export type RoutineViewServiceDeps = {
   shelf: Pick<ShelfService, 'activeEntriesFor'>
   recommendations: Pick<RecommendationService, 'shoppingFor'>
   repository: Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
+  /** Tells whoever follows a profile's routine that it changed (`routine:<profileId>`). */
+  events: ScanEvents
   now?: () => Date
 }
 
 /**
  * The routine as a person's screen reads it (spec #189): what the routes call. Each session method is the caller's own (no profile id; the actor's profile is the
- * one read) over RoutineService's profile-keyed internals, and adds what only a screen needs: the gates, the body a client reads (routines.view.ts), and "what changed
- * since last shown".
+ * one read) over RoutineService's profile-keyed internals, and adds what only a screen needs: the gates, the body a client reads (routines.view.ts), "what changed
+ * since last shown", and the live stream. `announce` is the build's way to the same stream, by profile id.
  *
  * The gates, in order: 401, 403 `SIGNUP_REQUIRED` for a guest (a routine is saved with an account), 409 `GOAL_REQUIRED`, then 503 `VERDICT_UNAVAILABLE` while a step-down
  * template of the verdict is not approved, since the routine is built from the verdict and would stay pending for ever.
@@ -41,6 +44,7 @@ export class RoutineViewService {
   private readonly shelf: RoutineViewServiceDeps['shelf']
   private readonly recommendations: RoutineViewServiceDeps['recommendations']
   private readonly repository: RoutineViewServiceDeps['repository']
+  private readonly events: ScanEvents
   private readonly now: () => Date
 
   constructor(deps: RoutineViewServiceDeps) {
@@ -51,6 +55,7 @@ export class RoutineViewService {
     this.shelf = deps.shelf
     this.recommendations = deps.recommendations
     this.repository = deps.repository
+    this.events = deps.events
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -59,6 +64,29 @@ export class RoutineViewService {
     const profileId = await this.gated()
     await this.routines.requestIfStale(profileId)
     return this.shown(profileId, await this.routines.current(profileId), true)
+  }
+
+  /**
+   * The caller's routine followed live, as the `text/event-stream` of `routine:<profileId>`. The gates and the request for a build are `current`'s. It starts with the
+   * routine `current` would answer, then carries each `routine` a build sends (see `announce`), and ends with `done` once the routine is ready. The snapshot is read
+   * before the stream opens, so the routine is read again once it is open: a build that landed in between is sent, and a routine that is ready gets `done` straight
+   * away. A failure to send is logged, and so is a failure of that re-read, which still hands back the stream.
+   */
+  async watch(): Promise<Response> {
+    const profileId = await this.gated()
+    await this.routines.requestIfStale(profileId)
+    const view = await this.routines.current(profileId)
+    const stream = await this.events.subscribe(RoutineViewService.streamKey(profileId), await this.shown(profileId, view, true))
+    let latest: RoutineView
+    try {
+      latest = await this.routines.current(profileId)
+    } catch {
+      console.error({ outcome: 'routine-watch-reread-failed', profileId })
+      return stream
+    }
+    if (latest.status !== view.status || RoutineViewService.versionIdOf(latest) !== RoutineViewService.versionIdOf(view)) await this.publishRoutine(profileId, latest)
+    if (latest.status === 'ready') await this.publishDone(profileId)
+    return stream
   }
 
   /** Makes today day 1 of the routine in force, and answers it. 409 `ROUTINE_NOT_READY` before there is one; starting again changes nothing. */
@@ -93,6 +121,16 @@ export class RoutineViewService {
     return this.shown(profileId, { status: 'updating', version: view.version }, false)
   }
 
+  /**
+   * Sends the profile's routine to whoever follows it, as the body GET answers (`routine`), and `done` when it is ready. For the build to call, by profile id with no
+   * gates and no session. Never marks a version served: only a person looking at it does. Throws when it cannot be sent; callers log that.
+   */
+  async announce(profileId: string): Promise<void> {
+    const view = await this.routines.current(profileId)
+    await this.publishRoutine(profileId, view)
+    if (view.status === 'ready') await this.publishDone(profileId)
+  }
+
   /** The caller's profile once they may see a routine: signed up, with a goal, and the verdict available. */
   private async gated(): Promise<string> {
     const user = requireUser()
@@ -100,6 +138,22 @@ export class RoutineViewService {
     await this.goals.requireGoal()
     if (VerdictService.lacksTapers(await this.workbook.verdictReference())) throw new UnavailableError('VERDICT_UNAVAILABLE', 'The routine is not available yet')
     return user.profileId
+  }
+
+  private async publishRoutine(profileId: string, view: RoutineView): Promise<void> {
+    try {
+      await this.events.publish(RoutineViewService.streamKey(profileId), { type: 'routine', routine: await this.shown(profileId, view, false) })
+    } catch {
+      console.error({ outcome: 'routine-publish-failed', profileId })
+    }
+  }
+
+  private async publishDone(profileId: string): Promise<void> {
+    try {
+      await this.events.publish(RoutineViewService.streamKey(profileId), { type: 'done' })
+    } catch {
+      console.error({ outcome: 'routine-publish-failed', profileId })
+    }
   }
 
   /**
@@ -134,5 +188,13 @@ export class RoutineViewService {
       }
     }
     return body
+  }
+
+  private static versionIdOf(view: RoutineView): string | null {
+    return view.status === 'pending' ? null : view.version.id
+  }
+
+  private static streamKey(profileId: string): string {
+    return `routine:${profileId}`
   }
 }

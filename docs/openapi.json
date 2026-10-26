@@ -6154,6 +6154,84 @@
         }
       }
     },
+    "/api/v1/me/routine/events": {
+      "get": {
+        "operationId": "watchRoutine",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Follow the routine live, as server-sent events",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the body `GET /api/v1/me/routine` answers now; then one `routine` each time a build starts or finishes, or \"I got it\" is recorded, whose data is the routine in that same shape (`updating` while a build is under way); then `done` (data `{}`) after a `routine` that is `ready`, after which the server closes the stream. A routine that is already ready gets `snapshot` and `done` at once. `pending` and `updating` leave the stream open for the build's `routine`. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Frames of `event:` and `data:` lines."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/me/routine/start": {
       "post": {
         "operationId": "startRoutine",
@@ -6405,7 +6483,7 @@
           "Routine"
         ],
         "summary": "Ask for another product for a step whose product is not sold in this country",
-        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. For a step whose recommended product is not sold in the shopping country (or has been retired). Queues a build that picks the step again without that product and answers 202 with the routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine`. Asking again for the same step of the same routine queues nothing more. 409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already.",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. For a step whose recommended product is not sold in the shopping country (or has been retired). Queues a build that picks the step again without that product and answers 202 with the routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine` or its `/events`. Asking again for the same step of the same routine queues nothing more. 409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already.",
         "security": [
           {
             "bearerAuth": []

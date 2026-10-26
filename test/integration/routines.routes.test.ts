@@ -20,6 +20,7 @@ import { MemoryProductResearcher } from '../../src/providers/product-research/me
 import { applied, code, taperRow } from './admin.catalog.support'
 import { availabilityRow, countryRow, productRow, putCountry, type RawWorkbook } from './catalog.workbook.support'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
+import { parseFrame, sseReader, type SseReader } from './sse'
 
 // The routine endpoints (spec #189, PR 4b) through the Worker's public surface: the real entrypoint, real local D1 under it, plain fetch for the new routes (the
 // typed client has no call for them until they exist) and the typed client for the sign-in that already does. A routine version reaches the database the way the
@@ -34,7 +35,7 @@ import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-wi
 //   product = { kind: 'own', entryId, brand, name } | { kind: 'recommended', code, brand, name, imageUrl, origin?, price: { min, max, currency } | null, whereSold,
 //             soldInCurrentCountry, soldElsewhere, keyIngredient, strength, notYetGot } | { kind: 'none' }
 //   Taper = { entryId, brand, name, code, kind, whatToExpect, seeAProfessionalIf, steps: { fromWeek, toWeek, frequency, fromDate?, toDate? }[] }
-// GET /me/routine, POST /me/routine/start, POST /me/routine/steps/{step}/got-it and POST /me/routine/steps/{step}/find-sold-here.
+// GET /me/routine, GET /me/routine/events, POST /me/routine/start, POST /me/routine/steps/{step}/got-it and POST /me/routine/steps/{step}/find-sold-here.
 // Every one is for a signed-up account: 401 AUTH_REQUIRED, then 403 SIGNUP_REQUIRED (a guest), then 409 GOAL_REQUIRED, then 503 VERDICT_UNAVAILABLE (a step-down
 // template of the verdict is not approved yet). Note the order against the verdict's own, which answers 503 before 409.
 // Start answers 200 with the body (409 ROUTINE_NOT_READY before there is a routine) and is idempotent; got-it answers 200 with the body (409 ROUTINE_NOT_READY,
@@ -48,6 +49,8 @@ const OTP_QUEUE = 'deepertones-otp-delivery-development'
 const ZEPTO_URL = 'https://zeptomail.test/v1.1/email'
 const SOURCE_URL = 'https://shop.example/product'
 const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
+// How long to listen for a frame that must not come.
+const QUIET_MS = 300
 
 // Every time here hangs off this one anchor (the real clock, which the Worker also runs on).
 const ANCHOR = new Date()
@@ -83,12 +86,14 @@ const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) => worker.fet
 const api = hc<AppType>(ORIGIN, { fetch: fetchWorker as typeof fetch })
 const v1 = api.api.v1
 
+const opened: SseReader[] = []
 afterEach(async () => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   routinesQueued.length = 0
   otpQueued.length = 0
   routinesEnabled = false
+  await Promise.all(opened.splice(0).map((stream) => stream.cancel()))
   await abortAllDurableObjects()
 })
 
@@ -195,6 +200,14 @@ const getRoutine = (guest?: Guest) => send('GET', '', guest)
 const startRoutine = (guest?: Guest) => send('POST', '/start', guest)
 const gotIt = (step: string, guest?: Guest) => send('POST', `/steps/${step}/got-it`, guest)
 const findSoldHere = (step: string, guest?: Guest) => send('POST', `/steps/${step}/find-sold-here`, guest)
+const eventsOf = (guest?: Guest) => send('GET', '/events', guest)
+const watch = async (guest: Guest) => {
+  const res = await eventsOf(guest)
+  expect(res.status).toBe(200)
+  const stream = sseReader(res)
+  opened.push(stream)
+  return { res, stream }
+}
 const bodyOf = async (guest: Guest) => dataOf<RoutineBody>(await getRoutine(guest))
 const readyOf = async (guest: Guest) => {
   const body = await bodyOf(guest)
@@ -204,6 +217,7 @@ const readyOf = async (guest: Guest) => {
 
 const ENDPOINTS: [string, (guest?: Guest) => Promise<Response>][] = [
   ['GET /me/routine', getRoutine],
+  ['GET /me/routine/events', eventsOf],
   ['POST /me/routine/start', startRoutine],
   ['POST /me/routine/steps/{step}/got-it', (guest) => gotIt('moisturise', guest)],
   ['POST /me/routine/steps/{step}/find-sold-here', (guest) => findSoldHere('treat', guest)],
@@ -667,6 +681,14 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       }
     })
 
+    it('has no internal field or value in the first frame of the event stream', async () => {
+      const { guest } = await withRoutine()
+      const { stream } = await watch(guest)
+
+      const { frames } = await stream.read(1)
+
+      expectClean(parseFrame(frames[0]!).data, frames[0]!)
+    })
   })
 
   describe('POST /api/v1/me/routine/start', () => {
@@ -867,6 +889,55 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(res.status).toBe(202)
       expect((await dataOf<ReadyBody>(res)).status).toBe('updating')
       expect(queuedFor(guest)).toEqual([])
+    })
+  })
+
+  describe('GET /api/v1/me/routine/events', () => {
+    it('starts with a snapshot that is the body GET answers, and ends at once with done for a routine that is ready', async () => {
+      const { guest } = await withRoutine()
+      const { res, stream } = await watch(guest)
+
+      const { frames, ended } = await stream.read(3)
+
+      expect(res.headers.get('Content-Type')).toContain('text/event-stream')
+      expect(frames.map((frame) => parseFrame(frame).event)).toEqual(['snapshot', 'done'])
+      expect(parseFrame(frames[0]!).data).toEqual(await readyOf(guest))
+      expect(parseFrame(frames[1]!).data).toEqual({})
+      expect(ended).toBe(true)
+    })
+
+    it('starts with a pending snapshot and stays open for an account with no routine yet', async () => {
+      const guest = await account()
+      const { stream } = await watch(guest)
+
+      const { frames, ended } = await stream.read(2, QUIET_MS)
+
+      expect(frames.map((frame) => parseFrame(frame))).toEqual([{ event: 'snapshot', data: { status: 'pending' }, comment: null }])
+      expect(ended).toBe(false)
+    })
+
+    it('starts with an updating snapshot of the routine in force and stays open while a newer build is under way', async () => {
+      const { guest } = await withRoutine()
+      await appendPending(guest)
+      const { stream } = await watch(guest)
+
+      const { frames, ended } = await stream.read(2, QUIET_MS)
+
+      expect(frames).toHaveLength(1)
+      expect(parseFrame(frames[0]!)).toMatchObject({ event: 'snapshot', data: { status: 'updating' } })
+      expect(ended).toBe(false)
+    })
+
+    it('answers the usual JSON envelope, not a stream, before it starts: 403 to a guest and 409 without a goal', async () => {
+      const guest = await newGuest()
+      const forbidden = await eventsOf(guest)
+      expect(forbidden.status).toBe(403)
+      expect(forbidden.headers.get('Content-Type')).toContain('application/json')
+
+      await guest.signUp()
+      const noGoal = await eventsOf(guest)
+      expect(noGoal.status).toBe(409)
+      expect(await errorCodeOf(noGoal)).toBe('GOAL_REQUIRED')
     })
   })
 

@@ -119,7 +119,7 @@ const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
     ]
   })
 
-/** The body `GET /me/routine` answers for a routine in force. The routes answer it: one mapping. */
+/** The body `GET /me/routine` answers for a routine in force. The viewer service sends this same body on the event stream, and the routes answer it: one mapping. */
 export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
   const { version, previous } = input
   return {

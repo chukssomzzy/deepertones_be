@@ -13,6 +13,9 @@ export type FaceScanFrame = { id: string; state: string; reason: string | null }
 /** A shelf verdict as its stream shows it: the body `GET /api/v1/me/verdict` answers, typed by its `status` since the provider only forwards it. The whole of a verdict's snapshot and its `verdict` events. */
 export type VerdictFrame = { status: string; [field: string]: unknown }
 
+/** A profile's routine as its stream shows it: the body `GET /api/v1/me/routine` answers, typed by its `status` since the provider only forwards it. The whole of a routine's snapshot and its `routine` events. */
+export type RoutineFrame = { status: string; [field: string]: unknown }
+
 export type ScanEvent =
   /** An item changed; carries the item as it now is. */
   | { type: 'item'; item: ScanEventItem }
@@ -22,6 +25,8 @@ export type ScanEvent =
   | { type: 'face'; faceScan: FaceScanFrame }
   /** A shelf verdict was built; carries the verdict as GET answers it. Only the streams keyed `verdict:<profileId>` (the full verdict) and `verdict-preview:<profileId>` (a guest's locked preview) carry one. */
   | { type: 'verdict'; verdict: VerdictFrame }
+  /** A routine version was built or is being built; carries the routine as GET answers it. Only the stream keyed `routine:<profileId>` carries one. */
+  | { type: 'routine'; routine: RoutineFrame }
   /** Every item of the scan is in a final state. Sent once the last one gets there. */
   | { type: 'done' }
 
@@ -36,9 +41,9 @@ export type ScanSnapshot = { id: string; items: ScanEventItem[]; [field: string]
 export interface ScanEvents {
   publish(scanId: string, event: ScanEvent): Promise<void>
   /**
-   * Opens a client's event stream (a face scan's snapshot is its frame, a verdict's is its body): a `text/event-stream` response that starts with `snapshot` and then carries what is
+   * Opens a client's event stream (a face scan's snapshot is its frame, a verdict's and a routine's are their bodies): a `text/event-stream` response that starts with `snapshot` and then carries what is
    * published for the scan, until `done`, until the stream has lived too long, or until the client goes. Unlike publish,
    * a failure here is the caller's: there is no stream without it.
    */
-  subscribe(scanId: string, snapshot: ScanSnapshot | FaceScanFrame | VerdictFrame): Promise<Response>
+  subscribe(scanId: string, snapshot: ScanSnapshot | FaceScanFrame | VerdictFrame | RoutineFrame): Promise<Response>
 }

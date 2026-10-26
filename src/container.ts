@@ -404,6 +404,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       outcomeCounts: new D1OutcomeCountsRepository(db()),
       jobs: jobQueue(),
       enabled: env.ROUTINES_ENABLED === 'true',
+      // Lazy: the viewer reads this service, so wiring it here is deferred to the first announcement.
+      announce: async (profileId: string): Promise<void> => routineViewer().announce(profileId),
       now: () => new Date(),
       newId: () => crypto.randomUUID(),
     })
@@ -419,6 +421,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         shelf: shelf(),
         recommendations: recommendations(),
         repository: new D1RoutinesRepository(db()),
+        events: new DurableObjectScanEvents(env.SCAN_STREAM),
         now: () => new Date(),
       }),
   )

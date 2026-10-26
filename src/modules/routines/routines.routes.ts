@@ -1,4 +1,4 @@
-import { defineRoute, errorResponses, ok, openapiApp, success } from '../../lib/openapi'
+import { defineRoute, errorResponses, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
 import { RoutineResponse, StepParams } from './routines.schemas'
@@ -25,6 +25,24 @@ const getRoutine = defineRoute({
     'shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.',
   security: bearer,
   responses: { 200: success(RoutineResponse, 'The routine, or pending'), ...errorResponses(401, 403, 409, 503) },
+})
+
+const watchRoutine = defineRoute({
+  method: 'get',
+  path: '/routine/events',
+  operationId: 'watchRoutine',
+  tags: ['Routine'],
+  summary: 'Follow the routine live, as server-sent events',
+  description:
+    GATES +
+    'A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the body `GET /api/v1/me/routine` answers now; ' +
+    'then one `routine` each time a build starts or finishes, or "I got it" is recorded, whose data is the routine in that same shape (`updating` while a build is under way); then `done` ' +
+    '(data `{}`) after a `routine` that is `ready`, after which the server closes the stream. A routine that is already ready gets `snapshot` and `done` at once. `pending` and `updating` leave the ' +
+    'stream open for the build\'s `routine`. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on. ' +
+    'Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body.',
+  security: bearer,
+  middleware: [signedIn()],
+  responses: { 200: sseResponse('The event stream'), ...errorResponses(401, 403, 409, 503) },
 })
 
 const startRoutine = defineRoute({
@@ -66,7 +84,7 @@ const findSoldHere = defineRoute({
   description:
     GATES +
     'No body. For a step whose recommended product is not sold in the shopping country (or has been retired). Queues a build that picks the step again without that product and answers 202 with the ' +
-    'routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine`. Asking again for the same step of the same routine queues nothing more. ' +
+    'routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine` or its `/events`. Asking again for the same step of the same routine queues nothing more. ' +
     '409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already.',
   security: bearer,
   request: { params: StepParams },
@@ -75,6 +93,7 @@ const findSoldHere = defineRoute({
 
 export const routinesRoutes = openapiApp()
   .openapi(getRoutine, async (c) => ok(c, await c.var.services.routineViewer.current(), 'Routine'))
+  .openapi(watchRoutine, async (c) => c.var.services.routineViewer.watch())
   .openapi(startRoutine, async (c) => ok(c, await c.var.services.routineViewer.start(), 'Routine started'))
   .openapi(gotIt, async (c) => ok(c, await c.var.services.routineViewer.gotIt(c.req.valid('param').step, c.req.header('cf-connecting-ip') ?? FALLBACK_IP), 'Product marked as got'))
   .openapi(findSoldHere, async (c) => ok(c, await c.var.services.routineViewer.findSoldHere(c.req.valid('param').step), 'Looking for another product', 202))
