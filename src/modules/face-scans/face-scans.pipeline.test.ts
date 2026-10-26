@@ -37,6 +37,7 @@ import { FakeFaceScansRepository } from './face-scans.repository.fake'
 import { FACE_SCAN_LIST_LIMIT, FaceScanService } from './face-scans.service'
 import { measuredConcernsForGoal, TABLES_VERSION } from './face-scans.tables'
 import { FakeVendorSpendLedger } from './face-scans.vendor-spend.fake'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 
 // The face scan's analysis pipeline through FaceScanService: the three job steps (advance), the webhook (receiveWebhook), the retake, the
 // reaper's one check (reap) and the live stream (watch). Only the edges are fakes: Perfect Corp (MemoryPerfectCorpClient, scripted per
@@ -137,7 +138,7 @@ class EventsThatFail extends MemoryScanEvents {
   }
 }
 
-type SetupOptions = { repository?: FakeFaceScansRepository; environment?: PhotoEnvironment; events?: MemoryScanEvents }
+type SetupOptions = { repository?: FakeFaceScansRepository; environment?: PhotoEnvironment; events?: MemoryScanEvents; onRoutineTrigger?: RoutineTrigger }
 
 const setup = (options: SetupOptions = {}) => {
   const environment = options.environment ?? 'test'
@@ -186,6 +187,7 @@ const setup = (options: SetupOptions = {}) => {
     environment,
     now: () => clock,
     newId: () => `id-${environment}-${++n}`,
+    ...(options.onRoutineTrigger ? { onRoutineTrigger: options.onRoutineTrigger } : {}),
   })
   return {
     service,
@@ -3879,5 +3881,112 @@ describe('FaceScanService.latestSkinType', () => {
     const ctx = setup()
 
     expect(await errorOf(runAs({ kind: 'public' }, () => ctx.service.latestSkinType()))).toBeInstanceOf(UnauthorizedError)
+  })
+})
+
+// --- the routine trigger (spec #189, PR 3c) ---
+//
+// A check-in scan that becomes ready is the goal's review point, and the routine is asked to rebuild against it. FaceScanService takes an optional
+// `onRoutineTrigger?: RoutineTrigger` (routines.trigger.ts, a leaf file: it never imports the routines service) and `copyResults` calls it, next to the ready push,
+// only for the step whose write won and only when the scan is a check-in: (profileId, 'review-point', `review-point:${scanId}`). A day-one scan asks for nothing
+// (its routine follows the verdict). A hook that fails changes nothing the scan does. These live here with the other fetch-step tests: the hook is reached only
+// through the pipeline (face-scans.service.test.ts stubs it out).
+describe('FaceScanService.advance: the routine trigger', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  const withTrigger = () => {
+    const trigger = vi.fn<RoutineTrigger>(async () => undefined)
+    return { trigger, ctx: setup({ onRoutineTrigger: trigger }) }
+  }
+  /** A day-one scan made ready, the real way, and the check-in of its chase taken at the review point and sent to Perfect Corp, awaiting its analysis. */
+  const checkInAwaitingAnalysis = async (ctx: Ctx, answer: SkinAnalysisResult | { status: 'running' } = analysed()) => {
+    const dayOne = await finished(ctx, 'glow')
+    const checkIn = await checkInTakenUnder(ctx, 'glow', dayOne.id)
+    ctx.perfectCorp.script('getSkinAnalysis', answer as SkinAnalysisResult)
+    return { dayOne: dayOne.id, checkIn: checkIn.id }
+  }
+
+  it('asks for a review-point rebuild of the profile, keyed by the scan, once the check-in scan is ready', async () => {
+    const { ctx, trigger } = withTrigger()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx)
+    expect((await rowOf(ctx, checkIn)).checkIn).toBe(true)
+
+    await fetchStep(ctx, checkIn)
+
+    expect((await rowOf(ctx, checkIn)).state).toBe('ready')
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(trigger).toHaveBeenCalledWith(PROFILE, 'review-point', `review-point:${checkIn}`)
+  })
+
+  it('asks for nothing when a day-one scan becomes ready', async () => {
+    const { ctx, trigger } = withTrigger()
+
+    const { id } = await finished(ctx, 'glow')
+
+    expect((await rowOf(ctx, id)).checkIn).toBe(false)
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('asks for nothing while the check-in is still being analysed', async () => {
+    const { ctx, trigger } = withTrigger()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx, { status: 'running' })
+
+    await fetchStep(ctx, checkIn)
+
+    expect((await rowOf(ctx, checkIn)).state).toBe('analysing')
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('asks only once when the check-in is fetched again (a webhook that comes twice)', async () => {
+    const { ctx, trigger } = withTrigger()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx)
+    await fetchStep(ctx, checkIn)
+
+    await fetchStep(ctx, checkIn, 'wh-late-duplicate')
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks for nothing when the completion loses because the user deleted the check-in while the masks were being fetched', async () => {
+    const { ctx, trigger } = withTrigger()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx)
+    ctx.perfectCorp.duringDownload = () => asUser(() => ctx.service.deleteFaceScan(checkIn))
+
+    await fetchStep(ctx, checkIn)
+
+    expect(await ctx.repository.findFaceScan(checkIn)).toBeNull()
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['rejects', () => Promise.reject(new Error('the routine queue is down'))],
+    ['throws at once', () => {
+      throw new Error('the routine queue is down')
+    }],
+  ])('still completes the check-in, sends the ready push and tells the stream done, when the hook %s', async (_how, fail) => {
+    const { ctx, trigger } = withTrigger()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx)
+    trigger.mockImplementation(fail)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(console, 'log').mockImplementation(() => undefined)
+
+    await expect(fetchStep(ctx, checkIn)).resolves.toBeUndefined()
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect((await rowOf(ctx, checkIn)).state).toBe('ready')
+    expect(ctx.pushJobs.enqueued.map((entry) => entry.body)).toContainEqual({ kind: 'face-scan-ready', userId: USER, profileId: PROFILE, faceScanId: checkIn })
+    expect(ctx.events.eventsFor(checkIn).at(-1)).toEqual({ type: 'done' })
+    expect(deletedTasks(ctx)).toContain((await rowOf(ctx, checkIn)).pcAnalysisTaskId)
+  })
+
+  it('completes a check-in as before when no hook is wired', async () => {
+    const ctx = setup()
+    const { checkIn } = await checkInAwaitingAnalysis(ctx)
+
+    await fetchStep(ctx, checkIn)
+
+    expect((await rowOf(ctx, checkIn)).state).toBe('ready')
   })
 })

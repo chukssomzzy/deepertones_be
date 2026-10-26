@@ -49,12 +49,37 @@ export const VerdictTaperResponse = z
   })
   .openapi('ShelfVerdictTaper')
 
+const GroupCounts = z
+  .object({
+    helping: z.number().int(),
+    redundant: z.number().int(),
+    blocking: z.number().int(),
+    conflicting: z.number().int(),
+    'likely-the-problem': z.number().int(),
+    'cant-tell': z.number().int(),
+    prescribed: z.number().int(),
+    undecided: z.number().int(),
+  })
+  .openapi({ description: 'How many products are under each heading; 0 where there are none. Every heading is always present.' })
+
+const FIT = z.enum(['ready', 'not-ready']).openapi({ description: '`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again.' })
+
+// A plain `z.union`: `locked` tells the two ready shapes apart, and `status` alone could not.
 export const ShelfVerdictResponse = z
-  .discriminatedUnion('status', [
+  .union([
     z.object({ status: z.literal('pending') }),
     z.object({
       status: z.literal('ready'),
-      fit: z.enum(['ready', 'not-ready']).openapi({ description: '`not-ready` when the goal-fit check has not answered yet: the products it would decide are shown as kept for now, and it is tried again.' }),
+      locked: z.literal(true).openapi({ description: 'A guest is given this preview and never the products: sign up to see them.' }),
+      fit: FIT,
+      total: z.number().int().openapi({ description: 'How many skin-care products the verdict holds.' }),
+      counts: GroupCounts,
+      escalates: z.number().int().openapi({ description: 'How many products carry `escalate`: how many to see a professional about, without saying which.' }),
+    }),
+    z.object({
+      status: z.literal('ready'),
+      locked: z.literal(false).openapi({ description: 'A verified user is given the full verdict.' }),
+      fit: FIT,
       products: z.array(VerdictProductResponse).openapi({ description: 'One per skin-care product on the shelf, in shelf order.' }),
       tapers: z.array(VerdictTaperResponse).openapi({ description: 'The step-downs the `stop` verdicts use, each once.' }),
     }),

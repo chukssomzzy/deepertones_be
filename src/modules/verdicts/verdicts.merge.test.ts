@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Category } from '../catalog/catalog.vocabulary'
+import type { Category, RoutineStep } from '../catalog/catalog.vocabulary'
 import type { FitProductResult, FitResult } from '../../providers/verdict-fitting/verdict-fitter.provider'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import type { SafetyChoice } from '../safety/safety.vocabulary'
@@ -15,6 +15,8 @@ import { mergeVerdict, type VerdictProduct } from './verdicts.merge'
 //   `entries` is the shelf in its order (anything with an `id` and a `category`, so the FloorShelfEntry list the floor was given is passed as it is). The output
 //   is the skin products of it, in that order. `choices` is the profile's safety choices (default none), which the stop copy reads (prescription note).
 //   VerdictProduct = { entryId, group, verdict, escalate, reason, facts, sameJobAs?, nudge? }; `facts` is the floor's facts for a fixed product and [] for any other.
+//   A product entry carries `step: RoutineStep | null` (its catalog routine step); a product at 'protect' is a sunscreen, and a clash never reduces one: when the
+//   judge names the sunscreen the merge reduces the other member of the pair. How the merge learns it (a field of the floor's clash, say) is the implementer's.
 // Expected values are literals worked out from the spec; the floor is the real one, so every state here is one the product can reach.
 
 const RULES: FloorRule[] = [
@@ -44,6 +46,7 @@ const product = (id: string, ingredients: string[], over: Partial<Extract<FloorS
   category: 'skin',
   productId: `prod-${id}`,
   ingredients,
+  step: null,
   ...over,
 })
 const noLabel = (id: string, noLabelPurpose: NoLabelPurpose, category: Category = 'skin'): FloorShelfEntry => ({
@@ -450,6 +453,118 @@ describe('mergeVerdict: a clashing pair', () => {
     const result = merge([product('serum', ['Aqua', 'Retinol']), product('cream', ['Aqua'])], fitOf([helping('serum'), helping('cream')]))
 
     expect(result.products.map((p) => p.group)).toEqual(['helping', 'helping'])
+  })
+})
+
+describe('mergeVerdict: a sunscreen in a clashing pair (never reduced; the product at the protect step)', () => {
+  const sunscreen = (id: string, ingredients: string[]) => product(id, ingredients, { name: 'SPF 50 Sunscreen', step: 'protect' })
+  const at = (id: string, ingredients: string[], step: RoutineStep | null = 'treat') => product(id, ingredients, { step })
+  const SPF_PAIR: [string, string] = ['spf', 'serum']
+
+  it('reduces the acid serum, not the retinoid sunscreen, when the judge names the sunscreen', () => {
+    const shelf = [sunscreen('spf', ['Aqua', 'Retinol']), at('serum', ['Aqua', 'Glycolic Acid'])]
+
+    const result = merge(shelf, fitOf([helping('spf'), helping('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    expect(entryOf(result, 'serum').reason).not.toContain(AI)
+  })
+
+  it('reduces the retinoid serum, not the exfoliating-acid sunscreen, when the judge names the sunscreen', () => {
+    const shelf = [sunscreen('spf', ['Aqua', 'Glycolic Acid']), at('serum', ['Aqua', 'Retinol'])]
+
+    const result = merge(shelf, fitOf([helping('spf'), helping('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+  })
+
+  it('reduces the other product when the judge names it, and when the judge names none', () => {
+    const shelf = () => [sunscreen('spf', ['Aqua', 'Glycolic Acid']), at('serum', ['Aqua', 'Retinol'])]
+
+    for (const clashes of [[{ ids: SPF_PAIR, reduceId: 'serum' }], []]) {
+      const result = merge(shelf(), fitOf([helping('spf'), helping('serum')], clashes))
+
+      expect(entryOf(result, 'serum')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+      expect(entryOf(result, 'spf')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+    }
+  })
+
+  it('reduces the other product with no fit answer at all, and keeps the sunscreen undecided', () => {
+    const result = merge([sunscreen('spf', ['Aqua', 'Glycolic Acid']), at('serum', ['Aqua', 'Retinol'])], null)
+
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'undecided', verdict: { kind: 'keep' } })
+  })
+
+  it('reduces the non-sunscreen in every pair the judge names the sunscreen in', () => {
+    const shelf = [sunscreen('spf', ['Aqua', 'Glycolic Acid']), at('serum', ['Aqua', 'Retinol']), at('spot', ['Aqua', 'Benzoyl Peroxide'])]
+
+    const result = merge(
+      shelf,
+      fitOf([helping('spf'), helping('serum'), helping('spot')], [{ ids: ['spf', 'serum'], reduceId: 'spf' }, { ids: ['spf', 'spot'], reduceId: 'spf' }]),
+    )
+
+    expect(result.products.map((p) => [p.entryId, p.verdict.kind])).toEqual([['spf', 'keep'], ['serum', 'reduce'], ['spot', 'reduce']])
+  })
+
+  it('keeps the judge\'s pick when both members are sunscreens', () => {
+    const shelf = [sunscreen('spf', ['Aqua', 'Retinol']), sunscreen('serum', ['Aqua', 'Glycolic Acid'])]
+
+    const result = merge(shelf, fitOf([helping('spf'), helping('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+  })
+
+  it('keeps the judge\'s pick when neither member is at the protect step', () => {
+    const shelf = [at('spf', ['Aqua', 'Retinol'], 'moisturise'), at('serum', ['Aqua', 'Glycolic Acid'], 'treat')]
+
+    const result = merge(shelf, fitOf([helping('spf'), helping('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+  })
+
+  it('keeps the judge\'s pick of a product with no step, however it is named: it is not a sunscreen', () => {
+    const shelf = [product('spf', ['Aqua', 'Retinol'], { name: 'SPF 50 Sunscreen', step: null }), at('serum', ['Aqua', 'Glycolic Acid'])]
+
+    const result = merge(shelf, fitOf([helping('spf'), helping('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+  })
+
+  it('leaves the sunscreen alone when the clash is voided because the other member is dropped', () => {
+    const shelf = [sunscreen('spf', ['Aqua', 'Glycolic Acid']), at('serum', ['Aqua', 'Retinol'])]
+
+    const result = merge(shelf, fitOf([helping('spf'), blocking('serum')], [{ ids: SPF_PAIR, reduceId: 'spf' }]))
+
+    expect(entryOf(result, 'serum')).toMatchObject({ group: 'blocking', verdict: { kind: 'drop' } })
+    expect(entryOf(result, 'spf')).toMatchObject({ group: 'helping', verdict: { kind: 'keep' } })
+  })
+
+  it('still never reduces a prescribed product: beside a prescribed serum the sunscreen is reduced, whoever the judge names, and nothing throws', () => {
+    for (const reduceId of ['spf', 'serum']) {
+      const shelf = [sunscreen('spf', ['Aqua', 'Retinol']), at('serum', ['Aqua', 'Glycolic Acid'])]
+
+      const result = merge(shelf, fitOf([helping('spf')], [{ ids: SPF_PAIR, reduceId }]), { mentions: [prescribed('prod-serum')] })
+
+      expect(entryOf(result, 'serum')).toMatchObject({ group: 'prescribed', verdict: { kind: 'keep' } })
+      expect(entryOf(result, 'spf')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    }
+  })
+
+  it('reduces the other product when the prescribed one is the sunscreen, whoever the judge names', () => {
+    for (const reduceId of ['spf', 'serum']) {
+      const shelf = [sunscreen('spf', ['Aqua', 'Retinol']), at('serum', ['Aqua', 'Glycolic Acid'])]
+
+      const result = merge(shelf, fitOf([helping('serum')], [{ ids: SPF_PAIR, reduceId }]), { mentions: [prescribed('prod-spf')] })
+
+      expect(entryOf(result, 'spf')).toMatchObject({ group: 'prescribed', verdict: { kind: 'keep' } })
+      expect(entryOf(result, 'serum')).toMatchObject({ group: 'conflicting', verdict: REDUCED })
+    }
   })
 })
 

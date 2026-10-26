@@ -26,9 +26,11 @@ import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
 import { D1RecommendationsRepository } from './modules/recommendations/recommendations.repository'
 import { RecommendationService } from './modules/recommendations/recommendations.service'
+import { D1OutcomeCountsRepository } from './modules/routines/routines.outcome-counts.repository'
 import { D1RoutinesRepository } from './modules/routines/routines.repository'
 import { RoutineService } from './modules/routines/routines.service'
 import { RoutineViewService } from './modules/routines/routines.viewer.service'
+import type { RoutineTrigger } from './modules/routines/routines.trigger'
 import { D1SafetyRepository } from './modules/safety/safety.repository'
 import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
@@ -328,6 +330,9 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
 
+  // Lazily: the routines service reads the modules that call this, so it cannot be built before them. The annotation keeps the types of the two from defining each other.
+  const routineTrigger: RoutineTrigger = (profileId, reason, requestKey) => routines().request(profileId, reason, requestKey)
+
   const faceScans = once(
     () =>
       new FaceScanService({
@@ -344,6 +349,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         // photo-link.ts derives its own key from this with a distinct HKDF info, so it cannot be used to sign a JWT.
         photoLinkSecret: env.JWT_SECRET,
         environment: photoEnvironment(env.ENVIRONMENT),
+        onRoutineTrigger: routineTrigger,
       }),
   )
 
@@ -375,6 +381,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         safety: safety(),
         goals: goals(),
         faceScans: faceScans(),
+        onRoutineTrigger: routineTrigger,
         now: () => new Date(),
       }),
   )
@@ -394,6 +401,7 @@ export const buildContainer = (env: CloudflareBindings) => {
       writer: new AnthropicRoutineWriter(client),
       writerIdentity: { model: client.modelFor(routineWriterWriteRoutinePrompt.job), promptHash: routineWriterWriteRoutinePrompt.hash },
       repository: new D1RoutinesRepository(db()),
+      outcomeCounts: new D1OutcomeCountsRepository(db()),
       jobs: jobQueue(),
       enabled: env.ROUTINES_ENABLED === 'true',
       // Lazy: the viewer reads this service, so wiring it here is deferred to the first announcement.
@@ -427,6 +435,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         tokens: tokens(),
         notifications: notifications(),
         deviceIdKey: env.DEVICE_ID_KEY,
+        onRoutineTrigger: routineTrigger,
       }),
   )
 

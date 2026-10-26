@@ -31,9 +31,16 @@ import { applied, code, ruleRow, taperRow, word } from './admin.catalog.support'
 // The step-down templates and the ingredient rules are the workbook's, which is one database for the whole file, so the first describes run in order against
 // the state the one before left: no template, then the steroid one alone, then both.
 //
+// A GUEST (status 'anonymous') never receives the full verdict (owner decision): it is given the locked preview, the counts the app's "Your result" screen needs and
+// a prompt to save the result. A VERIFIED user gets the full verdict, with `locked: false`. It is one build and one saved row read two ways: signing up (the guest
+// verifies by the OTP flow, which keeps the profile) shows the full verdict at once, with no new build. The tests that read the full verdict therefore sign the guest up
+// first (`newMember`); the gates and `pending` are the same for both, and are tested with a guest.
+//
 // THE PUBLIC SHAPE PINNED HERE (the screen shows the verdict; it never shows how the rules reached it):
 //   { status: 'pending' }
-//   { status: 'ready', fit: 'ready' | 'not-ready',
+//   guest:    { status: 'ready', locked: true, fit, total, counts: { helping, redundant, blocking, conflicting, 'likely-the-problem', 'cant-tell', prescribed, undecided }, escalates }
+//             (counts has every group, 0 where none; total is how many skin products; escalates is how many carry `escalate`; no products, tapers, ids, names or reasons)
+//   verified: { status: 'ready', locked: false, fit: 'ready' | 'not-ready',
 //     products: { entryId, kind, product? | noLabel?, group, verdict, reason, escalate, sameJobAs?, nudge? }[],      verdict: { kind: 'keep' } | { kind: 'reduce', maxFrequency }
 //                                                                                                  | { kind: 'stop', taperCode } | { kind: 'drop' }
 //     tapers: { code, kind, schedule: { fromWeek, toWeek, frequency }[], whatToExpect, seeAProfessionalIf }[] }
@@ -116,8 +123,11 @@ type PublicProduct = {
   nudge?: string
 }
 type PublicTaper = { code: string; kind: string; schedule: { fromWeek: number; toWeek: number; frequency: string }[]; whatToExpect: string; seeAProfessionalIf: string }
-type ReadyView = { status: 'ready'; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: PublicTaper[] }
-type VerdictBody = { status: 'pending' } | ReadyView
+type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: PublicTaper[] }
+type Groups = { helping: number; redundant: number; blocking: number; conflicting: number; 'likely-the-problem': number; 'cant-tell': number; prescribed: number; undecided: number }
+type LockedView = { status: 'ready'; locked: true; fit: 'ready' | 'not-ready'; total: number; counts: Groups; escalates: number }
+type VerdictBody = { status: 'pending' } | ReadyView | LockedView
+const NO_GROUPS: Groups = { helping: 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 0, 'cant-tell': 0, prescribed: 0, undecided: 0 }
 
 // --- people: a guest of one install, and the sign-in that makes the guest an account ---
 
@@ -151,6 +161,12 @@ const newGuest = async () => {
   }
 }
 type Guest = Awaited<ReturnType<typeof newGuest>>
+/** A guest who has already signed up: a verified account, on the same profile the guest had. The full verdict is read by these. */
+const newMember = async (): Promise<Guest> => {
+  const guest = await newGuest()
+  await guest.signUp()
+  return guest
+}
 
 /** Delivers the queued code email through the Worker's queue handler and reads the code from it. */
 const codeFor = async (): Promise<string> => {
@@ -396,7 +412,7 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
   })
 
   it('answers 200 ready once the queued build has run, with the fit judge called once for the shelf, and keeps answering the same without a new build', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const entryId = await onShelf(guest)
@@ -411,6 +427,7 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
     const view = await dataOf<VerdictBody>(res)
     expect(view).toEqual({
       status: 'ready',
+      locked: false,
       fit: 'ready',
       products: [{ entryId, ...shows(entryId), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false }],
       tapers: [],
@@ -420,7 +437,7 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
   })
 
   it('shows each product by its entry id, group, verdict, reason and escalation, and the step-down it uses by its code, schedule, what to expect and when to see a professional', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
@@ -434,8 +451,8 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
     await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
 
     const view = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(Object.keys(view).sort()).toEqual(['fit', 'products', 'status', 'tapers'])
-    expect(view).toMatchObject({ status: 'ready', fit: 'ready' })
+    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready' })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     expect([...byId.keys()].sort()).toEqual([steroid, mercury, helping, twin, unlabelled].sort())
 
@@ -467,7 +484,7 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
   })
 
   it('does not show how the rules reached a verdict: no facts, routine step or rule source on a product, and no status or audit column on a step-down', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
@@ -490,7 +507,7 @@ describe('GET /api/v1/me/verdict: with both step-down templates approved', () =>
 
 describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict product', () => {
   it('gives each product exactly the kind and the product or noLabel that GET /me/shelf/{entryId} gives for its entry, so the verdict reads without a second call', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const named = await onShelf(guest)
@@ -517,11 +534,11 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
     expect(byId.get(unlabelled)).toMatchObject({ kind: 'no-label', noLabel: { purpose: 'moisturise', source: 'market-vendor', usedFor: '6-months-2-years', description: 'A tub from the market' } })
     expect(byId.get(unlabelled)).not.toHaveProperty('product')
     // The body has the same top-level shape as before: the product's fields sit on each product, not beside the verdict.
-    expect(Object.keys(view).sort()).toEqual(['fit', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
   })
 
   it('still gives only the fields it names: the product adds none of how the rules reached a verdict', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     await onShelf(guest)
@@ -534,7 +551,7 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
   })
 
   it('reads the product when it is asked, with no new build: it is not what the verdict was built from', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const entryId = await onShelf(guest)
@@ -550,25 +567,128 @@ describe('GET /api/v1/me/verdict: the shelf entry\'s product on each verdict pro
   })
 })
 
-describe('GET /api/v1/me/verdict: a guest who signs up', () => {
-  it('gets the verdict the guest had, as it was, with no new build: promotion keeps the profile', async () => {
+/** Every string of the full verdict a guest must never be sent: ids, names, the reasons, the step-down, and the words the product carries. */
+const privateTo = (shelf: (entryId: string) => { product?: object; noLabel?: object }, full: ReadyView): string[] => [
+  ...full.products.flatMap((product) => [product.entryId, product.reason, ...(product.verdict.taperCode ? [product.verdict.taperCode] : [])]),
+  ...full.products.flatMap((product) => {
+    const shown = shelf(product.entryId).product as { brand?: string; name?: string } | undefined
+    return shown ? [shown.brand ?? '', shown.name ?? ''] : []
+  }),
+  ...full.tapers.flatMap((taper) => [taper.code, taper.whatToExpect, taper.seeAProfessionalIf]),
+  STEROID_INGREDIENT,
+  'VerdictBrand',
+  'A tub from the market',
+  'photograph-back-label',
+].filter((text) => text.length > 0)
+
+describe('GET /api/v1/me/verdict: a guest is given the locked preview, never the full verdict', () => {
+  /** A guest whose shelf holds a steroid cream, a mercury cream, a serum, its twin and a tub with no label, and whose verdict has been built. */
+  const builtShelf = async () => {
     const guest = await newGuest()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
-    await onShelf(guest)
+    await onShelf(guest, [...CLEAN, MERCURY_INGREDIENT])
+    const helping = await onShelf(guest)
+    const twin = await onShelf(guest)
+    await noLabelOnShelf(guest, 'moisturise')
     await getVerdict(guest)
-    await buildQueued(guest)
-    const asGuest = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(asGuest.status).toBe('ready')
+    await buildQueued(guest, { [twin]: { label: 'redundant', sameJobAs: helping } })
+    return guest
+  }
+
+  it('answers 200 ready with the counts of each group, the total, and how many to see a professional about, and no product, step-down, id, name or reason', async () => {
+    const guest = await builtShelf()
+
+    const res = await getVerdict(guest)
+
+    expect(res.status).toBe(200)
+    const raw = await res.text()
+    const body = (JSON.parse(raw) as Envelope<VerdictBody>) as { success: true; data: LockedView }
+    expect(body.data).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'ready',
+      // steroid cream and mercury cream (likely-the-problem), the serum (helping), its twin (redundant), the tub nothing could be read from (cant-tell).
+      total: 5,
+      counts: { ...NO_GROUPS, helping: 1, redundant: 1, 'likely-the-problem': 2, 'cant-tell': 1 },
+      // Only the mercury cream routes to a professional; the guest is told how many, never which.
+      escalates: 1,
+    })
+    expect(Object.keys(body.data).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect(Object.keys(body.data.counts).sort()).toEqual(Object.keys(NO_GROUPS).sort())
+    for (const field of ['products', 'tapers', 'entryId', 'reason', 'verdict']) expect(raw).not.toContain(`"${field}"`)
+  })
+
+  it('shows nothing a member of the same profile is shown: no entry id, product name, brand, reason, step-down or word of the rules appears anywhere in the guest\'s body', async () => {
+    const guest = await builtShelf()
+    const shows = await shelfShows(guest)
+    const raw = await (await getVerdict(guest)).text()
+    expect(JSON.parse(raw).data.locked).toBe(true)
+
+    // The full verdict, read once the guest has signed up, is the independent source for what the preview must not give away.
+    await guest.signUp()
+    const full = await dataOf<ReadyView>(await getVerdict(guest))
+    expect(full.products).toHaveLength(5)
+    const hidden = privateTo(shows, full)
+    expect(hidden.length).toBeGreaterThan(10)
+    for (const text of hidden) expect(raw).not.toContain(text)
+  })
+
+  it('carries the fit as it is: not ready when the judge failed, with the products it has not decided counted as undecided', async () => {
+    const guest = await newGuest()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    await onShelf(guest)
+    await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    await getVerdict(guest)
+
+    await buildWithFitFailing(guest)
+
+    const res = await getVerdict(guest)
+    expect(res.status).toBe(200)
+    expect(await dataOf(res)).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'not-ready',
+      total: 2,
+      counts: { ...NO_GROUPS, undecided: 1, 'likely-the-problem': 1 },
+      escalates: 0,
+    })
+  })
+})
+
+describe('GET /api/v1/me/verdict: a guest who signs up', () => {
+  it('gets the full verdict from the same build, with no new build queued: promotion keeps the profile, and the preview the guest had counted exactly it', async () => {
+    const guest = await newGuest()
+    await putGoal(guest)
+    await putSafety(guest, { choices: ['none'] })
+    const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    const serum = await onShelf(guest)
+    const shows = await shelfShows(guest)
+    await getVerdict(guest)
+    const calls = await buildQueued(guest)
+    const asGuest = await dataOf<LockedView>(await getVerdict(guest))
+    expect(asGuest).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 })
     const queuedBefore = queuedFor(guest).length
 
     await guest.signUp()
 
     const res = await getVerdict(guest)
     expect(res.status).toBe(200)
-    expect(await dataOf(res)).toEqual(asGuest)
+    const asMember = await dataOf<ReadyView>(res)
+    expect(asMember).toEqual({
+      status: 'ready',
+      locked: false,
+      fit: 'ready',
+      products: [
+        { entryId: steroid, ...shows(steroid), group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: STEROID_TAPER }, reason: expect.any(String), escalate: false },
+        { entryId: serum, ...shows(serum), group: 'helping', verdict: { kind: 'keep' }, reason: 'Reason: helping.', escalate: false },
+      ],
+      tapers: [expect.objectContaining({ code: STEROID_TAPER, kind: 'steroid' })],
+    })
     expect(queuedFor(guest)).toHaveLength(queuedBefore)
+    expect(calls).toHaveLength(1)
   })
 })
 
@@ -625,7 +745,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
   })
 
   it('answers ready with the fit not ready and the open product undecided and kept, once the judge has failed and the verdict was saved from the rules alone', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const entryId = await onShelf(guest)
@@ -638,6 +758,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     expect(res.status).toBe(200)
     expect(await dataOf(res)).toEqual({
       status: 'ready',
+      locked: false,
       fit: 'not-ready',
       products: [{ entryId, ...shows(entryId), group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
       tapers: [],
@@ -645,7 +766,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
   })
 
   it('shows one product of a clashing pair as conflicting, reduced to alternate days, and the other as the judge left it', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     await putSafety(guest, { choices: ['none'] })
     const retinoid = await onShelf(guest, [...CLEAN, RETINOID_INGREDIENT])
@@ -656,7 +777,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     await buildQueued(guest)
 
     const view = await dataOf<ReadyView>(await getVerdict(guest))
-    expect(view).toMatchObject({ status: 'ready', fit: 'ready', tapers: [] })
+    expect(view).toMatchObject({ status: 'ready', locked: false, fit: 'ready', tapers: [] })
     const byId = new Map(view.products.map((product) => [product.entryId, product]))
     // The judge named no pick, so the floor's tie-break reduces the add-on (the acid) before the treatment.
     expect(byId.get(acid)).toEqual({ entryId: acid, ...shows(acid), group: 'conflicting', verdict: { kind: 'reduce', maxFrequency: 'alternate-days' }, reason: expect.any(String), escalate: false })
@@ -665,7 +786,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
   })
 
   it('shows a product the user said a doctor prescribed as prescribed and kept, whatever the rules would say of its ingredients', async () => {
-    const guest = await newGuest()
+    const guest = await newMember()
     await putGoal(guest)
     const brand = freshBrand()
     const entryId = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT], brand)
@@ -679,6 +800,7 @@ describe('GET /api/v1/me/verdict: the other shapes of a ready verdict', () => {
     const view = await dataOf<ReadyView>(await getVerdict(guest))
     expect(view).toEqual({
       status: 'ready',
+      locked: false,
       fit: 'ready',
       products: [{ entryId, ...shows(entryId), group: 'prescribed', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false }],
       tapers: [],

@@ -6,6 +6,7 @@ import type { OtpChannel, OtpRecipient } from '../otp/otp.types'
 import { type OtpService, parseRecipient } from '../otp/otp.service'
 import type { ProfilesService } from '../profiles/profiles.service'
 import type { Profile } from '../profiles/profiles.types'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 import type { UsersService } from '../users/users.service'
 import type { Device, User, UserIdentifier } from '../users/users.types'
 import type { IssuedTokens, TokenService } from './tokens.service'
@@ -23,6 +24,8 @@ export type AuthServiceDeps = {
   notifications: NotificationsService
   /** Keys the HMAC of device ids, so a leaked devices table cannot be matched against known device ids. */
   deviceIdKey: string
+  /** Asks for the profile's first routine when a guest is promoted. A failure of it never fails the sign-in. */
+  onRoutineTrigger?: RoutineTrigger
   now?: () => Date
 }
 
@@ -42,6 +45,7 @@ export class AuthService {
   private readonly otp: OtpService
   private readonly tokens: TokenService
   private readonly notifications: NotificationsService
+  private readonly onRoutineTrigger: RoutineTrigger | undefined
   private readonly now: () => Date
   // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
   readonly #deviceIdKey: string
@@ -53,6 +57,7 @@ export class AuthService {
     this.tokens = deps.tokens
     this.notifications = deps.notifications
     this.#deviceIdKey = deps.deviceIdKey
+    this.onRoutineTrigger = deps.onRoutineTrigger
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -100,6 +105,14 @@ export class AuthService {
       const platform = await this.notifications.guestSignedIn(actor.userId)
       // The account's other phones are told; the phone that signed in is not among them (its guest row is gone, and the row it registers next is newer than `at`).
       await this.notifications.newSignIn({ userId: user.id, platform, at: this.now().getTime() })
+    }
+    // A promoted guest is the moment the profile's routine is first asked for. Last, in a try of its own: the code is consumed and the guest promoted by now.
+    if (outcome === 'promoted') {
+      try {
+        await this.onRoutineTrigger?.(actor.profileId, 'first', 'first')
+      } catch {
+        console.error({ outcome: 'routine-trigger-failed', reason: 'first', profileId: actor.profileId })
+      }
     }
     return this.session(user, outcome === 'promoted' ? actor.profileId : (await this.profiles.defaultFor(user.id)).id)
   }

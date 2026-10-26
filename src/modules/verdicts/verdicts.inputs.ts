@@ -81,10 +81,11 @@ const resolveEntry = (entry: ShelfActiveEntry, facts: VerdictFacts): Resolved | 
   const product = facts.shelfFacts.get(entry.formulationId)
   if (!product) return null
   const base = { id: entry.id, brand: product.brand, name: product.name, variant: product.variant, category: product.category }
+  const step = firstStep(facts.steps.get(product.productId))
   return {
-    floor: { ...base, kind: 'product', productId: product.productId, ingredients: product.ingredients },
+    floor: { ...base, kind: 'product', productId: product.productId, ingredients: product.ingredients, step },
     fingerprint: { ...base, kind: 'product', formulationId: entry.formulationId },
-    step: firstStep(facts.steps.get(product.productId)),
+    step,
     form: product.form,
     sourceUrls: sortedUnique(matchedRules(product.ingredients, facts.reference).flatMap((rule) => (rule.source === null ? [] : [rule.source]))),
   }

@@ -80,12 +80,14 @@ const openProduct = (id: string, fit: FitResult | null): VerdictProduct => {
 /** Reduces, to alternate days, one product of each clashing pair whose two products both survive: the judge's pick, or the floor's tie-break when it names none. */
 const applyClashes = (products: Map<string, VerdictProduct>, { floor, fit }: Pick<MergeInput, 'floor' | 'fit'>): void => {
   const settled = new Map((fit?.clashes ?? []).map(({ ids, reduceId }) => [pairKey(...ids), reduceId]))
-  for (const { ids, groups, fallbackReduceId, maxFrequency } of floor.clashes) {
+  for (const { ids, groups, fallbackReduceId, sunscreenId, maxFrequency } of floor.clashes) {
     const [a, b] = ids.map((id) => products.get(id))
     if (!a || !b || !survives(a) || !survives(b)) continue
     const named = settled.get(pairKey(...ids))
-    // A prescribed product is never reduced, so a pick of one falls back to the floor's, which never is.
-    const reduceId = named !== undefined && ids.includes(named) && products.get(named)?.group !== 'prescribed' ? named : fallbackReduceId
+    // A prescribed product is never reduced, nor is a sunscreen unless the other member is prescribed, so a pick of either falls back to the floor's, which
+    // never is a prescribed product and is the sunscreen only when the other member is prescribed.
+    const pickable = named !== undefined && ids.includes(named) && products.get(named)?.group !== 'prescribed' && named !== sunscreenId
+    const reduceId = pickable ? named : fallbackReduceId
     const target = products.get(reduceId)
     // A defence only: the floor never picks a prescribed product as the fallback, so this cannot happen unless the floor changes.
     if (!target || target.group === 'prescribed') throw new Error(`The clash of ${ids.join(' and ')} has no product that can be reduced`)
