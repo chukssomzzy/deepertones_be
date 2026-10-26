@@ -14,14 +14,14 @@ import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { FakeRoutinesRepository } from './routines.repository.fake'
 import type { RoutineVersionRow } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
-import { RoutineViewService } from './routines.viewer.service'
+import { RoutineViewerService } from './routines.viewer.service'
 
 // The session-facing routine (spec #189, PR 4b): what the routes call. Each method is the session's own (no profile id; the actor's profile is the one read) over
 // PR 2b's profile-keyed RoutineService, and adds what only a screen needs: the gates, the body a client reads, "what changed since last shown", the live stream.
 // The other services are Pick<> fakes answering from one mutable `world`, as routines.service.test.ts does; the repository is the real fake.
 //
 // THE CONTRACT THIS FILE PINS (assumed: the brief names the methods, not the constructor):
-//   new RoutineViewService({ routines, goals, workbook, catalog, shelf, recommendations, repository, events, now })
+//   new RoutineViewerService({ routines, goals, workbook, catalog, shelf, recommendations, repository, events, enabled, now })
 //     routines         Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>   (requestIfStale(profileId) is PR 3c's; it never throws)
 //     goals            Pick<GoalsService, 'requireGoal'>
 //     workbook         Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries'>
@@ -173,7 +173,8 @@ let world: World
 let clock: Date
 let repository: FakeRoutinesRepository
 let events: MemoryScanEvents
-let viewer: RoutineViewService
+let viewer: RoutineViewerService
+let routinesEnabled: boolean
 let routines: { [K in 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale']: ReturnType<typeof vi.fn> }
 let requireGoal: ReturnType<typeof vi.fn>
 
@@ -188,34 +189,8 @@ const showing = async (row: RoutineVersionRow, status: 'ready' | 'updating' = 'r
   return row
 }
 
-beforeEach(() => {
-  clock = T0
-  ids = 0
-  world = newWorld()
-  repository = new FakeRoutinesRepository()
-  events = new MemoryScanEvents()
-  routines = {
-    // As RoutineService.current does: the version is read from the repository, so what Start and the viewer wrote (served, started) shows on the next read.
-    current: vi.fn(async () => {
-      const shown = structuredClone(world.routine)
-      if (shown.status === 'pending') return shown
-      const stored = await repository.current(PROFILE)
-      if (stored?.id !== shown.version.id) return shown
-      return { ...shown, version: { ...shown.version, servedAt: stored.servedAt, startedOn: stored.startedOn, tapers: stored.tapers } }
-    }),
-    start: vi.fn(async () => {
-      if (world.routine.status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
-      await repository.markStarted(PROFILE, START_DAY)
-    }),
-    gotIt: vi.fn(async () => {}),
-    request: vi.fn(async () => {}),
-    requestIfStale: vi.fn(async () => {}),
-  }
-  requireGoal = vi.fn(async () => {
-    if (world.goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
-    return { goal: world.goal }
-  })
-  viewer = new RoutineViewService({
+const makeViewer = () =>
+  new RoutineViewerService({
     routines: routines as unknown as Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>,
     goals: { requireGoal } as unknown as Pick<GoalsService, 'requireGoal'>,
     workbook: {
@@ -232,8 +207,40 @@ beforeEach(() => {
     recommendations: { shoppingFor: async () => ({ ...world.shopping }) } as unknown as Pick<RecommendationService, 'shoppingFor'>,
     repository,
     events,
+    enabled: routinesEnabled,
     now: () => clock,
   })
+
+beforeEach(() => {
+  clock = T0
+  ids = 0
+  world = newWorld()
+  routinesEnabled = true
+  repository = new FakeRoutinesRepository()
+  events = new MemoryScanEvents()
+  routines = {
+    // As RoutineService.current does: the version is read from the repository, so what Start and the viewer wrote (served, started) shows on the next read.
+    current: vi.fn(async () => {
+      const shown = structuredClone(world.routine)
+      if (shown.status === 'pending') return shown
+      const stored = await repository.current(PROFILE)
+      if (stored?.id !== shown.version.id) return shown
+      return { ...shown, version: { ...shown.version, servedAt: stored.servedAt, startedOn: stored.startedOn, tapers: stored.tapers } }
+    }),
+    start: vi.fn(async () => {
+      if (world.routine.status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+      await repository.markStarted(PROFILE, START_DAY)
+    }),
+    gotIt: vi.fn(async () => {}),
+    // Whether a build was queued: true unless a test says the claim was held.
+    request: vi.fn(async () => true),
+    requestIfStale: vi.fn(async () => {}),
+  }
+  requireGoal = vi.fn(async () => {
+    if (world.goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+    return { goal: world.goal }
+  })
+  viewer = makeViewer()
 })
 
 afterEach(() => {
@@ -261,7 +268,7 @@ const SESSION_METHODS: [string, () => Promise<unknown>][] = [
 ]
 const touched = () => [...Object.values(routines)].some((fn) => fn.mock.calls.length > 0)
 
-describe.each(SESSION_METHODS)('RoutineViewService.%s: who may ask, and when', (_name, call) => {
+describe.each(SESSION_METHODS)('RoutineViewerService.%s: who may ask, and when', (_name, call) => {
   it('refuses a guest with 403 SIGNUP_REQUIRED before reading anything', async () => {
     const error = await errorOf(asGuest(call))
 
@@ -304,7 +311,7 @@ describe.each(SESSION_METHODS)('RoutineViewService.%s: who may ask, and when', (
   })
 })
 
-describe('RoutineViewService.current', () => {
+describe('RoutineViewerService.current', () => {
   it('answers pending when there is no routine yet, and asks for a build when none is fresh', async () => {
     expect(await body(asVerified(() => viewer.current()))).toEqual({ status: 'pending' })
 
@@ -396,7 +403,7 @@ describe('RoutineViewService.current', () => {
   })
 })
 
-describe('RoutineViewService.current: marking the routine served', () => {
+describe('RoutineViewerService.current: marking the routine served', () => {
   it('marks the routine in force served at the time it was read', async () => {
     const row = await showing(versionRow())
     setClock(5 * MINUTE)
@@ -444,7 +451,7 @@ describe('RoutineViewService.current: marking the routine served', () => {
   })
 })
 
-describe('RoutineViewService.current: what changed since the routine was last shown', () => {
+describe('RoutineViewerService.current: what changed since the routine was last shown', () => {
   const served = (over: Partial<RoutineVersionRow> = {}) => versionRow({ createdAt: at(-3 * DAY), readyAt: at(-3 * DAY), servedAt: at(-2 * DAY), ...over })
   const withTreat = (code: string, frequency: Step['frequency'] = 'pm') => defaultSteps().map((s) => (s.step === 'treat' ? stepOf('treat', { kind: 'candidate', code }, frequency) : s))
   const changedOf = (routine: any) => routine.steps.map((s: any) => s.changed)
@@ -469,6 +476,19 @@ describe('RoutineViewService.current: what changed since the routine was last sh
     expect(changedOf(await body(asVerified(() => viewer.current())))).toEqual([false, true, false, false])
   })
 
+  it('does not mark a step changed when the recommended product the routine shown before had is now the user\'s own entry of the same formulation (they got it)', async () => {
+    world.entries.push({ id: 'entry-s', kind: 'product', addedAt: T0, productId: 'prod-s', formulationId: 'form-serum-1' })
+    world.facts.set('form-serum-1', { productId: 'prod-s', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua'] })
+    await repository.append(served({ steps: withTreat('SERUM-1') }))
+    const swapped = defaultSteps().map((s) => (s.step === 'treat' ? stepOf('treat', { kind: 'shelf', id: 'entry-s' }, 'pm') : s))
+    await showing(versionRow({ steps: swapped }))
+
+    const routine = await body(asVerified(() => viewer.current()))
+
+    expect(routine.steps[1].product).toMatchObject({ kind: 'own', entryId: 'entry-s' })
+    expect(changedOf(routine)).toEqual([false, false, false, false])
+  })
+
   it('compares with the newest version that was shown, not with one that was built and never shown', async () => {
     await repository.append(served({ id: 'shown', steps: withTreat('SERUM-1') }))
     await repository.append(versionRow({ id: 'never-shown', createdAt: at(-DAY), readyAt: at(-DAY), steps: withTreat('SERUM-2') }))
@@ -490,7 +510,7 @@ describe('RoutineViewService.current: what changed since the routine was last sh
   })
 })
 
-describe('RoutineViewService.watch', () => {
+describe('RoutineViewerService.watch', () => {
   it('opens the stream of the profile\'s routine with the body current() answers as its snapshot', async () => {
     await showing(versionRow())
 
@@ -546,7 +566,7 @@ describe('RoutineViewService.watch', () => {
   })
 })
 
-describe('RoutineViewService.start', () => {
+describe('RoutineViewerService.start', () => {
   it('starts the routine of the caller\'s profile and answers the body, started today with its step-downs dated', async () => {
     await showing(versionRow())
 
@@ -563,7 +583,7 @@ describe('RoutineViewService.start', () => {
   })
 })
 
-describe('RoutineViewService.gotIt', () => {
+describe('RoutineViewerService.gotIt', () => {
   it('records "I got it" for the profile\'s step with the client address, and answers the body', async () => {
     await showing(versionRow())
 
@@ -594,7 +614,7 @@ describe('RoutineViewService.gotIt', () => {
   })
 })
 
-describe('RoutineViewService.findSoldHere', () => {
+describe('RoutineViewerService.findSoldHere', () => {
   it('asks for the step to be built again without that product, and answers the routine in force as updating', async () => {
     const row = await showing(versionRow())
 
@@ -607,9 +627,22 @@ describe('RoutineViewService.findSoldHere', () => {
     expect(routine.steps[2].product).toMatchObject({ code: 'MOIST-GH' })
   })
 
-  it('answers updating even when the request was dropped (a build is already under way): the body is the routine in force', async () => {
+  it('refuses with 409 BUILD_IN_PROGRESS when nothing was queued (another build holds the claim), so the exclusion is not silently lost', async () => {
     await showing(versionRow())
-    routines.request.mockResolvedValue(undefined)
+    routines.request.mockResolvedValue(false)
+
+    const error = await errorOf(asVerified(() => viewer.findSoldHere('moisturise')))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'BUILD_IN_PROGRESS' })
+    expect(error.message).toMatch(/try again/i)
+  })
+
+  it('still answers updating when routines are switched off and nothing was queued: there is no build to wait for', async () => {
+    routinesEnabled = false
+    viewer = makeViewer()
+    await showing(versionRow())
+    routines.request.mockResolvedValue(false)
 
     expect((await body(asVerified(() => viewer.findSoldHere('moisturise')))).status).toBe('updating')
   })
@@ -658,7 +691,7 @@ describe('RoutineViewService.findSoldHere', () => {
   })
 })
 
-describe('RoutineViewService.announce', () => {
+describe('RoutineViewerService.announce', () => {
   const key = `routine:${PROFILE}`
   const announce = () => runAs(SYSTEM, () => viewer.announce(PROFILE))
 

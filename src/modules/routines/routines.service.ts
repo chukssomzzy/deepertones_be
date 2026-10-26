@@ -175,9 +175,12 @@ export class RoutineService {
     return { status: 'updating', version: ready }
   }
 
-  /** Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one. Starting again changes nothing. */
+  /**
+   * Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
+   * answers pending): a routine the person cannot see is not started. Starting again changes nothing.
+   */
   async start(profileId: string): Promise<void> {
-    if (!(await this.repository.current(profileId))) throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    if ((await this.current(profileId)).status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
     const now = this.now()
     await this.repository.markStarted(profileId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())))
   }
@@ -185,15 +188,18 @@ export class RoutineService {
   /**
    * "I got it" for a recommended product: puts it on the shelf (by its catalog product, as the shelf's own add does) and appends a copy of the routine in force with
    * that step marked got, with no writer call. 409 `ROUTINE_NOT_READY` before there is a routine and 409 `STEP_NOT_RECOMMENDED` when the step does not hold a
-   * recommended product, or its product is sold nowhere now. The swap to the shelf entry happens at the next rebuild, once the shelf holds the product.
+   * recommended product, or its product is sold nowhere now. The swap to the shelf entry happens at the next rebuild, once the shelf holds the product. Also 409
+   * `ROUTINE_NOT_READY` while a safety change hides the routine. Idempotent: a step already marked got changes nothing (no shelf add, no version).
    */
   async gotIt(profileId: string, step: RoutineStep, clientIp: string): Promise<void> {
     const profile = await this.profiles.find(profileId)
     if (!profile) throw new NotFoundError('PROFILE_NOT_FOUND', 'No such profile')
-    const ready = await this.repository.current(profileId)
-    if (!ready) throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    const view = await this.current(profileId)
+    if (view.status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    const ready = view.version
     const chosen = ready.steps.find((entry) => entry.step === step && entry.product.kind === 'candidate')
     if (chosen?.product.kind !== 'candidate') throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
+    if (chosen.gotIt) return
     const code = chosen.product.code
     await runAs(RoutineService.actorOf(profile.userId, profileId), async () => {
       const found = await this.findAnywhere(profileId, step, code)
@@ -206,6 +212,8 @@ export class RoutineService {
     const inForce = (await this.repository.current(profileId)) ?? ready
     const holdsIt = (version: RoutineVersionRow) => version.steps.some((entry) => entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code)
     if (!holdsIt(inForce)) throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
+    // A tap that raced this one has marked it already: its version stands.
+    if (inForce.steps.some((entry) => entry.step === step && entry.gotIt)) return
     const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true } : entry))
     const now = this.now()
     await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, hintsShown: false, servedAt: null })
@@ -217,10 +225,11 @@ export class RoutineService {
    * Asks for a build of the profile's routine, to be run by the queue. Does nothing when routines are switched off. Otherwise claims the request by its key and
    * queues it, unless a request is already being worked on (a different key too: a request made mid-build is dropped, and the triggers ask again afterwards). If
    * the queue refuses, the claim is given back. `options.exclude` rides in the queued message for `run` to hand to the build. Does nothing for a profile whose
-   * user has not verified (a guest has no routine): no claim is made either. Never throws: a trigger must not fail for it. Logs ids and outcomes only.
+   * user has not verified (a guest has no routine): no claim is made either. Never throws: a trigger must not fail for it. Logs ids and outcomes only. Answers
+   * whether a build was queued; a trigger that can ask again later may ignore it, but a caller whose request would be lost if dropped (an exclusion) must not.
    */
-  async request(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<void> {
-    await this.ask(profileId, reason, requestKey, options)
+  async request(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<boolean> {
+    return this.ask(profileId, reason, requestKey, options)
   }
 
   /**

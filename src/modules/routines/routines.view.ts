@@ -19,9 +19,9 @@ export type RoutineViewInput = {
   /** The country the profile shops in. */
   country: string
   countries: readonly CountryRow[]
-  /** The shelf entries the version names. */
-  own: ReadonlyMap<string, { brand: string | null; name: string }>
-  /** The recommended rows the version names, retired ones included. */
+  /** The shelf entries the version names, with the formulation of a product entry (a no-label entry has none): what makes an entry the product the user was recommended. */
+  own: ReadonlyMap<string, { brand: string | null; name: string; formulationId?: string }>
+  /** The recommended rows the version names and the one shown before names, retired ones included. */
   recommended: ReadonlyMap<string, RecommendedByCode>
   /** By formulation id: the brand, name and image of a recommended product. */
   summaries: ReadonlyMap<string, ProductSummary>
@@ -47,11 +47,19 @@ const sameProduct = (a: RoutineVersionRow['steps'][number]['product'], b: Routin
   return b.kind === 'none'
 }
 
-// A step the version shown before had no entry for counts as changed. Rewording a reason, or the user getting the product, is not a change.
-const changedSince = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null): boolean => {
+/** Whether a recommended product of the version shown before is, as the version in force has it, the user's own shelf entry of the same formulation (they got it). */
+const gotAsOwn = (before: RoutineVersionRow['steps'][number]['product'], now: RoutineVersionRow['steps'][number]['product'], input: RoutineViewInput): boolean => {
+  if (before.kind !== 'candidate' || now.kind !== 'shelf') return false
+  const formulationId = input.recommended.get(before.code)?.formulationId
+  return !!formulationId && input.own.get(now.id)?.formulationId === formulationId
+}
+
+// A step the version shown before had no entry for counts as changed. Rewording a reason, or the user getting the product (it becomes their own entry of the same
+// formulation, which is the swap of story 30), is not a change.
+const changedSince = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): boolean => {
   if (previous === null) return false
   const before = previous.steps.find((entry) => entry.step === step.step)
-  return !before || before.frequency !== step.frequency || !sameProduct(before.product, step.product)
+  return !before || before.frequency !== step.frequency || !(sameProduct(before.product, step.product) || gotAsOwn(before.product, step.product, input))
 }
 
 // Written out field by field: grounding, where a step came from and the stored version's own columns are how the routine was reached, and a field added to the
@@ -126,7 +134,7 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
     status: input.status,
     startedOn: version.startedOn === null ? null : dayString(utcDay(version.startedOn)),
     expectation: version.expectation ?? '',
-    steps: version.steps.map((step) => ({ step: step.step, frequency: step.frequency, reason: step.reason, changed: changedSince(step, previous), product: productOf(step, input) })),
+    steps: version.steps.map((step) => ({ step: step.step, frequency: step.frequency, reason: step.reason, changed: changedSince(step, previous, input), product: productOf(step, input) })),
     tapers: tapersOf(input),
   }
 }

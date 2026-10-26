@@ -53,7 +53,7 @@ const startRoutine = defineRoute({
   summary: 'Start the routine: today is day 1',
   description:
     GATES +
-    'No body. Dates the routine, and the step-downs in it, from today (a UTC day). Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine.',
+    'No body. Dates the routine, and the step-downs in it, from today (a UTC day). Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.',
   security: bearer,
   responses: { 200: success(RoutineResponse, 'The routine, started'), ...errorResponses(401, 403, 409, 503) },
 })
@@ -67,7 +67,8 @@ const gotIt = defineRoute({
   description:
     GATES +
     'No body. Puts the step\'s recommended product on the shelf, as adding it from search does (it counts toward the same limits: 429 `RATE_LIMITED`, `SCAN_DAILY_LIMIT`), and answers the routine with that product no longer ' +
-    '`notYetGot`. No writer is called. 409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold nowhere now.',
+    '`notYetGot`. No writer is called. Tapping again for a step already marked got changes nothing (no second shelf add, no new version) and answers the routine. 409 `ROUTINE_NOT_READY` before there ' +
+    'is a routine, and while a safety change hides it; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold nowhere now.',
   security: bearer,
   // The shelf add's limits: it adds a product to the shelf. The address limit counts every caller, signedIn turns away the unsigned, the user limit needs a user.
   middleware: [rateLimit('SHELF_ADD_IP_LIMITER', 'ip'), signedIn(), rateLimit('SHELF_ADD_USER_LIMITER', 'user')],
@@ -84,8 +85,9 @@ const findSoldHere = defineRoute({
   description:
     GATES +
     'No body. For a step whose recommended product is not sold in the shopping country (or has been retired). Queues a build that picks the step again without that product and answers 202 with the ' +
-    'routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine` or its `/events`. Asking again for the same step of the same routine queues nothing more. ' +
-    '409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already.',
+    'routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine` or its `/events`. Asking again while that build is waiting answers 409 `BUILD_IN_PROGRESS`, as no second build is queued. ' +
+    '409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already; 409 `BUILD_IN_PROGRESS` when ' +
+    'nothing could be queued because the routine is being updated right now (including the same step asked a second time): nothing was lost, try again in a moment.',
   security: bearer,
   request: { params: StepParams },
   responses: { 202: success(RoutineResponse, 'The routine in force, updating'), ...errorResponses(401, 403, 409, 503) },

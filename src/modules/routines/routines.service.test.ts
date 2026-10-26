@@ -47,7 +47,7 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 //   gotIt(profileId, step, clientIp): Promise<void>    ConflictError STEP_NOT_RECOMMENDED unless the step's product is a recommended one; calls shelf.add(product id, clientIp)
 //
 // PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
-//   request(profileId, reason, requestKey): Promise<void>   never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
+//   request(profileId, reason, requestKey): Promise<boolean>   (whether a build was queued) never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
 //       repository.claim(profileId, requestKey, now, now - a stale cut-off) and, when it wins, enqueues the job `build-routine` with
 //       { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0 } and no delay. A queue that refuses gives the claim back. Failures are logged by id.
 //   run(body: BuildRoutineMessage): Promise<void>   calls build(body.profileId, body.reason). On 'waiting' for reason `first` or `review-point` while
@@ -956,6 +956,65 @@ describe('RoutineService.start', () => {
   })
 })
 
+describe('RoutineService.start: a routine hidden by a safety change', () => {
+  it('is 409 ROUTINE_NOT_READY, and the routine in force is not started, while a reported reaction or pregnancy hides it', async () => {
+    const before = await firstBuild()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    expect(await current()).toEqual({ status: 'pending' })
+    setClock(2 * DAY)
+
+    const error = await errorOf(start())
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    expect((await currentRow()).startedOn).toBeNull()
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+
+  it('starts it once the build that stores the new cautions has replaced it', async () => {
+    await firstBuild()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    reverdict()
+    await build('safety')
+    setClock(2 * DAY)
+
+    await start()
+
+    expect((await currentRow()).startedOn).not.toBeNull()
+  })
+})
+
+describe('RoutineService.gotIt: a routine hidden by a safety change', () => {
+  it('is 409 ROUTINE_NOT_READY, adding nothing to the shelf and appending no version, while a reported reaction or pregnancy hides it', async () => {
+    const before = await started()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    expect(await current()).toEqual({ status: 'pending' })
+
+    const error = await errorOf(gotIt('treat'))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    expect(world.shelfAdds).toEqual([])
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+})
+
+describe('RoutineService.gotIt: tapping it again', () => {
+  it('is idempotent: three taps leave one got-it version and one shelf add, and the later taps return without error', async () => {
+    await started()
+    await gotIt('treat')
+    const afterFirst = await repository.latest(AMARA_PROFILE)
+    setClock(2 * DAY + HOUR)
+
+    await expect(gotIt('treat')).resolves.toBeUndefined()
+    await expect(gotIt('treat')).resolves.toBeUndefined()
+
+    expect(world.shelfAdds).toHaveLength(1)
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(afterFirst)
+    expect(ids).toBe(2)
+  })
+})
+
 describe('RoutineService.gotIt: "I got it"', () => {
   it('appends a ready version that is the routine in force with that step marked got, no writer call, and the product on the shelf', async () => {
     const before = await started()
@@ -1176,7 +1235,7 @@ describe('RoutineService.request', () => {
       const spies = spyOnConsole()
       jobs.failNextWith(new Error('queue down while holding Karo Glow Cream'))
 
-      await expect(request()).resolves.toBeUndefined()
+      await expect(request()).resolves.toBe(false)
 
       expect(loggedText(spies)).toContain(AMARA_PROFILE)
       expect(loggedText(spies)).not.toContain('Karo Glow Cream')
@@ -1197,9 +1256,31 @@ describe('RoutineService.request', () => {
       spyOnConsole()
       vi.spyOn(repository, 'claim').mockRejectedValueOnce(new Error('the database is down'))
 
-      await expect(request()).resolves.toBeUndefined()
+      await expect(request()).resolves.toBe(false)
 
       expect(queued()).toEqual([])
+    })
+  })
+
+  describe('whether anything was queued', () => {
+    it('answers true when the build was queued', async () => {
+      await expect(request()).resolves.toBe(true)
+    })
+
+    it('answers false when a request already being worked on holds the claim, whatever its key', async () => {
+      await request('verdict', 'routine-fp-1')
+      setClock(MINUTE)
+
+      await expect(request('sold-here', 'sold-here:version-1:treat')).resolves.toBe(false)
+      expect(queued()).toHaveLength(1)
+    })
+
+    it('answers false when routines are switched off, and for a guest', async () => {
+      service = new RoutineService({ ...deps, enabled: false })
+      await expect(request()).resolves.toBe(false)
+      service = new RoutineService({ ...deps, enabled: true })
+      asGuest()
+      await expect(request()).resolves.toBe(false)
     })
   })
 })
