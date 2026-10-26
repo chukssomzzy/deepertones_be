@@ -75,6 +75,8 @@ const row = (code: string, over: Partial<Recommendation> = {}): Recommendation =
   ownCautions: [],
   evidenceUrls: ['https://example.com/evidence'],
   ingredientsSourceUrl: 'https://example.com/ingredients',
+  keyIngredient: null,
+  strength: null,
   origin: 'sourced',
   priceMin: 1000,
   priceMax: 2000,

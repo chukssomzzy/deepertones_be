@@ -1,6 +1,6 @@
 # Catalog workbook contract
 
-Version 2.0.0. Fingerprint `4c61cc733ae3f14f02244f1788aa4da00eba8083edc00cc374cb2145c8c0a0ca`.
+Version 2.1.0. Fingerprint `486bec22781b4822eb8fb379ac5e40ce7814ce3bf712fcc17f84957e94c27630`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
@@ -35,6 +35,8 @@ The products we recommend, one row each. Once approved, a product can be recomme
 | `category` | Required | What the product is for. | One of: `skin`, `hair`, `body`, `makeup`, `other`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `ingredients` | Required, unless the row is retired | The full ingredient list in label order (INCI names), separated by ;. A retired product may leave it empty. | List, items separated by semicolons. 1 to 150 items. Each item up to 120 characters. No links or markup. | `REQUIRED` `TOO_MANY_ITEMS` `ITEM_TOO_LONG` `HAS_LINK_OR_MARKUP` |
 | `ingredients_source_url` | Required when approved | The page the ingredient list was read from. Needed when the status is approved. | An https link. | `REQUIRED_WHEN_APPROVED` `NOT_HTTPS_URL` |
+| `key_ingredient` | Optional | The ingredient that does the main job, in plain words: for example "Azelaic acid". Shown to users in 'what to look for'; never used by a rule. | Text. Up to 80 characters. No links or markup. | `TOO_LONG` `HAS_LINK_OR_MARKUP` |
+| `strength` | Optional | Its strength as the label states it: for example "10%". Leave empty when the label does not say. | Text. Up to 40 characters. No links or markup. | `TOO_LONG` `HAS_LINK_OR_MARKUP` |
 | `skin_concerns` | Required | The skin concerns the product is for: one or more, separated by ;. These are the concerns a face scan can show. | One or more of, separated by semicolons: `hd_acne`, `hd_pore`, `hd_oiliness`, `hd_age_spot`, `hd_redness`, `hd_radiance`, `hd_texture`, `hd_dark_circle`, `hd_moisture`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `skin_types` | Required | The skin types it suits: one or more, separated by ;, or "all" on its own. | One or more of, separated by semicolons: `oily`, `dry`, `combination`, `normal`, `all`. `all` only on its own, never next to another value. | `REQUIRED` `NOT_IN_VOCABULARY` `ALL_MIXED_WITH_OTHERS` |
 | `steps` | Required | The routine steps it is used for: one or more, separated by ;. | One or more of, separated by semicolons: `cleanse`, `treat`, `moisturise`, `protect`. | `REQUIRED` `NOT_IN_VOCABULARY` |
@@ -55,6 +57,7 @@ Checks across cells and rows:
 - `APPROVED_WITH_DRAFT_CELLS`: An approved row has no draft cells.
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 - `ALL_MIXED_WITH_OTHERS`: skin_types is "all" alone, or a list of types without "all".
+- `STRENGTH_WITHOUT_INGREDIENT`: A product with a strength has a key_ingredient.
 
 ### Availability
 
@@ -322,6 +325,7 @@ Used by: `Tapers.schedule`
 | `CLASH_NOT_SYMMETRIC` | A rule says its group clashes with another group, but no rule of that group says the same back (or the other group has no rule at all). Both sides are reported. Retired rules neither ask for an answer nor give one; draft rules count. |
 | `CLASH_WITHOUT_GROUP` | A rule lists groups in clashes_with but has no group of its own. The clash is between groups, so give the rule its group, or clear clashes_with. |
 | `SELF_CLASH` | A rule lists its own group in clashes_with. A group does not clash with itself. |
+| `STRENGTH_WITHOUT_INGREDIENT` | A product has a strength but no key ingredient. A strength on its own means nothing, so name the key ingredient it belongs to, or clear the strength. |
 | `DUPLICATE_PHRASE` | Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one. |
 | `NOT_A_LIGHTENING_CLAIM` | The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out. |
 | `NOT_LOWER_CASE` | The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case. |

@@ -274,6 +274,13 @@
       "when": 1793014264306,
       "tag": "0038_slippery_impossible_man",
       "breakpoints": true
+    },
+    {
+      "idx": 39,
+      "version": "6",
+      "when": 1793016972470,
+      "tag": "0039_rainy_blacklash",
+      "breakpoints": true
     }
   ]
 }

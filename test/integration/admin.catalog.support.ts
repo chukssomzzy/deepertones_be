@@ -28,10 +28,10 @@ export const EXPORT_URL = `${ORIGIN}/api/v1/admin/catalog/export`
 export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
 
 /**
- * The contract version this checkout serves, written out: the version of the contract that has the Claim words and Tapers tabs. A literal, not read
+ * The contract version this checkout serves, written out: the version of the contract that adds the key_ingredient and strength Products columns. A literal, not read
  * from the code, so a bump has to be made here too.
  */
-export const CONTRACT_VERSION = '2.0.0'
+export const CONTRACT_VERSION = '2.1.0'
 
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -60,7 +60,7 @@ export const code = (prefix: string) => `${prefix}-${runSalt}-${next()}`
 // --- the headers of each tab, written out from the spec's tables, in the order the workbook has them (not read back from the contract) ---
 
 export const HEADERS = {
-  products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
+  products: ['code', 'brand', 'name', 'variant', 'form', 'category', 'ingredients', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells'],
   availability: ['product_code', 'country', 'price_min', 'price_max', 'where_sold', 'source_url'],
   ingredients: ['code', 'name', 'aliases', 'kind', 'strength_limit', 'statement', 'source_url', 'helps', 'group', 'clashes_with', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
@@ -82,6 +82,8 @@ export const productRow = (over: RawRow = {}): RawRow => {
     category: 'skin',
     ingredients: 'Aqua; Glycerin; Cetearyl Alcohol',
     ingredients_source_url: 'https://example.com/hydrating-cleanser',
+    key_ingredient: null,
+    strength: null,
     skin_concerns: 'hd_moisture; hd_redness',
     skin_types: 'dry; combination',
     steps: 'cleanse',

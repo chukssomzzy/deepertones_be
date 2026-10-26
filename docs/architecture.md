@@ -1830,7 +1830,7 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
 - **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: six tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers; contract 2.0.0), their columns, accepted values and
+  Countries, Claim words, Tapers; contract 2.1.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2789,6 +2789,13 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
   3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
      `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
      reused, and a retired code put back is reactivated. A product's availability that is gone is listed under `retired` and the row is removed.
+  3a. **`key_ingredient` and `strength`** are two optional plain-text Products columns (at most 80 and 40 characters) after `ingredients_source_url`: the
+     ingredient that does the product's main job in plain words ("Azelaic acid") and its strength as the label states it ("10%"). They are stored,
+     exported and diffed like every other Products column, and are shown to people in "what to look for"; **no rule, matcher or routine writer reads them**
+     (`Recommendation` and `Candidate` carry them, `SkeletonCandidate` does not). A strength without a key ingredient is `STRENGTH_WITHOUT_INGREDIENT` on the
+     `strength` cell, because a strength alone means nothing; it is not raised when the `key_ingredient` header is missing (that is `MISSING_COLUMN`, once).
+     **After the 2.1.0 deploy, re-export the staging catalog sheet before its next edit and upload**, and re-export any saved eval snapshot workbook
+     (`eval-data/routine/catalog-snapshot.xlsx`): a 2.0.0 file is refused as `409 CONTRACT_MISMATCH`, with no special case.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
