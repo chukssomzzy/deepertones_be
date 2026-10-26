@@ -1,7 +1,7 @@
 import { ingredientParts, ingredientsKey } from '../catalog/catalog.ingredients'
 import type { ReferenceEntry } from '../catalog/catalog.reference'
 import { flagFacts } from '../catalog/catalog.rules'
-import { INGREDIENT_GROUPS, type Category, type IngredientGroup, type TaperKind } from '../catalog/catalog.vocabulary'
+import { INGREDIENT_GROUPS, type Category, type IngredientGroup, type RoutineStep, type TaperKind } from '../catalog/catalog.vocabulary'
 import type { ShelfVerdict } from '../routines/routines.types'
 import { anyIn, namedIn, type NamedMention } from '../safety/safety.matching'
 import type { MentionSource } from '../safety/safety.types'
@@ -22,7 +22,8 @@ export type FloorRule = ReferenceEntry & {
 type FloorShelfBase = { id: string; brand: string | null; name: string; variant: string | null; category: Category }
 
 export type FloorShelfEntry =
-  | (FloorShelfBase & { kind: 'product'; productId: string; ingredients: string[] })
+  /** `step` is the catalog's first routine step for the product, or null when it has none. A product at 'protect' is a sunscreen. */
+  | (FloorShelfBase & { kind: 'product'; productId: string; ingredients: string[]; step: RoutineStep | null })
   | (FloorShelfBase & { kind: 'no-label'; noLabelPurpose: NoLabelPurpose })
 
 export type FloorMention = NamedMention & {
@@ -65,8 +66,10 @@ export type FloorEntry =
 export type ClashPair = {
   ids: [string, string]
   groups: [IngredientGroup, IngredientGroup]
-  /** The fixed tie-break, used only when the fit judge names none: never a prescribed product, then an exfoliant or benzoyl peroxide before a retinoid, then shelf order. */
+  /** The fixed tie-break, used when the fit judge names none: never a prescribed product, then never a sunscreen, then an exfoliant or benzoyl peroxide before a retinoid, then shelf order. */
   fallbackReduceId: string
+  /** The member that is a sunscreen when exactly one is, so the merge never reduces it on the judge's say-so. Absent otherwise. */
+  sunscreenId?: string
   maxFrequency: 'alternate-days'
 }
 
@@ -234,7 +237,7 @@ const clashRelation = (rules: readonly FloorRule[]): Map<IngredientGroup, Set<In
   return related
 }
 
-type Candidate = { id: string; prescribed: boolean; groups: IngredientGroup[] }
+type Candidate = { id: string; prescribed: boolean; sunscreen: boolean; groups: IngredientGroup[] }
 
 const clashingGroups = (a: Candidate, b: Candidate, related: Map<IngredientGroup, Set<IngredientGroup>>): [IngredientGroup, IngredientGroup] | null => {
   for (const ga of a.groups) {
@@ -246,11 +249,12 @@ const clashingGroups = (a: Candidate, b: Candidate, related: Map<IngredientGroup
 
 const reduceRank = (candidate: Candidate): number => (candidate.groups.some((group) => REDUCED_FIRST.includes(group)) ? 0 : 1)
 
-/** The product of a pair the floor would reduce: never a prescribed one, then the add-on over the treatment, then the one first on the shelf. */
+/** The product of a pair the floor would reduce: never a prescribed one, then never a sunscreen, then the add-on over the treatment, then the one first on the shelf. */
 const fallbackOf = (a: Candidate, b: Candidate): Candidate | null => {
   if (a.prescribed && b.prescribed) return null
   if (a.prescribed) return b
   if (b.prescribed) return a
+  if (a.sunscreen !== b.sunscreen) return a.sunscreen ? b : a
   return reduceRank(b) < reduceRank(a) ? b : a
 }
 
@@ -261,7 +265,15 @@ const clashPairs = (candidates: Candidate[], rules: readonly FloorRule[]): Clash
     for (const b of candidates.slice(at + 1)) {
       const groups = clashingGroups(a, b, related)
       const reduce = groups && fallbackOf(a, b)
-      if (groups && reduce) pairs.push({ ids: [a.id, b.id], groups, fallbackReduceId: reduce.id, maxFrequency: 'alternate-days' })
+      if (!groups || !reduce) continue
+      const sunscreen = a.sunscreen === b.sunscreen ? null : a.sunscreen ? a : b
+      pairs.push({
+        ids: [a.id, b.id],
+        groups,
+        fallbackReduceId: reduce.id,
+        ...(sunscreen ? { sunscreenId: sunscreen.id } : {}),
+        maxFrequency: 'alternate-days',
+      })
     }
   })
   return pairs
@@ -282,7 +294,7 @@ export const floorVerdicts = (input: FloorInput): FloorResult => {
     entries.push(entry)
     // Only a product still in play can be reduced: a stopped or dropped one is already out. A prescribed one stays in the pair but is never the fallback.
     const prescribed = entry.status === 'fixed' && entry.group === 'prescribed'
-    if (entry.status === 'open' || prescribed) candidates.push({ id: item.id, prescribed, groups: [...held.keys()] })
+    if (entry.status === 'open' || prescribed) candidates.push({ id: item.id, prescribed, sunscreen: item.step === 'protect', groups: [...held.keys()] })
   }
   return { entries, clashes: clashPairs(candidates, input.rules) }
 }

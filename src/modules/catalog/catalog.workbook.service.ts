@@ -8,7 +8,7 @@ import type { NewProduct } from './catalog.types'
 import type { IngredientGroup, RoutineStep, TaperKind } from './catalog.vocabulary'
 import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbook.diff'
 import { toRawWorkbook } from './catalog.workbook.raw'
-import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, WorkbookChanges } from './catalog.workbook.repository'
+import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, RecommendedByCode, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
 import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
@@ -241,6 +241,14 @@ export class CatalogWorkbookService {
   /** The step-down templates with these codes, retired ones included: a saved verdict still shows the template it was built with. */
   async tapersByCode(codes: string[]): Promise<Map<string, TaperRow>> {
     return new Map((await this.repository.tapersByCode(codes)).map((taper) => [taper.code, taper]))
+  }
+
+  /**
+   * The recommended rows with these codes, whatever their status and in whatever country they are sold, by code: a saved routine shows its product by code even
+   * when it has since been retired or is not sold where the person is now (the screen compares `availability` to their country). A code that names no row is absent.
+   */
+  async recommendedByCode(codes: string[]): Promise<Map<string, RecommendedByCode>> {
+    return new Map((await this.repository.recommendedByCode(codes)).map((row) => [row.code, row]))
   }
 
   /** The routine steps each of these catalog products fills, for those an approved recommended row names. */
