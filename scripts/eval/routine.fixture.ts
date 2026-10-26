@@ -2,6 +2,7 @@ import type { ReferenceEntry } from '../../src/modules/catalog/catalog.reference
 import type { ProductSummary } from '../../src/modules/catalog/catalog.service'
 import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import type { FakeCatalogWorkbook } from '../../src/modules/catalog/catalog.workbook.service.fake'
+import { maxNewProductsFor, ROUTINE_ALLOWED_FREQUENCIES } from '../../src/modules/routines/routines.rules'
 import type { Routine, RoutineSkeleton, SkeletonCandidate, SkeletonGap, SkeletonShelfProduct } from '../../src/modules/routines/routines.types'
 import type { RoutineCase } from './routine-cases'
 import type { Snapshot, SnapshotOffer } from './routine-snapshot'
@@ -122,13 +123,8 @@ export const skeletonOf = (gaps: SkeletonGap[], over: Partial<RoutineSkeleton> =
   shelf: [],
   gaps,
   limits: {
-    allowed: {
-      cleanse: ['am', 'pm', 'am-pm'],
-      treat: ['pm', 'alternate-days', 'weekly', 'am', 'am-pm'],
-      moisturise: ['am', 'pm', 'am-pm'],
-      protect: ['am'],
-    },
-    maxNewProducts: gaps.filter((gap) => gap.candidates.length > 0).length,
+    allowed: structuredClone(ROUTINE_ALLOWED_FREQUENCIES),
+    maxNewProducts: maxNewProductsFor(gaps),
   },
   hintsShown: false,
   ...over,

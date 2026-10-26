@@ -4,7 +4,7 @@
  * skeleton for exactly the reason it would be in the app.
  */
 import { type Actor, runAs } from '../../src/lib/context'
-import { ROUTINE_STEPS, type Frequency, type RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
+import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
 import type { ProductSummary } from '../../src/modules/catalog/catalog.service'
 import { LOW_CONFIDENCE_CONCERNS } from '../../src/modules/face-scans/face-scans.tables'
 import type { GoalView } from '../../src/modules/goals/goals.types'
@@ -12,20 +12,10 @@ import { FakeRecommendationsRepository } from '../../src/modules/recommendations
 import { RecommendationService } from '../../src/modules/recommendations/recommendations.service'
 import type { Candidate } from '../../src/modules/recommendations/recommendations.types'
 import type { SafetyMentionRow } from '../../src/modules/safety/safety.types'
+import { maxNewProductsFor, ROUTINE_ALLOWED_FREQUENCIES, routineStepsFor } from '../../src/modules/routines/routines.rules'
 import type { RoutineSkeleton, SkeletonCandidate, SkeletonGap } from '../../src/modules/routines/routines.types'
 import type { RoutineCase } from './routine-cases'
 import { catalogFor, type Snapshot } from './routine-snapshot'
-
-/**
- * The frequencies each step may be written with. The eval's stand-in until the routine-stage rules exist: they will own this table, and the skeleton the
- * app builds will carry theirs.
- */
-export const ROUTINE_ALLOWED_FREQUENCIES: Record<RoutineStep, Frequency[]> = {
-  cleanse: ['am', 'pm', 'am-pm'],
-  treat: ['pm', 'alternate-days', 'weekly', 'am', 'am-pm'],
-  moisturise: ['am', 'pm', 'am-pm'],
-  protect: ['am'],
-}
 
 export type BuiltSkeleton = {
   skeleton: RoutineSkeleton
@@ -103,7 +93,8 @@ export const buildSkeleton = async (c: RoutineCase, snapshot: Snapshot, { hintsS
   // A step is filled when a shelf product the rules keep (as it is or reduced) is used for it; a stopped or dropped product fills nothing.
   const filled = new Set(c.shelf.filter((p) => p.step !== null && (p.verdict.kind === 'keep' || p.verdict.kind === 'reduce')).map((p) => p.step))
   const gaps: SkeletonGap[] = []
-  for (const step of ROUTINE_STEPS) {
+  const steps = routineStepsFor(c.goal)
+  for (const step of steps) {
     if (filled.has(step)) continue
     const candidates = await runAs(ACTOR, () => service.candidatesFor({ step }))
     gaps.push({ step, candidates: candidates.map(skeletonCandidate) })
@@ -118,14 +109,12 @@ export const buildSkeleton = async (c: RoutineCase, snapshot: Snapshot, { hintsS
       cautions: [...c.cautions],
       budgetBand: c.budgetBand,
     },
-    steps: [...ROUTINE_STEPS],
+    steps,
     shelf: structuredClone(c.shelf),
     gaps,
     limits: {
       allowed: structuredClone(ROUTINE_ALLOWED_FREQUENCIES),
-      // The writer's prompt promises that the skeleton always allows enough new products to fill its gaps, and the gap gate needs every gap that has
-      // candidates filled. So the limit is that count, not a number a case chooses.
-      maxNewProducts: gaps.filter((gap) => gap.candidates.length > 0).length,
+      maxNewProducts: maxNewProductsFor(gaps),
     },
     hintsShown,
   }

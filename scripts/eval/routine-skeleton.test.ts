@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RoutineStep } from '../../src/modules/catalog/catalog.vocabulary'
-import { buildSkeleton, ROUTINE_ALLOWED_FREQUENCIES } from './routine-skeleton'
+import { ROUTINE_ALLOWED_FREQUENCIES } from '../../src/modules/routines/routines.rules'
+import { buildSkeleton } from './routine-skeleton'
 import { caseOf, GB, NG, offer, type Recommendation, row, RULES, rule, shelfProduct, snapshotOf } from './routine.fixture'
 
 // buildSkeleton runs the REAL RecommendationService.candidatesFor (under runAs) for each gap step, over the snapshot's FakeCatalogWorkbook and small
@@ -300,7 +301,7 @@ describe('buildSkeleton: the limits', () => {
     protect: ['am'],
   }
 
-  it('allows the frequencies the eval stands in for the routine-stage rules with', async () => {
+  it('allows the frequencies the production routine rules allow', async () => {
     const { skeleton } = await build()
 
     expect(skeleton.limits.allowed).toEqual(ALLOWED)
