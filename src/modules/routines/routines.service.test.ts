@@ -251,8 +251,6 @@ let service: RoutineService
 /** How many times the writer was asked, failed asks included. The words of the n-th ask are tagged "Written n". */
 let attempts: number
 let ids: number
-/** The profile ids the service told the live stream about (PR 4b), in order. */
-let announces: string[]
 
 const setClock = (offsetMs: number) => {
   clock = at(offsetMs)
@@ -320,7 +318,6 @@ beforeEach(() => {
   verdictRevision = 1
   attempts = 0
   ids = 0
-  announces = []
   world = newWorld()
   // Amara's shelf: a cleanser the rules keep, and a cream with a steroid in it, which the rules stop (with the steroid step-down).
   addProduct('entry-a', CLEAN, { name: 'Calm Cleanser' })
@@ -379,7 +376,6 @@ beforeEach(() => {
     outcomeCounts,
     jobs,
     enabled: true,
-    announce: async (profileId: string) => void announces.push(profileId),
     now: () => clock,
     newId: () => `version-${++ids}`,
   }
@@ -1623,12 +1619,10 @@ describe('RoutineService.build: a profile that does not exist', () => {
   })
 })
 
-// ---- PR 4b: "find one sold here" reaches the job, and the live stream is told ----
+// ---- PR 4b: "find one sold here" reaches the job ----
 //
 // request(profileId, reason, requestKey, options?: { exclude?: { step, code } }) carries the exclusion in the queued message, `run` hands it to `build`, and the
-// job message schema keeps it. The service is also given `announce: (profileId) => Promise<void>` (the viewer's, which publishes the routine's body on
-// `routine:<profileId>`; wired lazily in the container since the viewer reads the service): it is called when a build has put a pending version in place (the
-// routine is now `updating`) and again when that build is done. A failing announce never fails a build, and the log carries ids only.
+// job message schema keeps it.
 
 const EXCLUDE = { step: 'treat', code: 'SERUM-1' } as const
 
@@ -1681,61 +1675,6 @@ describe('RoutineService.run: find one sold here', () => {
     await service.request(AMARA_PROFILE, 'sold-here', `sold-here:${before.id}:moisturise`, { exclude: { step: 'moisturise', code: 'MOIST-1' } })
 
     expect(queued()).toHaveLength(2)
-  })
-})
-
-describe('RoutineService: telling the live stream', () => {
-  it('announces once when the build has put its pending version in place, before the writer is asked, and again when the build is done', async () => {
-    let announcedWhileWriting: string[] | null = null
-    writer.hook = async () => {
-      announcedWhileWriting ??= [...announces]
-    }
-
-    expect(await build('first')).toBe('built')
-
-    expect(announcedWhileWriting).toEqual([AMARA_PROFILE])
-    expect(announces).toEqual([AMARA_PROFILE, AMARA_PROFILE])
-  })
-
-  it('announces only the profile that was built', async () => {
-    await build('first')
-
-    expect(new Set(announces)).toEqual(new Set([AMARA_PROFILE]))
-  })
-
-  it('announces nothing when there is nothing to build from yet', async () => {
-    world.saved = null
-
-    expect(await build('first')).toBe('waiting')
-
-    expect(announces).toEqual([])
-  })
-
-  it('announces nothing when a rebuild after Start finds nothing to change', async () => {
-    await started()
-    announces.length = 0
-    setClock(2 * DAY + HOUR)
-
-    expect(await build('shelf')).toBe('unchanged')
-
-    expect(announces).toEqual([])
-  })
-
-  it('still builds, and logs the failure by profile id, when the announcement fails', async () => {
-    const spies = spyOnConsole()
-    let tried = 0
-    deps = { ...deps, announce: async () => { tried++; throw new Error('the stream is down') } }
-    service = new RoutineService(deps)
-
-    expect(await build('first')).toBe('built')
-
-    expect(tried).toBeGreaterThan(0)
-
-    expect((await currentRow()).status).toBe('ready')
-    const logged = loggedText(spies)
-    expect(logged).toContain(AMARA_PROFILE)
-    expect(logged).not.toContain('Calm Cleanser')
-    expect(logged).not.toContain('Karo Glow Cream')
   })
 })
 

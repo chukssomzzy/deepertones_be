@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import { ConflictError } from '../../lib/errors'
-import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import type { ProductCatalogService, ProductSummary, ShelfFacts } from '../catalog/catalog.service'
 import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
@@ -17,11 +16,11 @@ import type { RoutineService, RoutineView } from './routines.service'
 import { RoutineViewService } from './routines.viewer.service'
 
 // The session-facing routine (spec #189, PR 4b): what the routes call. Each method is the session's own (no profile id; the actor's profile is the one read) over
-// PR 2b's profile-keyed RoutineService, and adds what only a screen needs: the gates, the body a client reads, "what changed since last shown", the live stream.
+// PR 2b's profile-keyed RoutineService, and adds what only a screen needs: the gates, the body a client reads, and "what changed since last shown".
 // The other services are Pick<> fakes answering from one mutable `world`, as routines.service.test.ts does; the repository is the real fake.
 //
 // THE CONTRACT THIS FILE PINS (assumed: the brief names the methods, not the constructor):
-//   new RoutineViewService({ routines, goals, workbook, catalog, shelf, recommendations, repository, events, now })
+//   new RoutineViewService({ routines, goals, workbook, catalog, shelf, recommendations, repository, now })
 //     routines         Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>   (requestIfStale(profileId) is PR 3c's; it never throws)
 //     goals            Pick<GoalsService, 'requireGoal'>
 //     workbook         Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries'>
@@ -29,16 +28,12 @@ import { RoutineViewService } from './routines.viewer.service'
 //     shelf            Pick<ShelfService, 'activeEntriesFor'>
 //     recommendations  Pick<RecommendationService, 'shoppingFor'>
 //     repository       Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
-//     events           ScanEvents (the Durable Object in life, MemoryScanEvents here)
 //   current(): Promise<RoutineResponse>            { status: 'pending' } | the ready or updating body (routines.view.ts)
-//   watch(): Promise<Response>                     the text/event-stream of `routine:<profileId>`: a snapshot of what current() answers, then `done` once ready
 //   start(): Promise<RoutineResponse>              routines.start(profileId), then the body; 409 ROUTINE_NOT_READY is RoutineService's
 //   gotIt(step, clientIp): Promise<RoutineResponse>    routines.gotIt(profileId, step, clientIp), then the body
 //   findSoldHere(step): Promise<RoutineResponse>   routines.request(profileId, 'sold-here', `sold-here:${versionId}:${step}`, { exclude: { step, code } }), then the body
 //                                                   with status 'updating'
-//   announce(profileId): Promise<void>             by profile id, for the build (no session): publishes the body as `{ type: 'routine', routine }` on `routine:<profileId>`
-//                                                   and, when it is ready, `{ type: 'done' }`. It never marks a version served.
-// The gates, in order, for all five session methods: 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
+// The gates, in order, for all four session methods: 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
 // the verdict not approved). Note the order: the verdict itself answers 503 before 409; the routine answers 409 before 503.
 
 // The one clock every test hangs off; later times are offsets from it.
@@ -172,7 +167,6 @@ const newWorld = (): World => ({
 let world: World
 let clock: Date
 let repository: FakeRoutinesRepository
-let events: MemoryScanEvents
 let viewer: RoutineViewService
 let routines: { [K in 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale']: ReturnType<typeof vi.fn> }
 let requireGoal: ReturnType<typeof vi.fn>
@@ -193,7 +187,6 @@ beforeEach(() => {
   ids = 0
   world = newWorld()
   repository = new FakeRoutinesRepository()
-  events = new MemoryScanEvents()
   routines = {
     // As RoutineService.current does: the version is read from the repository, so what Start and the viewer wrote (served, started) shows on the next read.
     current: vi.fn(async () => {
@@ -231,7 +224,6 @@ beforeEach(() => {
     shelf: { activeEntriesFor: async () => structuredClone(world.entries) } as unknown as Pick<ShelfService, 'activeEntriesFor'>,
     recommendations: { shoppingFor: async () => ({ ...world.shopping }) } as unknown as Pick<RecommendationService, 'shoppingFor'>,
     repository,
-    events,
     now: () => clock,
   })
 })
@@ -254,7 +246,6 @@ const body = async (promise: Promise<unknown>) => JSON.parse(JSON.stringify(awai
 
 const SESSION_METHODS: [string, () => Promise<unknown>][] = [
   ['current', () => viewer.current()],
-  ['watch', () => viewer.watch()],
   ['start', () => viewer.start()],
   ['gotIt', () => viewer.gotIt('treat', IP)],
   ['findSoldHere', () => viewer.findSoldHere('moisturise')],
@@ -268,7 +259,6 @@ describe.each(SESSION_METHODS)('RoutineViewService.%s: who may ask, and when', (
     expect(error).toMatchObject({ name: 'ForbiddenError', code: 'SIGNUP_REQUIRED' })
     expect(requireGoal).not.toHaveBeenCalled()
     expect(touched()).toBe(false)
-    expect(events.subscribed).toEqual([])
   })
 
   it('refuses a guest with 403, not 409 or 503, even when there is no goal and the verdict is unavailable', async () => {
@@ -286,7 +276,6 @@ describe.each(SESSION_METHODS)('RoutineViewService.%s: who may ask, and when', (
 
     expect(error).toMatchObject({ name: 'ConflictError', code: 'GOAL_REQUIRED' })
     expect(touched()).toBe(false)
-    expect(events.subscribed).toEqual([])
   })
 
   it.each([
@@ -300,7 +289,6 @@ describe.each(SESSION_METHODS)('RoutineViewService.%s: who may ask, and when', (
 
     expect(error).toMatchObject({ name: 'UnavailableError', code: 'VERDICT_UNAVAILABLE' })
     expect(touched()).toBe(false)
-    expect(events.subscribed).toEqual([])
   })
 })
 
@@ -490,62 +478,6 @@ describe('RoutineViewService.current: what changed since the routine was last sh
   })
 })
 
-describe('RoutineViewService.watch', () => {
-  it('opens the stream of the profile\'s routine with the body current() answers as its snapshot', async () => {
-    await showing(versionRow())
-
-    await asVerified(() => viewer.watch())
-
-    expect(events.subscribed).toHaveLength(1)
-    expect(events.subscribed[0]!.scanId).toBe(`routine:${PROFILE}`)
-    const snapshot = JSON.parse(JSON.stringify(events.subscribed[0]!.snapshot))
-    expect(snapshot).toMatchObject({ status: 'ready', startedOn: null })
-    expect(snapshot.steps).toHaveLength(4)
-    expect(snapshot).toEqual(await body(asVerified(() => viewer.current())))
-  })
-
-  it('answers the stream the events provider opened', async () => {
-    const response = await asVerified(() => viewer.watch())
-
-    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
-  })
-
-  it('asks for a build when none is fresh, as a read does', async () => {
-    await asVerified(() => viewer.watch())
-
-    expect(routines.requestIfStale).toHaveBeenCalledWith(PROFILE)
-  })
-
-  it('marks the routine in its snapshot served', async () => {
-    await showing(versionRow())
-    setClock(MINUTE)
-
-    await asVerified(() => viewer.watch())
-
-    expect((await repository.current(PROFILE))!.servedAt).toEqual(at(MINUTE))
-  })
-
-  it('follows a routine that is already ready with done at once: nothing more is coming', async () => {
-    await showing(versionRow())
-
-    await asVerified(() => viewer.watch())
-
-    expect(events.eventsFor(`routine:${PROFILE}`)).toEqual([{ type: 'done' }])
-  })
-
-  it.each([
-    ['pending', async () => undefined],
-    ['updating', async () => void (await showing(versionRow(), 'updating'))],
-  ])('leaves the stream open when the routine is %s: the build\'s frame is still to come', async (_status, arrange) => {
-    await arrange()
-
-    await asVerified(() => viewer.watch())
-
-    expect(events.eventsFor(`routine:${PROFILE}`)).toEqual([])
-    expect(events.subscribed).toHaveLength(1)
-  })
-})
-
 describe('RoutineViewService.start', () => {
   it('starts the routine of the caller\'s profile and answers the body, started today with its step-downs dated', async () => {
     await showing(versionRow())
@@ -655,52 +587,5 @@ describe('RoutineViewService.findSoldHere', () => {
   it('refuses with 409 ROUTINE_NOT_READY before there is a routine, and asks for nothing', async () => {
     expect(await errorOf(asVerified(() => viewer.findSoldHere('moisturise')))).toMatchObject({ name: 'ConflictError', code: 'ROUTINE_NOT_READY' })
     expect(routines.request).not.toHaveBeenCalled()
-  })
-})
-
-describe('RoutineViewService.announce', () => {
-  const key = `routine:${PROFILE}`
-  const announce = () => runAs(SYSTEM, () => viewer.announce(PROFILE))
-
-  it('publishes a ready routine as the body GET answers, on the profile\'s stream, followed by done', async () => {
-    await showing(versionRow())
-
-    await announce()
-
-    const published = events.eventsFor(key)
-    expect(published).toHaveLength(2)
-    expect(published[0]).toMatchObject({ type: 'routine', routine: { status: 'ready' } })
-    expect(JSON.parse(JSON.stringify((published[0] as any).routine))).toEqual(await body(asVerified(() => viewer.current())))
-    expect(published[1]).toEqual({ type: 'done' })
-  })
-
-  it('publishes an updating routine without done: the build under way is still to land', async () => {
-    await showing(versionRow(), 'updating')
-
-    await announce()
-
-    expect(events.eventsFor(key)).toEqual([expect.objectContaining({ type: 'routine', routine: expect.objectContaining({ status: 'updating' }) })])
-  })
-
-  it('publishes pending, without done', async () => {
-    await announce()
-
-    expect(events.eventsFor(key)).toEqual([{ type: 'routine', routine: { status: 'pending' } }])
-  })
-
-  it('never marks a version served: only a person looking at it does', async () => {
-    await showing(versionRow())
-
-    await announce()
-
-    expect((await repository.current(PROFILE))!.servedAt).toBeNull()
-  })
-
-  it('publishes to the profile\'s stream only', async () => {
-    await showing(versionRow())
-
-    await announce()
-
-    expect(events.published.every((p) => p.scanId === key)).toBe(true)
   })
 })

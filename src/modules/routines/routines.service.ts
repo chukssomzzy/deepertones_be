@@ -51,8 +51,6 @@ export type RoutineServiceDeps = {
   jobs: JobQueue
   /** Whether routines are switched on in this environment: off, `request` does nothing at all. */
   enabled: boolean
-  /** Tells whoever follows the profile's routine that it changed (the viewer's, which publishes it on `routine:<profileId>`); a lazy callback because the viewer reads this service. */
-  announce: (profileId: string) => Promise<void>
   now?: () => Date
   newId?: () => string
 }
@@ -119,7 +117,6 @@ export class RoutineService {
   private readonly outcomeCounts: RoutineServiceDeps['outcomeCounts']
   private readonly jobs: JobQueue
   private readonly enabled: boolean
-  private readonly announce: RoutineServiceDeps['announce']
   private readonly now: () => Date
   private readonly newId: () => string
 
@@ -139,7 +136,6 @@ export class RoutineService {
     this.outcomeCounts = deps.outcomeCounts
     this.jobs = deps.jobs
     this.enabled = deps.enabled
-    this.announce = deps.announce
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
@@ -205,7 +201,6 @@ export class RoutineService {
     const now = this.now()
     await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
-    await this.tell(profileId)
   }
 
   /**
@@ -449,7 +444,6 @@ export class RoutineService {
 
     const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, routineFingerprint: null, catalogVersion: null, source: null }
     await this.repository.append(pending)
-    await this.tell(profileId)
     // Start may have landed after the routine in force was read: the pending version is then started too (as Start does for a pending version it finds).
     const startedBefore = pending.startedOn === null ? (await this.repository.current(profileId))?.startedOn : null
     if (startedBefore) await this.repository.markStarted(profileId, startedBefore)
@@ -477,7 +471,6 @@ export class RoutineService {
     }
     if (!(await this.repository.complete(pending.id, done))) console.error({ outcome: 'routine-complete-skipped', profileId, versionId: pending.id })
     console.log({ outcome: 'routine-built', profileId, versionId: pending.id, source: done.source, writerCalls: calls })
-    await this.tell(profileId)
     return 'built'
   }
 
@@ -486,16 +479,6 @@ export class RoutineService {
     const startedOn = row.startedOn ?? (await this.repository.current(row.profileId))?.startedOn ?? null
     const tapers = row.startedOn === null && startedOn !== null ? RoutineService.datedFrom(row.tapers, startedOn, startedOn) : row.tapers
     await this.repository.append({ ...row, readyAt: this.now(), startedOn, tapers })
-    await this.tell(row.profileId)
-  }
-
-  /** Tells the live stream the routine changed. A failure is logged by id and never fails the build: the version is stored, and a client sees it on its next read. */
-  private async tell(profileId: string): Promise<void> {
-    try {
-      await this.announce(profileId)
-    } catch (error) {
-      console.error({ outcome: 'routine-announce-failed', profileId, error: describeError(error) })
-    }
   }
 
   /**

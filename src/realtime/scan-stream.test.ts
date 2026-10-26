@@ -26,7 +26,6 @@ const photoEvent = (photo: Record<string, unknown>) => ({ type: 'photo', photo }
 const DONE = { type: 'done' } as ScanEvent
 const verdictEvent = (verdict: Record<string, unknown>) => ({ type: 'verdict', verdict }) as unknown as ScanEvent
 const faceEvent = (faceScan: Record<string, unknown>) => ({ type: 'face', faceScan }) as unknown as ScanEvent
-const routineEvent = (routine: Record<string, unknown>) => ({ type: 'routine', routine }) as unknown as ScanEvent
 
 const stubFor = (scanId: string) => env.SCAN_STREAM.get(env.SCAN_STREAM.idFromName(scanId))
 const freshScanId = () => `scan-stream-${crypto.randomUUID()}`
@@ -303,65 +302,6 @@ describe('ScanStream verdict frames', () => {
     const { frames, ended } = await other.stream.read(1, 200)
     expect(frames).toEqual([])
     expect(ended).toBe(false)
-  })
-})
-
-// A profile's routine (spec #189, PR 4b) is followed on the same Durable Object, keyed `routine:<profileId>`. Its snapshot is the public routine body, and each
-// build that lands is a `routine` event carrying the body as GET /me/routine would answer. The object only forwards: `done` is the service's choice (it sends one
-// after a routine that is ready, and none after pending or updating, whose build is still to land).
-describe('ScanStream routine frames', () => {
-  const PENDING = { status: 'pending' }
-  const UPDATING = { status: 'updating', startedOn: null, expectation: 'Give it 8 to 12 weeks.', steps: [], tapers: [] }
-  const READY = { ...UPDATING, status: 'ready', steps: [{ step: 'cleanse', frequency: 'am', reason: 'Gentle.', changed: false, product: { kind: 'none' } }] }
-  const freshRoutineKey = () => `routine:${crypto.randomUUID()}`
-
-  it('writes a routine event as an event named routine whose data is the routine body, not as an item, after a pending snapshot', async () => {
-    const key = freshRoutineKey()
-    const { stream } = await subscribe(key, PENDING)
-
-    await stubFor(key).publish(routineEvent(READY))
-
-    const { frames } = await stream.read(2)
-    expect(frames).toEqual([`event: snapshot\ndata: ${JSON.stringify(PENDING)}`, `event: routine\ndata: ${JSON.stringify(READY)}`])
-  })
-
-  it('keeps the stream open after an updating routine, delivers the ready one that follows, and ends on done', async () => {
-    const key = freshRoutineKey()
-    const { stream } = await subscribe(key, PENDING)
-    await stream.read(1)
-
-    await stubFor(key).publish(routineEvent(UPDATING))
-    const first = await stream.read(2, 300)
-    expect(first.frames).toEqual([`event: routine\ndata: ${JSON.stringify(UPDATING)}`])
-    expect(first.ended).toBe(false)
-
-    await stubFor(key).publish(routineEvent(READY))
-    await stubFor(key).publish(DONE)
-
-    const { frames, ended } = await stream.read(3)
-    expect(frames).toEqual([`event: routine\ndata: ${JSON.stringify(READY)}`, 'event: done\ndata: {}'])
-    expect(ended).toBe(true)
-  })
-
-  it('writes a profile\'s routine to the clients of that profile only, and not to a verdict stream of the same profile', async () => {
-    const mine = freshRoutineKey()
-    const theirs = freshRoutineKey()
-    const verdictKey = `verdict:${mine.slice('routine:'.length)}`
-    const watching = await subscribe(mine, PENDING)
-    const other = await subscribe(theirs, PENDING)
-    const verdicts = await subscribe(verdictKey, PENDING)
-    await watching.stream.read(1)
-    await other.stream.read(1)
-    await verdicts.stream.read(1)
-
-    await stubFor(mine).publish(routineEvent(READY))
-
-    expect((await watching.stream.read(1)).frames).toHaveLength(1)
-    for (const quiet of [other, verdicts]) {
-      const { frames, ended } = await quiet.stream.read(1, 200)
-      expect(frames).toEqual([])
-      expect(ended).toBe(false)
-    }
   })
 })
 
