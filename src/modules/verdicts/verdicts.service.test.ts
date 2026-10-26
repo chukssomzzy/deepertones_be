@@ -19,7 +19,7 @@ import type { SafetyService } from '../safety/safety.service'
 import type { ParseState, SafetyMentionRow, SafetyView } from '../safety/safety.types'
 import type { SafetyChoice } from '../safety/safety.vocabulary'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
-import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { ShelfActiveEntry, ShelfEntryView, ShelfService } from '../shelf/shelf.service'
 import type { z } from 'zod'
 import type { buildVerdictSpec } from './verdicts.job-specs'
 import { FakeVerdictsRepository } from './verdicts.repository.fake'
@@ -32,13 +32,19 @@ import { VerdictService } from './verdicts.service'
 //
 // The contract this file pins:
 //   new VerdictService({ repository, fitter, jobs, events, workbook, catalog, shelf, scans, safety, goals, faceScans, now }), where the services are the Pick<> of
-//   what the verdict reads: workbook (verdictReference, tapersByCode, stepsFor, skinConcernsFor), catalog (shelfFacts, latestIngredients), shelf (activeEntriesFor), scans (noLabelFacts,
+//   what the verdict reads: workbook (verdictReference, tapersByCode, stepsFor, skinConcernsFor), catalog (shelfFacts, latestIngredients), shelf (activeEntriesFor,
+//   viewsFor), scans (noLabelFacts,
 //   hasShelfWorkInFlight), safety (snapshotFor), goals (goalFor), faceScans (latestConcernLevelsFor). Everything is read by profile id, so build() needs no session;
 //   current() uses the session's profile and throws GOAL_REQUIRED itself.
 //   current()      answers { status: 'pending' } or { status: 'ready', fit: 'ready' | 'not-ready', products, tapers }; `tapers` lists, once each, the rows (retired ones
 //                  included) of the step-down codes the products use, and is [] when none is used.
 //   build(body)    runs the build-verdict job. requeueDueFits(now) answers how many retries it queued. markFitFailed(body) is the dead-letter hook.
 //   savedFor(profileId)   answers null, or { fingerprint, fit, builtAt, rulesVersion, products }.
+//   The product of a shelf entry (spec #171 follow-up): what a client reads has, on each product, the shelf entry's own `kind` and `product` or `noLabel`, joined at read time
+//   by `shelf.viewsFor(profileId, entryIds)` (by profile id, no session). What is saved and what `savedFor` answers never carries them, and nothing in the fingerprint changes.
+//   A product whose view no longer resolves is NEVER left out (it could be a mercury escalation or a steroid stop): it stays with its saved entryId, group, verdict,
+//   reason, escalate, sameJobAs and nudge, and simply has no `kind`, `product` or `noLabel` (the saved product does not know its kind, so none is made up). `tapers` is
+//   computed from every saved product. That never throws and never queues a build.
 
 type BuildBody = z.infer<typeof buildVerdictSpec.schema>
 
@@ -89,6 +95,13 @@ type World = {
   facts: Map<string, ShelfFacts>
   noLabels: Map<string, { purpose: NoLabelPurpose; category: Category }>
   steps: Map<string, RoutineStep[]>
+  /** The shelf views `viewsFor` answers, by entry id: apart from the facts, so a test can lose one without changing what the verdict was built from. */
+  views: Map<string, ShelfEntryView>
+  /** The profile ids `viewsFor` was asked for, and the entry ids each time. */
+  viewsAsked: string[]
+  viewsIdsAsked: string[][]
+  /** When set, `viewsFor` throws this: the join of the shelf's product fails while everything else works. */
+  viewsFail: Error | null
   /** The skin concerns the recommendation catalog gives a product, by catalog product id. */
   skinConcerns: Map<string, ShownConcern[]>
   safety: { view: SafetyView | null; parseState: ParseState | null; mentions: SafetyMentionRow[] }
@@ -143,6 +156,10 @@ const newWorld = (): World => ({
   facts: new Map(),
   noLabels: new Map(),
   steps: new Map(),
+  views: new Map(),
+  viewsAsked: [],
+  viewsIdsAsked: [],
+  viewsFail: null,
   skinConcerns: new Map(),
   safety: { view: safetyView(['reaction'], { reactionText: 'I react to fragrance' }), parseState: 'done', mentions: [mention()] },
   mentionIngredients: new Map(),
@@ -164,7 +181,26 @@ let entryCount = 0
 const addProduct = (id: string, ingredients: string[], over: Partial<ShelfFacts> = {}) => {
   world.entries.push({ id, kind: 'product', addedAt: at(entryCount++ * MINUTE), productId: `prod-${id}`, formulationId: `form-${id}` })
   world.facts.set(`form-${id}`, { productId: `prod-${id}`, brand: 'Orbis', name: `Product ${id}`, variant: null, form: 'cream', category: 'skin', ingredients, ...over })
+  world.views.set(id, productView(id, over.name ?? `Product ${id}`))
 }
+/** The shelf view of a product entry, as `ShelfService.viewsFor` gives it. */
+const productView = (id: string, name: string): ShelfEntryView => ({
+  id,
+  addedAt: at(0),
+  lastScannedAt: at(0),
+  source: { scanId: `scan-${id}`, itemId: `item-${id}` },
+  kind: 'product',
+  product: { id: `prod-${id}`, kind: 'named', brand: 'Orbis', name, variant: null, form: 'cream', category: 'skin', imageUrl: `https://img.test/${id}.jpg` },
+})
+/** The shelf view of an entry with no label. */
+const noLabelView = (id: string): ShelfEntryView => ({
+  id,
+  addedAt: at(0),
+  lastScannedAt: at(0),
+  source: { scanId: `scan-${id}`, itemId: `item-${id}` },
+  kind: 'no-label',
+  noLabel: { source: 'market-vendor', purpose: 'moisturise', usedFor: '6-months-2-years', description: 'A tub from the market', concerns: [], rulesVersion: 1 },
+})
 const removeEntry = (id: string) => {
   world.entries = world.entries.filter((entry) => entry.id !== id)
 }
@@ -256,7 +292,14 @@ beforeEach(() => {
         world.profilesRead.push(profileId)
         return structuredClone(world.entries)
       },
-    } satisfies Pick<ShelfService, 'activeEntriesFor'>,
+      // Answers the entries it has a view for: one that "no longer resolves" is simply absent, as in ShelfService.viewsFor.
+      viewsFor: async (profileId: string, entryIds: string[]) => {
+        world.viewsAsked.push(profileId)
+        world.viewsIdsAsked.push(entryIds)
+        if (world.viewsFail) throw world.viewsFail
+        return new Map(entryIds.flatMap((id): [string, ShelfEntryView][] => (world.views.has(id) ? [[id, structuredClone(world.views.get(id)!)]] : [])))
+      },
+    } satisfies Pick<ShelfService, 'activeEntriesFor' | 'viewsFor'>,
     scans: {
       noLabelFacts: async (itemIds: string[]) => new Map(itemIds.flatMap((id) => (world.noLabels.has(id) ? [[id, world.noLabels.get(id)!] as const] : []))),
       hasShelfWorkInFlight: async (profileId: string) => {
@@ -1282,15 +1325,22 @@ const STEROID_TAPER_BODY = {
   whatToExpect: 'Skin may flare for a few days after each step down.',
   seeAProfessionalIf: 'The redness spreads or the skin weeps.',
 }
+// What the public body carries of the shelf entry (the presenter's flat summary, as GET /me/shelf shows it): the entry's own `kind` and its `product`.
+const publicProductOf = (id: string, name: string) => ({
+  kind: 'product',
+  product: { id: `prod-${id}`, kind: 'named', brand: 'Orbis', name, variant: null, form: 'cream', category: 'skin', imageUrl: `https://img.test/${id}.jpg` },
+})
+const PRODUCT_A = publicProductOf('entry-a', 'Calm Serum')
+const PRODUCT_B = publicProductOf('entry-b', 'Karo Glow Cream')
 /** Amara's shelf as a client reads it: the serum the judge decided (or left undecided when its fit is not ready), and the steroid cream stopped by its step-down. */
 const amarasBody = (fit: 'ready' | 'not-ready') => ({
   status: 'ready',
   fit,
   products: [
     fit === 'ready'
-      ? { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
-      : { entryId: 'entry-a', group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
-    { entryId: 'entry-b', group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false },
+      ? { entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
+      : { entryId: 'entry-a', ...PRODUCT_A, group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
+    { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false },
   ],
   tapers: [STEROID_TAPER_BODY],
 })
@@ -1687,6 +1737,358 @@ describe('VerdictService.build: telling the stream', () => {
       expect(failed.length).toBeGreaterThan(0)
       for (const line of failed) expect(line).toContain('profile-amara-1')
       for (const line of lines) for (const private_ of [SECRET, 'Calm Serum', 'Karo Glow Cream', 'Suits the goal', 'Clobetasol', 'TPR-STEROID-1']) expect(line).not.toContain(private_)
+    })
+  })
+})
+
+// The shelf entry's own product on each verdict product (spec #171 follow-up): what a client reads names the product, so the verdict is readable without a second call.
+// It is joined at read time through `shelf.viewsFor(profileId, entryIds)` and is no part of what is saved or fingerprinted.
+describe('VerdictService: the shelf entry\'s product on each verdict product', () => {
+  /** An entry with no label on Amara's shelf, as the accessors give it. */
+  const addNoLabel = (id: string) => {
+    world.entries.push({ id, kind: 'no-label', addedAt: at(entryCount++ * MINUTE), itemId: `item-${id}` })
+    world.noLabels.set(`item-${id}`, { purpose: 'moisturise', category: 'skin' })
+    world.views.set(id, noLabelView(id))
+  }
+  const addNoLabelEntry = () => addNoLabel('entry-n')
+
+  it('gives each product the shelf entry\'s kind and its product, as the shelf view has them', async () => {
+    await built()
+
+    const view = (await current()) as { products: object[] }
+
+    expect(view.products).toEqual([
+      expect.objectContaining({ entryId: 'entry-a', kind: 'product', product: world.views.get('entry-a')!.product }),
+      expect.objectContaining({ entryId: 'entry-b', kind: 'product', product: world.views.get('entry-b')!.product }),
+    ])
+  })
+
+  it('gives a no-label product its kind and its noLabel view and no product, in the body the stream carries too', async () => {
+    addNoLabel('entry-n')
+
+    await built()
+
+    const view = (await current()) as { products: { entryId: string }[] }
+    const shown = view.products.find((p) => p.entryId === 'entry-n')
+    expect(shown).toMatchObject({ kind: 'no-label', noLabel: world.views.get('entry-n')!.noLabel })
+    expect(shown).not.toHaveProperty('product')
+    const frame = events.eventsFor(KEY)[0] as unknown as { verdict: { products: { entryId: string }[] } }
+    const sent = frame.verdict.products.find((p) => p.entryId === 'entry-n')
+    expect(sent).toMatchObject({ kind: 'no-label', noLabel: { source: 'market-vendor', purpose: 'moisturise', usedFor: '6-months-2-years', description: 'A tub from the market', concerns: [], rulesVersion: 1 } })
+    expect(sent).not.toHaveProperty('product')
+  })
+
+  it('sends the product on the verdict frame a build publishes and on the stream\'s snapshot, as the public body', async () => {
+    await built()
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+    events.published.length = 0
+
+    await watch()
+
+    expect(events.subscribed[0]!.snapshot).toEqual(amarasBody('ready'))
+  })
+
+  it('reads the views by the profile id of the verdict it is for: the job\'s for a build, which has no session, and the session\'s for current', async () => {
+    await current(TOLU)
+
+    await build({ ...lastBody() })
+
+    expect(world.viewsAsked.length).toBeGreaterThan(0)
+    expect(new Set(world.viewsAsked)).toEqual(new Set(['profile-tolu-1']))
+
+    world.viewsAsked.length = 0
+    await current(TOLU)
+    expect(world.viewsAsked.length).toBeGreaterThan(0)
+    expect(new Set(world.viewsAsked)).toEqual(new Set(['profile-tolu-1']))
+  })
+
+  it('asks for the views of the products it is going to show in one call, by entry id', async () => {
+    await built()
+    world.viewsIdsAsked.length = 0
+
+    await current()
+
+    expect(world.viewsIdsAsked).toHaveLength(1)
+    expect([...world.viewsIdsAsked[0]!].sort()).toEqual(['entry-a', 'entry-b'])
+  })
+
+  it('saves the products without them: the product is added when the verdict is read, never stored', async () => {
+    await built()
+
+    const row = await rowOf()
+
+    expect(row.products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+    for (const saved of row.products) for (const joined of ['kind', 'product', 'noLabel']) expect(saved).not.toHaveProperty(joined)
+  })
+
+  it('does not hand them to the routine: savedFor answers the saved products as before', async () => {
+    await built()
+
+    const saved = await savedFor('profile-amara-1')
+
+    expect(saved!.products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+    for (const product of saved!.products) for (const joined of ['kind', 'product', 'noLabel']) expect(product).not.toHaveProperty(joined)
+  })
+
+  it('reads the product as it is when the verdict is read, with no new build: a product renamed is not a change to what the verdict was built from', async () => {
+    await built()
+    const before = (await rowOf()).fingerprint
+    world.views.get('entry-a')!.product!.name = 'Calm Serum Renamed'
+
+    const view = (await current()) as { status: string; products: { entryId: string; product?: { name: string } }[] }
+
+    expect(view.status).toBe('ready')
+    expect(view.products.find((p) => p.entryId === 'entry-a')?.product?.name).toBe('Calm Serum Renamed')
+    expect(jobs.enqueued).toHaveLength(1)
+    expect((await rowOf()).fingerprint).toBe(before)
+  })
+
+  describe('when the view of an entry in the saved verdict no longer resolves (the shelf changed in the moment since it was built)', () => {
+    /** What a client is shown of a product whose view is gone: the saved verdict as it was, and nothing of the shelf entry. */
+    const NO_VIEW_A = { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
+    const NO_VIEW_B = { entryId: 'entry-b', ...PRODUCT_B, group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false }
+    const noShelfEntry = (product: object) => {
+      for (const joined of ['kind', 'product', 'noLabel']) expect(product).not.toHaveProperty(joined)
+    }
+
+    it('keeps that product in what current answers, as saved and with no shelf entry on it, keeps the rest, and does not throw or queue a build', async () => {
+      await built()
+      world.views.delete('entry-a')
+
+      const view = (await current()) as { status: string; products: { entryId: string }[] }
+
+      expect(view.status).toBe('ready')
+      expect(view.products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+      expect(view.products[0]).toMatchObject({ entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false })
+      noShelfEntry(view.products[0]!)
+      expect(view.products[1]).toMatchObject({ entryId: 'entry-b', kind: 'product', product: world.views.get('entry-b')!.product })
+      expect(jobs.enqueued).toHaveLength(1)
+      // The verdict as saved is untouched.
+      expect((await rowOf()).products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+    })
+
+    it('keeps it in the stream\'s snapshot too, which still opens', async () => {
+      await built()
+      events.published.length = 0
+      world.views.delete('entry-a')
+
+      await expect(watch()).resolves.toBeInstanceOf(Response)
+
+      const snapshot = events.subscribed[0]!.snapshot as unknown as { status: string; products: object[] }
+      expect(snapshot.status).toBe('ready')
+      expect(snapshot.products).toEqual([NO_VIEW_A, NO_VIEW_B])
+    })
+
+    it('keeps it in the verdict a build publishes, saves it whole, and does not fail the build', async () => {
+      await current()
+      world.views.delete('entry-a')
+
+      await expect(build(lastBody())).resolves.toBeUndefined()
+
+      expect((await rowOf()).products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+      const [frame, done, ...rest] = events.eventsFor(KEY) as unknown as { type: string; verdict: { products: object[] } }[]
+      expect(frame!.type).toBe('verdict')
+      expect(frame!.verdict.products).toEqual([NO_VIEW_A, NO_VIEW_B])
+      expect(done).toEqual(DONE_FRAME)
+      expect(rest).toEqual([])
+    })
+
+    it('keeps a stopped product, and lists its step-down, when its own view is gone: the user is still told to taper off it', async () => {
+      await built()
+      world.views.delete('entry-b')
+
+      const view = (await current()) as { products: { entryId: string }[]; tapers: { code: string }[] }
+
+      const stopped = view.products.find((p) => p.entryId === 'entry-b')
+      expect(stopped).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, escalate: false })
+      noShelfEntry(stopped!)
+      expect(view.tapers.map((t) => t.code)).toEqual(['TPR-STEROID-1'])
+      // The public body, snapshot and frame alike, names the step-down by its code and carries the template.
+      events.published.length = 0
+      await watch()
+      const snapshot = events.subscribed[0]!.snapshot as unknown as { products: object[]; tapers: object[] }
+      expect(snapshot.products).toEqual([{ entryId: 'entry-a', ...PRODUCT_A, group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }, {
+        entryId: 'entry-b',
+        group: 'likely-the-problem',
+        verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' },
+        reason: expect.any(String),
+        escalate: false,
+      }])
+      expect(snapshot.tapers).toEqual([STEROID_TAPER_BODY])
+    })
+
+    it('lists the step-down of a stopped product whose view is gone in the frame a build publishes', async () => {
+      await current()
+      world.views.delete('entry-b')
+
+      await build(lastBody())
+
+      const [frame] = events.eventsFor(KEY) as unknown as { verdict: { products: { entryId: string }[]; tapers: object[] } }[]
+      expect(frame!.verdict.products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b'])
+      expect(frame!.verdict.tapers).toEqual([STEROID_TAPER_BODY])
+    })
+
+    it('keeps a mercury product that is to be escalated when its view is gone: the user is still told to see a professional', async () => {
+      world.reference.rules.push(rule({ name: 'mercury', kind: 'banned-substance', group: 'mercury', source: 'https://example.org/rules/mercury' }))
+      addProduct('entry-m', ['Aqua', 'Mercury'], { name: 'Pearl Cream' })
+      await built()
+      world.views.delete('entry-m')
+
+      const view = (await current()) as { products: { entryId: string }[] }
+
+      const mercury = view.products.find((p) => p.entryId === 'entry-m')
+      expect(mercury).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'drop' }, escalate: true })
+      noShelfEntry(mercury!)
+      events.published.length = 0
+      await watch()
+      const snapshot = events.subscribed[0]!.snapshot as unknown as { products: { entryId: string; escalate: boolean }[] }
+      expect(snapshot.products.find((p) => p.entryId === 'entry-m')).toMatchObject({ entryId: 'entry-m', escalate: true, verdict: { kind: 'drop' } })
+    })
+
+    it('keeps a redundant product, with the same-job product it names, when the view of that same-job product is gone: the name is always one of the products', async () => {
+      addProduct('entry-c', CLEAN, { name: 'Dew Lotion' })
+      world.steps.set('prod-entry-c', ['moisturise'])
+      fitter.respondWith((request) => ({
+        products: openIds(request).map((id) =>
+          id === 'entry-c'
+            ? { id, label: 'redundant' as const, reason: 'Does what the serum does.', sameJobAs: 'entry-a' }
+            : { id, label: 'helping' as const, reason: 'Suits the goal.', sameJobAs: null },
+        ),
+        clashes: [],
+      }))
+      await built()
+      world.views.delete('entry-a')
+
+      const view = (await current()) as { products: { entryId: string; sameJobAs?: string }[] }
+
+      const ids = view.products.map((p) => p.entryId)
+      expect(ids).toEqual(['entry-a', 'entry-b', 'entry-c'])
+      const redundant = view.products.find((p) => p.entryId === 'entry-c')
+      expect(redundant).toMatchObject({ group: 'redundant', verdict: { kind: 'drop' }, sameJobAs: 'entry-a' })
+      expect(ids).toContain(redundant!.sameJobAs)
+      noShelfEntry(view.products.find((p) => p.entryId === 'entry-a')!)
+      // The same on the public body the stream carries.
+      events.published.length = 0
+      await watch()
+      const snapshot = events.subscribed[0]!.snapshot as unknown as { products: { entryId: string; sameJobAs?: string }[] }
+      expect(snapshot.products.map((p) => p.entryId)).toEqual(['entry-a', 'entry-b', 'entry-c'])
+      expect(snapshot.products.find((p) => p.entryId === 'entry-c')).toMatchObject({ entryId: 'entry-c', sameJobAs: 'entry-a', verdict: { kind: 'drop' } })
+    })
+
+    it('keeps every product when every view is gone, and still lists the step-down', async () => {
+      await built()
+      world.views.clear()
+
+      const view = (await current()) as { status: string; products: object[]; tapers: { code: string }[] }
+
+      expect(view.status).toBe('ready')
+      expect(view.products).toHaveLength(2)
+      for (const product of view.products) noShelfEntry(product)
+      expect(view.tapers.map((t) => t.code)).toEqual(['TPR-STEROID-1'])
+    })
+  })
+
+  describe('when the join of the shelf\'s product fails altogether, so no verdict frame can be built', () => {
+    it('still sends done from a build whose fit is ready, saves the verdict, and logs publish-failed once, by profile id alone', async () => {
+      await current()
+      const spies = spyOnConsole()
+      world.viewsFail = new Error(SECRET)
+
+      await expect(build(lastBody())).resolves.toBeUndefined()
+
+      expect(await rowOf()).toMatchObject({ status: 'ready', fit: 'ready' })
+      expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+      const lines = loggedBy(spies)
+      const failed = lines.filter((line) => line.includes('publish-failed'))
+      expect(failed).toHaveLength(1)
+      expect(failed[0]).toContain('profile-amara-1')
+      for (const line of lines) for (const private_ of [SECRET, 'Calm Serum', 'Karo Glow Cream', 'Suits the goal', 'Clobetasol', 'TPR-STEROID-1']) expect(line).not.toContain(private_)
+    })
+
+    it('sends done from a build whose judge failed for the last time of the day, and still throws nothing for it', async () => {
+      await builtWithFitFailing()
+      const body = lastBody()
+      await expect(build(body)).rejects.toThrow()
+      events.published.length = 0
+      world.viewsFail = new Error(SECRET)
+
+      await expect(build(body)).resolves.toBeUndefined()
+
+      expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+    })
+
+    it('sends no done from a build whose fit is not ready and is still to be retried: the rule is the stream\'s, the join does not change it', async () => {
+      await current()
+      fitFails('the fit judge is unavailable')
+      world.viewsFail = new Error(SECRET)
+
+      await expect(build(lastBody())).rejects.toThrow('the fit judge is unavailable')
+
+      expect(events.published).toEqual([])
+    })
+
+    it('sends done from markFitFailed, still marks the retry, never throws, and logs publish-failed once, by profile id alone', async () => {
+      await builtWithFitFailing()
+      const body = lastBody()
+      events.published.length = 0
+      const spies = spyOnConsole()
+      world.viewsFail = new Error(SECRET)
+
+      await expect(markFitFailed(body)).resolves.toBeUndefined()
+
+      expect(await rowOf()).toMatchObject({ fitRetried: true, fitRetryDueAt: at(DAY) })
+      expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+      const lines = loggedBy(spies)
+      const failed = lines.filter((line) => line.includes('publish-failed'))
+      expect(failed).toHaveLength(1)
+      expect(failed[0]).toContain('profile-amara-1')
+      for (const line of lines) for (const private_ of [SECRET, 'Calm Serum', 'Karo Glow Cream', 'Clobetasol', 'TPR-STEROID-1']) expect(line).not.toContain(private_)
+    })
+  })
+
+  describe('the frames that are not a build\'s own carry the joined product too, read as it is when the frame is built', () => {
+    it('sends, from markFitFailed, the saved verdict with each product\'s kind and product as the shelf has them now', async () => {
+      await builtWithFitFailing()
+      const body = lastBody()
+      events.published.length = 0
+      world.views.get('entry-a')!.product!.name = 'Calm Serum Renamed'
+
+      await markFitFailed(body)
+
+      const [frame, done, ...rest] = events.eventsFor(KEY) as unknown as { type: string; verdict: { products: { entryId: string }[] } }[]
+      expect(frame!.type).toBe('verdict')
+      expect(frame!.verdict.products).toEqual([
+        expect.objectContaining({ entryId: 'entry-a', kind: 'product', product: expect.objectContaining({ id: 'prod-entry-a', name: 'Calm Serum Renamed' }) }),
+        expect.objectContaining({ entryId: 'entry-b', ...PRODUCT_B }),
+      ])
+      expect(done).toEqual(DONE_FRAME)
+      expect(rest).toEqual([])
+    })
+
+    it('sends, from the re-read of a watch, the verdict a build saved in the moment before the stream opened with each product\'s kind and product as the shelf has them now', async () => {
+      addNoLabelEntry()
+      await current()
+      const body = lastBody()
+      const open = events.subscribe.bind(events)
+      vi.spyOn(events, 'subscribe').mockImplementation(async (key, snapshot) => {
+        await build(body)
+        events.published.length = 0
+        world.views.get('entry-a')!.product!.name = 'Calm Serum Renamed'
+        return open(key, snapshot)
+      })
+
+      await watch()
+
+      expect(events.subscribed[0]!.snapshot).toEqual({ status: 'pending' })
+      const [frame, done, ...rest] = events.eventsFor(KEY) as unknown as { type: string; verdict: { products: { entryId: string }[] } }[]
+      expect(frame!.type).toBe('verdict')
+      expect(frame!.verdict.products).toEqual([
+        expect.objectContaining({ entryId: 'entry-a', kind: 'product', product: expect.objectContaining({ name: 'Calm Serum Renamed' }) }),
+        expect.objectContaining({ entryId: 'entry-b', ...PRODUCT_B }),
+        expect.objectContaining({ entryId: 'entry-n', kind: 'no-label', noLabel: expect.objectContaining({ purpose: 'moisturise' }) }),
+      ])
+      expect(done).toEqual(DONE_FRAME)
+      expect(rest).toEqual([])
     })
   })
 })
