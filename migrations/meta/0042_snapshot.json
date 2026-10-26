@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "43efd3c7-fa7a-4b10-b234-57dd1e854b29",
-  "prevId": "b9167338-b6cc-4b26-be09-22c64f38377f",
+  "id": "f4146c26-c78e-4e6b-b09e-abdcbeaced1f",
+  "prevId": "1c9d403f-18b2-4a63-9d75-d5d1fd860b8a",
   "tables": {
     "job_runs": {
       "name": "job_runs",

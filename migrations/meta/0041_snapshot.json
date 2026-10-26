@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b9167338-b6cc-4b26-be09-22c64f38377f",
-  "prevId": "93c60956-b12d-4eff-8945-5928214a1574",
+  "id": "1c9d403f-18b2-4a63-9d75-d5d1fd860b8a",
+  "prevId": "0c2e2983-9f58-4026-8d50-1e3d49b3bebf",
   "tables": {
     "job_runs": {
       "name": "job_runs",
@@ -1226,6 +1226,20 @@
         },
         "ingredients_source_url": {
           "name": "ingredients_source_url",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "key_ingredient": {
+          "name": "key_ingredient",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "strength": {
+          "name": "strength",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
@@ -2672,75 +2686,6 @@
           "name": "routine_outcome_counts_goal_skin_type_country_code_pk"
         }
       },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "routine_requests": {
-      "name": "routine_requests",
-      "columns": {
-        "profile_id": {
-          "name": "profile_id",
-          "type": "text",
-          "primaryKey": true,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "request_key": {
-          "name": "request_key",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "requested_at": {
-          "name": "requested_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "retry_due_at": {
-          "name": "retry_due_at",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "retried": {
-          "name": "retried",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": false
-        }
-      },
-      "indexes": {
-        "routine_requests_retry_due_idx": {
-          "name": "routine_requests_retry_due_idx",
-          "columns": [
-            "retry_due_at"
-          ],
-          "isUnique": false,
-          "where": "\"routine_requests\".\"retry_due_at\" IS NOT NULL"
-        }
-      },
-      "foreignKeys": {
-        "routine_requests_profile_id_profiles_id_fk": {
-          "name": "routine_requests_profile_id_profiles_id_fk",
-          "tableFrom": "routine_requests",
-          "tableTo": "profiles",
-          "columnsFrom": [
-            "profile_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
