@@ -1112,3 +1112,85 @@ describe('RecommendationService.candidatesFor: whose facts', () => {
     expect(await codesOf(ctx, 'moisturise', AMARA_SECOND_PROFILE)).toEqual(['SOLD-IN-GB'])
   })
 })
+
+describe('RecommendationService.shoppingFor: the shopping fact of a given profile (what a routine build reads)', () => {
+  it('answers the country and band of the profile it is given, to a job with no session of its own', async () => {
+    const ctx = setup()
+    await setShopping(ctx, 'NG', 'mid')
+
+    expect(await runAs(SYSTEM, () => ctx.service.shoppingFor('profile-amara-1'))).toMatchObject({ country: 'NG', budgetBand: 'mid' })
+  })
+
+  it('answers the band as null when none was given', async () => {
+    const ctx = setup()
+    await setShopping(ctx, 'GB')
+
+    expect(await runAs(SYSTEM, () => ctx.service.shoppingFor('profile-amara-1'))).toMatchObject({ country: 'GB', budgetBand: null })
+  })
+
+  it('answers the newest fact when the country has changed', async () => {
+    const ctx = setup()
+    await setShopping(ctx, 'NG', 'low')
+    ctx.tick()
+    await setShopping(ctx, 'GB', 'high')
+
+    expect(await runAs(SYSTEM, () => ctx.service.shoppingFor('profile-amara-1'))).toMatchObject({ country: 'GB', budgetBand: 'high' })
+  })
+
+  it('reads the profile it is given and not the caller\'s: Tolu\'s session asking for Amara\'s profile gets Amara\'s fact', async () => {
+    const ctx = setup()
+    await setShopping(ctx, 'NG', 'mid', AMARA)
+    await setShopping(ctx, 'GB', 'low', TOLU)
+
+    expect(await runAs(TOLU, () => ctx.service.shoppingFor('profile-amara-1'))).toMatchObject({ country: 'NG', budgetBand: 'mid' })
+    expect(await runAs(SYSTEM, () => ctx.service.shoppingFor('profile-tolu-1'))).toMatchObject({ country: 'GB', budgetBand: 'low' })
+  })
+
+  it('is 409 SHOPPING_REQUIRED for a profile that never set one, as candidatesFor is, and not for the profile that did', async () => {
+    const ctx = setup()
+    await setShopping(ctx, 'NG', 'mid', AMARA)
+
+    const error = await errorOf(runAs(SYSTEM, () => ctx.service.shoppingFor('profile-amara-2')))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error.code).toBe('SHOPPING_REQUIRED')
+    expect(await runAs(SYSTEM, () => ctx.service.shoppingFor('profile-amara-1'))).toMatchObject({ country: 'NG' })
+  })
+})
+
+describe('RecommendationService.candidatesFor: a country given in the question', () => {
+  it('offers the rows sold in that country instead of the shopping country, asks the workbook for it, and leaves the stored fact as it was', async () => {
+    const ctx = setup()
+    stock(ctx, [row('SOLD-IN-NG')], 'NG')
+    stock(ctx, [row('SOLD-IN-GB')], 'GB')
+    await ready(ctx, { country: 'NG' })
+
+    const found = await asUser(AMARA, () => ctx.service.candidatesFor({ step: 'moisturise', country: 'GB' }))
+
+    expect(found.map((candidate) => candidate.code)).toEqual(['SOLD-IN-GB'])
+    expect(ctx.workbook.asked).toEqual([{ country: 'GB', step: 'moisturise' }])
+    expect(await asUser(AMARA, () => ctx.service.currentShopping())).toMatchObject({ country: 'NG' })
+    expect(await codesOf(ctx)).toEqual(['SOLD-IN-NG'])
+  })
+
+  it('answers an empty list, not an error, for a country that is retired or that the Countries tab does not hold', async () => {
+    const ctx = setup()
+    stock(ctx, [row('SOLD-IN-NG')], 'NG')
+    stock(ctx, [row('SOLD-IN-GB')], 'GB')
+    await ready(ctx, { country: 'NG' })
+    ctx.workbook.retireCountry('GB')
+
+    expect(await asUser(AMARA, () => ctx.service.candidatesFor({ step: 'moisturise', country: 'GB' }))).toEqual([])
+    expect(await asUser(AMARA, () => ctx.service.candidatesFor({ step: 'moisturise', country: 'ZZ' }))).toEqual([])
+  })
+
+  it('still applies the profile\'s own safety answers in the other country', async () => {
+    const ctx = setup()
+    stock(ctx, [row('HAS-RETINOL', { ingredients: ['Aqua', 'Retinol'] }), row('PLAIN')], 'GB')
+    await ready(ctx, { choices: ['pregnant'], country: 'NG' })
+
+    const found = await asUser(AMARA, () => ctx.service.candidatesFor({ step: 'moisturise', country: 'GB' }))
+
+    expect(found.map((candidate) => candidate.code)).toEqual(['PLAIN'])
+  })
+})

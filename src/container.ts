@@ -26,6 +26,8 @@ import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
 import { D1RecommendationsRepository } from './modules/recommendations/recommendations.repository'
 import { RecommendationService } from './modules/recommendations/recommendations.service'
+import { D1RoutinesRepository } from './modules/routines/routines.repository'
+import { RoutineService } from './modules/routines/routines.service'
 import { D1SafetyRepository } from './modules/safety/safety.repository'
 import { SafetyService } from './modules/safety/safety.service'
 import { D1ScansRepository } from './modules/scans/scans.repository'
@@ -37,6 +39,7 @@ import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
 import { VerdictService } from './modules/verdicts/verdicts.service'
+import { routineWriterWriteRoutinePrompt } from './prompts/prompts.generated'
 import { AnthropicClient } from './providers/anthropic/anthropic.client'
 import { R2CatalogImageStore } from './providers/catalog-images/r2.catalog-image-store'
 import { ZeptoMailEmailSender } from './providers/email/zeptomail.email'
@@ -54,6 +57,7 @@ import { AnthropicProductRecognizer } from './providers/product-recognition/anth
 import { AnthropicProductResearcher } from './providers/product-research/anthropic.product-researcher'
 import { ExpoPushSender } from './providers/push/expo.push'
 import { DurableObjectScanEvents } from './providers/scan-events/durable-object.scan-events'
+import { AnthropicRoutineWriter } from './providers/routine-writing/anthropic.routine-writer'
 import { AnthropicVerdictFitter } from './providers/verdict-fitting/anthropic.verdict-fitter'
 import { R2WorkbookArchive } from './providers/workbook-archive/r2.workbook-archive'
 
@@ -150,6 +154,9 @@ export const buildContainer = (env: CloudflareBindings) => {
   // the queue and nobody waits, and 120 s still frees the consumer for the retry, which is billed afresh, if the request is stuck.
   const VERDICT_FIT_TIMEOUT_MS = 120_000
   const verdictFitterAnthropic = once(() => newAnthropic(VERDICT_FIT_TIMEOUT_MS))
+  // The routine writer writes a reason for each step with adaptive thinking, so a call runs as long as a verdict fit does; it is on the queue and nobody waits.
+  const ROUTINE_WRITE_TIMEOUT_MS = 120_000
+  const routineWriterAnthropic = once(() => newAnthropic(ROUTINE_WRITE_TIMEOUT_MS))
 
   // The catalog is shared data, not per-user, so it has no GuestDataCleaner.
   const catalog = once(
@@ -370,6 +377,26 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const routines = once(() => {
+    const client = routineWriterAnthropic()
+    return new RoutineService({
+      verdicts: verdicts(),
+      recommendations: recommendations(),
+      goals: goals(),
+      safety: safety(),
+      shelf: shelf(),
+      catalog: catalog(),
+      faceScans: faceScans(),
+      workbook: catalogWorkbook(),
+      profiles: profiles(),
+      writer: new AnthropicRoutineWriter(client),
+      writerIdentity: { model: client.modelFor(routineWriterWriteRoutinePrompt.job), promptHash: routineWriterWriteRoutinePrompt.hash },
+      repository: new D1RoutinesRepository(db()),
+      now: () => new Date(),
+      newId: () => crypto.randomUUID(),
+    })
+  })
+
   const auth = once(
     () =>
       new AuthService({
@@ -421,6 +448,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get safety() {
       return safety()
+    },
+    get routines() {
+      return routines()
     },
     get scans() {
       return scans()

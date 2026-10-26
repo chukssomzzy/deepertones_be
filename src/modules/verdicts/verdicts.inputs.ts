@@ -38,8 +38,9 @@ export type VerdictFacts = {
 }
 
 // A no-label entry has no name; the floor and the fingerprint still carry one, so it is fixed here and never varies with the entry. Changing its wording
-// changes the fingerprint of every shelf with a no-label item, so every such verdict is rebuilt and the fit judge billed again.
-const NO_LABEL_NAME = 'A product with no label'
+// changes the fingerprint of every shelf with a no-label item, so every such verdict is rebuilt and the fit judge billed again. The routine names such an entry
+// with it too.
+export const NO_LABEL_NAME = 'A product with no label'
 
 type Resolved = {
   floor: FloorShelfEntry

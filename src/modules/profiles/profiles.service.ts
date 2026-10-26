@@ -41,6 +41,12 @@ export class ProfilesService {
     return created
   }
 
+  /** The profile's id and the user it belongs to, whoever that is and default or not, or null for an id that is no profile: what a job needs to act as the profile's user. */
+  async find(profileId: string): Promise<Pick<Profile, 'id' | 'userId'> | null> {
+    const profile = await this.repository.findById(profileId)
+    return profile && { id: profile.id, userId: profile.userId }
+  }
+
   /** The profile if it exists and belongs to the user; null for an unknown id or another user's profile. */
   async ownedBy(userId: string, profileId: string): Promise<Profile | null> {
     const profile = await this.repository.findById(profileId)

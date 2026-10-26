@@ -83,6 +83,13 @@ export class RecommendationService {
     return RecommendationService.view(row)
   }
 
+  /** The shopping fact of a profile by its id, for a job with no session of its own. 409 `SHOPPING_REQUIRED` for a profile that never set one. */
+  async shoppingFor(profileId: string): Promise<ShoppingView> {
+    const row = await this.repository.current(profileId)
+    if (!row) throw new ConflictError('SHOPPING_REQUIRED', 'Say which country you shop in first')
+    return RecommendationService.view(row)
+  }
+
   /**
    * The reviewed products that may be suggested to the caller's profile for a routine step, cheapest first (by the lowest price, then by code: where a
    * row came from never decides its place). The goal, the safety answers and the shopping fact must all be there first, in that order: 409 `GOAL_REQUIRED`,
@@ -98,9 +105,12 @@ export class RecommendationService {
    * is "tretinoin"); a name no rule lists is matched as written and never guessed at. Words not yet parsed name nothing, so the ticked boxes alone apply, and the
    * newest answer only counts.
    *
+   * `country` asks the same question of another country: its rows instead of the shopping country's, with the budget band left out (it only answers "is this
+   * still sold and safe somewhere"), and every other rule, the profile's safety answers included, as they are. A retired or unknown country gives `[]`.
+   *
    * `sharedWithReaction` is information: the candidate's ingredients that a product the user said gave a reaction also holds (by the same labels), so the app can say so.
    */
-  async candidatesFor(input: { step: RoutineStep }): Promise<Candidate[]> {
+  async candidatesFor(input: { step: RoutineStep; country?: string }): Promise<Candidate[]> {
     const { profileId } = requireUser()
     // The guards stay in order, one after the other, so the error says what is missing first.
     const goal = await this.goals.requireGoal()
@@ -110,19 +120,20 @@ export class RecommendationService {
 
     // Everything else is independent of the rest, so it is read together. The rows are read for the stored country whether or not it is still served: a
     // retired one is then answered with none of them.
+    const inCountry = input.country ?? shopping.country
     const [countries, mentions, skinType, rules, approved] = await Promise.all([
       this.workbook.countries(),
       this.safety.currentMentions(),
       this.faceScans.latestSkinType(),
       this.workbook.liveRules(),
-      this.workbook.approvedFor({ country: shopping.country, step: input.step }),
+      this.workbook.approvedFor({ country: inCountry, step: input.step }),
     ])
-    const country = countries.find((candidate) => candidate.code === shopping.country)
+    const country = countries.find((candidate) => candidate.code === inCountry)
     if (country?.status !== 'active' || approved.length === 0) return []
 
     // requireGoal only answers a goal that was sorted, so there is one.
     const concerns = new Set<string>(concernsForGoal(goal.goal!))
-    const band = shopping.budgetBand
+    const band = input.country === undefined ? shopping.budgetBand : null
     const maxPrice = band === 'low' ? country.lowMax : band === 'mid' ? country.midMax : Infinity
     const named = namedIn(mentions, rules.entries)
     const lists = await this.productLists(mentions)
