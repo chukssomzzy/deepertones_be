@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Category } from '../catalog/catalog.vocabulary'
+import type { Category, RoutineStep } from '../catalog/catalog.vocabulary'
 import type { NoLabelPurpose } from '../scans/scans.vocabulary'
 import { floorVerdicts, type FloorEntry, type FloorInput, type FloorMention, type FloorResult, type FloorRule, type FloorShelfEntry } from './verdicts.floor'
 
@@ -8,6 +8,10 @@ import { floorVerdicts, type FloorEntry, type FloorInput, type FloorMention, typ
 // reduce if the judge does not name one. No I/O, no clock, no model: the same input is the same output.
 // Expected values are literals worked out from the spec and the owner's decisions, never taken from the code under test. Products and brands are invented;
 // ingredient names are the real ones the groups are about.
+//
+// Shape assumed (the contract the sunscreen cases pin): a product entry carries `step: RoutineStep | null`, the catalog's routine step for the product (the
+// first in routine order, as the fit request has it; null when the catalog has none). A sunscreen is a product whose step is 'protect', nothing else: no form
+// or name guess.
 
 // ---- the live rules, as the floor receives them: a rule's reviewed statement plus the Ingredients tab's group and clashes_with ----
 
@@ -50,6 +54,7 @@ const product = (id: string, ingredients: string[], over: Partial<Extract<FloorS
   category: 'skin',
   productId: `prod-${id}`,
   ingredients,
+  step: null,
   ...over,
 })
 
@@ -713,6 +718,112 @@ describe('floorVerdicts', () => {
       const result = floor([retinoid('serum'), acid('toner')], { mentions: [prescribed('prod-serum'), prescribed('prod-toner')] })
 
       expect(result.clashes).toEqual([])
+    })
+  })
+
+  // The owner's rule (via the routine stage, #189): never reduce a sunscreen in a clash. A sunscreen is a product at the 'protect' step. A pair with exactly one
+  // protect member reduces the OTHER member; both or neither protect keeps the tie-break above; a prescribed product is never reduced, whatever the step.
+  describe('a sunscreen in a clash (the product at the protect step is never the one reduced)', () => {
+    const SUNSCREEN_NAME = 'SPF 50 Sunscreen'
+    const sunscreen = (id: string, ingredients: string[]) => product(id, ingredients, { name: SUNSCREEN_NAME, step: 'protect' })
+    const retinoidSpf = (id: string) => sunscreen(id, ['Aqua', 'Retinol'])
+    const acidSpf = (id: string) => sunscreen(id, ['Aqua', 'Glycolic Acid'])
+    const peroxideSpf = (id: string) => sunscreen(id, ['Aqua', 'Benzoyl Peroxide 5%'])
+    const treat = (id: string, ingredients: string[], step: RoutineStep | null = 'treat') => product(id, ingredients, { step })
+
+    it('reduces the retinoid serum when the exfoliating-acid product is the sunscreen, though the acid would be reduced first', () => {
+      const result = floor([acidSpf('spf'), treat('serum', ['Aqua', 'Retinol'])])
+
+      expect(result.clashes).toHaveLength(1)
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'serum'], fallbackReduceId: 'serum' })
+    })
+
+    it('reduces the retinoid serum whichever comes first on the shelf', () => {
+      const result = floor([treat('serum', ['Aqua', 'Retinol']), acidSpf('spf')])
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['serum', 'spf'], fallbackReduceId: 'serum' })
+    })
+
+    it('reduces the retinoid serum when the benzoyl-peroxide product is the sunscreen', () => {
+      const result = floor([peroxideSpf('spf'), treat('serum', ['Aqua', 'Retinol'])])
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'serum'], fallbackReduceId: 'serum' })
+    })
+
+    it('overrides the shelf-order tie-break between an acid and benzoyl peroxide: the sunscreen is not the one reduced, though it is first on the shelf', () => {
+      const result = floor([acidSpf('spf'), treat('spot', ['Aqua', 'Benzoyl Peroxide 5%'])])
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'spot'], fallbackReduceId: 'spot' })
+    })
+
+    it('reduces the acid serum when the retinoid is the sunscreen (the add-on over the treatment, as before)', () => {
+      const result = floor([retinoidSpf('spf'), treat('toner', ['Aqua', 'Glycolic Acid'])])
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'toner'], fallbackReduceId: 'toner' })
+    })
+
+    it('reduces the non-sunscreen in each pair a sunscreen is in', () => {
+      const result = floor([acidSpf('spf'), treat('serum', ['Aqua', 'Retinol']), treat('spot', ['Aqua', 'Benzoyl Peroxide 5%'])])
+
+      expect(result.clashes.map(({ ids, fallbackReduceId }) => ({ ids, fallbackReduceId }))).toEqual([
+        { ids: ['spf', 'serum'], fallbackReduceId: 'serum' },
+        { ids: ['spf', 'spot'], fallbackReduceId: 'spot' },
+        { ids: ['serum', 'spot'], fallbackReduceId: 'spot' },
+      ])
+    })
+
+    it('keeps the existing tie-break when both members are sunscreens: the acid before the retinoid, and shelf order between an acid and benzoyl peroxide', () => {
+      expect(floor([retinoidSpf('one'), acidSpf('two')]).clashes[0]).toMatchObject({ ids: ['one', 'two'], fallbackReduceId: 'two' })
+      expect(floor([acidSpf('one'), retinoidSpf('two')]).clashes[0]).toMatchObject({ ids: ['one', 'two'], fallbackReduceId: 'one' })
+      expect(floor([acidSpf('one'), peroxideSpf('two')]).clashes[0]).toMatchObject({ ids: ['one', 'two'], fallbackReduceId: 'one' })
+      expect(floor([peroxideSpf('one'), acidSpf('two')]).clashes[0]).toMatchObject({ ids: ['one', 'two'], fallbackReduceId: 'one' })
+    })
+
+    it('keeps the existing tie-break when neither member is at the protect step, whatever other step each is at', () => {
+      expect(floor([treat('serum', ['Aqua', 'Retinol'], 'moisturise'), treat('toner', ['Aqua', 'Glycolic Acid'], 'cleanse')]).clashes[0]).toMatchObject({ fallbackReduceId: 'toner' })
+      expect(floor([treat('toner', ['Aqua', 'Glycolic Acid'], 'cleanse'), treat('spot', ['Aqua', 'Benzoyl Peroxide 5%'], 'moisturise')]).clashes[0]).toMatchObject({ fallbackReduceId: 'toner' })
+    })
+
+    it('does not treat a product with no step as a sunscreen, however it is named: it is reduced by the tie-break like any other', () => {
+      const unknownStep = product('spf', ['Aqua', 'Glycolic Acid'], { name: SUNSCREEN_NAME, step: null })
+
+      const result = floor([unknownStep, treat('serum', ['Aqua', 'Retinol'])])
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'serum'], fallbackReduceId: 'spf' })
+    })
+
+    it('does not treat a product as a sunscreen when protect is only a later step of its own: the step is the first in routine order, which the entry carries', () => {
+      const moisturiser = product('lotion', ['Aqua', 'Glycolic Acid'], { name: SUNSCREEN_NAME, step: 'moisturise' })
+
+      const result = floor([moisturiser, treat('serum', ['Aqua', 'Retinol'])])
+
+      expect(result.clashes[0]).toMatchObject({ fallbackReduceId: 'lotion' })
+    })
+
+    it('never makes a pair of a sunscreen that holds nothing that clashes', () => {
+      const result = floor([product('spf', ['Aqua', 'Zinc Oxide'], { step: 'protect' }), treat('serum', ['Aqua', 'Retinol'])])
+
+      expect(result.clashes).toEqual([])
+    })
+
+    it('still never reduces a prescribed product, so a prescribed acid serum beside an open sunscreen leaves the sunscreen as the one to reduce', () => {
+      const result = floor([retinoidSpf('spf'), treat('toner', ['Aqua', 'Glycolic Acid'])], { mentions: [prescribed('prod-toner')] })
+
+      expect(entryOf(result, 'toner')).toMatchObject({ group: 'prescribed' })
+      expect(result.clashes).toHaveLength(1)
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'toner'], fallbackReduceId: 'spf' })
+    })
+
+    it('reduces the other product when the prescribed one is itself the sunscreen', () => {
+      const result = floor([retinoidSpf('spf'), treat('toner', ['Aqua', 'Glycolic Acid'])], { mentions: [prescribed('prod-spf')] })
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['spf', 'toner'], fallbackReduceId: 'toner' })
+    })
+
+    it('reduces the non-prescribed one when one is prescribed and both are sunscreens', () => {
+      const result = floor([acidSpf('one'), retinoidSpf('two')], { mentions: [prescribed('prod-one')] })
+
+      expect(result.clashes[0]).toMatchObject({ ids: ['one', 'two'], fallbackReduceId: 'two' })
     })
   })
 
