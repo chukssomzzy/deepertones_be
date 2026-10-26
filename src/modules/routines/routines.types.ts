@@ -155,6 +155,14 @@ export type RoutineEntry = {
   grounding: string[]
 }
 
+/** A routine entry as stored in a routine version (spec #189). Grounding stays in storage and is never served. */
+export type StoredRoutineStep = RoutineEntry & {
+  /** The user has this candidate already. Always false for a shelf product. */
+  gotIt: boolean
+  /** The id of the version this step was carried over from unchanged, or null. */
+  fixedFrom: string | null
+}
+
 export type Routine = {
   /** The entries, in routine order. */
   steps: RoutineEntry[]

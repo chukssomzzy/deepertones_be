@@ -267,6 +267,13 @@
       "when": 1792954792864,
       "tag": "0037_romantic_grandmaster",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1793014264306,
+      "tag": "0038_slippery_impossible_man",
+      "breakpoints": true
     }
   ]
 }
