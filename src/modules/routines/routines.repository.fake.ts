@@ -1,9 +1,10 @@
-import type { CompletedRoutineBuild, RoutineVersionRow, RoutinesRepository } from './routines.repository'
+import type { CompletedRoutineBuild, RoutineRequestRetry, RoutineRequestRow, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 
 /** In-memory RoutinesRepository for unit tests. Its behaviour is pinned by routinesRepositoryContract, which the D1 class also passes. Unlike D1 it has no
  * profiles table, so append accepts a profile id that does not exist. */
 export class FakeRoutinesRepository implements RoutinesRepository {
   private rows = new Map<string, RoutineVersionRow>()
+  private requests = new Map<string, RoutineRequestRow>()
 
   async append(row: RoutineVersionRow): Promise<void> {
     if (this.rows.has(row.id)) throw new Error(`routine version ${row.id} already exists`)
@@ -43,6 +44,28 @@ export class FakeRoutinesRepository implements RoutinesRepository {
 
   async writerBuildsSince(profileId: string, since: Date): Promise<number> {
     return [...this.rows.values()].filter((row) => row.profileId === profileId && row.writerCalls > 0 && row.createdAt.getTime() >= since.getTime()).length
+  }
+
+  async claim(profileId: string, key: string, now: Date, staleBefore: Date): Promise<boolean> {
+    const held = this.requests.get(profileId)
+    if (held && held.requestedAt.getTime() > staleBefore.getTime()) return false
+    this.requests.set(profileId, { profileId, requestKey: key, requestedAt: new Date(now), retryDueAt: null, retried: false })
+    return true
+  }
+
+  async release(profileId: string, requestedAt: Date): Promise<void> {
+    const held = this.requests.get(profileId)
+    if (held && held.requestedAt.getTime() === requestedAt.getTime()) this.requests.set(profileId, { ...held, requestedAt: new Date(0) })
+  }
+
+  async findRequest(profileId: string): Promise<RoutineRequestRow | null> {
+    const held = this.requests.get(profileId)
+    return held ? structuredClone(held) : null
+  }
+
+  async setRequestRetry(profileId: string, { retried, retryDueAt }: RoutineRequestRetry): Promise<void> {
+    const held = this.requests.get(profileId)
+    if (held) this.requests.set(profileId, { ...held, retried, retryDueAt: retryDueAt ? new Date(retryDueAt) : null })
   }
 
   // Newest is the latest creation time, then the larger id, as in D1.

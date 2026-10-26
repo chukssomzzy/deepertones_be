@@ -1,4 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import type { Container } from '../container'
+import { buildRoutine } from '../modules/routines/routines.jobs'
+import { buildRoutineSpec } from '../modules/routines/routines.job-specs'
 import { queueNames } from './job'
 import { jobs } from './registry'
 
@@ -46,6 +49,16 @@ describe('the job registry', () => {
     expect(job!.onDeadLetter).toBeTypeOf('function')
   })
 
+  it('lists the build-routine job on its own routines queue, apart from the verdicts queue, with a hook for when its retries run out', () => {
+    const job = jobs.find((j) => j.name === 'build-routine')
+
+    expect(job).toBeDefined()
+    expect(job!.queue).toBe('routines')
+    expect(job!.queue).not.toBe(jobs.find((j) => j.name === 'build-verdict')!.queue)
+    expect(job!.shared).toBeUndefined()
+    expect(job!.onDeadLetter).toBeTypeOf('function')
+  })
+
   it('lists the send-ops-alert job on the shared email queue', () => {
     const job = jobs.find((j) => j.name === 'send-ops-alert')
 
@@ -74,5 +87,42 @@ describe('the job registry', () => {
 
     expect(new Set(names).size).toBe(queues.length * 2)
     for (const queue of queues) expect(queueNames(queue, 'test').deadLetter).not.toBe(queueNames(queue, 'test').main)
+  })
+})
+
+// The build-routine handlers only call one service method each; the behaviour behind them is RoutineService's, tested there.
+const recordingServices = () => {
+  const calls: unknown[][] = []
+  const services = {
+    routines: {
+      run: async (...args: unknown[]) => void calls.push(['run', ...args]),
+      markBuildFailed: async (...args: unknown[]) => void calls.push(['markBuildFailed', ...args]),
+    },
+  } as unknown as Container
+  return { calls, services }
+}
+
+const BUILD_ROUTINE_BODY = { profileId: 'profile-amara-1', reason: 'first', requestKey: 'routine-fp-1', requestedAt: 1_000, waits: 2 } as const
+
+describe('buildRoutine job', () => {
+  it('is the build-routine spec with its handlers attached', () => {
+    expect(buildRoutine.name).toBe(buildRoutineSpec.name)
+    expect(buildRoutine.queue).toBe(buildRoutineSpec.queue)
+  })
+
+  it('handles a message by running the routine service on the whole body', async () => {
+    const { calls, services } = recordingServices()
+
+    await buildRoutine.handle(BUILD_ROUTINE_BODY, services)
+
+    expect(calls).toEqual([['run', BUILD_ROUTINE_BODY]])
+  })
+
+  it('handles a dead letter by marking the build failed, with the whole body', async () => {
+    const { calls, services } = recordingServices()
+
+    await buildRoutine.onDeadLetter!({ ...BUILD_ROUTINE_BODY, retry: true }, services)
+
+    expect(calls).toEqual([['markBuildFailed', { ...BUILD_ROUTINE_BODY, retry: true }]])
   })
 })

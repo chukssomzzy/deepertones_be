@@ -12,6 +12,8 @@
   // After changing vars or bindings, run `npm run cf-typegen` so c.env stays typed.
   "vars": {
     "ENVIRONMENT": "development",
+    // "true" lets the routine triggers and sweeps queue builds. Off in dev and test, so nothing builds a routine by itself.
+    "ROUTINES_ENABLED": "false",
     // Comma-separated list of origins allowed to call the API from a browser.
     "CORS_ORIGINS": "http://localhost:3000,http://localhost:5173",
     // "true" serves Swagger UI at /docs and the spec at /openapi.json; anything else 404s both.
@@ -74,6 +76,8 @@
   //   npx wrangler queues create deepertones-face-scans-dlq-development
   //   npx wrangler queues create deepertones-verdicts-development
   //   npx wrangler queues create deepertones-verdicts-dlq-development
+  //   npx wrangler queues create deepertones-routines-development
+  //   npx wrangler queues create deepertones-routines-dlq-development
   // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
   "queues": {
     "producers": [
@@ -84,7 +88,8 @@
       { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-development" },
       { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-development" },
       { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-development" },
-      { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-development" }
+      { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-development" },
+      { "binding": "ROUTINES_QUEUE", "queue": "deepertones-routines-development" }
     ],
     "consumers": [
       {
@@ -162,7 +167,16 @@
         "max_retries": 4,
         "dead_letter_queue": "deepertones-verdicts-dlq-development"
       },
-      { "queue": "deepertones-verdicts-dlq-development", "max_batch_size": 10 }
+      { "queue": "deepertones-verdicts-dlq-development", "max_batch_size": 10 },
+      {
+        "queue": "deepertones-routines-development",
+        // One message at a time: a message is one build of a routine (up to three calls to the writer), and a batch is retried or acked as a whole.
+        "max_batch_size": 1,
+        // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the build one more try the next day.
+        "max_retries": 4,
+        "dead_letter_queue": "deepertones-routines-dlq-development"
+      },
+      { "queue": "deepertones-routines-dlq-development", "max_batch_size": 10 }
     ]
   },
 
@@ -269,6 +283,8 @@
       "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "staging",
+        // "true" lets the routine triggers and sweeps queue builds. On in staging.
+        "ROUTINES_ENABLED": "true",
         // TODO: the staging frontend origin(s). Empty = no browser origin allowed.
         "CORS_ORIGINS": "",
         // The frontend team reads the docs here.
@@ -330,6 +346,8 @@
       //   npx wrangler queues create deepertones-face-scans-dlq-staging
       //   npx wrangler queues create deepertones-verdicts-staging
       //   npx wrangler queues create deepertones-verdicts-dlq-staging
+      //   npx wrangler queues create deepertones-routines-staging
+      //   npx wrangler queues create deepertones-routines-dlq-staging
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -340,7 +358,8 @@
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-staging" },
           { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-staging" },
           { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-staging" },
-          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-staging" }
+          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-staging" },
+          { "binding": "ROUTINES_QUEUE", "queue": "deepertones-routines-staging" }
         ],
         "consumers": [
           {
@@ -418,7 +437,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-verdicts-dlq-staging"
           },
-          { "queue": "deepertones-verdicts-dlq-staging", "max_batch_size": 10 }
+          { "queue": "deepertones-verdicts-dlq-staging", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-routines-staging",
+            // One message at a time: a message is one build of a routine (up to three calls to the writer), and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the build one more try the next day.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-routines-dlq-staging"
+          },
+          { "queue": "deepertones-routines-dlq-staging", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that
@@ -489,6 +517,8 @@
       "preview_urls": false,
       "vars": {
         "ENVIRONMENT": "production",
+        // "true" lets the routine triggers and sweeps queue builds. Off in production until the routine is launched there.
+        "ROUTINES_ENABLED": "false",
         // TODO: the production frontend origin(s). Empty = no browser origin allowed.
         "CORS_ORIGINS": "",
         // Production does not advertise its API surface. Flip to "true" to publish the docs.
@@ -550,6 +580,8 @@
       //   npx wrangler queues create deepertones-face-scans-dlq-production
       //   npx wrangler queues create deepertones-verdicts-production
       //   npx wrangler queues create deepertones-verdicts-dlq-production
+      //   npx wrangler queues create deepertones-routines-production
+      //   npx wrangler queues create deepertones-routines-dlq-production
       // Names must match queueNames(queue, ENVIRONMENT) in src/jobs/job.ts.
       "queues": {
         "producers": [
@@ -560,7 +592,8 @@
           { "binding": "PARSE_SAFETY_QUEUE", "queue": "deepertones-parse-safety-production" },
           { "binding": "EMAIL_QUEUE", "queue": "deepertones-email-production" },
           { "binding": "FACE_SCANS_QUEUE", "queue": "deepertones-face-scans-production" },
-          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-production" }
+          { "binding": "VERDICTS_QUEUE", "queue": "deepertones-verdicts-production" },
+          { "binding": "ROUTINES_QUEUE", "queue": "deepertones-routines-production" }
         ],
         "consumers": [
           {
@@ -638,7 +671,16 @@
             "max_retries": 4,
             "dead_letter_queue": "deepertones-verdicts-dlq-production"
           },
-          { "queue": "deepertones-verdicts-dlq-production", "max_batch_size": 10 }
+          { "queue": "deepertones-verdicts-dlq-production", "max_batch_size": 10 },
+          {
+            "queue": "deepertones-routines-production",
+            // One message at a time: a message is one build of a routine (up to three calls to the writer), and a batch is retried or acked as a whole.
+            "max_batch_size": 1,
+            // 5 attempts in total; then the message moves to the dead-letter queue, whose hook gives the build one more try the next day.
+            "max_retries": 4,
+            "dead_letter_queue": "deepertones-routines-dlq-production"
+          },
+          { "queue": "deepertones-routines-dlq-production", "max_batch_size": 10 }
         ]
       },
       // Rate limits, 60 s windows. A namespace_id is an account-wide counter: two Workers (or environments) that

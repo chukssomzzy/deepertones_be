@@ -205,6 +205,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         email: env.EMAIL_QUEUE,
         'face-scans': env.FACE_SCANS_QUEUE,
         verdicts: env.VERDICTS_QUEUE,
+        routines: env.ROUTINES_QUEUE,
       }),
   )
 
@@ -392,6 +393,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       writer: new AnthropicRoutineWriter(client),
       writerIdentity: { model: client.modelFor(routineWriterWriteRoutinePrompt.job), promptHash: routineWriterWriteRoutinePrompt.hash },
       repository: new D1RoutinesRepository(db()),
+      jobs: jobQueue(),
+      enabled: env.ROUTINES_ENABLED === 'true',
       now: () => new Date(),
       newId: () => crypto.randomUUID(),
     })

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, currentActor, requireUser, runAs } from '../../lib/context'
 import { ConflictError } from '../../lib/errors'
+import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
 import { MemoryRoutineWriter } from '../../providers/routine-writing/memory.routine-writer'
 import type { RoutineRetry } from '../../providers/routine-writing/routine-writer.provider'
 import type { ProductCatalogService, ShelfFacts } from '../catalog/catalog.service'
@@ -19,6 +20,7 @@ import type { ProfilesService } from '../profiles/profiles.service'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
 import type { SavedVerdictProduct } from '../verdicts/verdicts.types'
 import { checkRoutine } from './routines.gates'
+import type { BuildRoutineMessage } from './routines.job-specs'
 import { routineFingerprint } from './routines.fingerprint'
 import { FakeRoutinesRepository } from './routines.repository.fake'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
@@ -40,6 +42,16 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 //   current(profileId): Promise<{ status: 'pending' } | { status: 'updating'; version } | { status: 'ready'; version }>   `version` is the stored row (id, steps, tapers, ...)
 //   start(profileId): Promise<void>    ConflictError ROUTINE_NOT_READY without a ready version
 //   gotIt(profileId, step, clientIp): Promise<void>    ConflictError STEP_NOT_RECOMMENDED unless the step's product is a recommended one; calls shelf.add(product id, clientIp)
+//
+// PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
+//   request(profileId, reason, requestKey): Promise<void>   never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
+//       repository.claim(profileId, requestKey, now, now - a stale cut-off) and, when it wins, enqueues the job `build-routine` with
+//       { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0 } and no delay. A queue that refuses gives the claim back. Failures are logged by id.
+//   run(body: BuildRoutineMessage): Promise<void>   calls build(body.profileId, body.reason). On 'waiting' for reason `first` or `review-point` while
+//       body.waits < 15 it enqueues { ...body, waits: body.waits + 1 } with delaySeconds 60 and keeps the claim; any other outcome releases the claim
+//       (repository.release(profileId, new Date(body.requestedAt))). An error from build is thrown for the queue to retry.
+//   markBuildFailed(body: BuildRoutineMessage): Promise<void>   the dead letter: releases the claim; the first time sets the request's retry due 24 hours on
+//       (repository.setRequestRetry), a body with `retry: true` is final (no retry due) and logged.
 
 // The one clock every test hangs off; later times are offsets from it.
 const T0 = new Date('2030-06-15T12:00:00.000Z')
@@ -221,6 +233,8 @@ const FREQUENCY_AT_PROTECT = { failed: [{ gate: 'frequency', step: 'protect' }] 
 
 let clock: Date
 let repository: FakeRoutinesRepository
+let jobs: MemoryJobQueue
+let deps: Record<string, unknown>
 let writer: HookedWriter
 let service: RoutineService
 /** How many times the writer was asked, failed asks included. The words of the n-th ask are tagged "Written n". */
@@ -298,9 +312,10 @@ beforeEach(() => {
   addProduct('entry-b', STEROID, { name: 'Karo Glow Cream' })
 
   repository = new FakeRoutinesRepository()
+  jobs = new MemoryJobQueue()
   writer = new HookedWriter()
   script()
-  const deps = {
+  deps = {
     verdicts: {
       savedFor: async () => (world.saved ? structuredClone(world.saved) : null),
     } satisfies Pick<VerdictService, 'savedFor'>,
@@ -344,6 +359,8 @@ beforeEach(() => {
     writer,
     writerIdentity: { model: 'claude-test-model', promptHash: 'prompt-hash-test' },
     repository,
+    jobs,
+    enabled: true,
     now: () => clock,
     newId: () => `version-${++ids}`,
   }
@@ -1045,5 +1062,305 @@ describe('RoutineService.current', () => {
     const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call))).join('\n')
     expect(logged).not.toContain('Karo Glow Cream')
     expect(logged).not.toContain('Calm Cleanser')
+  })
+})
+
+// ---- PR 3b: asking for a build, running it from the queue, and the dead letter ----
+
+const PROFILE_REQUEST = { profileId: AMARA_PROFILE, reason: 'first', requestKey: 'routine-fp-1' } as const
+// A claim that has stood this long is a build that died, whatever the exact cut-off is (the brief does not give one): a request this much later takes it over.
+const LONG_AFTER = DAY
+
+const request = (reason: Reason = 'first', requestKey = 'routine-fp-1') => service.request(AMARA_PROFILE, reason, requestKey)
+const run = (body: BuildRoutineMessage) => runAs(SYSTEM, () => service.run(body))
+const markBuildFailed = (body: BuildRoutineMessage) => runAs(SYSTEM, () => service.markBuildFailed(body))
+const queued = () => jobs.enqueued
+/** The message `request` queued first, as the queue would hand it to `run`. */
+const queuedBody = () => jobs.enqueued[0]!.body as BuildRoutineMessage
+const bodyOf = (over: Partial<BuildRoutineMessage> = {}): BuildRoutineMessage => ({ ...PROFILE_REQUEST, requestedAt: T0.getTime(), waits: 0, ...over })
+const requestRow = () => repository.findRequest(AMARA_PROFILE)
+const loggedText = (spies: ReturnType<typeof spyOnConsole>) => spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call))).join('\n')
+
+describe('RoutineService.request', () => {
+  it('queues one build-routine message for the profile, with the reason, the key and the time it was asked, and no delay', async () => {
+    await request('verdict', 'routine-fp-9')
+
+    expect(queued()).toEqual([
+      { job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'verdict', requestKey: 'routine-fp-9', requestedAt: T0.getTime(), waits: 0 } },
+    ])
+  })
+
+  it('queues nothing a second time for the same key while the first request is still being worked on', async () => {
+    await request()
+    setClock(MINUTE)
+    await request()
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('takes over a request that has stood so long its build must have died, and queues it again', async () => {
+    await request()
+    setClock(LONG_AFTER)
+
+    await request()
+
+    expect(queued().map((m) => (m.body as BuildRoutineMessage).requestedAt)).toEqual([T0.getTime(), at(LONG_AFTER).getTime()])
+  })
+
+  it('queues again for the same key once the build has run, because the claim was given back', async () => {
+    await request()
+    await run(queuedBody())
+    setClock(MINUTE)
+
+    await request()
+
+    expect(queued()).toHaveLength(2)
+  })
+
+  describe('when routines are switched off', () => {
+    beforeEach(() => {
+      service = new RoutineService({ ...deps, enabled: false } as never)
+    })
+
+    it('queues nothing', async () => {
+      await request()
+
+      expect(queued()).toEqual([])
+    })
+
+    it('takes no claim either, so switching routines on later does not find the key held', async () => {
+      await request()
+      service = new RoutineService({ ...deps, enabled: true } as never)
+
+      await request()
+
+      expect(queued()).toHaveLength(1)
+      expect(await requestRow()).toMatchObject({ requestKey: 'routine-fp-1' })
+    })
+
+    it('leaves no request row behind', async () => {
+      await request()
+
+      expect(await requestRow()).toBeNull()
+    })
+  })
+
+  describe('when the queue or the claim fails', () => {
+    it('does not throw when the queue refuses the message, and logs by id and never the words of the error', async () => {
+      const spies = spyOnConsole()
+      jobs.failNextWith(new Error('queue down while holding Karo Glow Cream'))
+
+      await expect(request()).resolves.toBeUndefined()
+
+      expect(loggedText(spies)).toContain(AMARA_PROFILE)
+      expect(loggedText(spies)).not.toContain('Karo Glow Cream')
+    })
+
+    it('gives the claim back when the queue refuses, so the next request for the same key queues', async () => {
+      jobs.failNextWith(new Error('queue down'))
+      await request()
+      expect(queued()).toEqual([])
+      setClock(SECOND)
+
+      await request()
+
+      expect(queued()).toHaveLength(1)
+    })
+
+    it('does not throw when the claim itself fails, and queues nothing', async () => {
+      spyOnConsole()
+      vi.spyOn(repository, 'claim').mockRejectedValueOnce(new Error('the database is down'))
+
+      await expect(request()).resolves.toBeUndefined()
+
+      expect(queued()).toEqual([])
+    })
+  })
+})
+
+describe('RoutineService.run', () => {
+  it('builds the routine for the profile and reason in the message', async () => {
+    await request('first')
+
+    await run(queuedBody())
+
+    expect(await repository.current(AMARA_PROFILE)).toMatchObject({ status: 'ready', reason: 'first' })
+    expect(shapeOf(await currentRow())).toEqual(FIRST_SHAPE)
+  })
+
+  it('records the reason it was asked with on the version it builds', async () => {
+    await request('verdict', 'routine-fp-2')
+
+    await run(queuedBody())
+
+    expect((await latestRow()).reason).toBe('verdict')
+  })
+
+  it('leaves a routine unchanged after Start when the rebuild finds nothing to change, and gives the claim back', async () => {
+    await started()
+    await request('shelf', 'routine-fp-2')
+    const versionsBefore = ids
+
+    await run(queued().at(-1)!.body as BuildRoutineMessage)
+
+    expect(ids).toBe(versionsBefore)
+    setClock(2 * DAY + MINUTE)
+    await request('shelf', 'routine-fp-2')
+    expect(queued()).toHaveLength(2)
+  })
+
+  it('gives the claim back once the build is done, so the same key can be asked for again', async () => {
+    await request()
+    await run(queuedBody())
+    expect(queued()).toHaveLength(1)
+
+    setClock(MINUTE)
+    await request()
+
+    expect(queued()).toHaveLength(2)
+  })
+
+  it('throws what the build throws, for the queue to retry', async () => {
+    await request()
+    vi.spyOn(repository, 'append').mockRejectedValueOnce(new Error('the database is down'))
+
+    await expect(run(queuedBody())).rejects.toThrow('the database is down')
+  })
+
+  describe('while the routine has nothing to be built from yet', () => {
+    beforeEach(() => {
+      world.saved = null
+    })
+
+    it.each(['first', 'review-point'] as const)('queues itself again a minute on with one more wait, for the reason %s', async (reason) => {
+      const body = bodyOf({ reason, requestKey: 'k', requestedAt: 5_000, waits: 2 })
+
+      await run(body)
+
+      expect(queued()).toEqual([{ job: 'build-routine', body: { ...body, waits: 3 }, delaySeconds: 60 }])
+      expect(await repository.latest(AMARA_PROFILE)).toBeNull()
+    })
+
+    it('keeps the message\'s retry flag when it waits', async () => {
+      await run(bodyOf({ retry: true, waits: 0 }))
+
+      expect(queued()[0]!.body).toMatchObject({ retry: true, waits: 1 })
+    })
+
+    it('keeps the claim while it waits, so a request for the same key is still held off', async () => {
+      await request()
+      await run(queuedBody())
+      expect(queued()).toHaveLength(2)
+
+      setClock(MINUTE)
+      await request()
+
+      expect(queued()).toHaveLength(2)
+    })
+
+    it('still waits at 14 waits: a message that has waited 14 times queues the 15th', async () => {
+      await run(bodyOf({ waits: 14 }))
+
+      expect(queued()).toEqual([{ job: 'build-routine', body: expect.objectContaining({ waits: 15 }), delaySeconds: 60 }])
+    })
+
+    it('stops waiting at the 15th: a message that has waited 15 times queues nothing more, and does not throw', async () => {
+      await expect(run(bodyOf({ waits: 15 }))).resolves.toBeUndefined()
+
+      expect(queued()).toEqual([])
+    })
+
+    it('gives the claim back when it stops waiting, so a later request for the same key queues', async () => {
+      await request()
+      const body = { ...queuedBody(), waits: 15 }
+      await run(body)
+      setClock(MINUTE)
+
+      await request()
+
+      expect(queued()).toHaveLength(2)
+    })
+
+    it.each(['shelf', 'goal', 'safety', 'verdict', 'catalog-retired', 'sold-here', 'got-it', 'writer-retry'] as const)(
+      'never waits for the reason %s: nothing is queued, and the claim is given back',
+      async (reason) => {
+        await request(reason, `key-${reason}`)
+
+        await run(queuedBody())
+
+        expect(queued()).toHaveLength(1)
+        setClock(MINUTE)
+        await request(reason, `key-${reason}`)
+        expect(queued()).toHaveLength(2)
+      },
+    )
+  })
+
+  it('gives back only the claim made at the time in the message: a newer request\'s claim survives an older run', async () => {
+    await request('first', 'key-1')
+    const older = queuedBody()
+    // The first build died long ago; a later request took its claim over.
+    setClock(LONG_AFTER)
+    await request('first', 'key-1')
+    expect(queued()).toHaveLength(2)
+
+    await run(older)
+    setClock(LONG_AFTER + SECOND)
+    await request('first', 'key-1')
+
+    expect(queued()).toHaveLength(2)
+  })
+})
+
+describe('RoutineService.markBuildFailed', () => {
+  it('sets the retry due exactly 24 hours after the dead letter, the first time', async () => {
+    await request()
+    setClock(30 * MINUTE)
+
+    await markBuildFailed(queuedBody())
+
+    const row = await requestRow()
+    expect(row!.retryDueAt).toEqual(at(30 * MINUTE + DAY))
+    expect(row!.retried).toBe(true)
+  })
+
+  it('gives the claim back, so a new request for the same key is queued at once', async () => {
+    await request()
+    setClock(MINUTE)
+    await markBuildFailed(queuedBody())
+
+    await request()
+
+    expect(queued()).toHaveLength(2)
+  })
+
+  it('makes a second dead letter final: no retry is due', async () => {
+    await request()
+    setClock(30 * MINUTE)
+    await markBuildFailed(queuedBody())
+    expect((await requestRow())!.retryDueAt).not.toBeNull()
+
+    // The daily sweep (PR 3c) queues the retry with retry: true and a time of its own; it too runs out of tries.
+    const retry = { ...queuedBody(), requestedAt: at(DAY + HOUR).getTime(), retry: true }
+    setClock(DAY + 2 * HOUR)
+    await markBuildFailed(retry)
+
+    expect((await requestRow())!.retryDueAt).toBeNull()
+  })
+
+  it('logs a final failure by id, never the words of the person', async () => {
+    await request()
+    const spies = spyOnConsole()
+
+    await markBuildFailed({ ...queuedBody(), retry: true })
+
+    expect(loggedText(spies)).toContain(AMARA_PROFILE)
+    expect(loggedText(spies)).not.toContain('Karo Glow Cream')
+  })
+
+  it('does not set a retry due for a request that has no row, and does not throw', async () => {
+    await expect(markBuildFailed(bodyOf())).resolves.toBeUndefined()
+
+    expect(await requestRow()).toBeNull()
   })
 })
