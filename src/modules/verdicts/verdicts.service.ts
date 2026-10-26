@@ -379,7 +379,7 @@ export class VerdictService {
   }
 
   /** Both step-down kinds must have an approved template, whatever this shelf needs: the shelf can change under a saved verdict, and a stop with no taper is never shown. */
-  private static lacksTapers(reference: VerdictReference): boolean {
+  static lacksTapers(reference: VerdictReference): boolean {
     return !reference.tapers.steroid || !reference.tapers['lightening-agent']
   }
 

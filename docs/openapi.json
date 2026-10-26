@@ -1436,6 +1436,419 @@
           "seeAProfessionalIf"
         ]
       },
+      "Routine": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pending"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          {
+            "$ref": "#/components/schemas/ReadyRoutine"
+          },
+          {
+            "$ref": "#/components/schemas/UpdatingRoutine"
+          }
+        ],
+        "description": "`pending`: there is nothing to show yet (a first build is on its way, or the routine no longer fits the safety answers and is being rebuilt). `ready`: the routine in force. `updating`: the routine in force, while a newer one is being built."
+      },
+      "ReadyRoutine": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          "startedOn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The day the user tapped Start, as `YYYY-MM-DD` (UTC); null until they do."
+          },
+          "expectation": {
+            "type": "string",
+            "description": "What to expect and when, in plain words."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineStep"
+            },
+            "description": "In routine order."
+          },
+          "tapers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineTaper"
+            },
+            "description": "One per product being stopped."
+          }
+        },
+        "required": [
+          "status",
+          "startedOn",
+          "expectation",
+          "steps",
+          "tapers"
+        ]
+      },
+      "RoutineStep": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": [
+              "cleanse",
+              "treat",
+              "moisturise",
+              "protect"
+            ]
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "am",
+              "pm",
+              "am-pm",
+              "alternate-days",
+              "weekly",
+              "as-needed"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why, in words for the user."
+          },
+          "changed": {
+            "type": "boolean",
+            "description": "True when this step's product or frequency differs from the routine the user was last shown, or that routine had no such step. Always false the first time a routine is shown."
+          },
+          "product": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RoutineOwnProduct"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineRecommendedProduct"
+              },
+              {
+                "$ref": "#/components/schemas/RoutineNoProduct"
+              }
+            ],
+            "discriminator": {
+              "propertyName": "kind",
+              "mapping": {
+                "own": "#/components/schemas/RoutineOwnProduct",
+                "recommended": "#/components/schemas/RoutineRecommendedProduct",
+                "none": "#/components/schemas/RoutineNoProduct"
+              }
+            }
+          }
+        },
+        "required": [
+          "step",
+          "frequency",
+          "reason",
+          "changed",
+          "product"
+        ]
+      },
+      "RoutineOwnProduct": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "own"
+            ]
+          },
+          "entryId": {
+            "type": "string",
+            "description": "The shelf entry to keep using: its `id` from `GET /api/v1/me/shelf`."
+          },
+          "brand": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Null when the label was not read."
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "entryId",
+          "brand",
+          "name"
+        ],
+        "description": "A product already on the shelf."
+      },
+      "RoutineRecommendedProduct": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "recommended"
+            ]
+          },
+          "code": {
+            "type": "string",
+            "description": "The catalog code of the product."
+          },
+          "brand": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "imageUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "brand-submitted"
+            ],
+            "description": "Only on a product a brand submitted for review, which says so. The review fee never affects the choice."
+          },
+          "price": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "min": {
+                "type": "number"
+              },
+              "max": {
+                "type": "number"
+              },
+              "currency": {
+                "type": "string",
+                "description": "The currency of the country the profile shops in."
+              }
+            },
+            "required": [
+              "min",
+              "max",
+              "currency"
+            ],
+            "description": "The price range in the shopping country; null when it is not sold there."
+          },
+          "whereSold": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where to find it in the shopping country; null when it is not sold there or the review does not say."
+          },
+          "soldInCurrentCountry": {
+            "type": "boolean",
+            "description": "False when the product is not sold in the shopping country (or has been retired): it stays on the screen, and `find-sold-here` asks for another."
+          },
+          "soldElsewhere": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The codes of the other countries that sell it; empty for a retired product."
+          },
+          "keyIngredient": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "strength": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "notYetGot": {
+            "type": "boolean",
+            "description": "True until the user taps \"I got it\"."
+          }
+        },
+        "required": [
+          "kind",
+          "code",
+          "brand",
+          "name",
+          "imageUrl",
+          "price",
+          "whereSold",
+          "soldInCurrentCountry",
+          "soldElsewhere",
+          "keyIngredient",
+          "strength",
+          "notYetGot"
+        ],
+        "description": "A product from the catalog the user does not have yet."
+      },
+      "RoutineNoProduct": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "description": "\"Use what you have\": nothing to recommend for this step."
+      },
+      "RoutineTaper": {
+        "type": "object",
+        "properties": {
+          "entryId": {
+            "type": "string",
+            "description": "The shelf entry being stepped down."
+          },
+          "brand": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "description": "The step-down's code."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "steroid",
+              "lightening-agent"
+            ]
+          },
+          "whatToExpect": {
+            "type": "string"
+          },
+          "seeAProfessionalIf": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "fromWeek": {
+                  "type": "integer",
+                  "description": "The first week of the step, counting from 1."
+                },
+                "toWeek": {
+                  "type": "integer",
+                  "description": "The last week of the step; the same as `fromWeek` for a single week."
+                },
+                "frequency": {
+                  "type": "string",
+                  "enum": [
+                    "am",
+                    "pm",
+                    "am-pm",
+                    "alternate-days",
+                    "weekly",
+                    "as-needed",
+                    "stop"
+                  ]
+                },
+                "fromDate": {
+                  "type": "string",
+                  "description": "The first day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started."
+                },
+                "toDate": {
+                  "type": "string",
+                  "description": "The last day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started."
+                }
+              },
+              "required": [
+                "fromWeek",
+                "toWeek",
+                "frequency"
+              ]
+            },
+            "description": "The steps in order, ending with `stop`."
+          }
+        },
+        "required": [
+          "entryId",
+          "brand",
+          "name",
+          "code",
+          "kind",
+          "whatToExpect",
+          "seeAProfessionalIf",
+          "steps"
+        ]
+      },
+      "UpdatingRoutine": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "updating"
+            ]
+          },
+          "startedOn": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The day the user tapped Start, as `YYYY-MM-DD` (UTC); null until they do."
+          },
+          "expectation": {
+            "type": "string",
+            "description": "What to expect and when, in plain words."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineStep"
+            },
+            "description": "In routine order."
+          },
+          "tapers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutineTaper"
+            },
+            "description": "One per product being stopped."
+          }
+        },
+        "required": [
+          "status",
+          "startedOn",
+          "expectation",
+          "steps",
+          "tapers"
+        ]
+      },
       "FaceConsentGivenResponse": {
         "type": "object",
         "properties": {
@@ -5507,6 +5920,562 @@
           },
           "401": {
             "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine": {
+      "get": {
+        "operationId": "getRoutine",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "The routine: steps in order, with a dated step-down for each product being stopped",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. The routine is built in the background, never in this request. `{ status: 'pending' }`: nothing to show yet (a build is on its way, which this ask requests when none is fresh), or the routine no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force; `updating` is the same body while a newer build is under way. A step's `product` is `own` (a product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` (\"use what you have\"). A recommended product the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The routine, or pending",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Routine"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine/events": {
+      "get": {
+        "operationId": "watchRoutine",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Follow the routine live, as server-sent events",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. A `text/event-stream`, not the usual envelope (errors before the stream starts still are). Frames: `snapshot` first, whose data is the body `GET /api/v1/me/routine` answers now; then one `routine` each time a build starts or finishes, or \"I got it\" is recorded, whose data is the routine in that same shape (`updating` while a build is under way); then `done` (data `{}`) after a `routine` that is `ready`, after which the server closes the stream. A routine that is already ready gets `snapshot` and `done` at once. `pending` and `updating` leave the stream open for the build's `routine`. A `: ping` comment arrives every 20 seconds while nothing else does. The server closes a stream 10 minutes after it opened; reconnect to carry on. Send the bearer token as for every other route, which a browser `EventSource` cannot: use `fetch` and read the body.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event stream",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string",
+                  "description": "Frames of `event:` and `data:` lines."
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine/start": {
+      "post": {
+        "operationId": "startRoutine",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Start the routine: today is day 1",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Dates the routine, and the step-downs in it, from today (a UTC day). Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The routine, started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Routine"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine/steps/{step}/got-it": {
+      "post": {
+        "operationId": "markRoutineStepGot",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "The user has the recommended product for this step",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Puts the step's recommended product on the shelf, as adding it from search does (it counts toward the same limits: 429 `RATE_LIMITED`, `SCAN_DAILY_LIMIT`), and answers the routine with that product no longer `notYetGot`. No writer is called. 409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold nowhere now.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cleanse",
+                "treat",
+                "moisturise",
+                "protect"
+              ],
+              "description": "The routine step: `cleanse`, `treat`, `moisturise` or `protect`."
+            },
+            "required": true,
+            "description": "The routine step: `cleanse`, `treat`, `moisturise` or `protect`.",
+            "name": "step",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The routine, with that product marked got",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Routine"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many requests; wait for the Retry-After header (seconds) when present",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine/steps/{step}/find-sold-here": {
+      "post": {
+        "operationId": "findRoutineProductSoldHere",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Ask for another product for a step whose product is not sold in this country",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. For a step whose recommended product is not sold in the shopping country (or has been retired). Queues a build that picks the step again without that product and answers 202 with the routine in force as `updating`; the new routine arrives as `ready` on `GET /api/v1/me/routine` or its `/events`. Asking again for the same step of the same routine queues nothing more. 409 `ROUTINE_NOT_READY` before there is a routine; 409 `STEP_NOT_RECOMMENDED` for a step that holds a shelf product or nothing, or a product sold here already.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "cleanse",
+                "treat",
+                "moisturise",
+                "protect"
+              ],
+              "description": "The routine step: `cleanse`, `treat`, `moisturise` or `protect`."
+            },
+            "required": true,
+            "description": "The routine step: `cleanse`, `treat`, `moisturise` or `protect`.",
+            "name": "step",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "The routine in force, updating",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Routine"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
             "content": {
               "application/json": {
                 "schema": {
