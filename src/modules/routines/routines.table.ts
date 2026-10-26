@@ -4,11 +4,14 @@ import { GOALS } from '../goals/goals.vocabulary'
 import { profiles } from '../profiles/profiles.table'
 import type { CautionState, StoredRoutineStep, StoredTaper } from './routines.types'
 
+/** How a build sorted the shelf it was made from: each product in exactly one count. A reduced sunscreen counts as `keep`, as the routine keeps it. */
+export type ShelfCounts = { keep: number; reduce: number; drop: number; stop: number }
+
 /**
  * A profile's routine versions (spec #189): one row per build. A build appends a `pending` row, which is filled in once, to `ready`, when the build is done
  * (a build that needs no pending phase may append a `ready` row). A ready row is never changed again, except `served_at`, `started_on` (and the dates of its
- * `tapers`, set with it), `writer_retry_due_at` (cleared when a retry finds nothing to rewrite) and `routine_fingerprint` (set when a rebuild finds nothing to
- * change, so the routine in force records the inputs it was last checked against). The `ready` row that became ready last (`ready_at`, the time
+ * `tapers`, set with it), `writer_retry_due_at` (cleared when a retry finds nothing to rewrite) and `routine_fingerprint` and `shelf_counts` (set when a rebuild finds nothing
+ * to change in the routine, so the routine in force records the inputs it was last checked against and the shelf as it sorts under them). The `ready` row that became ready last (`ready_at`, the time
  * a row was appended ready or completed, not when its build began) is the profile's routine in force; a newer `pending` row is a build asked for and not
  * done. Rows go with their profile (cascade).
  *
@@ -16,7 +19,8 @@ import type { CautionState, StoredRoutineStep, StoredTaper } from './routines.ty
  * routine is started) and `expectation`: `[]`, `[]` and null while pending. `cautions` are the skeleton's cautions the build was made under (null while
  * pending): a later read compares them with the person's current safety answers. `goal` is the goal it was built for (null while pending, and on a row
  * written before the column existed), so a rebuild knows whether the goal has changed. `started_on` is when the routine was started, carried forward by later
- * builds; `served_at` is when this version was last returned to the user.
+ * builds; `served_at` is when this version was last returned to the user. `shelf_counts` is how the build sorted the shelf (`keep`, `reduce`, `drop`, `stop`;
+ * null while pending, and on a row written before the column): the plan summary shows it, so it is fixed at build time and matches the routine beside it.
  *
  * The rest records the build. `source` is who wrote the words (`writer`, or the `rules` alone), null while pending, and `reason` why it was built. `model` and
  * `prompt_hash` name the writer when it was called, even if every try failed and the rules wrote the routine, and are null when it was not called. A got-it copy is the one exception: it keeps the source, model and prompt hash of the version it copies, with
@@ -38,6 +42,7 @@ export const routineVersions = sqliteTable(
     expectation: text('expectation'),
     cautions: text('cautions', { mode: 'json' }).$type<CautionState[]>(),
     goal: text('goal', { enum: GOALS }),
+    shelfCounts: text('shelf_counts', { mode: 'json' }).$type<ShelfCounts>(),
     readyAt: integer('ready_at', { mode: 'timestamp_ms' }),
     startedOn: integer('started_on', { mode: 'timestamp_ms' }),
     servedAt: integer('served_at', { mode: 'timestamp_ms' }),

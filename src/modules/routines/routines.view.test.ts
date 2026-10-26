@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import type { ProductSummary } from '../catalog/catalog.service'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
+import { GOALS } from '../goals/goals.vocabulary'
+import { contentFor } from '../onboarding/onboarding.content'
 import type { RoutineVersionRow } from './routines.repository'
 import { toRoutineResponse, type RoutineViewInput } from './routines.view'
+import { FORBIDDEN_WORDING } from './routines.wording'
 
 // The routine screen's body (spec #189, PR 4b), as a pure mapping from a stored version and the reads around it. Nothing here touches a service: the
 // viewer service gathers the reads and hands them over, and this file pins what a client is shown of them.
@@ -26,6 +29,11 @@ import { toRoutineResponse, type RoutineViewInput } from './routines.view'
 //     keyIngredient, strength, notYetGot } | { kind: 'none' };
 // a taper is { entryId, brand, name, code, kind, whatToExpect, seeAProfessionalIf, steps: { fromWeek, toWeek, frequency, fromDate?, toDate? }[] }.
 // `origin` is there only for a brand-submitted product. `soldElsewhere` is country codes. Dates are UTC days ('YYYY-MM-DD'), only once the routine is started.
+// PR 5 (the Plan ready summary) adds one column to the stored version and one key to the body:
+//   RoutineVersionRow.shelfCounts: { keep: number; reduce: number; drop: number; stop: number } | null   (null while pending, and on a row built before the column)
+//   body.summary: { goal: { id, label }, keepUsing, useLessOrChange, stepDown: { products: { brand, name }[], message } | null } | null
+//   keepUsing = keep; useLessOrChange = reduce + drop; stepDown is null when stop is 0 and otherwise names the version's step-downs (brand + name, in stored
+//   order); summary is null for a version with no stored counts. The goal label is the one the goal chips show (the six pinned in the onboarding content test).
 // Two choices the brief leaves open, pinned here and flagged in the report: a taper's dates count from the taper's own `startedOn` (a step-down begun after Start
 // begins the day of its rebuild), and a step the previously served version had no entry for counts as changed.
 
@@ -73,6 +81,8 @@ const version = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: [],
   goal: 'fade-dark-marks',
+  // Counts that no sum or pairing can be mistaken for: keep 3, reduce 2, drop 4, stop 0 (the default version stops nothing).
+  shelfCounts: { keep: 3, reduce: 2, drop: 4, stop: 0 },
   readyAt: at(-1),
   startedOn: null,
   servedAt: null,
@@ -160,7 +170,7 @@ describe('toRoutineResponse: the routine as a whole', () => {
   it('answers a ready routine as its start day, what to expect, its steps in routine order and its step-downs', () => {
     const body = wire(toRoutineResponse(input()))
 
-    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'tapers'])
+    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'summary', 'tapers'])
     expect(body).toMatchObject({ status: 'ready', startedOn: null, expectation: 'Give it 8 to 12 weeks before judging.', tapers: [] })
     expect(body.steps.map((s: any) => s.step)).toEqual(['cleanse', 'treat', 'protect'])
   })
@@ -498,6 +508,7 @@ describe('toRoutineResponse: nothing internal is shown', () => {
         startedOn: at(0),
         steps: [ownStep('cleanse', 'entry-a'), candidateStep('treat', 'SERUM-1', 'pm', { gotIt: true }), noneStep('protect')],
         tapers: [{ shelfProductId: 'entry-b', templateId: STEROID_TEMPLATE.code, startedOn: at(0) }],
+        shelfCounts: { keep: 3, reduce: 2, drop: 4, stop: 1 },
       }),
       previous: version({ steps: [ownStep('cleanse', 'entry-a', 'pm')], servedAt: at(-2) }),
       own: new Map([
@@ -508,7 +519,9 @@ describe('toRoutineResponse: nothing internal is shown', () => {
     })
 
   it.each(['ready', 'updating'] as const)('has none of the internal fields anywhere in a %s body, at any depth', (status) => {
-    const keys = keysDeep(wire(toRoutineResponse({ ...full(), status })))
+    // The summary names the goal (`goal.id`, `goal.label`) on purpose: its own keys are pinned in the summary's describe below.
+    const { summary: _summary, ...routine } = wire(toRoutineResponse({ ...full(), status }))
+    const keys = keysDeep(routine)
 
     for (const internal of INTERNAL) expect(keys, internal).not.toContain(internal)
   })
@@ -516,7 +529,7 @@ describe('toRoutineResponse: nothing internal is shown', () => {
   it('has exactly the documented keys on the routine, a step, each kind of product and a step-down', () => {
     const body = wire(toRoutineResponse(full()))
 
-    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'tapers'])
+    expect(Object.keys(body).sort()).toEqual(['expectation', 'startedOn', 'status', 'steps', 'summary', 'tapers'])
     for (const step of body.steps) expect(Object.keys(step).sort()).toEqual(['changed', 'frequency', 'product', 'reason', 'step'])
     expect(Object.keys(body.steps[0].product).sort()).toEqual(['brand', 'entryId', 'kind', 'name'])
     expect(Object.keys(body.steps[1].product).sort()).toEqual(
@@ -525,5 +538,192 @@ describe('toRoutineResponse: nothing internal is shown', () => {
     expect(Object.keys(body.steps[2].product)).toEqual(['kind'])
     expect(Object.keys(body.tapers[0]).sort()).toEqual(['brand', 'code', 'entryId', 'kind', 'name', 'seeAProfessionalIf', 'steps', 'whatToExpect'])
     expect(Object.keys(body.tapers[0].steps[0]).sort()).toEqual(['frequency', 'fromDate', 'fromWeek', 'toDate', 'toWeek'])
+  })
+})
+
+describe('toRoutineResponse: the summary of the plan (the "Your plan is ready" screen)', () => {
+  // The counts are the ones the build stored on the version (`shelfCounts`), so the summary always agrees with the routine shown beside it. The names of the
+  // products being stopped come from the version's step-downs, in the order stored.
+  const COUNTS = { keep: 3, reduce: 2, drop: 4, stop: 0 }
+  const stopped = (shelfProductId: string, templateId = STEROID_TEMPLATE.code) => ({ shelfProductId, templateId, startedOn: null })
+  // Names that no word of the wording gate can catch, so what is under test is the sentence and not the products.
+  const NAMES = new Map([
+    ['stop-1', { brand: 'Karo', name: 'Glow Cream' }],
+    ['stop-2', { brand: 'Orbis', name: 'Clear Gel' }],
+    ['stop-3', { brand: 'Lumina', name: 'Day Lotion' }],
+    ['stop-4', { brand: 'Accra', name: 'Shea Balm' }],
+    ['stop-5', { brand: 'Zuri', name: 'Body Oil' }],
+    ['stop-plain', { brand: null, name: 'Jar From The Market' }],
+  ])
+  const summaryOf = (version: RoutineVersionRow, over: Partial<RoutineViewInput> = {}) => wire(toRoutineResponse(input({ own: NAMES, version, ...over }))).summary
+  const stoppingVersion = (ids: string[]) => version({ shelfCounts: { ...COUNTS, stop: ids.length }, tapers: ids.map((id) => stopped(id)) })
+  const SENTENCE_END = "suddenly can make your skin flare. We'll take it step by step, so the rough days are expected, not a surprise."
+
+  it('is there on a ready routine and on an updating one, the same in both', () => {
+    const ready = wire(toRoutineResponse(input({ status: 'ready' }))).summary
+    const updating = wire(toRoutineResponse(input({ status: 'updating' }))).summary
+
+    expect(ready).toEqual({ goal: { id: 'fade-dark-marks', label: 'Fade dark marks' }, keepUsing: 3, useLessOrChange: 6, stepDown: null })
+    expect(updating).toEqual(ready)
+  })
+
+  it.each([
+    ['products kept as they are', { keep: 5, reduce: 0, drop: 0, stop: 0 }, 5, 0],
+    ['products to use less often (reduce)', { keep: 0, reduce: 5, drop: 0, stop: 0 }, 0, 5],
+    ['products to leave out at once (drop)', { keep: 0, reduce: 0, drop: 5, stop: 0 }, 0, 5],
+    ['reduce and drop together', { keep: 1, reduce: 2, drop: 4, stop: 0 }, 1, 6],
+    ['nothing on the shelf', { keep: 0, reduce: 0, drop: 0, stop: 0 }, 0, 0],
+  ])('counts %s: keep is "keep using", reduce plus drop is "use less or change"', (_what, shelfCounts, keepUsing, useLessOrChange) => {
+    const summary = summaryOf(version({ shelfCounts }))
+
+    expect(summary.keepUsing).toBe(keepUsing)
+    expect(summary.useLessOrChange).toBe(useLessOrChange)
+  })
+
+  it('leaves a stopped product out of both of the other counts: it is counted once, as a step-down', () => {
+    const summary = summaryOf(version({ shelfCounts: { keep: 1, reduce: 1, drop: 1, stop: 2 }, tapers: [stopped('stop-1'), stopped('stop-2')] }))
+
+    expect(summary.keepUsing).toBe(1)
+    expect(summary.useLessOrChange).toBe(2)
+    expect(summary.stepDown.products).toHaveLength(2)
+  })
+
+  describe('the goal', () => {
+    // The labels the goal chips show, word for word (test/integration/onboarding.content.test.ts pins the same six).
+    it.each([
+      ['clear-skin', 'Clear skin'],
+      ['even-tone', 'Even tone'],
+      ['fade-dark-marks', 'Fade dark marks'],
+      ['brighter', 'Brighter, more even'],
+      ['glow', 'A glow'],
+      ['calm-repair', 'Calm, healthy skin'],
+    ] as const)('names the goal %s with its chip label "%s"', (goal, label) => {
+      expect(summaryOf(version({ goal })).goal).toEqual({ id: goal, label })
+    })
+
+    it('has a label for every goal there is, the very label the goal chips show', async () => {
+      const chips = (await contentFor('en')).goalScreen.chips
+
+      expect(chips.map((chip) => chip.id)).toEqual([...GOALS])
+      for (const chip of chips) expect(summaryOf(version({ goal: chip.id })).goal, chip.id).toEqual({ id: chip.id, label: chip.label })
+    })
+  })
+
+  describe('the step-down', () => {
+    it('is null when nothing is stopped', () => {
+      expect(summaryOf(version({ shelfCounts: { ...COUNTS, stop: 0 }, tapers: [] })).stepDown).toBeNull()
+    })
+
+    it('names one stopped product by its brand and name, and says the step-down sentence about it', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1']))
+
+      expect(stepDown).toEqual({
+        products: [{ brand: 'Karo', name: 'Glow Cream' }],
+        message: `Stopping Karo Glow Cream ${SENTENCE_END}`,
+      })
+    })
+
+    it('joins two as "X and Y"', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1', 'stop-2']))
+
+      expect(stepDown.message).toBe(`Stopping Karo Glow Cream and Orbis Clear Gel ${SENTENCE_END}`)
+      expect(stepDown.products).toEqual([
+        { brand: 'Karo', name: 'Glow Cream' },
+        { brand: 'Orbis', name: 'Clear Gel' },
+      ])
+    })
+
+    it('joins three as "X, Y and 1 more", the first two by name', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1', 'stop-2', 'stop-3']))
+
+      expect(stepDown.message).toBe(`Stopping Karo Glow Cream, Orbis Clear Gel and 1 more ${SENTENCE_END}`)
+      expect(stepDown.products).toHaveLength(3)
+    })
+
+    it('joins five as "X, Y and 3 more", and still lists all five products', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1', 'stop-2', 'stop-3', 'stop-4', 'stop-5']))
+
+      expect(stepDown.message).toBe(`Stopping Karo Glow Cream, Orbis Clear Gel and 3 more ${SENTENCE_END}`)
+      expect(stepDown.products.map((p: any) => p.name)).toEqual(['Glow Cream', 'Clear Gel', 'Day Lotion', 'Shea Balm', 'Body Oil'])
+    })
+
+    it('names a product with no brand by its name alone, and gives its brand as null', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-plain']))
+
+      expect(stepDown.products).toEqual([{ brand: null, name: 'Jar From The Market' }])
+      expect(stepDown.message).toBe(`Stopping Jar From The Market ${SENTENCE_END}`)
+    })
+
+    it('names a product with no brand by its name alone among others', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-1', 'stop-plain']))
+
+      expect(stepDown.message).toBe(`Stopping Karo Glow Cream and Jar From The Market ${SENTENCE_END}`)
+    })
+
+    it('keeps the order the step-downs are stored in', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-3', 'stop-1']))
+
+      expect(stepDown.products.map((p: any) => p.name)).toEqual(['Day Lotion', 'Glow Cream'])
+      expect(stepDown.message).toBe(`Stopping Lumina Day Lotion and Karo Glow Cream ${SENTENCE_END}`)
+    })
+
+    it('still counts a stopped product that has left the shelf since, under the neutral name its step-down has', () => {
+      const { stepDown } = summaryOf(stoppingVersion(['stop-gone']))
+
+      expect(stepDown.products).toEqual([{ brand: null, name: "A product you're stepping down" }])
+      expect(stepDown.message).toBe(`Stopping A product you're stepping down ${SENTENCE_END}`)
+    })
+
+    it('is told the same before the routine is started and after: the sentence does not depend on dates', () => {
+      const before = summaryOf(stoppingVersion(['stop-1']))
+      const after = summaryOf({ ...stoppingVersion(['stop-1']), startedOn: at(0), tapers: [{ ...stopped('stop-1'), startedOn: at(0) }] })
+
+      expect(after.stepDown).toEqual(before.stepDown)
+    })
+  })
+
+  describe('the wording gate', () => {
+    // The sentence is fixed reviewed copy, so it must pass the gate whatever the number of products it names.
+    it.each([1, 2, 3, 4, 5])('lets the step-down sentence for %i stopped products through every forbidden-wording pattern', (count) => {
+      const ids = ['stop-1', 'stop-2', 'stop-3', 'stop-4', 'stop-5'].slice(0, count)
+      const { stepDown } = summaryOf(stoppingVersion(ids))
+
+      for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(stepDown.message), `${count} products: ${code}`).toBe(false)
+    })
+
+    it('lets the sentence through for a product with no brand, and for a product that has left the shelf', () => {
+      for (const id of ['stop-plain', 'stop-gone']) {
+        const { stepDown } = summaryOf(stoppingVersion([id]))
+
+        for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(stepDown.message), `${id}: ${code}`).toBe(false)
+      }
+    })
+  })
+
+  describe('a version with no stored counts', () => {
+    it.each(['ready', 'updating'] as const)('has summary null on a %s routine: the counts are not worked out from the steps and step-downs it holds', (status) => {
+      // It holds a step-down and four steps, so counting from what it holds would give an answer; the summary must not.
+      const body = wire(toRoutineResponse(input({ status, own: NAMES, version: version({ shelfCounts: null, tapers: [stopped('stop-1')] }) })))
+
+      expect(body).toHaveProperty('summary', null)
+      expect(body.steps).toHaveLength(3)
+    })
+  })
+
+  describe('what it shows', () => {
+    it('has exactly the documented keys, and nothing of how the counts are stored or which shelf entry a name came from', () => {
+      const summary = summaryOf(stoppingVersion(['stop-1', 'stop-2']))
+
+      expect(Object.keys(summary).sort()).toEqual(['goal', 'keepUsing', 'stepDown', 'useLessOrChange'])
+      expect(Object.keys(summary.goal).sort()).toEqual(['id', 'label'])
+      expect(Object.keys(summary.stepDown).sort()).toEqual(['message', 'products'])
+      for (const product of summary.stepDown.products) expect(Object.keys(product).sort()).toEqual(['brand', 'name'])
+    })
+
+    it('does not carry the stored counts, under any of their names, anywhere in the body', () => {
+      const text = JSON.stringify(wire(toRoutineResponse(input({ own: NAMES, version: stoppingVersion(['stop-1']) }))))
+
+      for (const stored of ['shelfCounts', 'shelf_counts', '"keep"', '"reduce"', '"drop"', '"stop":']) expect(text, stored).not.toContain(stored)
+    })
   })
 })

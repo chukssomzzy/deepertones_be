@@ -2,7 +2,7 @@ import { sha256Hex } from '../../lib/crypto'
 import { once } from '../../lib/once'
 import { stableJson } from '../../lib/stable-json'
 import { answerFor, type GoalAnswer } from '../goals/goals.answers'
-import { GOALS, type Goal } from '../goals/goals.vocabulary'
+import { GOAL_LABELS, GOALS, type Goal } from '../goals/goals.vocabulary'
 import { SAFETY_CHOICES, type SafetyChoice } from '../safety/safety.vocabulary'
 
 // The words of onboarding screens 1.2 to 1.5 (goal, answer, safety), served by GET /api/v1/onboarding/content so that a copy change, a new chip
@@ -38,26 +38,16 @@ export type OnboardingContent = {
 const LOCALES = ['en'] as const
 type Locale = (typeof LOCALES)[number]
 
-// DRAFT copy: new words nobody has reviewed yet (issue #82): the sixth chip, and the label and hint of the field under the reaction choice. The
+// DRAFT copy: new words nobody has reviewed yet (issue #82): the sixth chip (its label lives in GOAL_LABELS, goals.vocabulary.ts), and the label and hint of the field under the reaction choice. The
 // chip's label is not the calm-repair answer's title, which says "again". DRAFT_COPY lists them for the owner to find before launch; approving a
 // string means removing it from that list and its DRAFT comment.
-const DRAFT_CHIP_LABEL = 'Calm, healthy skin' // DRAFT
 const DRAFT_REACTION_FIELD_LABEL = 'Which product? (optional)' // DRAFT
 const DRAFT_REACTION_FIELD_HINT = 'Add the ingredient too if you know it.' // DRAFT
 
 const DRAFT_SWITCH_RESUME = 'Picks up where you left off: your progress on this goal still counts.' // DRAFT (issue #145)
 const DRAFT_SWITCH_FRESH = 'Starts fresh, with a new face scan as your day one.' // DRAFT (issue #145)
 
-export const DRAFT_COPY: readonly string[] = [DRAFT_CHIP_LABEL, DRAFT_REACTION_FIELD_LABEL, DRAFT_REACTION_FIELD_HINT, DRAFT_SWITCH_RESUME, DRAFT_SWITCH_FRESH]
-
-const CHIP_LABELS: Record<Goal, string> = {
-  'clear-skin': 'Clear skin',
-  'even-tone': 'Even tone',
-  'fade-dark-marks': 'Fade dark marks',
-  brighter: 'Brighter, more even',
-  glow: 'A glow',
-  'calm-repair': DRAFT_CHIP_LABEL,
-}
+export const DRAFT_COPY: readonly string[] = [GOAL_LABELS['calm-repair'], DRAFT_REACTION_FIELD_LABEL, DRAFT_REACTION_FIELD_HINT, DRAFT_SWITCH_RESUME, DRAFT_SWITCH_FRESH]
 
 // A field is a text box under the choice; only the two that take words have one.
 const CHOICES: Record<SafetyChoice, { label: string; field?: Field }> = {
@@ -84,7 +74,7 @@ const withoutVersion = (locale: Locale): Omit<OnboardingContent, 'contentVersion
       footnote: 'No account needed.',
       continueLabel: 'Continue',
       loginLabel: 'Login',
-      chips: GOALS.map((id) => ({ id, label: CHIP_LABELS[id] })),
+      chips: GOALS.map((id) => ({ id, label: GOAL_LABELS[id] })),
     },
     answerScreen: {
       subtitle: 'Here is what it usually takes.',

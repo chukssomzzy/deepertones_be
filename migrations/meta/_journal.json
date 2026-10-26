@@ -302,6 +302,13 @@
       "when": 1793022928999,
       "tag": "0042_cloudy_deathstrike",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "6",
+      "when": 1793053414376,
+      "tag": "0043_heavy_cannonball",
+      "breakpoints": true
     }
   ]
 }

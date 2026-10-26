@@ -1,3 +1,4 @@
+import type { ShelfCounts } from './routines.table'
 import type { CompletedRoutineBuild, RoutineRequestRetry, RoutineRequestRow, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 
 /** In-memory RoutinesRepository for unit tests. Its behaviour is pinned by routinesRepositoryContract, which the D1 class also passes. Unlike D1 it has no
@@ -28,6 +29,11 @@ export class FakeRoutinesRepository implements RoutinesRepository {
   async setRoutineFingerprint(id: string, fingerprint: string): Promise<void> {
     const row = this.rows.get(id)
     if (row) this.rows.set(id, { ...row, routineFingerprint: fingerprint })
+  }
+
+  async setShelfCounts(id: string, shelfCounts: ShelfCounts): Promise<void> {
+    const row = this.rows.get(id)
+    if (row) this.rows.set(id, { ...row, shelfCounts: { ...shelfCounts } })
   }
 
   async markServed(id: string, at: Date): Promise<void> {

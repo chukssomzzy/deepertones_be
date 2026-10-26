@@ -2,6 +2,8 @@ import type { z } from '@hono/zod-openapi'
 import type { ProductSummary } from '../catalog/catalog.service'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
+import { GOAL_LABELS } from '../goals/goals.vocabulary'
+import { stepDownMessage } from './routines.copy'
 import type { RoutineVersionRow } from './routines.repository'
 import type { ReadyRoutineResponse, UpdatingRoutineResponse } from './routines.schemas'
 
@@ -127,14 +129,30 @@ const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
     ]
   })
 
+// The plan summary, worked out from the version's stored counts so it always matches the routine beside it. Its step-down names the tapers shown, so a schedule the
+// workbook no longer holds is not named either. A version with no stored counts (built before the column) has none: counting from what it holds would be a guess.
+const summaryOf = (input: RoutineViewInput, tapers: RoutineBody['tapers']): RoutineBody['summary'] => {
+  const { shelfCounts, goal } = input.version
+  if (shelfCounts === null || goal === null) return null
+  const products = tapers.map(({ brand, name }) => ({ brand, name }))
+  return {
+    goal: { id: goal, label: GOAL_LABELS[goal] },
+    keepUsing: shelfCounts.keep,
+    useLessOrChange: shelfCounts.reduce + shelfCounts.drop,
+    stepDown: products.length === 0 ? null : { products, message: stepDownMessage(products) },
+  }
+}
+
 /** The body `GET /me/routine` answers for a routine in force. The viewer service sends this same body on the event stream, and the routes answer it: one mapping. */
 export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
   const { version, previous } = input
+  const tapers = tapersOf(input)
   return {
     status: input.status,
     startedOn: version.startedOn === null ? null : dayString(utcDay(version.startedOn)),
     expectation: version.expectation ?? '',
     steps: version.steps.map((step) => ({ step: step.step, frequency: step.frequency, reason: step.reason, changed: changedSince(step, previous, input), product: productOf(step, input) })),
-    tapers: tapersOf(input),
+    tapers,
+    summary: summaryOf(input, tapers),
   }
 }

@@ -1560,6 +1560,9 @@
               "ready"
             ]
           },
+          "summary": {
+            "$ref": "#/components/schemas/RoutineSummary"
+          },
           "startedOn": {
             "type": [
               "string",
@@ -1588,11 +1591,99 @@
         },
         "required": [
           "status",
+          "summary",
           "startedOn",
           "expectation",
           "steps",
           "tapers"
         ]
+      },
+      "RoutineSummary": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "goal": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "enum": [
+                  "clear-skin",
+                  "even-tone",
+                  "fade-dark-marks",
+                  "brighter",
+                  "glow",
+                  "calm-repair"
+                ]
+              },
+              "label": {
+                "type": "string",
+                "description": "The goal as the goal chips name it."
+              }
+            },
+            "required": [
+              "id",
+              "label"
+            ],
+            "description": "The goal the routine was built for."
+          },
+          "keepUsing": {
+            "type": "integer",
+            "description": "Shelf products used as they are. A sunscreen the rules would reduce counts here too: sun protection is never used less."
+          },
+          "useLessOrChange": {
+            "type": "integer",
+            "description": "Shelf products to use less often, or to leave out (redundant, in the way of the goal, or not clear enough to keep)."
+          },
+          "stepDown": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "products": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "brand": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "name": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "brand",
+                    "name"
+                  ]
+                },
+                "description": "The products being stopped step by step, as in `tapers`."
+              },
+              "message": {
+                "type": "string",
+                "description": "The fixed sentence for the card, naming the products."
+              }
+            },
+            "required": [
+              "products",
+              "message"
+            ],
+            "description": "Null when nothing is being stopped."
+          }
+        },
+        "required": [
+          "goal",
+          "keepUsing",
+          "useLessOrChange",
+          "stepDown"
+        ],
+        "description": "Null for a routine built before summaries were kept; it gains one at its next rebuild."
       },
       "RoutineStep": {
         "type": "object",
@@ -1905,6 +1996,9 @@
               "updating"
             ]
           },
+          "summary": {
+            "$ref": "#/components/schemas/RoutineSummary"
+          },
           "startedOn": {
             "type": [
               "string",
@@ -1933,6 +2027,7 @@
         },
         "required": [
           "status",
+          "summary",
           "startedOn",
           "expectation",
           "steps",
@@ -6238,8 +6333,8 @@
         "tags": [
           "Routine"
         ],
-        "summary": "Start the routine: today is day 1",
-        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Dates the routine, and the step-downs in it, from today (a UTC day). Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.",
+        "summary": "Start the routine: tomorrow is day 1",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Dates the routine, and the step-downs in it, from tomorrow (the next UTC day): the first step is the morning after the tap. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.",
         "security": [
           {
             "bearerAuth": []

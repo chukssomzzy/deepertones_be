@@ -50,10 +50,10 @@ const startRoutine = defineRoute({
   path: '/routine/start',
   operationId: 'startRoutine',
   tags: ['Routine'],
-  summary: 'Start the routine: today is day 1',
+  summary: 'Start the routine: tomorrow is day 1',
   description:
     GATES +
-    'No body. Dates the routine, and the step-downs in it, from today (a UTC day). Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.',
+    'No body. Dates the routine, and the step-downs in it, from tomorrow (the next UTC day): the first step is the morning after the tap. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.',
   security: bearer,
   responses: { 200: success(RoutineResponse, 'The routine, started'), ...errorResponses(401, 403, 409, 503) },
 })

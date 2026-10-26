@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { GOALS } from '../goals/goals.vocabulary'
 import { FREQUENCIES, ROUTINE_STEPS, TAPER_KINDS } from '../catalog/catalog.vocabulary'
 
 export const StepParams = z.object({
@@ -70,7 +71,26 @@ const RoutineTaperResponse = z
   })
   .openapi('RoutineTaper')
 
+const RoutineSummaryResponse = z
+  .object({
+    goal: z.object({ id: z.enum(GOALS), label: z.string().openapi({ description: 'The goal as the goal chips name it.' }) }).openapi({ description: 'The goal the routine was built for.' }),
+    keepUsing: z.number().int().openapi({ description: 'Shelf products used as they are. A sunscreen the rules would reduce counts here too: sun protection is never used less.' }),
+    useLessOrChange: z.number().int().openapi({ description: 'Shelf products to use less often, or to leave out (redundant, in the way of the goal, or not clear enough to keep).' }),
+    stepDown: z
+      .object({
+        products: z.array(z.object({ brand: z.string().nullable(), name: z.string() })).openapi({ description: 'The products being stopped step by step, as in `tapers`.' }),
+        message: z.string().openapi({ description: 'The fixed sentence for the card, naming the products.' }),
+      })
+      .nullable()
+      .openapi({ description: 'Null when nothing is being stopped.' }),
+  })
+  .openapi('RoutineSummary', {
+    description:
+      'The "Your plan is ready" screen. The counts were fixed when the routine was built, so they always match it: every shelf product the routine was built from is in exactly one of `keepUsing`, `useLessOrChange` and the step-down.',
+  })
+
 const body = {
+  summary: RoutineSummaryResponse.nullable().openapi({ description: 'Null for a routine built before summaries were kept; it gains one at its next rebuild.' }),
   startedOn: z.string().nullable().openapi({ description: 'The day the user tapped Start, as `YYYY-MM-DD` (UTC); null until they do.' }),
   expectation: z.string().openapi({ description: 'What to expect and when, in plain words.' }),
   steps: z.array(RoutineStepResponse).openapi({ description: 'In routine order.' }),

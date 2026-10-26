@@ -38,6 +38,8 @@ import { RoutineViewerService } from './routines.viewer.service'
 //                                                   with status 'updating'
 //   announce(profileId): Promise<void>             by profile id, for the build (no session): publishes the body as `{ type: 'routine', routine }` on `routine:<profileId>`
 //                                                   and, when it is ready, `{ type: 'done' }`. It never marks a version served.
+// PR 5 adds `summary` to the body (see routines.view.test.ts for what it holds): every way the body leaves the service (a read, the stream's snapshot and the frames
+// the build publishes) carries the one summary, worked out from the version's stored counts.
 // The gates, in order, for all five session methods: 401, 403 SIGNUP_REQUIRED (a guest), 409 GOAL_REQUIRED, 503 VERDICT_UNAVAILABLE (either step-down template of
 // the verdict not approved). Note the order: the verdict itself answers 503 before 409; the routine answers 409 before 503.
 
@@ -48,7 +50,8 @@ const MINUTE = 60 * SECOND
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
 const at = (offsetMs: number) => new Date(T0.getTime() + offsetMs)
-const START_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate()))
+// Start makes tomorrow day 1: the UTC midnight after T0's day. (RoutineService.start decides this; the stand-in below only stores it, so the viewer is shown a started routine.)
+const START_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate() + 1))
 
 const PROFILE = 'profile-amara-1'
 const USER = 'user-amara'
@@ -79,6 +82,8 @@ const versionRow = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow =>
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: [],
   goal: 'fade-dark-marks',
+  // As the build counted Amara's shelf: two kept, nothing reduced, one dropped, and the steroid cream (the one step-down below) stopped.
+  shelfCounts: { keep: 2, reduce: 0, drop: 1, stop: 1 },
   readyAt: at(-HOUR),
   startedOn: null,
   servedAt: null,
@@ -349,6 +354,34 @@ describe('RoutineViewerService.current', () => {
     expect(routine.tapers[0]).toMatchObject({ entryId: 'entry-b', brand: 'Karo', name: 'Karo Glow Cream', code: 'TPR-STEROID-1', kind: 'steroid' })
   })
 
+  it('answers the plan summary with the goal, the stored counts and the step-down of the product the verdict stopped, named from the shelf', async () => {
+    await showing(versionRow())
+
+    const routine = await body(asVerified(() => viewer.current()))
+
+    expect(routine.summary).toEqual({
+      goal: { id: 'fade-dark-marks', label: 'Fade dark marks' },
+      keepUsing: 2,
+      useLessOrChange: 1,
+      stepDown: {
+        products: [{ brand: 'Karo', name: 'Karo Glow Cream' }],
+        message: "Stopping Karo Karo Glow Cream suddenly can make your skin flare. We'll take it step by step, so the rough days are expected, not a surprise.",
+      },
+    })
+  })
+
+  it('answers the same summary for an updating routine, and null for a version with no stored counts', async () => {
+    await showing(versionRow(), 'updating')
+    expect((await body(asVerified(() => viewer.current()))).summary).toMatchObject({ keepUsing: 2, useLessOrChange: 1 })
+    world.routine = { status: 'updating', version: versionRow({ shelfCounts: null }) }
+
+    expect(await body(asVerified(() => viewer.current()))).toHaveProperty('summary', null)
+  })
+
+  it('has no summary on a pending routine: there is no plan to summarise', async () => {
+    expect(await body(asVerified(() => viewer.current()))).toEqual({ status: 'pending' })
+  })
+
   it('prices a recommended product in the shopping country\'s currency', async () => {
     world.shopping = { country: 'GH', budgetBand: null, updatedAt: T0 }
     await showing(versionRow())
@@ -524,6 +557,16 @@ describe('RoutineViewerService.watch', () => {
     expect(snapshot).toEqual(await body(asVerified(() => viewer.current())))
   })
 
+  it('carries the plan summary in the snapshot, the very one a read answers', async () => {
+    await showing(versionRow())
+
+    await asVerified(() => viewer.watch())
+
+    const snapshot = JSON.parse(JSON.stringify(events.subscribed[0]!.snapshot))
+    expect(snapshot.summary).toMatchObject({ goal: { id: 'fade-dark-marks', label: 'Fade dark marks' }, keepUsing: 2, useLessOrChange: 1, stepDown: { products: [{ brand: 'Karo', name: 'Karo Glow Cream' }] } })
+    expect(snapshot.summary).toEqual((await body(asVerified(() => viewer.current()))).summary)
+  })
+
   it('answers the stream the events provider opened', async () => {
     const response = await asVerified(() => viewer.watch())
 
@@ -567,15 +610,15 @@ describe('RoutineViewerService.watch', () => {
 })
 
 describe('RoutineViewerService.start', () => {
-  it('starts the routine of the caller\'s profile and answers the body, started today with its step-downs dated', async () => {
+  it('starts the routine of the caller\'s profile and answers the body, started with its step-downs dated from the start day', async () => {
     await showing(versionRow())
 
     const routine = await body(asVerified(() => viewer.start()))
 
     expect(routines.start).toHaveBeenCalledWith(PROFILE)
     expect(routine.status).toBe('ready')
-    expect(routine.startedOn).toBe('2030-06-15')
-    expect(routine.tapers[0].steps[0]).toMatchObject({ fromDate: '2030-06-15', toDate: '2030-06-28' })
+    expect(routine.startedOn).toBe('2030-06-16')
+    expect(routine.tapers[0].steps[0]).toMatchObject({ fromDate: '2030-06-16', toDate: '2030-06-29' })
   })
 
   it('answers 409 ROUTINE_NOT_READY before there is a routine', async () => {
@@ -705,6 +748,19 @@ describe('RoutineViewerService.announce', () => {
     expect(published[0]).toMatchObject({ type: 'routine', routine: { status: 'ready' } })
     expect(JSON.parse(JSON.stringify((published[0] as any).routine))).toEqual(await body(asVerified(() => viewer.current())))
     expect(published[1]).toEqual({ type: 'done' })
+  })
+
+  it('carries the plan summary in the frame it publishes, for a ready routine and an updating one', async () => {
+    const row = await showing(versionRow())
+    await announce()
+    const ready = (events.eventsFor(key)[0] as any).routine
+
+    expect(ready.summary).toMatchObject({ goal: { id: 'fade-dark-marks', label: 'Fade dark marks' }, keepUsing: 2, useLessOrChange: 1, stepDown: { products: [{ brand: 'Karo', name: 'Karo Glow Cream' }] } })
+    expect(JSON.parse(JSON.stringify(ready.summary))).toEqual((await body(asVerified(() => viewer.current()))).summary)
+
+    world.routine = { status: 'updating', version: row }
+    await announce()
+    expect((events.eventsFor(key).at(-1) as any).routine).toMatchObject({ status: 'updating', summary: { keepUsing: 2, useLessOrChange: 1 } })
   })
 
   it('publishes an updating routine without done: the build under way is still to land', async () => {

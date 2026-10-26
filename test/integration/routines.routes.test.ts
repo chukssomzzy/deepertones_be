@@ -30,7 +30,8 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 //
 // THE PUBLIC SHAPE PINNED HERE (pr4-plan.md):
 //   { status: 'pending' }
-//   { status: 'ready' | 'updating', startedOn: 'YYYY-MM-DD' | null, expectation, steps: Step[], tapers: Taper[] }
+//   { status: 'ready' | 'updating', startedOn: 'YYYY-MM-DD' | null, expectation, steps: Step[], tapers: Taper[], summary: Summary | null }
+//   Summary = { goal: { id, label }, keepUsing, useLessOrChange, stepDown: { products: { brand, name }[], message } | null }   (PR 5; null for a version with no stored counts)
 //   Step  = { step, frequency, reason, changed, product }
 //   product = { kind: 'own', entryId, brand, name } | { kind: 'recommended', code, brand, name, imageUrl, origin?, price: { min, max, currency } | null, whereSold,
 //             soldInCurrentCountry, soldElsewhere, keyIngredient, strength, notYetGot } | { kind: 'none' }
@@ -122,7 +123,8 @@ const errorCodeOf = async (res: Reply) => {
 
 type Step = { step: string; frequency: string; reason: string; changed: boolean; product: Record<string, any> }
 type Taper = { entryId: string; brand: string | null; name: string; code: string; kind: string; whatToExpect: string; seeAProfessionalIf: string; steps: Record<string, any>[] }
-type ReadyBody = { status: 'ready' | 'updating'; startedOn: string | null; expectation: string; steps: Step[]; tapers: Taper[] }
+type Summary = { goal: { id: string; label: string }; keepUsing: number; useLessOrChange: number; stepDown: { products: { brand: string | null; name: string }[]; message: string } | null }
+type ReadyBody = { status: 'ready' | 'updating'; startedOn: string | null; expectation: string; steps: Step[]; tapers: Taper[]; summary: Summary | null }
 type RoutineBody = { status: 'pending' } | ReadyBody
 
 // --- people: a guest of one install, and the sign-in that makes the guest an account ---
@@ -321,6 +323,8 @@ const appendVersion = async (guest: Guest, over: Partial<RoutineVersionRow> = {}
     expectation: 'Give it 8 to 12 weeks before judging.',
     cautions: [],
     goal: 'glow',
+    // As the build sorted the seeded shelf (see withRoutine): one product kept, two to use less, three to leave out, and the steroid cream stopped.
+    shelfCounts: { keep: 1, reduce: 2, drop: 3, stop: 1 },
     readyAt: at(-age + versionCount),
     startedOn: null,
     servedAt: null,
@@ -342,7 +346,7 @@ const appendVersion = async (guest: Guest, over: Partial<RoutineVersionRow> = {}
 }
 /** A build under way: a pending version, created a minute ago. */
 const appendPending = (guest: Guest) =>
-  appendVersion(guest, { status: 'pending', createdAt: at(-MINUTE), steps: [], tapers: [], expectation: null, cautions: null, goal: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 })
+  appendVersion(guest, { status: 'pending', createdAt: at(-MINUTE), steps: [], tapers: [], expectation: null, cautions: null, goal: null, shelfCounts: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 })
 
 type Seeded = { guest: Guest; own: string; stopped: string; version: RoutineVersionRow }
 /** An account whose routine is: cleanse its own cleanser, treat a Ghana-only serum, moisturise a Nigerian cream, protect nothing; a steroid cream being stepped down. */
@@ -523,6 +527,52 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(version.steps).toHaveLength(4)
     })
 
+    it('shows the plan summary: the goal with its chip label, the stored counts, and the step-down of the stopped product with the sentence about it', async () => {
+      const { guest, stopped } = await withRoutine()
+      const shown = await shelfProduct(guest, stopped)
+
+      const { summary } = await readyOf(guest)
+
+      expect(summary).toEqual({
+        goal: { id: 'glow', label: 'A glow' },
+        keepUsing: 1,
+        useLessOrChange: 5,
+        stepDown: {
+          products: [{ brand: shown.brand, name: shown.name }],
+          message: `Stopping ${shown.brand} ${shown.name} suddenly can make your skin flare. We'll take it step by step, so the rough days are expected, not a surprise.`,
+        },
+      })
+    })
+
+    it('has no step-down in the summary when nothing is stopped', async () => {
+      const { guest } = await withRoutine({ tapers: [], shelfCounts: { keep: 2, reduce: 0, drop: 1, stop: 0 } })
+
+      const { summary } = await readyOf(guest)
+
+      expect(summary).toEqual({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 2, useLessOrChange: 1, stepDown: null })
+    })
+
+    it('has summary null for a routine with no stored counts, one built before the counts existed, and still shows its steps', async () => {
+      const { guest } = await withRoutine({ shelfCounts: null })
+
+      const body = await readyOf(guest)
+
+      expect(body.summary).toBeNull()
+      expect(body.steps).toHaveLength(4)
+    })
+
+    it('carries the same summary on an updating routine', async () => {
+      const { guest } = await withRoutine()
+      const ready = await readyOf(guest)
+      await appendPending(guest)
+
+      const updating = await readyOf(guest)
+
+      expect(updating.status).toBe('updating')
+      expect(updating.summary).toMatchObject({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 1, useLessOrChange: 5 })
+      expect(updating.summary).toEqual(ready.summary)
+    })
+
     it('shows a product sold only in another country as not sold here, with the country that sells it and no price', async () => {
       const { guest } = await withRoutine()
 
@@ -635,6 +685,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       'hintsShown',
       'source',
       'cautions',
+      'shelfCounts',
+      'shelf_counts',
       'gotIt',
       'approvedBy',
       'approvedOn',
@@ -701,7 +753,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(await res.json()).toMatchObject({ success: false, status: 409, error: { code: 'ROUTINE_NOT_READY' } })
     })
 
-    it('answers 200 with the routine started today, its step-downs dated from today, week by week', async () => {
+    it('answers 200 with the routine started tomorrow (day 1 is the day after the tap), its step-downs dated from then, week by week', async () => {
       const { guest } = await withRoutine()
       const today = new Date()
 
@@ -712,12 +764,12 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const day = (offset: number) => utcDay(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + offset)))
       expect(body.status).toBe('ready')
       // A test that runs across UTC midnight would be wrong by a day; the read of the clock is a moment before the call.
-      expect(body.startedOn).toBe(day(0))
-      // Weeks 1-2 are days 0-13, weeks 3-4 days 14-27, week 5 days 28-34.
+      expect(body.startedOn).toBe(day(1))
+      // From day 1 (tomorrow): weeks 1-2 are days 1-14, weeks 3-4 days 15-28, week 5 days 29-35.
       expect(body.tapers[0]!.steps).toEqual([
-        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days', fromDate: day(0), toDate: day(13) },
-        { fromWeek: 3, toWeek: 4, frequency: 'weekly', fromDate: day(14), toDate: day(27) },
-        { fromWeek: 5, toWeek: 5, frequency: 'stop', fromDate: day(28), toDate: day(34) },
+        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days', fromDate: day(1), toDate: day(14) },
+        { fromWeek: 3, toWeek: 4, frequency: 'weekly', fromDate: day(15), toDate: day(28) },
+        { fromWeek: 5, toWeek: 5, frequency: 'stop', fromDate: day(29), toDate: day(35) },
       ])
     })
 
@@ -957,6 +1009,17 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(parseFrame(frames[0]!).data).toEqual(await readyOf(guest))
       expect(parseFrame(frames[1]!).data).toEqual({})
       expect(ended).toBe(true)
+    })
+
+    it('carries the plan summary in the snapshot frame, the one the read answers', async () => {
+      const { guest } = await withRoutine()
+      const { stream } = await watch(guest)
+
+      const { frames } = await stream.read(3)
+
+      const snapshot = parseFrame(frames[0]!).data as ReadyBody
+      expect(snapshot.summary).toMatchObject({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 1, useLessOrChange: 5, stepDown: { products: [expect.objectContaining({ name: expect.any(String) })] } })
+      expect(snapshot.summary).toEqual((await readyOf(guest)).summary)
     })
 
     it('starts with a pending snapshot and stays open for an account with no routine yet', async () => {

@@ -30,6 +30,7 @@ import { rulesOnlyRoutine } from './routines.rules-only'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
 import { assembleSkeleton, candidateOf, cautionsOf, sunscreenKept } from './routines.skeleton'
 import { asRoutine, spliceFixed, stableMerge, type SplicedRoutine, type StableCarry } from './routines.stable'
+import type { ShelfCounts } from './routines.table'
 import type { CautionState, GateFailure, Routine, RoutineSkeleton, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
 
 export type RoutineServiceDeps = {
@@ -176,13 +177,13 @@ export class RoutineService {
   }
 
   /**
-   * Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
+   * Makes tomorrow (the next UTC midnight) day 1 of the routine in force, and of its step-downs: the person taps Start on the evening they decide, and the plan begins with the morning after. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
    * answers pending): a routine the person cannot see is not started. Starting again changes nothing.
    */
   async start(profileId: string): Promise<void> {
     if ((await this.current(profileId)).status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
     const now = this.now()
-    await this.repository.markStarted(profileId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())))
+    await this.repository.markStarted(profileId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)))
   }
 
   /**
@@ -431,6 +432,7 @@ export class RoutineService {
     const today = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
+    const shelfCounts = RoutineService.countsOf(skeleton.shelf)
     const base: Omit<RoutineVersionRow, 'id'> = {
       profileId,
       status: 'ready',
@@ -440,6 +442,7 @@ export class RoutineService {
       expectation: null,
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
+      shelfCounts,
       readyAt: null,
       startedOn: current?.startedOn ?? null,
       servedAt: null,
@@ -455,7 +458,7 @@ export class RoutineService {
       writerRetryDueAt: null,
       writerCalls: 0,
     }
-    // A step-down that begins after Start (a new stop) begins the day of the rebuild.
+    // A step-down that begins after Start (a new stop) begins the day of the rebuild, or day 1 when that is still ahead (Start was tapped, day 1 has not come).
     const ready = (built: SplicedRoutine, over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
       ...base,
       id: versionId,
@@ -472,7 +475,11 @@ export class RoutineService {
         // A retry that finds nothing to rewrite is done with: the version is not due another.
         if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
         // The inputs changed (or the stale read would ask again on every read) but the routine did not: it now stands for the inputs it was just checked against.
-        if (current!.routineFingerprint !== routine) await this.repository.setRoutineFingerprint(current!.id, routine)
+        if (current!.routineFingerprint !== routine) {
+          await this.repository.setRoutineFingerprint(current!.id, routine)
+          // The shelf may sort differently under the new inputs (a product that joined it and is dropped), and the plan summary must match it.
+          await this.repository.setShelfCounts(current!.id, shelfCounts)
+        }
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
       }
@@ -490,7 +497,7 @@ export class RoutineService {
       return 'built'
     }
 
-    const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, routineFingerprint: null, catalogVersion: null, source: null }
+    const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, shelfCounts: null, routineFingerprint: null, catalogVersion: null, source: null }
     await this.repository.append(pending)
     await this.tell(profileId)
     // Start may have landed after the routine in force was read: the pending version is then started too (as Start does for a pending version it finds).
@@ -500,13 +507,14 @@ export class RoutineService {
     const { written, calls } = await this.write(profileId, pending.id, asked, checking, assemble)
     const built = written ?? assemble(rulesOnlyRoutine(asked))
     const after = await this.afterWrite(profileId, pending, built.steps)
-    const day = pending.startedOn ? today : after.startedOn
+    const startedOn = pending.startedOn ?? after.startedOn
     const done: CompletedRoutineBuild = {
       steps: after.steps,
-      tapers: RoutineService.datedFrom(built.tapers, day, day ?? today),
+      tapers: RoutineService.datedFrom(built.tapers, startedOn, today),
       expectation: built.expectation,
       cautions: skeleton.person.cautions,
       goal: skeleton.goal,
+      shelfCounts,
       // The writer is named whenever it was called, even if the rules wrote the routine in the end.
       model: calls > 0 ? this.writerIdentity.model : null,
       promptHash: calls > 0 ? this.writerIdentity.promptHash : null,
@@ -693,9 +701,18 @@ export class RoutineService {
     return { id: row.id, goal: row.goal ?? goal, expectation: row.expectation ?? '', steps: row.steps, tapers: row.tapers }
   }
 
-  /** The step-downs with the undated ones dated `day`, when the routine is started (`startedOn` set); before Start none has a date. */
+  /** The step-downs with the undated ones dated `day`, when the routine is started (`startedOn` set); before Start none has a date. None begins before day 1: Start makes tomorrow day 1, so a stop added in between waits for it. */
   private static datedFrom(tapers: StoredTaper[], startedOn: Date | null, day: Date): StoredTaper[] {
-    return startedOn === null ? tapers : tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn ?? day }))
+    if (startedOn === null) return tapers
+    const begin = startedOn.getTime() > day.getTime() ? startedOn : day
+    return tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn ?? begin }))
+  }
+
+  /** How the shelf (as the skeleton holds it, a reduced sunscreen already kept) sorts: each product in exactly one count. */
+  private static countsOf(shelf: readonly SkeletonShelfProduct[]): ShelfCounts {
+    const counts: ShelfCounts = { keep: 0, reduce: 0, drop: 0, stop: 0 }
+    for (const { verdict } of shelf) counts[verdict.kind]++
+    return counts
   }
 
   private static stoppedOf(skeleton: RoutineSkeleton): StoredTaper[] {

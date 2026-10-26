@@ -18,9 +18,11 @@ import type { CautionState } from './routines.types'
 //                                  `cautions` is the skeleton's CautionState[] (order kept, [] is not null) or null while pending. `goal` is the goal the
 //                                  version was built for, or null while pending (and on a row written before the column). `readyAt` is when the version became ready:
 //                                  the caller gives it for a row appended already ready, and null for a pending one.
+//                                  `shelfCounts` (PR 5) is how the build sorted the shelf: { keep, reduce, drop, stop } whole numbers, or null while pending and on a row
+//                                  written before the column. Fixed at build time, it comes back exactly as given and is changed by nothing but `complete`.
 
 //   complete(id, built)            fills that one pending row with the finished build (steps, tapers, expectation, model, promptHash, catalogVersion,
-//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal, readyAt) and makes it 'ready', resolving to true. It does so
+//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal, shelfCounts, readyAt) and makes it 'ready', resolving to true. It does so
 //                                  once: an unknown id, or a row that is already ready, resolves to false and changes nothing.
 //   latest(profileId)              the row with the newest createdAt, whatever its status, or null.
 //   current(profileId)             the `ready` row that became ready last (readyAt, then the larger id; a row with no readyAt counts from its createdAt),
@@ -111,6 +113,9 @@ const cautionsOf = (): CautionState[] => ['tapering', 'recent-reaction']
 
 const GOAL: Goal = 'fade-dark-marks'
 
+// Four different numbers, so a column that swaps two of them, or keeps only a total, cannot pass.
+const COUNTS = { keep: 4, reduce: 1, drop: 3, stop: 2 }
+
 /** A pending row: a build requested and not yet done. The routine and what only the build knows are empty. */
 const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partial<Appended> = {}): Appended => ({
   id,
@@ -122,6 +127,7 @@ const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partia
   expectation: null,
   cautions: null,
   goal: null,
+  shelfCounts: null,
   readyAt: null,
   startedOn: null,
   servedAt: null,
@@ -150,6 +156,7 @@ const readyRow = (profileId: string, id: string, createdAt: Date, over: Partial<
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  shelfCounts: COUNTS,
   readyAt: createdAt,
   startedOn: at(-DAY),
   servedAt: null,
@@ -174,6 +181,7 @@ const builtOf = (over: Partial<Completed> = {}): Completed => ({
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  shelfCounts: COUNTS,
   readyAt: at(DAY),
   model: 'claude-sonnet-5-5',
   promptHash: 'prompt-hash-1',
@@ -645,6 +653,65 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await repository.complete(pending.id, builtOf({ goal: 'glow' }))
 
         expect((await latestOf(repository, profileId)).goal).toBe('glow')
+      })
+    })
+
+    describe('shelf counts', () => {
+      it('keeps the four counts of a version as given, each in its own place', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { shelfCounts: { keep: 7, reduce: 0, drop: 5, stop: 1 } }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
+        expect((await repository.current(profileId))!.shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
+      })
+
+      it('has none recorded on a version appended without them: null, which is not the same as four zeros', async () => {
+        const { repository, newAccount } = await make()
+        const withNone = await newAccount()
+        const withZeros = await newAccount()
+        await repository.append(readyRow(withNone.profileId, crypto.randomUUID(), BASE, { shelfCounts: null }))
+        await repository.append(readyRow(withZeros.profileId, crypto.randomUUID(), BASE, { shelfCounts: { keep: 0, reduce: 0, drop: 0, stop: 0 } }))
+
+        expect((await latestOf(repository, withNone.profileId)).shelfCounts).toBeNull()
+        expect((await latestOf(repository, withZeros.profileId)).shelfCounts).toEqual({ keep: 0, reduce: 0, drop: 0, stop: 0 })
+      })
+
+      it('is null while a version is pending, and is filled in with the build\'s counts when it completes', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        expect((await latestOf(repository, profileId)).shelfCounts).toBeNull()
+
+        await repository.complete(pending.id, builtOf({ shelfCounts: { keep: 2, reduce: 6, drop: 0, stop: 3 } }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 2, reduce: 6, drop: 0, stop: 3 })
+      })
+
+      it('completes with no counts as null, when the build has none to give', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+
+        await repository.complete(pending.id, builtOf({ shelfCounts: null }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toBeNull()
+      })
+
+      it('is changed by nothing that marks the version later: serving it, starting it, clearing its writer retry or recording its fingerprint', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, writerRetryDueAt: at(DAY), shelfCounts: { keep: 7, reduce: 0, drop: 5, stop: 1 } })
+        await repository.append(row)
+
+        await repository.markServed(row.id, at(HOUR))
+        await repository.markStarted(profileId, at(2 * HOUR))
+        await repository.clearWriterRetry(row.id)
+        await repository.setRoutineFingerprint(row.id, 'routine-fp-2')
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
       })
     })
 
