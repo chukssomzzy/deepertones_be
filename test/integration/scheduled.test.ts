@@ -15,6 +15,7 @@ import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
+import { D1RoutinesRepository } from '../../src/modules/routines/routines.repository'
 import { D1VerdictsRepository } from '../../src/modules/verdicts/verdicts.repository'
 import { queueRecorder, stubPerfectCorp } from './perfect-corp.stub'
 
@@ -638,5 +639,138 @@ describe('the Worker scheduled handler: verdict fit retries due', () => {
 
     expect(await users.findById(guest)).toBeNull()
     expect(sweep).toHaveBeenCalledTimes(1)
+  })
+})
+
+
+// --- the routines sweeps (spec #189, PR 3c) ---
+
+// The daily cron ends with RoutineService.sweep(now): the dead-letter retries due, the writer retries due and the routines holding a retired product, each
+// capped at 200 (their rules are pinned in routines.service.test.ts and the repository contract). It runs after the verdict sweep, in its own try like the others, and a
+// failure is rethrown after everything else has run. It does nothing while routines are switched off: ROUTINES_ENABLED is false in the Worker's default
+// environment (wrangler.jsonc), so the tests that need it on say so in the env they hand the Worker. The routines producer is a recorder. The sweep is spied on
+// through the service the container builds, as the verdict sweep is, so a Worker without the service fails these tests and no others of this file.
+describe('the Worker scheduled handler: routines sweeps', () => {
+  const routineRows = new D1RoutinesRepository(createDb(env.DB))
+  const routineQueue = queueRecorder()
+  const verdictQueue = queueRecorder()
+  const pushes = queueRecorder()
+  const fireWithRoutines = async (cron: string, enabled = true) => {
+    const ctx = createExecutionContext()
+    const bindings = { ...env, ROUTINES_QUEUE: routineQueue.queue, VERDICTS_QUEUE: verdictQueue.queue, PUSH_DELIVERY_QUEUE: pushes.queue, ...(enabled ? { ROUTINES_ENABLED: 'true' } : {}) }
+    await worker.scheduled!(createScheduledController({ scheduledTime: NOW, cron }), bindings as typeof env, ctx)
+    await waitOnExecutionContext(ctx)
+  }
+  const routinesServicePrototype = () => Object.getPrototypeOf(buildContainer(env).routines) as { sweep(now: Date): Promise<number> }
+  const verdictsServicePrototype = () => Object.getPrototypeOf(buildContainer(env).verdicts) as { requeueDueFits(now: Date): Promise<number> }
+  afterEach(() => {
+    routineQueue.messages.length = 0
+    verdictQueue.messages.length = 0
+    pushes.messages.length = 0
+  })
+
+  /** A guest whose build request dead-lettered a day ago, so its retry is due now. */
+  const deadLetteredGuest = async () => {
+    const userId = crypto.randomUUID()
+    const profileId = crypto.randomUUID()
+    await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-routines-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    await routineRows.claim(profileId, 'routine-fp-1', new Date(NOW - 2 * DAY), new Date(NOW - 3 * DAY))
+    await routineRows.setRequestRetry(profileId, { retried: true, retryDueAt: new Date(NOW - HOUR) })
+    return profileId
+  }
+  const queuedFor = (profileId: string) => routineQueue.messages.filter((message) => (message as { profileId: string }).profileId === profileId)
+
+  it('on the daily cron, queues the retry of a build request whose retry is due, marked as the retry', async () => {
+    const profileId = await deadLetteredGuest()
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON)
+
+    expect(queuedFor(profileId)).toEqual([{ profileId, reason: expect.any(String), requestKey: 'routine-fp-1', requestedAt: expect.any(Number), waits: 0, retry: true }])
+  })
+
+  it('queues nothing while routines are switched off, which is how the Worker is configured by default', async () => {
+    const profileId = await deadLetteredGuest()
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON, false)
+
+    expect(queuedFor(profileId)).toEqual([])
+    expect((await routineRows.findRequest(profileId))!.retryDueAt).not.toBeNull()
+  })
+
+  it('on the reaper cron, which runs every 10 minutes, queues nothing: the sweeps are a once-a-day job', async () => {
+    const profileId = await deadLetteredGuest()
+
+    await fireWithRoutines(SCAN_REAPER_CRON)
+
+    expect(queuedFor(profileId)).toEqual([])
+  })
+
+  it('calls the sweep once, with the time of the run', async () => {
+    const sweep = vi.spyOn(routinesServicePrototype(), 'sweep').mockResolvedValue(0)
+    const before = Date.now()
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON)
+
+    expect(sweep).toHaveBeenCalledTimes(1)
+    const when = sweep.mock.calls[0]![0]
+    expect(when).toBeInstanceOf(Date)
+    expect(when.getTime()).toBeGreaterThanOrEqual(before)
+    expect(when.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it('runs the routines sweep after the verdict sweep', async () => {
+    const verdicts = vi.spyOn(verdictsServicePrototype(), 'requeueDueFits').mockResolvedValue(0)
+    const routines = vi.spyOn(routinesServicePrototype(), 'sweep').mockResolvedValue(0)
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON)
+
+    expect(verdicts).toHaveBeenCalledTimes(1)
+    expect(routines).toHaveBeenCalledTimes(1)
+    expect(verdicts.mock.invocationCallOrder[0]!).toBeLessThan(routines.mock.invocationCallOrder[0]!)
+  })
+
+  it('still runs the routines sweep when the verdict sweep throws, and the run still fails with the verdict sweep\'s error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(verdictsServicePrototype(), 'requeueDueFits').mockRejectedValue(new Error('the verdict sweep exploded'))
+    const routines = vi.spyOn(routinesServicePrototype(), 'sweep').mockResolvedValue(0)
+
+    await expect(fireWithRoutines(GUEST_CLEANUP_CRON)).rejects.toThrow('the verdict sweep exploded')
+
+    expect(routines).toHaveBeenCalledTimes(1)
+  })
+
+  it('still deletes the abandoned guests, queues the due safety parses, sends the check-in pushes and queues the verdict retries when the routines sweep throws, and the run still fails with its error', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(routinesServicePrototype(), 'sweep').mockRejectedValue(new Error('the routines sweep exploded'))
+    const parses = vi.spyOn(SafetyService.prototype, 'requeueDueParses').mockResolvedValue(0)
+    const checkIns = vi.spyOn(FaceScanService.prototype, 'sendDueCheckIns').mockResolvedValue(0)
+    const verdicts = vi.spyOn(verdictsServicePrototype(), 'requeueDueFits').mockResolvedValue(0)
+    const guest = await abandonedGuest()
+
+    await expect(fireWithRoutines(GUEST_CLEANUP_CRON)).rejects.toThrow('the routines sweep exploded')
+
+    expect(await users.findById(guest)).toBeNull()
+    expect(parses).toHaveBeenCalledTimes(1)
+    expect(checkIns).toHaveBeenCalledTimes(1)
+    expect(verdicts).toHaveBeenCalledTimes(1)
+  })
+
+  it('fails the run with the first failure when the routines sweep throws after an earlier sweep did', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(SafetyService.prototype, 'requeueDueParses').mockRejectedValue(new Error('the safety sweep exploded'))
+    vi.spyOn(routinesServicePrototype(), 'sweep').mockRejectedValue(new Error('the routines sweep exploded'))
+
+    await expect(fireWithRoutines(GUEST_CLEANUP_CRON)).rejects.toThrow('the safety sweep exploded')
+  })
+
+  it('logs a failed routines sweep with a scrubbed error and no words of the error\'s own', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(routinesServicePrototype(), 'sweep').mockRejectedValue(new Error('the routines sweep exploded with Karo Glow Cream'))
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON).catch(() => undefined)
+
+    const text = logged.mock.calls.map((call) => JSON.stringify(call)).join('\n')
+    expect(text).toContain('failed')
+    expect(text).not.toContain('Karo Glow Cream')
   })
 })

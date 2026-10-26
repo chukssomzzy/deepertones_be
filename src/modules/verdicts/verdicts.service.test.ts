@@ -24,6 +24,7 @@ import type { z } from 'zod'
 import type { buildVerdictSpec } from './verdicts.job-specs'
 import { FakeVerdictsRepository } from './verdicts.repository.fake'
 import { VerdictService } from './verdicts.service'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 
 // The shelf verdict's service (spec #171, D2b): `current` (what GET /me/verdict will return), `build` (the body of the build-verdict job), `requeueDueFits` (the daily
 // sweep), `markFitFailed` (the dead-letter hook) and `savedFor` (what the routine, #152, reads). The other services are Pick<> fakes that answer from one mutable
@@ -211,6 +212,8 @@ let fitter: MemoryVerdictFitter
 let jobs: MemoryJobQueue
 let events: MemoryScanEvents
 let service: VerdictService
+/** What `service` was built from, so a test can build another over the same world with one more dependency. */
+let verdictDeps: object
 
 const profileOf = (who: Actor): string => (who.kind === 'user' ? who.profileId : '')
 
@@ -328,6 +331,7 @@ beforeEach(() => {
     now: () => clock,
   }
   service = new VerdictService(deps as never)
+  verdictDeps = deps
 })
 
 afterEach(() => {
@@ -2090,5 +2094,154 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
       expect(done).toEqual(DONE_FRAME)
       expect(rest).toEqual([])
     })
+  })
+})
+
+// --- the routine trigger (spec #189, PR 3c) ---
+//
+// A verdict saved for the inputs as they are is the moment the routine is asked to follow it. VerdictService takes an optional `onRoutineTrigger?: RoutineTrigger`
+// (routines.trigger.ts, a leaf file: it never imports the routines service) and build() calls it as (profileId, 'verdict', <the fingerprint it just saved>):
+//   - after the save and the outdated check, so a save that is already out of date asks for nothing (the build queued for the newer inputs will);
+//   - before the stream is told anything, so a failed publish can never cost the routine its trigger;
+//   - in a try of its own, so a hook that fails changes nothing the host does: the verdict stays saved, the stream still gets the verdict and done, and a failed
+//     fit judge still fails the build for the queue to retry.
+// A build that saved nothing (still waiting for the shelf, or the verdict already built) calls nothing.
+describe('VerdictService.build: the routine trigger', () => {
+  let trigger: ReturnType<typeof vi.fn<RoutineTrigger>>
+
+  beforeEach(() => {
+    trigger = vi.fn<RoutineTrigger>(async () => undefined)
+    service = new VerdictService({ ...verdictDeps, onRoutineTrigger: trigger } as never)
+  })
+
+  it('asks for the routine once with the profile, the reason verdict and the fingerprint of the verdict it saved', async () => {
+    await built()
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(trigger).toHaveBeenCalledWith('profile-amara-1', 'verdict', (await rowOf()).fingerprint)
+    expect((await rowOf()).fingerprint).toBe((await savedFor('profile-amara-1'))!.fingerprint)
+  })
+
+  it('asks for the profile that was built for and no other', async () => {
+    await built(AMARA)
+    await built(TOLU)
+
+    expect(trigger.mock.calls.map((call: Parameters<RoutineTrigger>) => call[0])).toEqual(['profile-amara-1', 'profile-tolu-1'])
+  })
+
+  it('asks with the new fingerprint when the shelf changed and the verdict was built again', async () => {
+    await built()
+    const first = (await rowOf()).fingerprint
+    addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+    await built()
+
+    expect(trigger).toHaveBeenCalledTimes(2)
+    expect(trigger.mock.calls[0]![2]).toBe(first)
+    expect(trigger.mock.calls[1]![2]).toBe((await rowOf()).fingerprint)
+    expect(trigger.mock.calls[1]![2]).not.toBe(first)
+  })
+
+  it('asks before the stream is told anything, so a stream that is down cannot cost the routine its trigger', async () => {
+    let publishedWhenAsked = -1
+    trigger.mockImplementation(async () => {
+      publishedWhenAsked = events.published.length
+    })
+    await built()
+
+    expect(publishedWhenAsked).toBe(0)
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+  })
+
+  it('asks even when the stream cannot be sent to', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    vi.spyOn(events, 'publish').mockRejectedValue(new Error('the stream is down'))
+
+    await expect(built()).resolves.toBeUndefined()
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+  })
+
+  it('asks for nothing when the verdict saved is already out of date: the shelf changed while the judge worked', async () => {
+    await current()
+    const asked = lastBody()
+    fitter.respondWith((request) => {
+      addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+      return helpingAll(request)
+    })
+
+    await build(asked)
+
+    // The build for the shelf as it now is has been queued, and it will ask once it has saved.
+    expect(jobs.enqueued).toHaveLength(2)
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('asks for the newer verdict once the build queued for the changed shelf has run', async () => {
+    await current()
+    fitter.respondWith((request) => {
+      addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+      return helpingAll(request)
+    })
+    await build(lastBody())
+    fitter.respondWith(helpingAll)
+
+    await build(lastBody())
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(trigger).toHaveBeenCalledWith('profile-amara-1', 'verdict', (await rowOf()).fingerprint)
+  })
+
+  it('asks for nothing while the build only waits for the shelf to settle', async () => {
+    world.inFlight = true
+    await current()
+
+    await build(lastBody())
+
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('asks for nothing when the same message is delivered again and the verdict is already built', async () => {
+    await built()
+    trigger.mockClear()
+
+    await build(jobs.enqueued[0]!.body as BuildBody)
+
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['rejects', () => Promise.reject(new Error('the routine queue is down'))],
+    ['throws at once', () => {
+      throw new Error('the routine queue is down')
+    }],
+  ])('keeps the saved verdict, tells the stream the verdict and done, and resolves, when the hook %s', async (_how, fail) => {
+    trigger.mockImplementation(fail)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    await expect(built()).resolves.toBeUndefined()
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(await rowOf()).toMatchObject({ status: 'ready', fit: 'ready' })
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+  })
+
+  it('still fails the build for the queue to retry, with the judge\'s error and not the hook\'s, when the judge failed and the hook fails too', async () => {
+    trigger.mockRejectedValue(new Error('the routine queue is down'))
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await current()
+    fitFails('the fit judge is unavailable')
+
+    await expect(build(lastBody())).rejects.toThrow('the fit judge is unavailable')
+
+    expect(await rowOf()).toMatchObject({ status: 'ready', fit: 'not-ready' })
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready')])
+  })
+
+  it('builds as before when no hook is wired', async () => {
+    service = new VerdictService(verdictDeps as never)
+
+    await built()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
   })
 })
