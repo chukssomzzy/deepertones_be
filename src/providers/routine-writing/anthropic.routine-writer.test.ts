@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { Routine, RoutineSkeleton } from '../../modules/routines/routines.types'
+import type { GateFailure, Routine, RoutineSkeleton } from '../../modules/routines/routines.types'
 import { routineWriterWriteRoutinePrompt } from '../../prompts/prompts.generated'
 import { AI_JOBS, AiBudgetExceededError, type AiJob } from '../anthropic/ai-spend.provider'
 import { AnthropicClient } from '../anthropic/anthropic.client'
@@ -237,6 +237,91 @@ describe('AnthropicRoutineWriter request', () => {
     expect(Object.keys(top.properties).sort()).toEqual(['expectation', 'steps', 'tapers'])
     expect([...top.required].sort()).toEqual(['expectation', 'steps', 'tapers'])
     expect(top.additionalProperties).toBe(false)
+  })
+})
+
+describe('AnthropicRoutineWriter retry', () => {
+  // The brief's own example, written out: the codes and steps in the order given, then the fixed closing line.
+  const FAILED: GateFailure[] = [
+    { gate: 'unknown-product', step: 'treat' },
+    { gate: 'gap', step: 'protect' },
+  ]
+  const RETRY_TEXT = 'Your previous routine failed these checks: unknown-product (treat), gap (protect). Return a corrected routine.'
+  // Written out, not built from LEAD_IN by the same code the adapter uses: this is what the request carries today, with no retry.
+  const FIRST_ATTEMPT_MESSAGES = [{ role: 'user', content: [{ type: 'text', text: `Write the routine for this skeleton:\n${JSON.stringify(SKELETON)}` }] }]
+
+  /** The request body sent for SKELETON; `retry` is passed through exactly as given. */
+  const bodyOf = async (...retry: [] | [{ failed: GateFailure[] } | undefined]) => {
+    const { calls, writer } = writerAnswering()
+    await writer.write(SKELETON, ...retry)
+    return calls[0]!.body
+  }
+
+  describe('with no retry', () => {
+    it('sends exactly the one user message it sends today: one text block, the lead-in then the skeleton as JSON', async () => {
+      const body = await bodyOf()
+
+      expect(body.messages).toEqual(FIRST_ATTEMPT_MESSAGES)
+    })
+
+    it('sends the same request whether retry is left out or passed as undefined', async () => {
+      expect(await bodyOf(undefined)).toEqual(await bodyOf())
+    })
+
+    it('counts an empty failed list as no retry: the request is byte-identical', async () => {
+      expect(JSON.stringify(await bodyOf({ failed: [] }))).toBe(JSON.stringify(await bodyOf()))
+    })
+  })
+
+  describe('with a retry', () => {
+    it('adds exactly one extra text block after the skeleton, and the skeleton block is the one it sends today', async () => {
+      const body = await bodyOf({ failed: FAILED })
+
+      expect(body.messages).toHaveLength(1)
+      expect(body.messages[0].role).toBe('user')
+      expect(body.messages[0].content).toEqual([...FIRST_ATTEMPT_MESSAGES[0]!.content, { type: 'text', text: RETRY_TEXT }])
+    })
+
+    it('lists each failure as its code and step, in the order given, in the fixed format', async () => {
+      const body = await bodyOf({ failed: FAILED })
+
+      expect(body.messages[0].content[1].text).toBe(RETRY_TEXT)
+    })
+
+    it('keeps the order it was given rather than sorting', async () => {
+      const body = await bodyOf({ failed: [...FAILED].reverse() })
+
+      expect(body.messages[0].content[1].text).toBe('Your previous routine failed these checks: gap (protect), unknown-product (treat). Return a corrected routine.')
+    })
+
+    it('writes a single failure without a separator', async () => {
+      const body = await bodyOf({ failed: [{ gate: 'gap', step: 'protect' }] })
+
+      expect(body.messages[0].content[1].text).toBe('Your previous routine failed these checks: gap (protect). Return a corrected routine.')
+    })
+
+    it('changes nothing else in the request: system prompt, max_tokens, model, output schema', async () => {
+      const first = await bodyOf()
+      const retried = await bodyOf({ failed: FAILED })
+
+      expect({ ...retried, messages: null }).toEqual({ ...first, messages: null })
+    })
+
+    it('names a routine-wide failure (no step) by its code alone, never as "null" or "undefined"', async () => {
+      const body = await bodyOf({ failed: [{ gate: 'parse', step: null }] })
+
+      const text: string = body.messages[0].content[1].text
+      expect(text).toContain('parse')
+      expect(text).not.toMatch(/null|undefined/)
+    })
+
+    it('carries only fixed codes and steps, nothing of the failed routine or its model text', async () => {
+      const body = await bodyOf({ failed: FAILED })
+
+      // Everything the block says is the fixed sentence plus the codes and steps; stripping those leaves only the fixed words.
+      const text: string = body.messages[0].content[1].text
+      expect(text.replace(/unknown-product|gap|treat|protect/g, '')).toBe('Your previous routine failed these checks:  (),  (). Return a corrected routine.')
+    })
   })
 })
 

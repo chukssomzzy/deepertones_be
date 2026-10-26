@@ -302,6 +302,22 @@ export class FaceScanService {
   }
 
   /**
+   * What the routine stage reads of the given profile's newest ready scan: the concerns of the scan's OWN goal it measured (a faint one included, as the verdict reads them),
+   * the other measured concerns that can be seen (`alsoNoticed`, which are not stored but worked out from the score rows), and the scan's skin type. Nothing of an older
+   * scan is mixed in. Empty with a null skin type when there is no ready scan. By profile id with no session, consent or verification, since a job asks; reads only.
+   */
+  async seenFor(profileId: string): Promise<{ seen: { concern: ShownConcern; level: Band }[]; alsoNoticed: { concern: ShownConcern; level: Band }[]; skinType: SkinTypeLabel | null }> {
+    const scan = await this.repository.latestReadyForProfile(profileId)
+    if (!scan) return { seen: [], alsoNoticed: [], skinType: null }
+    const results = await this.repository.resultsOf(scan.id)
+    return {
+      seen: shownConcerns(scan.goalAtScan, results).map(({ concern, band }) => ({ concern, level: band })),
+      alsoNoticed: noticedConcerns(scan.goalAtScan, results).map(({ concern, band }) => ({ concern, level: band })),
+      skinType: scan.skinType,
+    }
+  }
+
+  /**
    * The profile's latest scans, newest first, in every state, each the view `getFaceScan` gives. Needs no consent and no goal, so it still works after the consent
    * is withdrawn. `rescanSuggested` is a fact about the profile, not the scan, so it is worked out once for all of them; it now needs the goal history too
    * (the due rule reads it), so the history is fetched once and shared with the day-one comparison every ready scan in the list makes.

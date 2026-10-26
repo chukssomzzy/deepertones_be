@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { GOALS } from '../goals/goals.vocabulary'
 import type { SkeletonCandidate, SkeletonGap } from './routines.types'
-import { maxNewProductsFor, ROUTINE_ALLOWED_FREQUENCIES, ROUTINE_RULES_VERSION, routineStepsFor } from './routines.rules'
+import { FREQUENCY_RANK, maxNewProductsFor, reducedFrequencyFor, ROUTINE_ALLOWED_FREQUENCIES, ROUTINE_RULES_VERSION, routineStepsFor } from './routines.rules'
 
 // The production routine rules (spec #189): the steps a goal uses, the frequencies each step allows and the new-product limit. The eval builds its skeleton
 // from the same rules, so what is measured is what ships. Expected values are written out here, not read back from the rules.
@@ -76,5 +76,42 @@ describe('maxNewProductsFor', () => {
 
   it('counts a gap once however many candidates it has, because the routine buys one product per gap', () => {
     expect(maxNewProductsFor([gap('cleanse', ['A', 'B', 'C']), gap('treat', [])])).toBe(1)
+  })
+})
+
+describe('reducedFrequencyFor', () => {
+  it('picks the most frequent allowed frequency within the cap', () => {
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.treat, 'alternate-days')).toBe('alternate-days')
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.treat, 'weekly')).toBe('weekly')
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.treat, 'am-pm')).toBe('am-pm')
+    // pm comes first in the list but alternate-days is more frequent than weekly, and both are within the cap.
+    expect(reducedFrequencyFor(['weekly', 'alternate-days', 'as-needed'], 'am')).toBe('alternate-days')
+  })
+
+  it('gives the first in the allowed order when two frequencies tie on rank', () => {
+    // am and pm are the same rank: whichever the step lists first wins, in either order.
+    expect(reducedFrequencyFor(['am', 'pm', 'am-pm'], 'pm')).toBe('am')
+    expect(reducedFrequencyFor(['pm', 'am', 'am-pm'], 'am')).toBe('pm')
+  })
+
+  it('is null when every allowed frequency is more often than the cap', () => {
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.cleanse, 'weekly')).toBeNull()
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.cleanse, 'alternate-days')).toBeNull()
+    expect(reducedFrequencyFor(ROUTINE_ALLOWED_FREQUENCIES.protect, 'alternate-days')).toBeNull()
+  })
+
+  it('is null for nothing allowed', () => {
+    expect(reducedFrequencyFor([], 'am-pm')).toBeNull()
+  })
+})
+
+describe('FREQUENCY_RANK', () => {
+  it('ranks how often from least to most, am and pm level', () => {
+    expect(FREQUENCY_RANK['as-needed']).toBe(0)
+    expect(FREQUENCY_RANK.weekly).toBe(1)
+    expect(FREQUENCY_RANK['alternate-days']).toBe(2)
+    expect(FREQUENCY_RANK.am).toBe(3)
+    expect(FREQUENCY_RANK.pm).toBe(3)
+    expect(FREQUENCY_RANK['am-pm']).toBe(4)
   })
 })

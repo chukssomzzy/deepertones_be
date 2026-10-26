@@ -1,18 +1,12 @@
 import { ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
-import type { Frequency, RoutineStep } from '../catalog/catalog.vocabulary'
+import type { RoutineStep } from '../catalog/catalog.vocabulary'
+import { FREQUENCY_RANK } from './routines.rules'
 import { RoutineSchema } from './routines.schema'
 import { FORBIDDEN_WORDING } from './routines.wording'
 import type { GateFailure, Routine, RoutineSkeleton, SkeletonCandidate, SkeletonShelfProduct } from './routines.types'
 
-/** How often, from least to most. am and pm are the same rank: neither is more than the other. */
-export const FREQUENCY_RANK: Record<Frequency, number> = {
-  'as-needed': 0,
-  weekly: 1,
-  'alternate-days': 2,
-  am: 3,
-  pm: 3,
-  'am-pm': 4,
-}
+// Re-exported for the eval's tests, which rank frequencies the same way the gates do.
+export { FREQUENCY_RANK }
 
 const hasForbiddenWording = (text: string) => FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(text))
 
