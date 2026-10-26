@@ -9,6 +9,7 @@ import type { ShownConcern } from '../face-scans/face-scans.tables'
 import { verdictFingerprint } from './verdicts.fingerprint'
 import { floorVerdicts, type FloorResult } from './verdicts.floor'
 import { assembleVerdictInputs, fingerprintInputOf, fitRequestOf, provenanceOf } from './verdicts.inputs'
+import { mergeVerdict } from './verdicts.merge'
 
 // The pure assembly of a shelf verdict's inputs (spec #171, D2a): the facts the accessors already loaded (reference, goal, shelf entries, formulation facts,
 // no-label facts, routine steps, safety snapshot, face scan, fitter identity) become the exact inputs of the floor, the merge, the fit judge, the fingerprint and
@@ -24,6 +25,8 @@ import { assembleVerdictInputs, fingerprintInputOf, fitRequestOf, provenanceOf }
 //   fitRequestOf(facts, floor)         FitRequest, or null when there is nothing to ask: no open product and no clash, or the profile has no goal
 //   fingerprintInputOf(facts, floor)   FingerprintInput
 //   provenanceOf(facts, floor)         the saved row's `inputs`: ids, codes and bands only, never words the user typed
+//   floorInput.shelf[i].step           for a product, the first of its catalog steps in routine order, or null: the same value `perEntry` and the fit request
+//                                      give, so the floor can tell a sunscreen (step 'protect') from any other product
 
 type Facts = Parameters<typeof assembleVerdictInputs>[0]
 
@@ -121,8 +124,8 @@ describe('assembleVerdictInputs: the floor input', () => {
     const { floorInput } = assembleVerdictInputs(factsOf(BASIC))
 
     expect(floorInput.shelf.slice(0, 2)).toEqual([
-      { id: 'e-serum', kind: 'product', brand: 'Orbis', name: 'Dew Serum', variant: null, category: 'skin', productId: 'prod-e-serum', ingredients: ['Aqua', 'Niacinamide', 'Zinc PCA'] },
-      { id: 'e-cream', kind: 'product', brand: 'Orbis', name: 'Barrier Cream', variant: 'Rich', category: 'skin', productId: 'prod-e-cream', ingredients: ['Aqua', 'Glycerin', 'Shea Butter'] },
+      { id: 'e-serum', kind: 'product', brand: 'Orbis', name: 'Dew Serum', variant: null, category: 'skin', productId: 'prod-e-serum', ingredients: ['Aqua', 'Niacinamide', 'Zinc PCA'], step: 'treat' },
+      { id: 'e-cream', kind: 'product', brand: 'Orbis', name: 'Barrier Cream', variant: 'Rich', category: 'skin', productId: 'prod-e-cream', ingredients: ['Aqua', 'Glycerin', 'Shea Butter'], step: null },
     ])
   })
 
@@ -216,6 +219,88 @@ describe('assembleVerdictInputs: the floor input', () => {
       { source: 'reaction', kind: 'ingredient', name: 'fragrance', productId: null, ingredients: null },
       { source: 'reaction', kind: 'product', name: 'Unknown tub', productId: null, ingredients: null },
     ])
+  })
+
+  it('carries each product\'s step, the first of its catalog steps in routine order (not the first listed), found by catalog product id, and null when the catalog has none', () => {
+    const shelf = shelfOf([
+      { id: 'a', ingredients: ['Aqua'], steps: ['protect', 'cleanse'] },
+      { id: 'b', ingredients: ['Aqua'], steps: ['protect', 'moisturise'] },
+      { id: 'c', ingredients: ['Aqua'], steps: ['protect'] },
+      { id: 'd', ingredients: ['Aqua'] },
+    ])
+
+    const { floorInput } = assembleVerdictInputs(factsOf(shelf))
+
+    expect(floorInput.shelf.map((entry) => [entry.id, 'step' in entry ? entry.step : undefined])).toEqual([
+      ['a', 'cleanse'],
+      ['b', 'moisturise'],
+      ['c', 'protect'],
+      ['d', null],
+    ])
+  })
+
+  it('gives the floor the same step the fit request and the per-entry facts give', () => {
+    const shelf = shelfOf([
+      { id: 'a', ingredients: ['Aqua'], steps: ['protect', 'cleanse'] },
+      { id: 'b', ingredients: ['Aqua'], steps: ['protect'] },
+      { id: 'c', ingredients: ['Aqua'] },
+    ])
+    const facts = factsOf(shelf)
+    const { floorInput, perEntry } = assembleVerdictInputs(facts)
+
+    const asked = fitRequestOf(facts, floorOf(facts))?.shelf.map((product) => [product.id, product.step])
+
+    expect(asked).toEqual([['a', 'cleanse'], ['b', 'protect'], ['c', null]])
+    expect(floorInput.shelf.map((entry) => [entry.id, 'step' in entry ? entry.step : undefined])).toEqual(asked)
+    expect([...perEntry].map(([id, known]) => [id, known.step])).toEqual(asked)
+  })
+
+  it('is what the floor and the merge need to protect a sunscreen: a retinoid sunscreen (protect) clashing with an exfoliating-acid serum, which the judge says to reduce the sunscreen of, ends with the serum reduced and the sunscreen kept', () => {
+    const shelf = shelfOf([
+      { id: 'e-spf', ingredients: ['Aqua', 'Zinc Oxide', 'Retinol'], facts: { name: 'SPF 50 Sunscreen', form: 'lotion' }, steps: ['protect'] },
+      { id: 'e-acid', ingredients: ['Aqua', 'Glycolic Acid'], facts: { name: 'Peel Serum', form: 'serum' }, steps: ['treat'] },
+    ])
+    const facts = factsOf(shelf)
+    const { floorInput, entries } = assembleVerdictInputs(facts)
+    const floor = floorVerdicts(floorInput)
+    expect(floor.clashes).toMatchObject([{ ids: ['e-spf', 'e-acid'], groups: ['retinoid', 'exfoliating-acid'] }])
+    const request = fitRequestOf(facts, floor)
+    expect(request?.clashes).toEqual([{ ids: ['e-spf', 'e-acid'], groups: ['retinoid', 'exfoliating-acid'] }])
+
+    // The judge, which sees the pair, picks the sunscreen.
+    const fit = {
+      products: [
+        { id: 'e-spf', label: 'helping' as const, reason: 'Protects against the sun marks you are fading.', sameJobAs: null },
+        { id: 'e-acid', label: 'helping' as const, reason: 'Gently exfoliates.', sameJobAs: null },
+      ],
+      clashes: [{ ids: ['e-spf', 'e-acid'] as [string, string], reduceId: 'e-spf' }],
+    }
+    const merged = mergeVerdict({ floor, fit, entries })
+
+    expect(merged.products.map((p) => [p.entryId, p.group, p.verdict])).toEqual([
+      ['e-spf', 'helping', { kind: 'keep' }],
+      ['e-acid', 'conflicting', { kind: 'reduce', maxFrequency: 'alternate-days' }],
+    ])
+  })
+
+  it('does not take a product with no catalog step for a sunscreen, though it is named and shaped like one: the judge\'s pick of it stands', () => {
+    const shelf = shelfOf([
+      { id: 'e-spf', ingredients: ['Aqua', 'Retinol'], facts: { name: 'SPF 50 Sunscreen', form: 'lotion' } },
+      { id: 'e-acid', ingredients: ['Aqua', 'Glycolic Acid'], steps: ['treat'] },
+    ])
+    const facts = factsOf(shelf)
+    const { floorInput, entries } = assembleVerdictInputs(facts)
+    const fit = {
+      products: [
+        { id: 'e-spf', label: 'helping' as const, reason: 'Fine.', sameJobAs: null },
+        { id: 'e-acid', label: 'helping' as const, reason: 'Fine.', sameJobAs: null },
+      ],
+      clashes: [{ ids: ['e-spf', 'e-acid'] as [string, string], reduceId: 'e-spf' }],
+    }
+
+    const merged = mergeVerdict({ floor: floorVerdicts(floorInput), fit, entries })
+
+    expect(merged.products.map((p) => [p.entryId, p.verdict.kind])).toEqual([['e-spf', 'reduce'], ['e-acid', 'keep']])
   })
 
   it('is what the floor needs: a steroid on the shelf stops with the approved step-down code, and a serum nothing flags is left open', () => {
@@ -476,6 +561,17 @@ describe('fingerprintInputOf', () => {
     const other = factsOf(shelfOf([{ ...SERUM, skinConcerns: ['hd_acne', 'hd_redness'] }, CREAM]))
 
     expect(fingerprintInputOf(some, floorOf(some))).toEqual(fingerprintInputOf(none, floorOf(none)))
+    expect(await hash(other)).toBe(await hash(none))
+  })
+
+  it('does not change when a product\'s routine step changes, since the step (like the concerns) is catalog-derived and not part of what a verdict is hashed from', async () => {
+    const hash = (facts: Facts) => verdictFingerprint(fingerprintInputOf(facts, floorOf(facts)))
+    const none = factsOf(shelfOf([{ ...SERUM, steps: undefined }, CREAM]))
+    const sunscreen = factsOf(shelfOf([{ ...SERUM, steps: ['protect'] }, CREAM]))
+    const other = factsOf(shelfOf([{ ...SERUM, steps: ['cleanse', 'treat'] }, { ...CREAM, steps: ['protect'] }]))
+
+    expect(fingerprintInputOf(sunscreen, floorOf(sunscreen))).toEqual(fingerprintInputOf(none, floorOf(none)))
+    expect(await hash(sunscreen)).toBe(await hash(none))
     expect(await hash(other)).toBe(await hash(none))
   })
 
