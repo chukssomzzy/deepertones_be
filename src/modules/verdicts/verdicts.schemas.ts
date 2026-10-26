@@ -1,5 +1,6 @@
 import { z } from '@hono/zod-openapi'
 import { FREQUENCIES, TAPER_KINDS } from '../catalog/catalog.vocabulary'
+import { NoLabelResponse, ProductSummary } from '../scans/scans.schemas'
 
 const GROUPS = ['prescribed', 'likely-the-problem', 'conflicting', 'cant-tell', 'helping', 'redundant', 'blocking', 'undecided'] as const
 
@@ -15,6 +16,12 @@ const VerdictResponse = z
 export const VerdictProductResponse = z
   .object({
     entryId: z.string().openapi({ description: 'The shelf entry this is about: its `id` from `GET /api/v1/me/shelf`.' }),
+    kind: z
+      .enum(['product', 'no-label'])
+      .optional()
+      .openapi({ description: 'The shelf entry\'s own kind: `product` carries `product`; `no-label` carries `noLabel`. Absent only when the shelf entry can no longer be shown (it was taken off the shelf since the verdict was built): the product is still here, with its verdict, and carries neither.' }),
+    product: ProductSummary.optional().openapi({ description: 'Only on a `product` entry: the same summary `GET /api/v1/me/shelf` shows for it.' }),
+    noLabel: NoLabelResponse.optional().openapi({ description: 'Only on a `no-label` entry: the same view `GET /api/v1/me/shelf` shows for it.' }),
     group: z.enum(GROUPS).openapi({ description: 'The heading the product is shown under.' }),
     verdict: VerdictResponse,
     reason: z.string().openapi({ description: 'Why, in words for the user.' }),

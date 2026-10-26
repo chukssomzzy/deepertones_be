@@ -1,24 +1,34 @@
 import type { z } from '@hono/zod-openapi'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
-import type { SavedVerdictProduct } from './verdicts.types'
+import { toNoLabelResponse, toProductResponse } from '../scans/scans.presenter'
+import type { ShownVerdictProduct } from './verdicts.types'
 import type { ShelfVerdictResponse, VerdictProductResponse, VerdictTaperResponse } from './verdicts.schemas'
 
 /** What GET /me/verdict answers: the build is on its way, or the saved verdict with the step-down templates its stopped products use (retired ones included). */
-export type VerdictView = { status: 'pending' } | { status: 'ready'; fit: 'ready' | 'not-ready'; products: SavedVerdictProduct[]; tapers: TaperRow[] }
+export type VerdictView = { status: 'pending' } | { status: 'ready'; fit: 'ready' | 'not-ready'; products: ShownVerdictProduct[]; tapers: TaperRow[] }
 
 type PublicProduct = z.infer<typeof VerdictProductResponse>
 
 // Written out field by field: `facts`, `step` and `sourceUrls` are how the rules reached a verdict, not what the user is shown, and a field added to the saved
 // product later must not reach a client unless it is named here.
-const toProduct = ({ entryId, group, verdict, reason, escalate, sameJobAs, nudge }: SavedVerdictProduct): PublicProduct => ({
-  entryId,
-  group,
-  verdict: verdict.kind === 'stop' ? { kind: 'stop', taperCode: verdict.taperTemplateId } : verdict,
-  reason,
-  escalate,
-  ...(sameJobAs === undefined ? {} : { sameJobAs }),
-  ...(nudge === undefined ? {} : { nudge }),
-})
+const toProduct = (shown: ShownVerdictProduct): PublicProduct => {
+  const { entryId, group, verdict, reason, escalate, sameJobAs, nudge } = shown
+  return {
+    entryId,
+    // The shelf entry's own, through the presenters GET /me/shelf uses, so the two bodies cannot drift.
+    ...(shown.kind === 'product'
+      ? { kind: shown.kind, product: toProductResponse(shown.product) }
+      : shown.kind === 'no-label'
+        ? { kind: shown.kind, noLabel: toNoLabelResponse(shown.noLabel) }
+        : {}),
+    group,
+    verdict: verdict.kind === 'stop' ? { kind: 'stop', taperCode: verdict.taperTemplateId } : verdict,
+    reason,
+    escalate,
+    ...(sameJobAs === undefined ? {} : { sameJobAs }),
+    ...(nudge === undefined ? {} : { nudge }),
+  }
+}
 
 // The workbook reader has already turned the schedule cell into steps, so there is nothing to parse here. A template's status and audit columns are left out.
 const toTaper = ({ code, kind, schedule, whatToExpect, seeAProfessionalIf }: TaperRow): z.infer<typeof VerdictTaperResponse> => ({

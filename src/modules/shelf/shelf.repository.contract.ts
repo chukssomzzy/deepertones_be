@@ -191,6 +191,49 @@ export const shelfRepositoryContract = (name: string, make: () => ShelfContractS
       })
     })
 
+    describe('activeByIds', () => {
+      it('finds the profile\'s active entries among the ids asked, as they were stored, in id order', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const prefix = `entry-${crypto.randomUUID()}`
+        const product = productRow(profileId, { id: `${prefix}-b` })
+        const noLabel = noLabelRow(profileId, { id: `${prefix}-a` })
+        const unasked = productRow(profileId, { id: `${prefix}-c` })
+        for (const row of [product, unasked, noLabel]) await put(row)
+
+        expect(await repository.activeByIds(profileId, [product.id, noLabel.id])).toEqual([noLabel, product])
+      })
+
+      it('leaves out a removed entry, another profile\'s entry and an id nobody has', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const other = await newProfile()
+        const kept = productRow(profileId)
+        const removed = productRow(profileId, { removedAt: at(MINUTE), removedReason: 'stopped' })
+        const foreign = productRow(other)
+        for (const row of [kept, removed, foreign]) await put(row)
+
+        expect(idsOf(await repository.activeByIds(profileId, [kept.id, removed.id, foreign.id, crypto.randomUUID()]))).toEqual([kept.id])
+      })
+
+      it('answers nothing for no ids', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        await put(productRow(profileId))
+
+        expect(await repository.activeByIds(profileId, [])).toEqual([])
+      })
+
+      it('is not capped: more ids than one statement can bind are all found', async () => {
+        const { repository, newProfile, put } = await make()
+        const profileId = await newProfile()
+        const rows = Array.from({ length: 205 }, () => productRow(profileId))
+        for (const row of rows) await put(row)
+
+        expect(idsOf(await repository.activeByIds(profileId, idsOf(rows))).sort()).toEqual(idsOf(rows).sort())
+      })
+    })
+
     describe('remove', () => {
       it('removes the profile\'s own entry with its reason and the time, and says it did', async () => {
         const { repository, newProfile, put, stored } = await make()

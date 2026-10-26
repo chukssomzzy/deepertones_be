@@ -114,6 +114,9 @@ const deleteEntryRaw = (guest: Guest, entryId: string, body?: string) =>
     headers: { ...guest.headers(), 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body }),
   })
+// The route is read with plain fetch: the typed client has no call for it until the route exists, and the answer is the envelope either way.
+const getEntry = (guest: Guest | undefined, entryId: string) =>
+  fetchWorker(`http://deepertones.test/api/v1/me/shelf/${entryId}`, { headers: guest ? guest.headers() : { 'cf-connecting-ip': freshIp() } })
 const entriesOf = async (guest: Guest) => (await dataOf<{ entries: EntryBody[] }>(await getShelf(guest))).entries
 
 // --- driving items to ready and unidentified, by the real routes and steps ---
@@ -316,6 +319,128 @@ describe('GET /api/v1/me/shelf', () => {
 
   it('answers 401 AUTH_REQUIRED without a token', async () => {
     const res = await getShelf()
+
+    expect(res.status).toBe(401)
+    expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')
+  })
+})
+
+describe('GET /api/v1/me/shelf/{entryId}', () => {
+  it('answers 200 with the product entry exactly as the shelf list shows it, source and times included', async () => {
+    const guest = await newGuest()
+    const { productId } = await cataloguedProduct()
+    const { scanId, itemId, item } = await scanProduct(guest, productId)
+    const [listed] = await entriesOf(guest)
+
+    const res = await getEntry(guest, listed!.id)
+
+    expect(res.status).toBe(200)
+    const entry = await dataOf<EntryBody>(res)
+    expect(entry).toEqual(listed)
+    expect(entry).toMatchObject({ kind: 'product', source: { scanId, itemId }, product: item.product })
+    expect(entry).not.toHaveProperty('noLabel')
+  })
+
+  it('answers 200 with a no-label entry exactly as the shelf list shows it, with the noLabel view and no product', async () => {
+    const guest = await newGuest()
+    const { item } = await scanNoLabel(guest)
+    const [listed] = await entriesOf(guest)
+
+    const res = await getEntry(guest, listed!.id)
+
+    expect(res.status).toBe(200)
+    const entry = await dataOf<EntryBody>(res)
+    expect(entry).toEqual(listed)
+    expect(entry.noLabel).toEqual(item.noLabel)
+    expect(entry).not.toHaveProperty('product')
+  })
+
+  it('answers the one entry asked for, whatever else is on the shelf', async () => {
+    const guest = await newGuest()
+    const { productId } = await cataloguedProduct()
+    await scanProduct(guest, productId)
+    await scanNoLabel(guest)
+    const listed = await entriesOf(guest)
+
+    for (const wanted of listed) expect(await dataOf<EntryBody>(await getEntry(guest, wanted.id))).toEqual(wanted)
+  })
+
+  it('serves a guest, as the shelf list does', async () => {
+    const guest = await newGuest()
+    await scanNoLabel(guest)
+    const [listed] = await entriesOf(guest)
+
+    expect((await getEntry(guest, listed!.id)).status).toBe(200)
+  })
+
+  it('answers 404 SHELF_ENTRY_NOT_FOUND for an id nobody has', async () => {
+    const guest = await newGuest()
+
+    const res = await getEntry(guest, crypto.randomUUID())
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SHELF_ENTRY_NOT_FOUND')
+  })
+
+  it('answers 404 SHELF_ENTRY_NOT_FOUND for an entry taken off the shelf, though removing it again is 204, and the product comes back as the same entry when scanned again', async () => {
+    const guest = await newGuest()
+    const { productId } = await cataloguedProduct()
+    await scanProduct(guest, productId)
+    const [entry] = await entriesOf(guest)
+    expect((await deleteEntry(guest, entry!.id, { reason: 'finished' })).status).toBe(204)
+
+    const gone = await getEntry(guest, entry!.id)
+
+    expect(gone.status).toBe(404)
+    expect(await errorCodeOf(gone)).toBe('SHELF_ENTRY_NOT_FOUND')
+    expect((await deleteEntry(guest, entry!.id)).status).toBe(204)
+
+    await scanProduct(guest, productId)
+
+    expect((await dataOf<EntryBody>(await getEntry(guest, entry!.id))).id).toBe(entry!.id)
+  })
+
+  it('answers another profile\'s entry exactly as one that does not exist, so it never shows the entry exists', async () => {
+    const owner = await newGuest()
+    const intruder = await newGuest()
+    await scanNoLabel(owner)
+    const [entry] = await entriesOf(owner)
+
+    const refused = await getEntry(intruder, entry!.id)
+    const unknown = await getEntry(intruder, crypto.randomUUID())
+
+    expect(refused.status).toBe(404)
+    expect(await errorCodeOf(refused)).toBe('SHELF_ENTRY_NOT_FOUND')
+    expect(await errorCodeOf(unknown)).toBe('SHELF_ENTRY_NOT_FOUND')
+    // The words are the same too: nothing tells the two apart.
+    const message = async (res: Reply) => ((await res.json()) as { error: { message: string } }).error.message
+    expect(await message(await getEntry(intruder, entry!.id))).toBe(await message(await getEntry(intruder, crypto.randomUUID())))
+    expect((await dataOf<EntryBody>(await getEntry(owner, entry!.id))).id).toBe(entry!.id)
+  })
+
+  it('answers 404 SHELF_ENTRY_NOT_FOUND for an entry whose product no longer resolves, as the list leaves it out, and logs only its id', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const guest = await newGuest()
+    const lostId = await putRow(guest, { productId: crypto.randomUUID(), formulationId: crypto.randomUUID() })
+
+    const res = await getEntry(guest, lostId)
+
+    expect(res.status).toBe(404)
+    expect(await errorCodeOf(res)).toBe('SHELF_ENTRY_NOT_FOUND')
+    expect(error).toHaveBeenCalledWith({ outcome: 'shelf-entry-unresolved', entryId: lostId })
+  })
+
+  it('answers 400 VALIDATION_FAILED for an id that is not a uuid', async () => {
+    const guest = await newGuest()
+
+    const res = await getEntry(guest, 'not-a-uuid')
+
+    expect(res.status).toBe(400)
+    expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+  })
+
+  it('answers 401 AUTH_REQUIRED without a token', async () => {
+    const res = await getEntry(undefined, crypto.randomUUID())
 
     expect(res.status).toBe(401)
     expect(await errorCodeOf(res)).toBe('AUTH_REQUIRED')

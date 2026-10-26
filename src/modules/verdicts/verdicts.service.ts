@@ -20,7 +20,7 @@ import { assembleVerdictInputs, fingerprintInputOf, fitRequestOf, provenanceOf, 
 import { buildVerdictSpec, type BuildVerdictMessage } from './verdicts.job-specs'
 import { mergeVerdict, type MergedVerdict } from './verdicts.merge'
 import type { FitState, ShelfVerdictRow, VerdictsRepository } from './verdicts.repository'
-import type { SavedVerdictProduct } from './verdicts.types'
+import type { SavedVerdictProduct, ShownVerdictProduct } from './verdicts.types'
 import { toShelfVerdictResponse, type VerdictView } from './verdicts.view'
 
 export type VerdictServiceDeps = {
@@ -31,7 +31,7 @@ export type VerdictServiceDeps = {
   events: ScanEvents
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>
-  shelf: Pick<ShelfService, 'activeEntriesFor'>
+  shelf: Pick<ShelfService, 'activeEntriesFor' | 'viewsFor'>
   scans: Pick<ScanService, 'noLabelFacts' | 'hasShelfWorkInFlight'>
   safety: Pick<SafetyService, 'snapshotFor'>
   goals: Pick<GoalsService, 'goalFor'>
@@ -104,7 +104,7 @@ export class VerdictService {
   async current(): Promise<VerdictView> {
     const { profileId } = requireUser()
     const { reference, goal } = await this.gated(profileId)
-    return this.viewOf(await this.servable(profileId, reference, goal))
+    return this.viewOf(profileId, await this.servable(profileId, reference, goal))
   }
 
   /**
@@ -119,7 +119,7 @@ export class VerdictService {
     const { profileId } = requireUser()
     const { reference, goal } = await this.gated(profileId)
     const row = await this.servable(profileId, reference, goal)
-    const stream = await this.events.subscribe(VerdictService.streamKey(profileId), toShelfVerdictResponse(await this.viewOf(row)))
+    const stream = await this.events.subscribe(VerdictService.streamKey(profileId), toShelfVerdictResponse(await this.viewOf(profileId, row)))
     let latest: ReadyRow | null
     try {
       latest = (await this.lookup(profileId, reference, goal)).row ?? row
@@ -127,13 +127,21 @@ export class VerdictService {
       console.error({ outcome: 'watch-reread-failed', profileId })
       return stream
     }
-    try {
-      if (latest) {
-        if (latest.builtAt.getTime() !== row?.builtAt.getTime()) await this.publishVerdict(profileId, latest.fit, latest.products)
-        if (VerdictService.isFinished(latest)) await this.publishDone(profileId)
+    if (!latest) return stream
+    // The frame joins the shelf's products and can fail on its own; `done` is sent apart from it, so a failed join never leaves the stream open.
+    if (latest.builtAt.getTime() !== row?.builtAt.getTime()) {
+      try {
+        await this.publishVerdict(profileId, latest.fit, latest.products)
+      } catch {
+        console.error({ outcome: 'publish-failed', profileId })
       }
-    } catch {
-      console.error({ outcome: 'publish-failed', profileId })
+    }
+    if (VerdictService.isFinished(latest)) {
+      try {
+        await this.publishDone(profileId)
+      } catch {
+        console.error({ outcome: 'publish-failed', profileId })
+      }
     }
     return stream
   }
@@ -206,14 +214,16 @@ export class VerdictService {
     const fingerprintNow = (await this.assemble(profileId, asNow.reference, asNow.goal, await this.safety.snapshotFor(profileId))).fingerprint
     const outdated = fingerprintNow !== fingerprint
     if (outdated) await this.claimAndEnqueue(profileId, fingerprintNow)
-    // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream.
+    // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream. The frame joins the
+    // shelf's products and can fail on that; `done` does not depend on it, so it is sent whatever became of the frame.
     try {
-      if (outdated) {
-        await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict: toShelfVerdictResponse({ status: 'pending' }) })
-      } else {
-        await this.publishVerdict(profileId, merged.fit, products)
-        if (VerdictService.isFinished({ fit: merged.fit, fitRetried: fitState.fitRetried })) await this.publishDone(profileId)
-      }
+      if (outdated) await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict: toShelfVerdictResponse({ status: 'pending' }) })
+      else await this.publishVerdict(profileId, merged.fit, products)
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId })
+    }
+    try {
+      if (!outdated && VerdictService.isFinished({ fit: merged.fit, fitRetried: fitState.fitRetried })) await this.publishDone(profileId)
     } catch {
       console.error({ outcome: 'publish-failed', profileId })
     }
@@ -255,9 +265,13 @@ export class VerdictService {
       fitRetried: true,
       fitRetryDueAt: final ? null : new Date(this.now().getTime() + VerdictService.DAY_MS),
     })
-    // Nothing more is coming soon, so a stream still open is told what the row holds and that it is over. Never throws: the retry above is already scheduled.
+    // Nothing more is coming soon, so a stream still open is told what the row holds and that it is over. Never throws: the retry above is already scheduled. The verdict's frame joins the shelf's products and can fail on that, which must not skip `done`.
     try {
       if (isReady(row)) await this.publishVerdict(row.profileId, row.fit, row.products)
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId: row.profileId })
+    }
+    try {
       await this.publishDone(row.profileId)
     } catch {
       console.error({ outcome: 'publish-failed', profileId: row.profileId })
@@ -286,8 +300,25 @@ export class VerdictService {
     return { reference, goal }
   }
 
-  private async viewOf(row: ReadyRow | null): Promise<VerdictView> {
-    return row ? { status: 'ready', fit: row.fit, products: row.products, tapers: await this.tapersOf(row.products) } : { status: 'pending' }
+  private async viewOf(profileId: string, row: ReadyRow | null): Promise<VerdictView> {
+    if (!row) return { status: 'pending' }
+    const products = await this.shown(profileId, row.products)
+    return { status: 'ready', fit: row.fit, products, tapers: await this.tapersOf(products) }
+  }
+
+  /**
+   * The saved products with their shelf entry's kind and product or noLabel, read now in one call and never saved (a rename is no new build). A product whose
+   * entry no longer resolves (taken off the shelf since the build, which a rebuild then drops) is still shown, as saved and without them: its verdict, its
+   * escalation and its step-down are the user's to see, and none of them depends on the entry. No throw and no new build.
+   */
+  private async shown(profileId: string, products: readonly SavedVerdictProduct[]): Promise<ShownVerdictProduct[]> {
+    const views = await this.shelf.viewsFor(profileId, products.map(({ entryId }) => entryId))
+    return products.map((product): ShownVerdictProduct => {
+      const view = views.get(product.entryId)
+      if (view?.kind === 'product' && view.product) return { ...product, kind: 'product', product: view.product }
+      if (view?.kind === 'no-label' && view.noLabel) return { ...product, kind: 'no-label', noLabel: view.noLabel }
+      return product
+    })
   }
 
   /** The ready row built from the inputs as they are now, or null, and those inputs' fingerprint. Writes nothing. */
@@ -299,7 +330,8 @@ export class VerdictService {
 
   /** The verdict as the stream carries it: the public body GET answers. Throws when it cannot be sent; callers log that. */
   private async publishVerdict(profileId: string, fit: 'ready' | 'not-ready', products: SavedVerdictProduct[]): Promise<void> {
-    const verdict = toShelfVerdictResponse({ status: 'ready', fit, products, tapers: await this.tapersOf(products) })
+    const shown = await this.shown(profileId, products)
+    const verdict = toShelfVerdictResponse({ status: 'ready', fit, products: shown, tapers: await this.tapersOf(shown) })
     await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict })
   }
 
