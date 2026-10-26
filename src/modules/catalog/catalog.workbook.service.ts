@@ -40,6 +40,40 @@ export type VerdictReference = {
   tapers: Partial<Record<TaperKind, string>>
 }
 
+/**
+ * The rules as the shelf verdict reads them, in code order, whatever their status: which rules count is the caller's choice (the service passes the approved
+ * ones, the verdict eval its own set). Pure and exported so the eval maps through the same lines as the service. The lists are copies.
+ */
+export const verdictRulesOf = (rules: readonly IngredientRule[]): VerdictRule[] =>
+  [...rules]
+    .sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0))
+    .map((rule) => ({
+      name: rule.name,
+      aliases: [...rule.aliases],
+      kind: rule.kind,
+      rule: rule.statement,
+      source: rule.sourceUrl,
+      group: rule.group,
+      clashesWith: [...rule.clashesWith],
+      helps: [...rule.helps],
+    }))
+
+/**
+ * For each kind, the code of its approved template that was approved most recently, the lower code when two were approved on the same day; a kind with none is
+ * absent. Pure and exported so the verdict eval picks its step-down templates the way the service does.
+ */
+export const approvedTapersOf = (tapers: readonly TaperRow[]): Partial<Record<TaperKind, string>> => {
+  const chosen = new Map<TaperKind, TaperRow>()
+  for (const taper of tapers) {
+    if (taper.status !== 'approved') continue
+    const held = chosen.get(taper.kind)
+    const day = taper.approvedOn?.getTime() ?? 0
+    const heldDay = held?.approvedOn?.getTime() ?? 0
+    if (!held || day > heldDay || (day === heldDay && taper.code < held.code)) chosen.set(taper.kind, taper)
+  }
+  return Object.fromEntries([...chosen].map(([kind, taper]) => [kind, taper.code]))
+}
+
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
 /** The workbook is whatever JSON object was uploaded: its shape is checked by the import, after the contract version. */
@@ -198,20 +232,9 @@ export class CatalogWorkbookService {
     return {
       rulesVersion,
       catalogVersion,
-      rules: rules
-        .filter((rule) => rule.status === 'approved')
-        .map((rule) => ({
-          name: rule.name,
-          aliases: rule.aliases,
-          kind: rule.kind,
-          rule: rule.statement,
-          source: rule.sourceUrl,
-          group: rule.group,
-          clashesWith: rule.clashesWith,
-          helps: rule.helps,
-        })),
+      rules: verdictRulesOf(rules.filter((rule) => rule.status === 'approved')),
       claimPhrases: claimWords.filter((word) => word.status === 'approved').map((word) => word.phrase),
-      tapers: CatalogWorkbookService.latestApprovedTapers(tapers),
+      tapers: approvedTapersOf(tapers),
     }
   }
 
@@ -313,19 +336,6 @@ export class CatalogWorkbookService {
       searchText: normaliseText(`${row.brand} ${row.name} ${row.variant ?? ''}`),
       createdAt: this.now(),
     }
-  }
-
-  /** For each kind, the code of its approved template that was approved most recently, the lower code when two were approved on the same day. */
-  private static latestApprovedTapers(tapers: readonly TaperRow[]): Partial<Record<TaperKind, string>> {
-    const chosen = new Map<TaperKind, TaperRow>()
-    for (const taper of tapers) {
-      if (taper.status !== 'approved') continue
-      const held = chosen.get(taper.kind)
-      const day = taper.approvedOn?.getTime() ?? 0
-      const heldDay = held?.approvedOn?.getTime() ?? 0
-      if (!held || day > heldDay || (day === heldDay && taper.code < held.code)) chosen.set(taper.kind, taper)
-    }
-    return Object.fromEntries([...chosen].map(([kind, taper]) => [kind, taper.code]))
   }
 
   /** The approved rules an upload leaves in force, in code order, as the matcher reads them: the set the rules version names. */
