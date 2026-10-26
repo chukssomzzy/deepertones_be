@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
+import { ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
 
 /**
  * The build of one profile's routine. The message carries the profile's id, why it is built, what the request was claimed for, when it was requested, how many
@@ -19,6 +20,8 @@ export const buildRoutineSpec = jobSpec({
     requestedAt: z.number().int().nonnegative(),
     waits: z.number().int().nonnegative(),
     retry: z.boolean().optional(),
+    // `find one sold here`: the product to leave out of its step when the routine is built again.
+    exclude: z.object({ step: z.enum(ROUTINE_STEPS), code: z.string() }).optional(),
   }),
   key: (body) => `build-routine:${body.profileId}:${body.requestKey}:${body.requestedAt}:${body.waits}${body.retry ? ':retry' : ''}`,
   // Nobody waits for the build in a request, and a spent AI budget needs spacing between tries: retry as patiently as the verdict build.

@@ -98,6 +98,11 @@ describe('the versioned API', () => {
     ['GET', '/api/v1/scans/faces'],
     ['GET', `/api/v1/scans/faces/${SCAN_ID}`],
     ['DELETE', `/api/v1/scans/faces/${SCAN_ID}`],
+    ['GET', '/api/v1/me/routine'],
+    ['GET', '/api/v1/me/routine/events'],
+    ['POST', '/api/v1/me/routine/start'],
+    ['POST', '/api/v1/me/routine/steps/treat/got-it'],
+    ['POST', '/api/v1/me/routine/steps/treat/find-sold-here'],
   ])('answers %s %s without a token with 401 AUTH_REQUIRED', async (method, path) => {
     const res = await fetchWorker(path, { method })
 
@@ -163,6 +168,11 @@ describe('the OpenAPI document', () => {
         'POST /api/v1/me/shelf',
         'GET /api/v1/me/verdict',
         'GET /api/v1/me/verdict/events',
+        'GET /api/v1/me/routine',
+        'GET /api/v1/me/routine/events',
+        'POST /api/v1/me/routine/start',
+        'POST /api/v1/me/routine/steps/{step}/got-it',
+        'POST /api/v1/me/routine/steps/{step}/find-sold-here',
         'POST /api/v1/scans/products',
         'POST /api/v1/scans/products/shelf',
         'GET /api/v1/scans/products/{scanId}',
