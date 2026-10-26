@@ -14,6 +14,8 @@ import type { CautionState, SkeletonShelfProduct } from './routines.types'
 const candidate = (code: string, over: Partial<Candidate> = {}): Candidate => ({
   code,
   product: { id: `product-${code}`, kind: 'named', brand: `Brand ${code}`, name: `Name ${code}`, variant: null, form: 'cream', category: 'skin', imageUrl: null },
+  keyIngredient: null,
+  strength: null,
   skinConcerns: ['hd_radiance'],
   ingredients: ['Aqua', 'Glycerin'],
   evidenceUrls: [`https://evidence.example/${code}`],

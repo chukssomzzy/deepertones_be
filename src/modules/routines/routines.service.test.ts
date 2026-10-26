@@ -107,6 +107,8 @@ const safetyView = (choices: SafetyChoice[]): SafetyView => ({
 const candidate = (code: string, priceMin: number, frequency: Candidate['frequency']): Candidate => ({
   code,
   product: { id: `prod-${code}`, kind: 'named', brand: `Brand ${code}`, name: `Name ${code}`, variant: null, form: 'cream', category: 'skin', imageUrl: null },
+  keyIngredient: null,
+  strength: null,
   skinConcerns: ['hd_age_spot'],
   ingredients: ['Aqua', 'Niacinamide'],
   evidenceUrls: [`https://example.org/evidence/${code}`],
