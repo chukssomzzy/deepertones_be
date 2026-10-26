@@ -1,14 +1,25 @@
 import { and, asc, desc, eq } from 'drizzle-orm'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import { users } from '../users/users.table'
 import { profiles } from './profiles.table'
-import type { Profile } from './profiles.types'
+import type { Profile, ProfileWithOwner } from './profiles.types'
 
 export class D1ProfilesRepository {
   constructor(private readonly db: Db) {}
 
   async findById(id: string): Promise<Profile | null> {
     const [row] = await this.db.select().from(profiles).where(eq(profiles.id, id))
+    return row ?? null
+  }
+
+  /** The profile's id and user, with the status of that user (guest or verified), in one read; null for an id that is no profile. */
+  async findWithOwner(id: string): Promise<ProfileWithOwner | null> {
+    const [row] = await this.db
+      .select({ id: profiles.id, userId: profiles.userId, ownerStatus: users.status })
+      .from(profiles)
+      .innerJoin(users, eq(users.id, profiles.userId))
+      .where(eq(profiles.id, id))
     return row ?? null
   }
 

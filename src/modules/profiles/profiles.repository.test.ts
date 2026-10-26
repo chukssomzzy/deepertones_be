@@ -1,3 +1,4 @@
+import type { EmailAddress } from '../../lib/email-address'
 import { FakeUsersRepository } from '../users/users.repository.fake'
 import { FakeProfilesRepository } from './profiles.repository.fake'
 import { profilesRepositoryContract } from './profiles.repository.contract'
@@ -11,6 +12,9 @@ profilesRepositoryContract('fake', () => {
   const users = new FakeUsersRepository({ profiles: repository })
   return {
     repository,
+    verify: async (userId) => {
+      await users.promote(userId, { kind: 'email', email: `${userId}@example.com` as EmailAddress }, BASE)
+    },
     newUser: async () => {
       const userId = crypto.randomUUID()
       const profileId = crypto.randomUUID()

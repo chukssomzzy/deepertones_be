@@ -669,11 +669,12 @@ describe('the Worker scheduled handler: routines sweeps', () => {
     pushes.messages.length = 0
   })
 
-  /** A guest whose build request dead-lettered a day ago, so its retry is due now. */
-  const deadLetteredGuest = async () => {
+  /** An account whose build request dead-lettered a day ago, so its retry is due now. Only a verified account is built a routine, so it has verified unless it is to stay a guest. */
+  const deadLetteredGuest = async ({ verified = true }: { verified?: boolean } = {}) => {
     const userId = crypto.randomUUID()
     const profileId = crypto.randomUUID()
     await users.createGuestForDevice({ user: { id: userId, createdAt: new Date(NOW) }, device: { deviceHash: `scheduled-routines-${userId}`, platform: 'ios' }, profile: { id: profileId } })
+    if (verified) await users.promote(userId, { kind: 'email', email: parseEmailAddress(`${userId}@example.com`) }, new Date(NOW))
     await routineRows.claim(profileId, 'routine-fp-1', new Date(NOW - 2 * DAY), new Date(NOW - 3 * DAY))
     await routineRows.setRequestRetry(profileId, { retried: true, retryDueAt: new Date(NOW - HOUR) })
     return profileId
@@ -686,6 +687,15 @@ describe('the Worker scheduled handler: routines sweeps', () => {
     await fireWithRoutines(GUEST_CLEANUP_CRON)
 
     expect(queuedFor(profileId)).toEqual([{ profileId, reason: expect.any(String), requestKey: 'routine-fp-1', requestedAt: expect.any(Number), waits: 0, retry: true }])
+  })
+
+  it('queues nothing for a guest, and drops the retry so it stops being due', async () => {
+    const profileId = await deadLetteredGuest({ verified: false })
+
+    await fireWithRoutines(GUEST_CLEANUP_CRON)
+
+    expect(queuedFor(profileId)).toEqual([])
+    expect((await routineRows.findRequest(profileId))!.retryDueAt).toBeNull()
   })
 
   it('queues nothing while routines are switched off, which is how the Worker is configured by default', async () => {

@@ -80,6 +80,11 @@ export class D1RoutinesRepository {
     await this.db.update(routineVersions).set({ writerRetryDueAt: null }).where(eq(routineVersions.id, id))
   }
 
+  /** Sets the fingerprint of the inputs the version stands for, changing nothing else of it: a rebuild that found nothing to change records the inputs it checked. A version nobody has is ignored. */
+  async setRoutineFingerprint(id: string, fingerprint: string): Promise<void> {
+    await this.db.update(routineVersions).set({ routineFingerprint: fingerprint }).where(eq(routineVersions.id, id))
+  }
+
   /** Sets when the version was last returned to the user, changing nothing else of it. A version nobody has is ignored. */
   async markServed(id: string, at: Date): Promise<void> {
     await this.db.update(routineVersions).set({ servedAt: at }).where(eq(routineVersions.id, id))
@@ -190,7 +195,8 @@ export class D1RoutinesRepository {
 
   /**
    * The routine in force of each profile that recommends a product the catalog retired after the version was built: one of its steps holds a recommended product
-   * (`json_each` over `steps`) whose `recommended_products` row is `retired` in a catalog version later than the version's own. Each version once, at most `limit`.
+   * (`json_each` over `steps`) whose `recommended_products` row is `retired` in a catalog version later than the version's own. Each version once, at most `limit`, in
+   * the order of the versions' ids so the rows a run leaves for the next are always the same.
    */
   async retiredCodeVersions(limit: number): Promise<RoutineVersionRow[]> {
     const rows = await this.db
@@ -206,6 +212,7 @@ export class D1RoutinesRepository {
             where json_extract(step.value, '$.product.kind') = 'candidate' and retired.status = 'retired' and retired.updated_in_version > routine_versions.catalog_version)`,
         ),
       )
+      .orderBy(asc(routineVersions.id))
       .limit(limit)
     return rows.map(revived)
   }
