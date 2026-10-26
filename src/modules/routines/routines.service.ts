@@ -21,13 +21,16 @@ import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.serv
 import { expectationFor } from './routines.copy'
 import { checkRoutine } from './routines.gates'
 import { routineFingerprint } from './routines.fingerprint'
+import { applyOutcomeHints } from './routines.hints'
 import { buildRoutineSpec, type BuildRoutineMessage } from './routines.job-specs'
-import type { CompletedRoutineBuild, RoutineVersionRow, RoutinesRepository } from './routines.repository'
+import type { OutcomeCountsRepository } from './routines.outcome-counts.repository'
+import { hintsShown } from './routines.outcomes'
+import type { CompletedRoutineBuild, RoutineRequestRow, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 import { rulesOnlyRoutine } from './routines.rules-only'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
-import { assembleSkeleton, candidateOf, cautionsOf } from './routines.skeleton'
+import { assembleSkeleton, candidateOf, cautionsOf, sunscreenKept } from './routines.skeleton'
 import { asRoutine, spliceFixed, stableMerge, type SplicedRoutine, type StableCarry } from './routines.stable'
-import type { GateFailure, Routine, RoutineSkeleton, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
+import type { CautionState, GateFailure, Routine, RoutineSkeleton, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
 
 export type RoutineServiceDeps = {
   verdicts: Pick<VerdictService, 'savedFor'>
@@ -43,6 +46,8 @@ export type RoutineServiceDeps = {
   /** The model and prompt hash the writer runs under, recorded on every routine it writes. */
   writerIdentity: { model: string; promptHash: string }
   repository: RoutinesRepository
+  /** What other users' outcomes were with each product, read for the hints of the routines that show them. */
+  outcomeCounts: Pick<OutcomeCountsRepository, 'counts'>
   jobs: JobQueue
   /** Whether routines are switched on in this environment: off, `request` does nothing at all. */
   enabled: boolean
@@ -93,6 +98,8 @@ export class RoutineService {
   // The first build and the review-point rebuild wait for the verdict to be ready: a minute apart, 15 times, then they give up quietly.
   private static readonly MAX_WAITS = 15
   private static readonly WAIT_SECONDS = 60
+  // The daily sweeps look at this many rows each, so a day's work stays inside the Worker's subrequests; the rest wait for the next run.
+  private static readonly SWEEP_LIMIT = 200
   private static readonly WAITING_REASONS: ReadonlySet<RoutineBuildReason> = new Set(['first', 'review-point'])
 
   private readonly verdicts: RoutineServiceDeps['verdicts']
@@ -107,6 +114,7 @@ export class RoutineService {
   private readonly writer: RoutineWriter
   private readonly writerIdentity: RoutineServiceDeps['writerIdentity']
   private readonly repository: RoutinesRepository
+  private readonly outcomeCounts: RoutineServiceDeps['outcomeCounts']
   private readonly jobs: JobQueue
   private readonly enabled: boolean
   private readonly now: () => Date
@@ -125,6 +133,7 @@ export class RoutineService {
     this.writer = deps.writer
     this.writerIdentity = deps.writerIdentity
     this.repository = deps.repository
+    this.outcomeCounts = deps.outcomeCounts
     this.jobs = deps.jobs
     this.enabled = deps.enabled
     this.now = deps.now ?? (() => new Date())
@@ -200,10 +209,65 @@ export class RoutineService {
    * the queue refuses, the claim is given back. Never throws: a trigger must not fail for it. Logs ids and outcomes only.
    */
   async request(profileId: string, reason: RoutineBuildReason, requestKey: string): Promise<void> {
+    await this.ask(profileId, reason, requestKey)
+  }
+
+  /**
+   * Asks for a build of the profile's routine when its inputs are not the ones the routine in force was built from (or there is no routine yet and the verdict is
+   * ready), keyed by the fingerprint of those inputs. For the read that shows the routine to call: the person may have changed the shelf, the goal or the safety
+   * answers since the build, and the triggers may not have caught up. Runs as the caller, who is the profile's own user. Never throws.
+   */
+  async requestIfStale(profileId: string): Promise<void> {
     if (!this.enabled) return
     try {
+      const saved = await this.verdicts.savedFor(profileId)
+      if (!saved || saved.fit !== 'ready') return
+      const [goal, safety] = await Promise.all([this.goals.goalFor(profileId), this.safety.snapshotFor(profileId)])
+      if (goal === null || safety.view === null) return
+      // The shelf as the build keeps it: an entry the build leaves out, or a reduced sunscreen the build keeps, must not make the two fingerprints differ.
+      const shelf = (await this.shelfOf(profileId, saved)).shelf.map(sunscreenKept)
+      const fingerprint = await RoutineService.fingerprintOf(goal, cautionsOf(safety.view.choices, shelf), shelf)
+      if ((await this.repository.current(profileId))?.routineFingerprint === fingerprint) return
+      await this.request(profileId, 'verdict', fingerprint)
+    } catch (error) {
+      console.error({ outcome: 'routine-stale-check-failed', profileId, error: describeError(error) })
+    }
+  }
+
+  /**
+   * The daily sweeps, run by the cron with no session. Each looks at 200 rows at most, and a failure of one does not stop the others (the first is thrown at the end).
+   * Does nothing while routines are off. Answers how many builds it queued.
+   * - A build request whose dead-letter retry is due is queued again, marked as the retry, and its due date cleared. It is not claimed, as the first try was: the
+   *   claim is long released, and a second build that overlapped it would find nothing to change. A queue that refuses it keeps the due date for the next run.
+   * - A rules-only routine in force whose writer retry is due is requested again, with `writer-retry`.
+   * - A routine in force that recommends a product the catalog has retired since is requested again, with `catalog-retired`.
+   */
+  async sweep(now: Date): Promise<number> {
+    if (!this.enabled) return 0
+    let queued = 0
+    let failed = false
+    let failure: unknown
+    for (const part of [() => this.retryDeadLetters(now), () => this.retryWriters(now), () => this.rebuildRetired()]) {
+      try {
+        queued += await part()
+      } catch (error) {
+        console.error({ outcome: 'routine-sweep-failed', error: describeError(error) })
+        if (!failed) {
+          failed = true
+          failure = error
+        }
+      }
+    }
+    if (failed) throw failure
+    return queued
+  }
+
+  /** `request`, saying whether a build was queued. */
+  private async ask(profileId: string, reason: RoutineBuildReason, requestKey: string): Promise<boolean> {
+    if (!this.enabled) return false
+    try {
       const now = this.now()
-      if (!(await this.repository.claim(profileId, requestKey, now, new Date(now.getTime() - RoutineService.CLAIM_STALE_AFTER_MS)))) return
+      if (!(await this.repository.claim(profileId, requestKey, now, new Date(now.getTime() - RoutineService.CLAIM_STALE_AFTER_MS)))) return false
       try {
         await this.jobs.enqueue(buildRoutineSpec, { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0 })
       } catch (error) {
@@ -211,9 +275,50 @@ export class RoutineService {
         await this.repository.release(profileId, now).catch(() => undefined)
         throw error
       }
+      return true
     } catch (error) {
       console.error({ outcome: 'routine-request-failed', profileId, reason, error: describeError(error) })
+      return false
     }
+  }
+
+  private async retryDeadLetters(now: Date): Promise<number> {
+    let queued = 0
+    for (const row of await this.repository.dueRequests(now, RoutineService.SWEEP_LIMIT)) {
+      const { profileId, requestKey } = row
+      try {
+        await this.jobs.enqueue(buildRoutineSpec, { profileId, reason: RoutineService.reasonOf(requestKey), requestKey, requestedAt: now.getTime(), waits: 0, retry: true })
+        queued++
+        // Only once it is queued: a refused message leaves the retry due for the next run.
+        await this.repository.setRequestRetry(profileId, { retried: true, retryDueAt: null })
+      } catch (error) {
+        console.error({ outcome: 'routine-retry-failed', profileId, error: describeError(error) })
+      }
+    }
+    return queued
+  }
+
+  private async retryWriters(now: Date): Promise<number> {
+    let queued = 0
+    for (const { profileId, id } of await this.repository.writerRetriesDue(now, RoutineService.SWEEP_LIMIT)) {
+      if (await this.ask(profileId, 'writer-retry', `writer-retry:${id}`)) queued++
+    }
+    return queued
+  }
+
+  private async rebuildRetired(): Promise<number> {
+    let queued = 0
+    for (const { profileId, id } of await this.repository.retiredCodeVersions(RoutineService.SWEEP_LIMIT)) {
+      if (await this.ask(profileId, 'catalog-retired', `catalog-retired:${id}`)) queued++
+    }
+    return queued
+  }
+
+  /** What a request was for, from its key: the request row keeps no reason. The routine fingerprint (a freshness request) and anything unknown are `verdict`. */
+  private static reasonOf(requestKey: string): RoutineBuildReason {
+    if (requestKey === 'first') return 'first'
+    for (const reason of ['review-point', 'writer-retry', 'catalog-retired'] as const) if (requestKey.startsWith(`${reason}:`)) return reason
+    return 'verdict'
   }
 
   /**
@@ -264,7 +369,10 @@ export class RoutineService {
     if (!saved || saved.fit !== 'ready') return 'waiting'
     const facts = await this.factsOf(profileId, saved, options)
     if (!facts) return 'waiting'
-    const { skeleton } = facts
+    // The version's id is minted before anything is written from the skeleton, because whether the writer sees outcome hints is decided by it.
+    const versionId = this.newId()
+    const shown = hintsShown(versionId)
+    const skeleton = shown ? await this.withHints(facts) : facts.skeleton
 
     const current = await this.repository.current(profileId)
     const previous = current?.startedOn ? current : null
@@ -275,12 +383,7 @@ export class RoutineService {
     const at = this.now()
     const today = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
-    const routine = await routineFingerprint({
-      goal: skeleton.goal,
-      cautions: skeleton.person.cautions,
-      products: skeleton.shelf.map((p) => ({ entryId: p.id, verdict: p.verdict, step: p.step })),
-      rulesVersion: ROUTINE_RULES_VERSION,
-    })
+    const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
     const base: Omit<RoutineVersionRow, 'id'> = {
       profileId,
       status: 'ready',
@@ -297,7 +400,7 @@ export class RoutineService {
       promptHash: null,
       catalogVersion,
       rulesVersion: ROUTINE_RULES_VERSION,
-      hintsShown: false,
+      hintsShown: shown,
       verdictFingerprint: saved.fingerprint,
       routineFingerprint: routine,
       source: 'rules',
@@ -308,7 +411,7 @@ export class RoutineService {
     // A step-down that begins after Start (a new stop) begins the day of the rebuild.
     const ready = (built: SplicedRoutine, over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
       ...base,
-      id: this.newId(),
+      id: versionId,
       steps: built.steps,
       tapers: RoutineService.datedFrom(built.tapers, base.startedOn, today),
       expectation: built.expectation,
@@ -338,7 +441,7 @@ export class RoutineService {
       return 'built'
     }
 
-    const pending: RoutineVersionRow = { ...base, id: this.newId(), status: 'pending', cautions: null, goal: null, routineFingerprint: null, catalogVersion: null, source: null }
+    const pending: RoutineVersionRow = { ...base, id: versionId, status: 'pending', cautions: null, goal: null, routineFingerprint: null, catalogVersion: null, source: null }
     await this.repository.append(pending)
     // Start may have landed after the routine in force was read: the pending version is then started too (as Start does for a pending version it finds).
     const startedBefore = pending.startedOn === null ? (await this.repository.current(profileId))?.startedOn : null
@@ -359,7 +462,7 @@ export class RoutineService {
       promptHash: calls > 0 ? this.writerIdentity.promptHash : null,
       catalogVersion,
       routineFingerprint: routine,
-      hintsShown: false,
+      hintsShown: shown,
       source: written ? 'writer' : 'rules',
       writerRetryDueAt: written ? null : new Date(at.getTime() + RoutineService.DAY_MS),
       writerCalls: calls,
@@ -434,18 +537,7 @@ export class RoutineService {
       throw error
     }
 
-    const entries = await this.shelf.activeEntriesFor(profileId)
-    const shelfFacts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
-    const decided = new Map(saved.products.map((product) => [product.entryId, product]))
-    // An entry the verdict has no decision for, or whose product cannot be found, is left out: there is nothing to build it from.
-    const shelf = entries.flatMap((entry): SkeletonShelfProduct[] => {
-      const verdict = decided.get(entry.id)
-      if (!verdict) return []
-      const named = entry.kind === 'no-label' ? { brand: null, name: NO_LABEL_NAME, ingredients: [] } : shelfFacts.get(entry.formulationId)
-      if (!named) return []
-      return [{ id: entry.id, brand: named.brand, name: named.name, ingredients: [...named.ingredients], step: verdict.step, verdict: verdict.verdict, sourceUrls: [...verdict.sourceUrls] }]
-    })
-
+    const { entries, shelf } = await this.shelfOf(profileId, saved)
     const seen = await this.faceScans.seenFor(profileId)
     const skeleton = assembleSkeleton({
       goal,
@@ -459,6 +551,34 @@ export class RoutineService {
       hintsShown: false,
     })
     return { profileId, skeleton, offered, entries, country: shopping.country }
+  }
+
+  /** The active shelf entries, and the ones the skeleton is built from: those the verdict decided on and whose product can be found. */
+  private async shelfOf(profileId: string, saved: SavedVerdictView): Promise<{ entries: ShelfActiveEntry[]; shelf: SkeletonShelfProduct[] }> {
+    const entries = await this.shelf.activeEntriesFor(profileId)
+    const shelfFacts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
+    const decided = new Map(saved.products.map((product) => [product.entryId, product]))
+    // An entry the verdict has no decision for, or whose product cannot be found, is left out: there is nothing to build it from.
+    const shelf = entries.flatMap((entry): SkeletonShelfProduct[] => {
+      const verdict = decided.get(entry.id)
+      if (!verdict) return []
+      const named = entry.kind === 'no-label' ? { brand: null, name: NO_LABEL_NAME, ingredients: [] } : shelfFacts.get(entry.formulationId)
+      if (!named) return []
+      return [{ id: entry.id, brand: named.brand, name: named.name, ingredients: [...named.ingredients], step: verdict.step, verdict: verdict.verdict, sourceUrls: [...verdict.sourceUrls] }]
+    })
+    return { entries, shelf }
+  }
+
+  /** The one fingerprint of a routine's inputs, for the build to record and the stale read to compare: `shelf` is the skeleton's own (a reduced sunscreen already kept). */
+  private static fingerprintOf(goal: Goal, cautions: CautionState[], shelf: readonly SkeletonShelfProduct[]): Promise<string> {
+    return routineFingerprint({ goal, cautions, products: shelf.map((p) => ({ entryId: p.id, verdict: p.verdict, step: p.step })), rulesVersion: ROUTINE_RULES_VERSION })
+  }
+
+  /** The skeleton with each gap candidate's outcome hint, from the counts of people with the same goal and skin type in the same country. */
+  private async withHints({ profileId, skeleton, country }: Facts): Promise<RoutineSkeleton> {
+    const codes = skeleton.gaps.flatMap((gap) => gap.candidates.map((candidate) => candidate.code))
+    const counts = await this.outcomeCounts.counts({ goal: skeleton.goal, skinType: skeleton.person.skinType, country }, codes)
+    return applyOutcomeHints(skeleton, counts, true, (code) => console.log({ outcome: 'hint-counts-corrupt', profileId, code }))
   }
 
   /**

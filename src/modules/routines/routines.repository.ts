@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gt, gte, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -22,6 +22,14 @@ const revived = (row: RoutineVersionRow): RoutineVersionRow => ({
   ...row,
   tapers: row.tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn === null ? null : new Date(taper.startedOn) })),
 })
+
+// A version no other ready version of its profile has replaced: the profile's routine in force, in `readyOrder`. Raw SQL, because the subquery names the outer row
+// (`routine_versions`) and drizzle leaves the table off a column of a single-table select.
+const inForce = sql`not exists (
+  select 1 from routine_versions newer
+  where newer.profile_id = routine_versions.profile_id and newer.status = 'ready'
+    and (coalesce(newer.ready_at, newer.created_at) > coalesce(routine_versions.ready_at, routine_versions.created_at)
+      or (coalesce(newer.ready_at, newer.created_at) = coalesce(routine_versions.ready_at, routine_versions.created_at) and newer.id > routine_versions.id)))`
 
 // The order ready versions are in force: the one that became ready last. A row with no `ready_at` counts from its creation.
 const readyOrder = [desc(sql`coalesce(${routineVersions.readyAt}, ${routineVersions.createdAt})`), desc(routineVersions.id)] as const
@@ -157,6 +165,49 @@ export class D1RoutinesRepository {
   /** Sets the two dead-letter retry columns, changing nothing else of the request. A profile with no request is ignored, never created. */
   async setRequestRetry(profileId: string, { retried, retryDueAt }: RoutineRequestRetry): Promise<void> {
     await this.db.update(routineRequests).set({ retried, retryDueAt }).where(eq(routineRequests.profileId, profileId))
+  }
+
+  /** The requests whose dead-letter retry is due at `now` or earlier, the longest overdue first, at most `limit`. A request with no retry due is never returned. */
+  async dueRequests(now: Date, limit: number): Promise<RoutineRequestRow[]> {
+    return this.db
+      .select()
+      .from(routineRequests)
+      .where(and(isNotNull(routineRequests.retryDueAt), lte(routineRequests.retryDueAt, now)))
+      .orderBy(asc(routineRequests.retryDueAt), asc(routineRequests.profileId))
+      .limit(limit)
+  }
+
+  /** The routine in force of each profile whose writer retry is due at `now` or earlier, the longest overdue first, at most `limit`. A version a newer ready one replaced is never returned. */
+  async writerRetriesDue(now: Date, limit: number): Promise<RoutineVersionRow[]> {
+    const rows = await this.db
+      .select()
+      .from(routineVersions)
+      .where(and(eq(routineVersions.status, 'ready'), isNotNull(routineVersions.writerRetryDueAt), lte(routineVersions.writerRetryDueAt, now), inForce))
+      .orderBy(asc(routineVersions.writerRetryDueAt), asc(routineVersions.id))
+      .limit(limit)
+    return rows.map(revived)
+  }
+
+  /**
+   * The routine in force of each profile that recommends a product the catalog retired after the version was built: one of its steps holds a recommended product
+   * (`json_each` over `steps`) whose `recommended_products` row is `retired` in a catalog version later than the version's own. Each version once, at most `limit`.
+   */
+  async retiredCodeVersions(limit: number): Promise<RoutineVersionRow[]> {
+    const rows = await this.db
+      .select()
+      .from(routineVersions)
+      .where(
+        and(
+          eq(routineVersions.status, 'ready'),
+          inForce,
+          sql`exists (
+            select 1 from json_each(routine_versions.steps) step
+            join recommended_products retired on retired.code = json_extract(step.value, '$.product.code')
+            where json_extract(step.value, '$.product.kind') = 'candidate' and retired.status = 'retired' and retired.updated_in_version > routine_versions.catalog_version)`,
+        ),
+      )
+      .limit(limit)
+    return rows.map(revived)
   }
 }
 

@@ -24,6 +24,7 @@ import type { GoalRow, SwitchPreviewView } from '../goals/goals.types'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { OpsAlertsService } from '../ops-alerts/ops-alerts.service'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 import { facePhotoUrl } from '../scans/scans.paths'
 import { CURRENT_FACE_CONSENT_VERSION } from './face-scans.consent'
 import { type AnalyseFaceScanMessage, analyseFaceScanSpec } from './face-scans.job-specs'
@@ -104,6 +105,8 @@ export type FaceScanServiceDeps = {
   notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   /** A Perfect Corp account problem is raised to the owner here. */
   opsAlerts: Pick<OpsAlertsService, 'raise'>
+  /** Asks for the routine's review-point rebuild when a check-in scan is ready. A failure of it never changes what the scan does. */
+  onRoutineTrigger?: RoutineTrigger
   /** Signs the photo links. photo-link.ts derives its own key from it. */
   photoLinkSecret: string
   environment: PhotoEnvironment
@@ -146,6 +149,7 @@ export class FaceScanService {
   private readonly events: ScanEvents
   private readonly notifications: Pick<NotificationsService, 'faceScanReady' | 'faceScanNeedsRetake' | 'faceCheckInDue'>
   private readonly opsAlerts: Pick<OpsAlertsService, 'raise'>
+  private readonly onRoutineTrigger: RoutineTrigger | undefined
   readonly #photoLinkSecret: string
   private readonly environment: PhotoEnvironment
   private readonly now: () => Date
@@ -162,6 +166,7 @@ export class FaceScanService {
     this.events = deps.events
     this.notifications = deps.notifications
     this.opsAlerts = deps.opsAlerts
+    this.onRoutineTrigger = deps.onRoutineTrigger
     this.#photoLinkSecret = deps.photoLinkSecret
     this.environment = deps.environment
     this.now = deps.now ?? (() => new Date())
@@ -682,6 +687,13 @@ export class FaceScanService {
     FaceScanService.warnMissingConcerns(scan, analysis)
     // Only the step whose write won gets here, and a ready scan is never fetched again: once per scan. At most once: a push lost here (the worker dies, or the queue refuses it) is not sent again.
     await this.notifications.faceScanReady({ userId, profileId, faceScanId: id })
+    if (scan.checkIn) {
+      try {
+        await this.onRoutineTrigger?.(profileId, 'review-point', `review-point:${id}`)
+      } catch {
+        console.error({ outcome: 'routine-trigger-failed', reason: 'review-point', faceScanId: id })
+      }
+    }
     await this.queueFitzpatrickBackstop(scan)
     await this.deleteTaskQuietly(taskId)
     await this.publishFrame(id, 'ready', null, { done: true })

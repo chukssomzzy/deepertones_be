@@ -47,6 +47,17 @@ import type { CautionState } from './routines.types'
 //   findRequest(profileId)         { profileId, requestKey, requestedAt, retryDueAt, retried } | null.
 //   setRequestRetry(profileId, { retried, retryDueAt })   sets those two columns, nothing else of the row; a profile with no request row is ignored (not created).
 //
+// The daily sweeps (spec #189, PR 3c). Each answers at most `limit` rows. Assumed shapes (what this file pins):
+//   dueRequests(now, limit)        the build requests (RoutineRequestRow) whose retryDueAt is `now` or earlier, the longest overdue first; one with no retry due is never
+//                                  returned. A row is returned until its retry is cleared (setRequestRetry) or the request is claimed again.
+//   writerRetriesDue(now, limit)   the routine in force (the profile's `ready` version that became ready last, as `current` answers) of each profile, when that version's
+//                                  writerRetryDueAt is `now` or earlier; a version a newer ready version has replaced is never returned, even with a retry due. Rows are
+//                                  RoutineVersionRows (the sweep keys its request by the version's id).
+//   retiredCodeVersions(limit)     the routine in force of each profile, when one of its steps holds a recommended product (product.kind 'candidate') whose code is
+//                                  `retired` in the catalog with updatedInVersion greater than the version's catalogVersion (that is, retired after the version was built;
+//                                  equal is not). Each version once, however many of its codes are retired; a version replaced by a newer ready one is never returned.
+//                                  Rows are RoutineVersionRows. The catalog is not this repository's table, so the setup gives the contract `retireCode`.
+//
 // Fixtures never give two rows of one profile the same createdAt: which of two such rows is newest is not specified.
 
 const BASE = new Date('2030-06-15T12:00:00.000Z')
@@ -64,6 +75,11 @@ export type RoutinesContractSetup = {
   repository: RoutinesRepository
   /** A user with its default profile, made the way the product makes one (D1 enforces routine_versions.profile_id -> profiles). */
   newAccount: () => Promise<{ userId: string; profileId: string }>
+  /**
+   * Makes the recommended product `code` retired in the catalog, as of catalog version `updatedInVersion` (calling it again moves it). The retired-code sweep joins the
+   * catalog's recommended_products table, which this repository does not write, so each tier says how its catalog is told: the fake is told directly, D1 gets the rows.
+   */
+  retireCode: (code: string, updatedInVersion: number) => Promise<void>
 }
 
 // A stored step is a routine entry plus `gotIt` and `fixedFrom`. One of each product kind, so a JSON column cannot quietly drop a variant: a shelf
@@ -1127,6 +1143,220 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await repository.setRequestRetry(profileId, { retried: true, retryDueAt: at(DAY) })
 
         expect(await repository.findRequest(profileId)).toBeNull()
+      })
+    })
+    describe('the daily sweeps: build requests whose dead-letter retry is due', () => {
+      // Dues sit in a window no other fixture uses, so that rows other tests left in a shared database cannot come between these.
+      const FAR = -1000 * DAY
+      const requestWithRetryDue = async (repository: RoutinesRepository, profileId: string, key: string, due: Date | null) => {
+        await repository.claim(profileId, key, at(FAR), at(FAR - HOUR))
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: due })
+      }
+      const mine = <T extends { profileId: string }>(rows: T[], ...profileIds: string[]) => rows.filter((row) => profileIds.includes(row.profileId))
+
+      it('returns a request whose retry is due, and not a millisecond before: the due time itself is due', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await requestWithRetryDue(repository, profileId, 'routine-fp-1', at(DAY))
+
+        expect(mine(await repository.dueRequests(at(DAY - 1), 1000), profileId)).toEqual([])
+        const due = mine(await repository.dueRequests(at(DAY), 1000), profileId)
+
+        expect(due).toHaveLength(1)
+        expect(due[0]).toMatchObject({ profileId, requestKey: 'routine-fp-1', retried: true })
+        expect(due[0]!.retryDueAt!.getTime()).toBe(at(DAY).getTime())
+      })
+
+      it('never returns a request with no retry due', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, 'routine-fp-1', BASE, at(-HOUR))
+
+        expect(mine(await repository.dueRequests(at(10 * DAY), 1000), profileId)).toEqual([])
+      })
+
+      it('stops returning a request once its retry is cleared', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await requestWithRetryDue(repository, profileId, 'routine-fp-1', at(DAY))
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: null })
+
+        expect(mine(await repository.dueRequests(at(10 * DAY), 1000), profileId)).toEqual([])
+      })
+
+      it('returns the longest overdue first and at most the limit', async () => {
+        const { repository, newAccount } = await make()
+        const [a, b, c] = [await newAccount(), await newAccount(), await newAccount()]
+        await requestWithRetryDue(repository, b.profileId, 'routine-fp-b', at(FAR + 2 * DAY))
+        await requestWithRetryDue(repository, c.profileId, 'routine-fp-c', at(FAR + 3 * DAY))
+        await requestWithRetryDue(repository, a.profileId, 'routine-fp-a', at(FAR + DAY))
+
+        const two = await repository.dueRequests(at(0), 2)
+        const three = await repository.dueRequests(at(0), 3)
+
+        expect(two.map((row) => row.profileId)).toEqual([a.profileId, b.profileId])
+        expect(three.map((row) => row.profileId)).toEqual([a.profileId, b.profileId, c.profileId])
+      })
+    })
+
+    describe('the daily sweeps: the routine in force whose writer retry is due', () => {
+      const mine = <T extends { profileId: string }>(rows: T[], ...profileIds: string[]) => rows.filter((row) => profileIds.includes(row.profileId))
+      const rulesRow = (profileId: string, id: string, createdAt: Date, retryDueAt: Date | null): Appended =>
+        readyRow(profileId, id, createdAt, { source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: retryDueAt })
+
+      it('returns a version whose retry is due, and not a millisecond before: the due time itself is due', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const id = crypto.randomUUID()
+        await repository.append(rulesRow(profileId, id, BASE, at(DAY)))
+
+        expect(mine(await repository.writerRetriesDue(at(DAY - 1), 1000), profileId)).toEqual([])
+        const due = mine(await repository.writerRetriesDue(at(DAY), 1000), profileId)
+
+        expect(due.map((row) => row.id)).toEqual([id])
+      })
+
+      it('never returns a version with no retry due', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(rulesRow(profileId, crypto.randomUUID(), BASE, null))
+
+        expect(mine(await repository.writerRetriesDue(at(10 * DAY), 1000), profileId)).toEqual([])
+      })
+
+      it('does not return a version that a newer ready version has replaced, even though its retry is due', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(rulesRow(profileId, crypto.randomUUID(), BASE, at(DAY)))
+        await repository.append(readyRow(profileId, crypto.randomUUID(), at(HOUR), { writerRetryDueAt: null }))
+
+        expect(mine(await repository.writerRetriesDue(at(10 * DAY), 1000), profileId)).toEqual([])
+      })
+
+      it('returns only the newest ready version when an older one has a retry due too', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const newest = crypto.randomUUID()
+        await repository.append(rulesRow(profileId, crypto.randomUUID(), BASE, at(DAY)))
+        await repository.append(rulesRow(profileId, newest, at(HOUR), at(DAY + HOUR)))
+
+        expect(mine(await repository.writerRetriesDue(at(10 * DAY), 1000), profileId).map((row) => row.id)).toEqual([newest])
+      })
+
+      it('returns the version that became ready last, not the one created last (a build that finished late)', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const late = crypto.randomUUID()
+        await repository.append(pendingRow(profileId, late, BASE))
+        await repository.append(rulesRow(profileId, crypto.randomUUID(), at(HOUR), at(DAY)))
+        await repository.complete(late, builtOf({ source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(2 * DAY), readyAt: at(2 * HOUR) }))
+
+        expect(mine(await repository.writerRetriesDue(at(10 * DAY), 1000), profileId).map((row) => row.id)).toEqual([late])
+      })
+
+      it('returns at most the limit', async () => {
+        const { repository, newAccount } = await make()
+        const accounts = [await newAccount(), await newAccount(), await newAccount()]
+        for (const { profileId } of accounts) await repository.append(rulesRow(profileId, crypto.randomUUID(), BASE, at(DAY)))
+
+        expect(await repository.writerRetriesDue(at(DAY), 2)).toHaveLength(2)
+        expect(mine(await repository.writerRetriesDue(at(DAY), 1000), ...accounts.map((a) => a.profileId))).toHaveLength(3)
+      })
+    })
+
+    describe('the daily sweeps: the routine in force that holds a code retired since it was built', () => {
+      const mine = <T extends { profileId: string }>(rows: T[], ...profileIds: string[]) => rows.filter((row) => profileIds.includes(row.profileId))
+      // Codes are made up for each test: the catalog is shared by every account, and other tests retire their own.
+      const newCode = () => `CODE-${crypto.randomUUID()}`
+      const candidateStep = (step: 'treat' | 'moisturise', code: string): Appended['steps'][number] => ({
+        step,
+        product: { kind: 'candidate', code },
+        frequency: 'pm',
+        reason: 'A test reason.',
+        grounding: [],
+        gotIt: false,
+        fixedFrom: null,
+      })
+      const versionHolding = (profileId: string, id: string, createdAt: Date, codes: string[], over: Partial<Appended> = {}): Appended =>
+        readyRow(profileId, id, createdAt, { catalogVersion: 7, steps: [...codes.map((code, i) => candidateStep(i === 0 ? 'treat' : 'moisturise', code)), stepsOf()[0]!, stepsOf()[3]!], ...over })
+
+      it('returns the version when a code it holds was retired after it was built, and not when it was retired in the same catalog version or before', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const { profileId } = await newAccount()
+        const code = newCode()
+        const id = crypto.randomUUID()
+        await repository.append(versionHolding(profileId, id, BASE, [code]))
+
+        await retireCode(code, 6)
+        expect(mine(await repository.retiredCodeVersions(1000), profileId)).toEqual([])
+        await retireCode(code, 7)
+        expect(mine(await repository.retiredCodeVersions(1000), profileId)).toEqual([])
+        await retireCode(code, 8)
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId).map((row) => row.id)).toEqual([id])
+      })
+
+      it('does not return a version whose code the catalog has not retired, though other codes are', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(versionHolding(profileId, crypto.randomUUID(), BASE, [newCode()]))
+        await retireCode(newCode(), 99)
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId)).toEqual([])
+      })
+
+      it('ignores the products of a version that are not recommended ones: a shelf product, or use what you have', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { steps: [stepsOf()[0]!, stepsOf()[2]!, stepsOf()[3]!] }))
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId)).toEqual([])
+      })
+
+      it('returns a version once, however many of its codes were retired', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const { profileId } = await newAccount()
+        const [first, second] = [newCode(), newCode()]
+        const id = crypto.randomUUID()
+        await repository.append(versionHolding(profileId, id, BASE, [first, second]))
+        await retireCode(first, 8)
+        await retireCode(second, 9)
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId).map((row) => row.id)).toEqual([id])
+      })
+
+      it('does not return a version that a newer ready version has replaced, even though it holds a retired code', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const { profileId } = await newAccount()
+        const code = newCode()
+        await repository.append(versionHolding(profileId, crypto.randomUUID(), BASE, [code]))
+        await repository.append(versionHolding(profileId, crypto.randomUUID(), at(HOUR), [newCode()], { catalogVersion: 9 }))
+        await retireCode(code, 8)
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId)).toEqual([])
+      })
+
+      it('returns only the newest version when both hold the retired code', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const { profileId } = await newAccount()
+        const code = newCode()
+        const newest = crypto.randomUUID()
+        await repository.append(versionHolding(profileId, crypto.randomUUID(), BASE, [code]))
+        await repository.append(versionHolding(profileId, newest, at(HOUR), [code]))
+        await retireCode(code, 8)
+
+        expect(mine(await repository.retiredCodeVersions(1000), profileId).map((row) => row.id)).toEqual([newest])
+      })
+
+      it('returns at most the limit', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const code = newCode()
+        const accounts = [await newAccount(), await newAccount(), await newAccount()]
+        for (const { profileId } of accounts) await repository.append(versionHolding(profileId, crypto.randomUUID(), BASE, [code]))
+        await retireCode(code, 8)
+
+        expect(await repository.retiredCodeVersions(2)).toHaveLength(2)
+        expect(mine(await repository.retiredCodeVersions(1000), ...accounts.map((a) => a.profileId))).toHaveLength(3)
       })
     })
   })

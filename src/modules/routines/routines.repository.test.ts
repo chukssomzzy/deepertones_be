@@ -10,8 +10,11 @@ const BASE = new Date('2030-06-15T12:00:00.000Z')
 routinesRepositoryContract('fake', () => {
   const profiles = new FakeProfilesRepository()
   const users = new FakeUsersRepository({ profiles })
+  const repository = new FakeRoutinesRepository()
   return {
-    repository: new FakeRoutinesRepository(),
+    repository,
+    // The fake has no catalog tables: it is told which codes the catalog has retired (the retired-code sweep joins them in D1).
+    retireCode: async (code, updatedInVersion) => repository.retireCode(code, updatedInVersion),
     newAccount: async () => {
       const userId = crypto.randomUUID()
       const profileId = crypto.randomUUID()

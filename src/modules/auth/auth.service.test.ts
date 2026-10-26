@@ -17,6 +17,7 @@ import { ProfilesService } from '../profiles/profiles.service'
 import { FakeUsersRepository } from '../users/users.repository.fake'
 import { UsersService } from '../users/users.service'
 import { AuthService, type Session } from './auth.service'
+import type { RoutineTrigger } from '../routines/routines.trigger'
 import { REFRESH_TTL_SECONDS, TokenService } from './tokens.service'
 
 // The one clock every test hangs off; fixtures are offsets from it.
@@ -51,7 +52,7 @@ const at = (msAfterT0: number) => {
   clock = new Date(T0.getTime() + msAfterT0)
 }
 
-const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users) => {
+const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users, onRoutineTrigger?: RoutineTrigger) => {
   const usersSvc = new UsersService({ repository, now: () => clock, newId: () => `user-${++n}` })
   const otp = new OtpService({
     repository: new FakeOtpRepository(),
@@ -65,7 +66,7 @@ const buildAuth = (deviceIdKey = DEVICE_KEY, repository = users) => {
   })
   const profiles = new ProfilesService({ repository: profilesRepo })
   const notifications = new NotificationsService({ pushTokens, settings: new FakeNotificationSettingsRepository(), push: new MemoryPushSender(), jobs: pushJobs, deviceIdKey, now: () => clock })
-  return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, notifications, deviceIdKey, now: () => clock }), usersSvc, notifications }
+  return { auth: new AuthService({ users: usersSvc, profiles, otp, tokens, notifications, deviceIdKey, now: () => clock, ...(onRoutineTrigger ? { onRoutineTrigger } : {}) }), usersSvc, notifications }
 }
 
 beforeEach(() => {
@@ -606,5 +607,106 @@ describe('AuthService.verifyOtp: the new sign-in alert', () => {
 
     expect(session.user.id).toBe(ownerId)
     logged.mockRestore()
+  })
+})
+
+// The routine's first build (spec #189, PR 3c): a guest who verifies is promoted in place, and that is the moment the profile's routine is first asked for.
+// The host only knows the trigger as `onRoutineTrigger?: RoutineTrigger` (routines.trigger.ts, a leaf file): it never imports the routines service. The hook is
+// called as (profileId, 'first', 'first'): the profile the promoted session is on, the reason, and the request key; and a failing hook changes nothing for the caller.
+describe('AuthService.verifyOtp: the routine trigger', () => {
+  const email = (address: string) => ({ channel: 'email', address }) as const
+  let trigger: ReturnType<typeof vi.fn<RoutineTrigger>>
+  let triggered: AuthService
+  let triggeredUsers: UsersService
+
+  const signIn = (actor: Awaited<ReturnType<typeof actorOf>>, address: string, code = CODE) =>
+    runAs(actor, async () => {
+      await triggered.sendOtp(email(address))
+      return triggered.verifyOtp(email(address), code)
+    })
+
+  beforeEach(() => {
+    trigger = vi.fn<RoutineTrigger>(async () => undefined)
+    const built = buildAuth(DEVICE_KEY, users, trigger)
+    triggered = built.auth
+    triggeredUsers = built.usersSvc
+  })
+
+  it('asks for the first routine of the profile the guest was on, for reason first with the key first, when the guest is promoted in place', async () => {
+    const guest = await triggered.bootstrap('device-1', 'ios')
+
+    const session = await signIn(await actorOf(guest.user.id), 'ada@example.com')
+
+    expect(session.user.status).toBe('verified')
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(trigger).toHaveBeenCalledWith(await defaultOf(guest.user.id), 'first', 'first')
+  })
+
+  it('names the profile the caller was on when it is not the default one, because that is the profile the promoted session stays on', async () => {
+    const guest = await triggered.bootstrap('device-1', 'ios')
+    const second = await addProfile(guest.user.id, 'profile-second')
+
+    const session = await signIn(await actorOf(guest.user.id, 'anonymous', second), 'ada@example.com')
+
+    expect(await profilesOf(session)).toEqual({ access: second, refresh: second })
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(trigger).toHaveBeenCalledWith(second, 'first', 'first')
+    expect(second).not.toBe(await defaultOf(guest.user.id))
+  })
+
+  it('does not ask when a guest signs in as an existing account: that account\'s routine is already its own', async () => {
+    const owner = await triggered.bootstrap('device-owner', 'ios')
+    await triggeredUsers.promote(owner.user.id, { kind: 'email', email: 'ada@example.com' as never })
+    const guest = await triggered.bootstrap('device-1', 'ios')
+
+    await signIn(await actorOf(guest.user.id), 'ada@example.com')
+
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('does not ask when a verified user signs in again with their own address', async () => {
+    const owner = await triggered.bootstrap('device-owner', 'ios')
+    await triggeredUsers.promote(owner.user.id, { kind: 'email', email: 'ada@example.com' as never })
+
+    await signIn(await actorOf(owner.user.id, 'verified'), 'ada@example.com')
+
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it('does not ask when the code is wrong, since nobody was promoted', async () => {
+    const guest = await triggered.bootstrap('device-1', 'ios')
+
+    const error = await errorOf(signIn(await actorOf(guest.user.id), 'ada@example.com', '000000'))
+
+    expect(error.code).toBeDefined()
+    expect(trigger).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['rejects', () => Promise.reject(new Error('the routine queue is down'))],
+    ['throws at once', () => {
+      throw new Error('the routine queue is down')
+    }],
+  ])('still promotes the guest and answers with the new session when the hook %s', async (_how, fail) => {
+    const guest = await triggered.bootstrap('device-1', 'ios')
+    trigger.mockImplementation(fail)
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    const session = await signIn(await actorOf(guest.user.id), 'ada@example.com')
+
+    expect(trigger).toHaveBeenCalledTimes(1)
+    expect(session.user).toMatchObject({ id: guest.user.id, status: 'verified', email: 'ada@example.com' })
+    await expect(triggered.refresh(session.tokens.refreshToken)).resolves.toMatchObject({ user: { id: guest.user.id } })
+  })
+
+  it('works with no hook wired at all, as before', async () => {
+    const guest = await auth.bootstrap('device-1', 'ios')
+
+    const session = await runAs(await actorOf(guest.user.id), async () => {
+      await auth.sendOtp(email('ada@example.com'))
+      return auth.verifyOtp(email('ada@example.com'), CODE)
+    })
+
+    expect(session.user.status).toBe('verified')
   })
 })

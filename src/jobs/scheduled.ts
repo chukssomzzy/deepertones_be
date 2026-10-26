@@ -49,7 +49,8 @@ export const createScanReaper = (): ScheduledHandler => async (_controller, env)
 /**
  * The daily cron: the guest cleanup, then the second try of the safety parses that dead-lettered (SafetyService.requeueDueParses, which queues the
  * pending parses whose due time has come), then the check-in-due pushes (FaceScanService.sendDueCheckIns), then the second try of the shelf verdicts whose fit judge failed
- * (VerdictService.requeueDueFits, which queues the retries whose due time has come). Each runs whether or not the other failed; a failure is logged and the first one is rethrown after all
+ * (VerdictService.requeueDueFits, which queues the retries whose due time has come), then the routine sweeps (RoutineService.sweep: the dead-letter retries, the
+ * writer retries and the retired products that are due). Each runs whether or not the other failed; a failure is logged and the first one is rethrown after all
  * have run, so Cloudflare records the run as failed and the next day's run looks at the same work again.
  */
 export const createDailyJobs = (): ScheduledHandler => {
@@ -89,6 +90,16 @@ export const createDailyJobs = (): ScheduledHandler => {
       if (queued > 0) console.log({ job: 'verdict-fit-requeue', outcome: 'done', queued })
     } catch (error) {
       console.error({ job: 'verdict-fit-requeue', outcome: 'failed', error: describeError(error) })
+      if (!failed) {
+        failed = true
+        failure = error
+      }
+    }
+    try {
+      const queued = await buildContainer(env).routines.sweep(new Date())
+      if (queued > 0) console.log({ job: 'routine-sweep', outcome: 'done', queued })
+    } catch (error) {
+      console.error({ job: 'routine-sweep', outcome: 'failed', error: describeError(error) })
       if (!failed) {
         failed = true
         failure = error

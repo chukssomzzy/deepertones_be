@@ -1,6 +1,8 @@
 import { env } from 'cloudflare:workers'
 import { describe, expect, it } from 'vitest'
 import { createDb } from '../../src/lib/db'
+import { products } from '../../src/modules/catalog/catalog.table'
+import { recommendedProducts } from '../../src/modules/catalog/catalog.workbook.table'
 import type { EmailAddress } from '../../src/lib/email-address'
 import { D1RoutinesRepository } from '../../src/modules/routines/routines.repository'
 import { routinesRepositoryContract } from '../../src/modules/routines/routines.repository.contract'
@@ -50,7 +52,44 @@ const rowFor = (profileId: string, createdAt: Date, over: Partial<Appended> = {}
   ...over,
 })
 
-routinesRepositoryContract('D1', () => ({ repository: new D1RoutinesRepository(db), newAccount: newGuest }))
+// The retired-code sweep joins the catalog's recommended_products, which this repository does not write, so the contract is told which codes are retired by
+// putting the rows in the catalog: a product and its retired recommendation, as an upload that retires a row leaves them (workbook.apply writes the same two tables).
+// The test is the only writer of these rows; a code retired again moves to the new catalog version.
+const retireCode = async (code: string, updatedInVersion: number) => {
+  const productId = `product-${code}`
+  await db.insert(products).values({ id: productId, identityKey: `test|${code}`, brandKey: 'test', brand: 'Test', name: code, category: 'skin', createdAt: BASE }).onConflictDoNothing()
+  await db
+    .insert(recommendedProducts)
+    .values({
+      code,
+      productId,
+      formulationId: null,
+      brand: 'Test',
+      name: code,
+      variant: null,
+      form: null,
+      category: 'skin',
+      ingredients: [],
+      ingredientsSourceUrl: null,
+      skinConcerns: [],
+      skinTypes: ['all'],
+      steps: ['treat'],
+      frequency: 'pm',
+      ownCautions: [],
+      evidenceUrls: [],
+      origin: 'sourced',
+      status: 'retired',
+      approvedBy: null,
+      approvedOn: null,
+      auditedBy: null,
+      auditedOn: null,
+      draftCells: [],
+      updatedInVersion,
+    })
+    .onConflictDoUpdate({ target: recommendedProducts.code, set: { status: 'retired', updatedInVersion } })
+}
+
+routinesRepositoryContract('D1', () => ({ repository: new D1RoutinesRepository(db), newAccount: newGuest, retireCode }))
 
 describe('routine_versions in D1', () => {
   it('removes a user\'s routine versions with the user (a guest purged by the cleanup), and leaves other accounts\' versions', async () => {

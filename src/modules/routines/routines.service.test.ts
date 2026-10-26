@@ -22,6 +22,8 @@ import type { SavedVerdictProduct } from '../verdicts/verdicts.types'
 import { checkRoutine } from './routines.gates'
 import type { BuildRoutineMessage } from './routines.job-specs'
 import { routineFingerprint } from './routines.fingerprint'
+import { FakeOutcomeCountsRepository } from './routines.outcome-counts.repository.fake'
+import { hintsShown } from './routines.outcomes'
 import { FakeRoutinesRepository } from './routines.repository.fake'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
 import { RoutineService, type RoutineServiceDeps } from './routines.service'
@@ -37,7 +39,8 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 //   new RoutineService({ verdicts, recommendations, goals, safety, shelf, catalog, faceScans, workbook, profiles, writer, writerIdentity, repository, now, newId }),
 //   the first nine being the Pick<> of what the build reads: verdicts (savedFor), recommendations (candidatesFor, shoppingFor), goals (goalFor), safety (snapshotFor),
 //   shelf (activeEntriesFor, add), catalog (shelfFacts), faceScans (seenFor), workbook (countries, verdictReference), profiles (find). `writerIdentity` is
-//   { model, promptHash }. `newId()` is called once for each version appended, in order.
+//   { model, promptHash }. `newId()` is called once for each build that gets as far as reading its facts (PR 3c mints the version's id before the skeleton, to decide
+//   whether hints are shown from it), so a build that appends nothing ('unchanged') has used an id; the id of the version appended is the one minted.
 //   build(profileId, reason, options?: { exclude?: { step, code } }): Promise<'built' | 'unchanged' | 'waiting'>   all run by profile id, as a job runs them
 //   current(profileId): Promise<{ status: 'pending' } | { status: 'updating'; version } | { status: 'ready'; version }>   `version` is the stored row (id, steps, tapers, ...)
 //   start(profileId): Promise<void>    ConflictError ROUTINE_NOT_READY without a ready version
@@ -177,6 +180,8 @@ const newWorld = (): World => ({
 })
 
 let world: World
+/** The catalog version the workbook says is live: a build records it. */
+let catalogVersion = 42
 let entryCount = 0
 let verdictRevision = 1
 
@@ -238,6 +243,7 @@ const FREQUENCY_AT_PROTECT = { failed: [{ gate: 'frequency', step: 'protect' }] 
 
 let clock: Date
 let repository: FakeRoutinesRepository
+let outcomeCounts: FakeOutcomeCountsRepository
 let jobs: MemoryJobQueue
 let deps: RoutineServiceDeps
 let writer: HookedWriter
@@ -307,6 +313,7 @@ const spyOnConsole = () => (['log', 'debug', 'info', 'warn', 'error'] as const).
 
 beforeEach(() => {
   clock = T0
+  catalogVersion = 42
   entryCount = 0
   verdictRevision = 1
   attempts = 0
@@ -317,6 +324,7 @@ beforeEach(() => {
   addProduct('entry-b', STEROID, { name: 'Karo Glow Cream' })
 
   repository = new FakeRoutinesRepository()
+  outcomeCounts = new FakeOutcomeCountsRepository()
   jobs = new MemoryJobQueue()
   writer = new HookedWriter()
   script()
@@ -357,7 +365,7 @@ beforeEach(() => {
     workbook: {
       countries: async () => structuredClone(world.countries),
       // Where the catalog version a routine records comes from.
-      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion: 42, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
+      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
     } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference'>,
     profiles: {
       find: async (profileId: string) => (world.profiles.has(profileId) ? { id: profileId, userId: world.profiles.get(profileId)! } : null),
@@ -365,6 +373,7 @@ beforeEach(() => {
     writer,
     writerIdentity: { model: 'claude-test-model', promptHash: 'prompt-hash-test' },
     repository,
+    outcomeCounts,
     jobs,
     enabled: true,
     now: () => clock,
@@ -439,7 +448,8 @@ describe('RoutineService.build: the first build', () => {
         { id: 'entry-b', brand: 'Orbis', name: 'Karo Glow Cream', ingredients: STEROID, step: 'treat', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, sourceUrls: [STEROID_SOURCE] },
       ],
       limits: { maxNewProducts: 3 },
-      hintsShown: false,
+      // 'version-1' is among the nine tenths of routine ids that show hints (routines.outcomes.ts hintsShown), with or without counts to show.
+      hintsShown: true,
     })
     const gaps = writer.calls[0]!.gaps.map((gap) => [gap.step, gap.candidates.map((c) => c.code)])
     expect(gaps).toEqual([
@@ -501,7 +511,7 @@ describe('RoutineService.build: the first build', () => {
       promptHash: 'prompt-hash-test',
       catalogVersion: 42,
       rulesVersion: ROUTINE_RULES_VERSION,
-      hintsShown: false,
+      hintsShown: true,
       verdictFingerprint: 'verdict-fp-1',
       cautions: ['tapering', 'recent-reaction'],
       reason: 'shelf',
@@ -592,7 +602,7 @@ describe('RoutineService.build: a writer that gets it wrong', () => {
 
     expect(writer.retries).toEqual([undefined, FREQUENCY_AT_PROTECT, FREQUENCY_AT_PROTECT])
     const row = await latestRow()
-    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
+    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: true })
     // The rules' own routine: fixed words for each step, no grounding, and the same step-down.
     expect(row.steps).toEqual([
       { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null },
@@ -1205,11 +1215,12 @@ describe('RoutineService.run', () => {
   it('leaves a routine unchanged after Start when the rebuild finds nothing to change, and gives the claim back', async () => {
     await started()
     await request('shelf', 'routine-fp-2')
-    const versionsBefore = ids
+    const before = await latestRow()
 
     await run(queued().at(-1)!.body as BuildRoutineMessage)
 
-    expect(ids).toBe(versionsBefore)
+    // Nothing was appended. (The build mints its version's id before it knows whether there will be one, so the id counter is no witness to that.)
+    expect(await latestRow()).toEqual(before)
     setClock(2 * DAY + MINUTE)
     await request('shelf', 'routine-fp-2')
     expect(queued()).toHaveLength(2)
@@ -1605,5 +1616,549 @@ describe('RoutineService.build: a profile that does not exist', () => {
 
     expect(log).toHaveBeenCalledWith({ outcome: 'routine-profile-missing', profileId: 'profile-nobody' })
     expect(await repository.latest('profile-nobody')).toBeNull()
+  })
+})
+
+// ---- PR 3c: the stale read, the daily sweeps, and outcome hints in the build (spec #189) ----
+//
+// New on the service (assumed shapes, what this file pins):
+//   requestIfStale(profileId): Promise<void>   never throws. Works out the routine fingerprint from the inputs as they are now (the goal; the cautions the safety answers
+//       state, plus tapering when the saved verdict stops a product; each saved verdict product's entryId, verdict and step; the rules version) and, when it differs
+//       from the routine in force's routineFingerprint, or there is no routine in force while the saved verdict is ready, calls request(profileId, 'verdict', fingerprint).
+//       Nothing is asked when the verdict is not saved and ready, or the goal or the safety answers are not there yet. Disabled: nothing.
+//   sweep(now: Date): Promise<number>   the daily sweeps, run by the cron with no session, answering how many builds it queued in all. Three, each at most 200 rows,
+//       and each does nothing at all when routines are switched off:
+//         - the dead-letter retry due (retryDueAt <= now): queues { profileId, reason, requestKey: the request's own key, requestedAt: now, waits: 0, retry: true } with
+//           no delay and clears the retry due (the reason is not pinned: the request row does not keep one);
+//         - the writer retry due: request(profileId, 'writer-retry', `writer-retry:${versionId}`) for the routine in force when its writerRetryDueAt <= now;
+//         - the retired codes: request(profileId, 'catalog-retired', `catalog-retired:${versionId}`) for the routine in force holding a recommended product retired
+//           after the version was built (catalog version greater than the version's).
+//   The repository gives it dueRequests(now, limit), writerRetriesDue(now, limit) and retiredCodeVersions(limit) (routines.repository.contract.ts); the fake is told
+//   which codes the catalog retired with retireCode(code, updatedInVersion).
+//   deps.outcomeCounts: Pick<OutcomeCountsRepository, 'counts'>, read for the codes of the skeleton's gap candidates when the version shows hints.
+
+const requestIfStale = () => runAs(AMARA_ACTOR, () => service.requestIfStale(AMARA_PROFILE))
+const sweep = (offsetMs: number) => {
+  setClock(offsetMs)
+  return service.sweep(at(offsetMs))
+}
+const bodies = () => jobs.enqueued.map((entry) => entry.body as BuildRoutineMessage)
+
+describe('RoutineService.requestIfStale', () => {
+  /** The fingerprint of the routine for Amara's goal, cautions and decisions as the world has them at the start of a test: the two products of the verdict. */
+  const fingerprintOfWorld = (over: { goal?: Goal; cautions?: Parameters<typeof routineFingerprint>[0]['cautions']; products?: Parameters<typeof routineFingerprint>[0]['products'] } = {}) =>
+    routineFingerprint({
+      goal: over.goal ?? 'fade-dark-marks',
+      cautions: over.cautions ?? ['tapering', 'recent-reaction'],
+      products: over.products ?? [
+        { entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' },
+        { entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' },
+      ],
+      rulesVersion: ROUTINE_RULES_VERSION,
+    })
+
+  it('asks for the first routine, keyed by the fingerprint of its inputs, when the verdict is ready and there is no routine yet', async () => {
+    await requestIfStale()
+
+    expect(queued()).toEqual([{ job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'verdict', requestKey: await fingerprintOfWorld(), requestedAt: T0.getTime(), waits: 0 } }])
+  })
+
+  it.each([
+    ['there is no saved verdict (outdated, or its build is still queued)', () => (world.saved = null)],
+    ['the saved verdict\'s fit is not ready', () => (world.saved = { ...world.saved!, fit: 'not-ready' })],
+    ['the profile has no goal', () => (world.goal = null)],
+    ['the profile has not answered the safety question', () => (world.safety = { view: null, parseState: null, mentions: [] })],
+  ])('asks for nothing when there is no routine yet and %s', async (_why, change) => {
+    change()
+
+    await expect(requestIfStale()).resolves.toBeUndefined()
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for nothing when the routine in force was built from the very inputs there are now', async () => {
+    await firstBuild()
+
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+  })
+
+  // The build leaves out a verdict product whose shelf entry cannot be found, and keeps a reduced sunscreen as keep: its fingerprint is of the skeleton's shelf, not of the
+  // verdict's list. A read that fingerprinted the verdict's products as they are would disagree with every build, and ask for a rebuild each time it was asked.
+  it('asks for nothing when the verdict names an entry the build leaves out, because the read fingerprints what the build does', async () => {
+    addProduct('entry-lost', CLEAN)
+    world.facts.delete('form-entry-lost')
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-lost', { kind: 'keep' }, 'moisturise')])
+    await firstBuild()
+
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for nothing when the verdict reduces a sunscreen the build keeps as it is', async () => {
+    addProduct('entry-spf', CLEAN)
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-spf', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'protect')])
+    await firstBuild()
+
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for nothing about a routine already started, when its inputs have not changed', async () => {
+    await started()
+
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+  })
+
+  const changes: [string, () => void, () => ReturnType<typeof routineFingerprint>][] = [
+    ['the goal changed', () => (world.goal = 'glow'), () => routineFingerprint({ goal: 'glow', cautions: ['tapering', 'recent-reaction'], products: [{ entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' }, { entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' }], rulesVersion: ROUTINE_RULES_VERSION })],
+    [
+      'a safety answer was added',
+      () => (world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }),
+      () => routineFingerprint({ goal: 'fade-dark-marks', cautions: ['pregnant', 'tapering', 'recent-reaction'], products: [{ entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' }, { entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' }], rulesVersion: ROUTINE_RULES_VERSION }),
+    ],
+    [
+      'the stopped product is now kept, so the tapering caution goes',
+      () => saveVerdict([verdictProduct('entry-a', { kind: 'keep' }, 'cleanse'), verdictProduct('entry-b', { kind: 'keep' }, 'treat')]),
+      () => routineFingerprint({ goal: 'fade-dark-marks', cautions: ['recent-reaction'], products: [{ entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' }, { entryId: 'entry-b', verdict: { kind: 'keep' }, step: 'treat' }], rulesVersion: ROUTINE_RULES_VERSION }),
+    ],
+    [
+      'a product left the shelf',
+      () => removeShelfProduct('entry-a'),
+      () => routineFingerprint({ goal: 'fade-dark-marks', cautions: ['tapering', 'recent-reaction'], products: [{ entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' }], rulesVersion: ROUTINE_RULES_VERSION }),
+    ],
+  ]
+
+  it.each(changes)('asks for a rebuild, keyed by the new fingerprint, when %s, and that key is what the rebuild then records', async (_why, change, expected) => {
+    const before = await firstBuild()
+    change()
+
+    await requestIfStale()
+
+    const key = await expected()
+    expect(key).not.toBe(before.routineFingerprint)
+    expect(queued()).toEqual([{ job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'verdict', requestKey: key, requestedAt: T0.getTime(), waits: 0 } }])
+    await run(queuedBody())
+    expect((await latestRow()).routineFingerprint).toBe(key)
+  })
+
+  it('does not ask a second time for the same inputs while the first request is being worked on', async () => {
+    await firstBuild()
+    reverdict()
+    world.goal = 'glow'
+
+    await requestIfStale()
+    await requestIfStale()
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('asks for nothing when routines are switched off', async () => {
+    service = new RoutineService({ ...deps, enabled: false })
+
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+    expect(await repository.findRequest(AMARA_PROFILE)).toBeNull()
+  })
+
+  it('does not throw, asks for nothing and logs only the id, when the saved verdict cannot be read', async () => {
+    const spies = spyOnConsole()
+    deps.verdicts = { savedFor: async () => Promise.reject(new Error('the database is down while holding Karo Glow Cream')) }
+    service = new RoutineService(deps)
+
+    await expect(requestIfStale()).resolves.toBeUndefined()
+
+    expect(queued()).toEqual([])
+    expect(spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call))).join('\n')).not.toContain('Karo Glow Cream')
+  })
+
+  it('does not throw when the routine in force cannot be read', async () => {
+    spyOnConsole()
+    vi.spyOn(repository, 'current').mockRejectedValue(new Error('the database is down'))
+
+    await expect(requestIfStale()).resolves.toBeUndefined()
+
+    expect(queued()).toEqual([])
+  })
+
+  it('does not throw when the queue refuses the request', async () => {
+    spyOnConsole()
+    jobs.failNextWith(new Error('queue down'))
+
+    await expect(requestIfStale()).resolves.toBeUndefined()
+  })
+})
+
+describe('RoutineService.sweep: the dead-letter retry due', () => {
+  /** A request that was built, dead-lettered 30 minutes in, and so has its retry due 24 hours after that. */
+  const deadLettered = async (key = 'routine-fp-1') => {
+    await request('verdict', key)
+    setClock(30 * MINUTE)
+    await markBuildFailed(queuedBody())
+    return 30 * MINUTE + DAY
+  }
+
+  it('queues the retry of a request whose retry is due, marked as the retry, with no delay, and not a millisecond before', async () => {
+    const due = await deadLettered()
+    const queuedBefore = jobs.enqueued.length
+
+    expect(await sweep(due - 1)).toBe(0)
+    expect(jobs.enqueued).toHaveLength(queuedBefore)
+
+    expect(await sweep(due)).toBe(1)
+    expect(jobs.enqueued).toHaveLength(queuedBefore + 1)
+    const sent = jobs.enqueued.at(-1)!
+    expect(sent.job).toBe('build-routine')
+    expect(sent.delaySeconds).toBeUndefined()
+    expect(sent.body).toEqual({ profileId: AMARA_PROFILE, reason: expect.any(String), requestKey: 'routine-fp-1', requestedAt: at(due).getTime(), waits: 0, retry: true })
+  })
+
+  it('clears the retry due when it queues the retry, so a second sweep queues nothing for it', async () => {
+    const due = await deadLettered()
+    await sweep(due)
+    const queuedBefore = jobs.enqueued.length
+
+    expect(await sweep(due + HOUR)).toBe(0)
+
+    expect(jobs.enqueued).toHaveLength(queuedBefore)
+    expect((await repository.findRequest(AMARA_PROFILE))!.retryDueAt).toBeNull()
+  })
+
+  it('queues nothing for a request that never dead-lettered, or whose build finished', async () => {
+    await request('verdict', 'routine-fp-1')
+    await run(queuedBody())
+
+    expect(await sweep(10 * DAY)).toBe(0)
+
+    expect(jobs.enqueued).toHaveLength(1)
+  })
+
+  it('does not queue a third try: a retry that dead-letters in turn is final', async () => {
+    const due = await deadLettered()
+    await sweep(due)
+    setClock(due + HOUR)
+    await markBuildFailed(jobs.enqueued.at(-1)!.body as BuildRoutineMessage)
+    const queuedBefore = jobs.enqueued.length
+
+    expect(await sweep(due + 3 * DAY)).toBe(0)
+
+    expect(jobs.enqueued).toHaveLength(queuedBefore)
+    expect((await repository.findRequest(AMARA_PROFILE))!.retryDueAt).toBeNull()
+  })
+
+  it('keeps the retry due when the queue refuses the message, so the next sweep tries again', async () => {
+    spyOnConsole()
+    const due = await deadLettered()
+    jobs.failNextWith(new Error('queue down'))
+
+    await expect(sweep(due)).resolves.toBe(0)
+    expect((await repository.findRequest(AMARA_PROFILE))!.retryDueAt).toEqual(at(due))
+
+    expect(await sweep(due + DAY)).toBe(1)
+  })
+
+  it('queues nothing, and leaves the retry due, when routines are switched off', async () => {
+    const due = await deadLettered()
+    service = new RoutineService({ ...deps, enabled: false })
+    const queuedBefore = jobs.enqueued.length
+
+    expect(await sweep(due)).toBe(0)
+
+    expect(jobs.enqueued).toHaveLength(queuedBefore)
+    expect((await repository.findRequest(AMARA_PROFILE))!.retryDueAt).toEqual(at(due))
+  })
+
+  it('queues at most 200 retries a run, the longest overdue first, and the rest on the next run', async () => {
+    for (let i = 0; i <= 200; i++) {
+      await repository.claim(`profile-${i}`, `routine-fp-${i}`, at(0), at(-HOUR))
+      await repository.setRequestRetry(`profile-${i}`, { retried: true, retryDueAt: at(HOUR + i * SECOND) })
+    }
+
+    expect(await sweep(DAY)).toBe(200)
+
+    expect(bodies()).toHaveLength(200)
+    expect(new Set(bodies().map((body) => body.profileId)).size).toBe(200)
+    expect(bodies().map((body) => body.profileId)).not.toContain('profile-200')
+    expect((await repository.findRequest('profile-200'))!.retryDueAt).toEqual(at(HOUR + 200 * SECOND))
+
+    expect(await sweep(DAY + HOUR)).toBe(1)
+    expect(bodies().at(-1)).toMatchObject({ profileId: 'profile-200', requestKey: 'routine-fp-200', retry: true })
+  })
+})
+
+describe('RoutineService.sweep: the writer retry due', () => {
+  /** A first build the writer failed three times: the rules wrote the routine, and the writer is due another try 24 hours after the build. */
+  const rulesBuilt = async () => {
+    script(throws(), throws(), throws())
+    const row = await firstBuild()
+    expect(row).toMatchObject({ source: 'rules', writerRetryDueAt: at(DAY) })
+    script()
+    return row
+  }
+
+  it('asks for the writer retry of the routine in force when it is due, keyed by the version, and not a millisecond before', async () => {
+    const row = await rulesBuilt()
+
+    expect(await sweep(DAY - 1)).toBe(0)
+    expect(queued()).toEqual([])
+
+    expect(await sweep(DAY)).toBe(1)
+    expect(queued()).toEqual([{ job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'writer-retry', requestKey: `writer-retry:${row.id}`, requestedAt: at(DAY).getTime(), waits: 0 } }])
+  })
+
+  it('stops asking once the retry has built a routine the writer wrote', async () => {
+    await rulesBuilt()
+    await sweep(DAY)
+    await run(queuedBody())
+    expect(await currentRow()).toMatchObject({ source: 'writer', reason: 'writer-retry', writerRetryDueAt: null })
+
+    expect(await sweep(DAY + HOUR)).toBe(0)
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('asks for nothing for a routine the writer wrote', async () => {
+    await firstBuild()
+
+    expect(await sweep(10 * DAY)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+
+  it('never asks for a rules-only version that a newer ready version has replaced', async () => {
+    await rulesBuilt()
+    setClock(MINUTE)
+    reverdict()
+    await build('verdict')
+    expect(await currentRow()).toMatchObject({ source: 'writer', writerRetryDueAt: null })
+
+    expect(await sweep(10 * DAY)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks only for the newest ready version when an older rules-only version is due too', async () => {
+    await rulesBuilt()
+    setClock(MINUTE)
+    reverdict()
+    script(throws(), throws(), throws())
+    await build('verdict')
+    const newest = await currentRow()
+    expect(newest).toMatchObject({ source: 'rules', writerRetryDueAt: at(MINUTE + DAY) })
+
+    expect(await sweep(10 * DAY)).toBe(1)
+
+    expect(bodies().map((body) => body.requestKey)).toEqual([`writer-retry:${newest.id}`])
+  })
+
+  it('asks for nothing when routines are switched off', async () => {
+    await rulesBuilt()
+    service = new RoutineService({ ...deps, enabled: false })
+
+    expect(await sweep(DAY)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for at most 200 profiles a run', async () => {
+    const base = await rulesBuilt()
+    // 201 more profiles with a rules-only routine due at the same time: 202 are due in all.
+    for (let i = 0; i <= 200; i++) {
+      await repository.append({ ...base, id: `version-due-${i}`, profileId: `profile-${i}`, createdAt: at(i * SECOND), readyAt: at(i * SECOND) })
+    }
+
+    expect(await sweep(DAY)).toBe(200)
+
+    expect(jobs.enqueued).toHaveLength(200)
+    expect(new Set(bodies().map((body) => body.profileId)).size).toBe(200)
+  })
+})
+
+describe('RoutineService.sweep: a recommended product retired since the routine was built', () => {
+  it('asks for a rebuild of the routine in force when a product it recommends was retired in a later catalog version', async () => {
+    const row = await firstBuild()
+    expect(row).toMatchObject({ catalogVersion: 42 })
+    expect(shapeOf(row).map((step) => step.product)).toContainEqual({ kind: 'candidate', code: 'SERUM-1' })
+    await repository.retireCode('SERUM-1', 43)
+
+    expect(await sweep(HOUR)).toBe(1)
+
+    expect(queued()).toEqual([{ job: 'build-routine', body: { profileId: AMARA_PROFILE, reason: 'catalog-retired', requestKey: `catalog-retired:${row.id}`, requestedAt: at(HOUR).getTime(), waits: 0 } }])
+  })
+
+  it.each([
+    ['in the catalog version the routine was built under', 42],
+    ['in an earlier catalog version', 41],
+  ])('asks for nothing when the product was retired %s', async (_when, retiredIn) => {
+    await firstBuild()
+    await repository.retireCode('SERUM-1', retiredIn)
+
+    expect(await sweep(HOUR)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for nothing when the retired product is not one the routine recommends', async () => {
+    await firstBuild()
+    await repository.retireCode('SERUM-2', 43)
+
+    expect(await sweep(HOUR)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+
+  it('asks for nothing once the routine was rebuilt under the catalog that retired the product', async () => {
+    await firstBuild()
+    catalogVersion = 43
+    retireSerum1()
+    await repository.retireCode('SERUM-1', 43)
+    await sweep(HOUR)
+    expect(queued()).toHaveLength(1)
+    await run(queuedBody())
+    const rebuilt = await currentRow()
+    expect(rebuilt).toMatchObject({ catalogVersion: 43 })
+    expect(shapeOf(rebuilt).map((step) => step.product)).not.toContainEqual({ kind: 'candidate', code: 'SERUM-1' })
+
+    expect(await sweep(2 * HOUR)).toBe(0)
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('asks for nothing when routines are switched off', async () => {
+    await firstBuild()
+    await repository.retireCode('SERUM-1', 43)
+    service = new RoutineService({ ...deps, enabled: false })
+
+    expect(await sweep(HOUR)).toBe(0)
+
+    expect(queued()).toEqual([])
+  })
+})
+
+describe('RoutineService.build: outcome hints', () => {
+  // hintsShown(routineId) is false for about one id in ten, by hash. These two ids were found by hashing, and are checked here so that a change of hash fails loudly.
+  const SHOWN_ID = 'version-1'
+  const HIDDEN_ID = 'hidden-6'
+  const GROUP = { goal: 'fade-dark-marks', skinType: 'combination', country: 'NG' } as const
+  // 40 similar users, of whom 30 saw it fainter and 10 flared or stopped: a net fainter score of (30 - 10) / 40 = 0.5.
+  const GOOD = { n: 40, fainter: 30, flared: 2, flaredOrStopped: 10, fainterAndFlaredOrStopped: 4 }
+  // Under 30 users: no hint to quote.
+  const FEW = { n: 10, fainter: 6, flared: 0, flaredOrStopped: 1, fainterAndFlaredOrStopped: 0 }
+  // More users saw it fainter than there are users: no such group exists.
+  const CORRUPT = { n: 10, fainter: 11, flared: 0, flaredOrStopped: 0, fainterAndFlaredOrStopped: 0 }
+
+  const withId = (id: string) => {
+    service = new RoutineService({ ...deps, newId: () => id })
+  }
+  const hintsOf = (step: RoutineStep) => Object.fromEntries(writer.calls[0]!.gaps.find((gap) => gap.step === step)!.candidates.map((c) => [c.code, c.outcomeHint]))
+
+  it('is checked that the fixture ids fall on the sides they are used for', () => {
+    expect(hintsShown(SHOWN_ID)).toBe(true)
+    expect(hintsShown(HIDDEN_ID)).toBe(false)
+  })
+
+  it('gives the writer each candidate\'s hint from the counts of the profile\'s group, when the routine shows hints', async () => {
+    withId(SHOWN_ID)
+    await outcomeCounts.upsert(GROUP, 'SERUM-1', GOOD, T0)
+    await outcomeCounts.upsert(GROUP, 'SERUM-2', FEW, T0)
+
+    await build('first')
+
+    expect(writer.calls[0]!.hintsShown).toBe(true)
+    const treat = hintsOf('treat')
+    expect(treat['SERUM-1']).toMatchObject({ n: 40 })
+    expect(treat['SERUM-1']!.netFainter).toBeCloseTo(0.5, 10)
+    // Too few users, and no row at all: no hint.
+    expect(treat['SERUM-2']).toBeNull()
+    expect(hintsOf('moisturise')['MOIST-1']).toBeNull()
+  })
+
+  it('records on the version whether hints were shown', async () => {
+    withId(SHOWN_ID)
+    await build('first')
+    expect((await latestRow()).hintsShown).toBe(true)
+  })
+
+  it('reads the counts once, for the group of the goal, the skin type and the shopping country, and for the codes of every gap candidate', async () => {
+    withId(SHOWN_ID)
+    const read = vi.spyOn(outcomeCounts, 'counts')
+
+    await build('first')
+
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(read.mock.calls[0]![0]).toEqual(GROUP)
+    expect([...read.mock.calls[0]![1]].sort()).toEqual(['MOIST-1', 'SERUM-1', 'SERUM-2', 'SPF-1'])
+  })
+
+  it('reads the group of users with no face scan when the profile has no skin type', async () => {
+    withId(SHOWN_ID)
+    world.seen = { ...world.seen, skinType: null }
+    await outcomeCounts.upsert({ ...GROUP, skinType: null }, 'SERUM-1', GOOD, T0)
+    await outcomeCounts.upsert(GROUP, 'SERUM-2', GOOD, T0)
+
+    await build('first')
+
+    expect(hintsOf('treat')['SERUM-1']).toMatchObject({ n: 40 })
+    expect(hintsOf('treat')['SERUM-2']).toBeNull()
+  })
+
+  it('reads the group of the shopping country, and never another country\'s counts', async () => {
+    withId(SHOWN_ID)
+    world.shopping = { country: 'GH', budgetBand: 'mid' }
+    await outcomeCounts.upsert(GROUP, 'SPF-1', GOOD, T0)
+    await outcomeCounts.upsert({ ...GROUP, country: 'GH' }, 'SPF-1', { n: 50, fainter: 40, flared: 0, flaredOrStopped: 5, fainterAndFlaredOrStopped: 0 }, T0)
+
+    await build('first')
+
+    expect(hintsOf('protect')['SPF-1']).toMatchObject({ n: 50 })
+    expect(hintsOf('protect')['SPF-1']!.netFainter).toBeCloseTo(0.7, 10)
+  })
+
+  it('reads no counts and gives the writer no hint, when the routine is one of the tenth that shows none', async () => {
+    withId(HIDDEN_ID)
+    await outcomeCounts.upsert(GROUP, 'SERUM-1', GOOD, T0)
+    const read = vi.spyOn(outcomeCounts, 'counts')
+
+    await build('first')
+
+    expect(read).not.toHaveBeenCalled()
+    expect(writer.calls[0]!.hintsShown).toBe(false)
+    expect(Object.values(hintsOf('treat'))).toEqual([null, null])
+    expect((await latestRow()).hintsShown).toBe(false)
+  })
+
+  it('costs one hint and not the routine when a counts row is corrupt: the others are kept, and the code (never the numbers) is logged', async () => {
+    withId(SHOWN_ID)
+    await outcomeCounts.upsert(GROUP, 'SERUM-1', GOOD, T0)
+    await outcomeCounts.upsert(GROUP, 'SERUM-2', CORRUPT, T0)
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(await build('first')).toBe('built')
+
+    expect(hintsOf('treat')['SERUM-1']).toMatchObject({ n: 40 })
+    expect(hintsOf('treat')['SERUM-2']).toBeNull()
+    expect(log).toHaveBeenCalledWith({ outcome: 'hint-counts-corrupt', profileId: AMARA_PROFILE, code: 'SERUM-2' })
+    expect(await currentRow()).toMatchObject({ status: 'ready', source: 'writer' })
+  })
+
+  it('mints the version\'s id before the skeleton and gives that same id to the version it appends', async () => {
+    const minted: string[] = []
+    service = new RoutineService({ ...deps, newId: () => (minted.push(`minted-${minted.length + 1}`), minted.at(-1)!) })
+    let idWhenWriting = ''
+    writer.hook = async () => {
+      idWhenWriting = (await repository.latest(AMARA_PROFILE))!.id
+    }
+
+    await build('first')
+
+    expect(minted).toEqual(['minted-1'])
+    expect(idWhenWriting).toBe('minted-1')
+    expect((await latestRow()).id).toBe('minted-1')
   })
 })
