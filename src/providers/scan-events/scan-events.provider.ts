@@ -20,7 +20,7 @@ export type ScanEvent =
   | { type: 'photo'; photo: ScanEventPhoto }
   /** A face scan changed state; carries the frame as it now is. Product scans never send one. */
   | { type: 'face'; faceScan: FaceScanFrame }
-  /** A shelf verdict was built; carries the verdict as GET answers it. Only the stream keyed `verdict:<profileId>` carries one. */
+  /** A shelf verdict was built; carries the verdict as GET answers it. Only the streams keyed `verdict:<profileId>` (the full verdict) and `verdict-preview:<profileId>` (a guest's locked preview) carry one. */
   | { type: 'verdict'; verdict: VerdictFrame }
   /** Every item of the scan is in a final state. Sent once the last one gets there. */
   | { type: 'done' }

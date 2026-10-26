@@ -37,8 +37,16 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 // reads the verdict without a second call.
 // No frame ever carries `facts`, `step`, `sourceUrls`, or a step-down's status and audit columns: the body is the same public one GET answers.
 // The errors before the stream starts (401, 503 VERDICT_UNAVAILABLE, 409 GOAL_REQUIRED) are the usual JSON envelopes, in GET's order.
+//
+// A GUEST never receives the full verdict (owner decision, spec #171), on the stream any more than on GET: a guest follows a stream of the locked preview only, whose
+// `snapshot` and every `verdict` frame carry the guest's body `{ status: 'ready', locked: true, fit, total, counts, escalates }` (or `{ status: 'pending' }`), never a
+// product, entry id, name, reason or step-down. A verified user's stream carries the full verdict, with `locked: false`. One build publishes to both (`verdict:<profileId>`
+// and `verdict-preview:<profileId>`, which the service tests pin; here it is told by what each client reads), and `done` goes to both. The tests that follow the full
+// verdict are therefore a verified user's (`readyMember`); the guest's are in the last describe.
 
 const VERDICTS_MAIN = 'deepertones-verdicts-development'
+const OTP_QUEUE = 'deepertones-otp-delivery-development'
+const ZEPTO_URL = 'https://zeptomail.test/v1.1/email'
 const ANTHROPIC_URL = 'https://api.anthropic.com/v1/messages'
 const SOURCE_URL = 'https://shop.example/product'
 const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
@@ -51,7 +59,18 @@ const verdictsQueued: Queued[] = []
 const verdictsQueue = { send: async (body: unknown, options?: { delaySeconds?: number }) => void verdictsQueued.push({ body, delaySeconds: options?.delaySeconds }), sendBatch: async () => {} } as unknown as Queue
 const quietQueue = { send: async () => {}, sendBatch: async () => {} } as unknown as Queue
 // The Worker keeps its real SCAN_STREAM binding (from env): the frames are read from the real Durable Object.
-const WORKER_ENV = { ...env, VERDICTS_QUEUE: verdictsQueue, SCAN_ITEMS_QUEUE: quietQueue, PARSE_SAFETY_QUEUE: quietQueue, PUSH_DELIVERY_QUEUE: quietQueue }
+const otpQueued: unknown[] = []
+const WORKER_ENV = {
+  ...env,
+  OTP_CHANNELS: 'email',
+  ZEPTOMAIL_API_URL: ZEPTO_URL,
+  ZEPTOMAIL_API_KEY: 'test-key',
+  OTP_DELIVERY_QUEUE: { send: async (body: unknown) => void otpQueued.push(body) } as unknown as Queue,
+  VERDICTS_QUEUE: verdictsQueue,
+  SCAN_ITEMS_QUEUE: quietQueue,
+  PARSE_SAFETY_QUEUE: quietQueue,
+  PUSH_DELIVERY_QUEUE: quietQueue,
+}
 const ORIGIN = 'http://deepertones.test'
 const fetchWorker = (input: RequestInfo | URL, init?: RequestInit) => worker.fetch!(new Request(input, init) as never, WORKER_ENV, createExecutionContext())
 const api = hc<AppType>(ORIGIN, { fetch: fetchWorker as typeof fetch })
@@ -62,6 +81,7 @@ afterEach(async () => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   verdictsQueued.length = 0
+  otpQueued.length = 0
   await Promise.all(opened.splice(0).map((stream) => stream.cancel()))
   await abortAllDurableObjects()
 })
@@ -73,6 +93,7 @@ const freshIp = () => {
   const n = next()
   return `10.${Number(runSalt) % 250}.${Math.floor(n / 250) % 250}.${(n % 250) + 1}`
 }
+const freshEmail = () => `Verdict-events-${runSalt}-${next()}@Example.com`
 const freshBrand = () => `${runSalt}${next()}x VerdictEventsBrand`
 
 type Envelope<T> = { success: true; status: number; data: T } | { success: false; status: number; error: { code: string } }
@@ -84,7 +105,9 @@ const dataOf = async <T>(res: Reply): Promise<T> => {
 }
 
 type PublicProduct = { entryId: string; kind: 'product' | 'no-label'; product?: Record<string, unknown>; noLabel?: Record<string, unknown>; group: string; verdict: { kind: string; taperCode?: string }; reason: string; escalate: boolean }
-type ReadyView = { status: 'ready'; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: { code: string }[] }
+type ReadyView = { status: 'ready'; locked: false; fit: 'ready' | 'not-ready'; products: PublicProduct[]; tapers: { code: string }[] }
+type Groups = { helping: number; redundant: number; blocking: number; conflicting: number; 'likely-the-problem': number; 'cant-tell': number; prescribed: number; undecided: number }
+const NO_GROUPS: Groups = { helping: 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 0, 'cant-tell': 0, prescribed: 0, undecided: 0 }
 
 // --- people: a guest of one install ---
 
@@ -94,8 +117,44 @@ const newGuest = async () => {
   const ip = freshIp()
   const res = await v1.auth.anonymous.$post({ json: { deviceId, platform: 'ios' } }, { headers: { 'cf-connecting-ip': ip } })
   const session = await dataOf<{ tokens: { accessToken: string }; user: { id: string } }>(res)
+  let token = session.tokens.accessToken
   const profileId = (await new D1ProfilesRepository(db).defaultFor(session.user.id))!.id
-  return { userId: session.user.id, profileId, headers: () => ({ 'cf-connecting-ip': ip, Authorization: `Bearer ${session.tokens.accessToken}` }) }
+  return {
+    userId: session.user.id,
+    profileId,
+    headers: () => ({ 'cf-connecting-ip': ip, Authorization: `Bearer ${token}` }),
+    /** Signs the guest up by email, the way a person does; the guest's token is replaced by the verified account's, on the same profile. */
+    async signUp() {
+      const address = freshEmail()
+      const headers = (bearer: string) => ({ 'cf-connecting-ip': ip, Authorization: `Bearer ${bearer}` })
+      expect((await v1.auth.otp.send.$post({ json: { channel: 'email', address } }, { headers: headers(token) })).status).toBe(200)
+      const verified = await v1.auth.otp.verify.$post({ json: { channel: 'email', address, code: await codeFor() } }, { headers: headers(token) })
+      expect(verified.status).toBe(200)
+      const after = await dataOf<{ tokens: { accessToken: string }; user: { id: string; status: string } }>(verified)
+      expect(after.user).toMatchObject({ id: session.user.id, status: 'verified' })
+      token = after.tokens.accessToken
+    },
+  }
+}
+
+/** Delivers the queued code email through the Worker's queue handler and reads the code from it. */
+const codeFor = async (): Promise<string> => {
+  const body = otpQueued.pop()
+  if (!body) throw new Error('no OTP delivery was queued')
+  const sent: { textbody: string }[] = []
+  vi.stubGlobal('fetch', async (url: unknown, init?: RequestInit) => {
+    if (String(url) !== ZEPTO_URL) throw new Error(`unexpected outbound request to ${String(url)}`)
+    sent.push(JSON.parse(init!.body as string))
+    return Response.json({ data: [{ code: 'EM_104', message: 'ok' }], message: 'OK', request_id: 'r' })
+  })
+  const batch = createMessageBatch(OTP_QUEUE, [{ id: 'm', timestamp: new Date(), attempts: 1, body }])
+  const ctx = createExecutionContext()
+  await worker.queue!(batch, WORKER_ENV, ctx)
+  expect((await getQueueResult(batch, ctx)).explicitAcks).toEqual(['m'])
+  vi.unstubAllGlobals()
+  const found = /\b(\d{6})\b/.exec(sent[0]!.textbody)?.[1]
+  if (!found) throw new Error('no code in the email')
+  return found
 }
 type Guest = Awaited<ReturnType<typeof newGuest>>
 
@@ -106,6 +165,12 @@ const readyGuest = async () => {
   const guest = await newGuest()
   await putGoal(guest)
   await putSafety(guest, { choices: ['none'] })
+  return guest
+}
+/** The same, signed up: a verified account on the guest's profile, whose stream carries the full verdict. */
+const readyMember = async () => {
+  const guest = await readyGuest()
+  await guest.signUp()
   return guest
 }
 
@@ -229,6 +294,7 @@ const LIGHTENING_TAPER = code('TPR-LIGHTENING')
 const STEROID_INGREDIENT = `${word('zq')} corticoidum`
 const helpingBody = (entryId: string, shown: object, fit: 'ready' | 'not-ready' = 'ready') => ({
   status: 'ready',
+  locked: false,
   fit,
   products: [
     fit === 'ready'
@@ -305,7 +371,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
   })
 
   it('sends the verdict, the same body GET answers, when the queued build saves, and then done and closes the stream', async () => {
-    const guest = await readyGuest()
+    const guest = await readyMember()
     const entryId = await onShelf(guest)
     const shows = await shelfShows(guest)
     const { stream } = await watch(guest)
@@ -324,7 +390,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
   })
 
   it('carries in its frames what a screen shows and nothing of how the rules reached it: the step-down by its code, and no facts, routine step, rule source or audit column', async () => {
-    const guest = await readyGuest()
+    const guest = await readyMember()
     const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
     await onShelf(guest)
     const shows = await shelfShows(guest)
@@ -336,7 +402,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     const [verdict] = (await stream.read(2)).frames.map(parseFrame)
     expect(verdict!.event).toBe('verdict')
     const view = verdict!.data as ReadyView
-    expect(Object.keys(view).sort()).toEqual(['fit', 'products', 'status', 'tapers'])
+    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
     expect(view.products.find((product) => product.entryId === steroid)).toEqual({
       entryId: steroid,
       ...shows(steroid),
@@ -352,7 +418,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
   describe('when the fit judge fails', () => {
     it('sends the verdict from the rules alone with the fit not ready, leaves the stream open, then sends the retry\'s verdict with the fit ready, then done', async () => {
-      const guest = await readyGuest()
+      const guest = await readyMember()
       const entryId = await onShelf(guest)
       const shows = await shelfShows(guest)
       const { stream } = await watch(guest)
@@ -376,7 +442,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     })
 
     it('sends done after the verdict of the third failed attempt of the day, since the next try is a day away, and closes the stream', async () => {
-      const guest = await readyGuest()
+      const guest = await readyMember()
       const entryId = await onShelf(guest)
       const shows = await shelfShows(guest)
       const { stream } = await watch(guest)
@@ -397,7 +463,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
 
   describe('following a verdict that is already built', () => {
     it('sends the ready verdict as the snapshot, then done at once and no second copy of the verdict, and queues nothing more', async () => {
-      const guest = await readyGuest()
+      const guest = await readyMember()
       const entryId = await onShelf(guest)
       const shows = await shelfShows(guest)
       await getVerdict(guest)
@@ -415,7 +481,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     })
 
     it('sends the snapshot and then done, and closes the stream, when the fit is not ready and the day\'s attempts are spent, since nothing is coming soon', async () => {
-      const guest = await readyGuest()
+      const guest = await readyMember()
       const entryId = await onShelf(guest)
       const shows = await shelfShows(guest)
       await getVerdict(guest)
@@ -432,7 +498,7 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     })
 
     it('sends the snapshot and keeps the stream open when the fit is not ready and the queue is still to retry it (the first attempt failed)', async () => {
-      const guest = await readyGuest()
+      const guest = await readyMember()
       const entryId = await onShelf(guest)
       const shows = await shelfShows(guest)
       await getVerdict(guest)
@@ -460,8 +526,8 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
   })
 
   it('sends one profile\'s verdict to that profile\'s stream only', async () => {
-    const amara = await readyGuest()
-    const tolu = await readyGuest()
+    const amara = await readyMember()
+    const tolu = await readyMember()
     await onShelf(amara)
     await onShelf(tolu)
     const watchingAmara = await watch(amara)
@@ -479,5 +545,141 @@ describe('GET /api/v1/me/verdict/events: with both step-down templates approved'
     // His own build, when it runs, reaches his stream.
     await buildQueued(tolu)
     expect((await watchingTolu.stream.read(3)).frames.map((frame) => parseFrame(frame).event)).toEqual(['verdict', 'done'])
+  })
+})
+
+describe('GET /api/v1/me/verdict/events: a guest follows the locked preview, never the full verdict', () => {
+  /** Everything a member of the same profile would be shown, which a guest's stream must not carry a word of. */
+  const hiddenFrom = (full: ReadyView, shows: (entryId: string) => { product?: object }): string[] =>
+    [
+      ...full.products.flatMap((product) => {
+        const shown = shows(product.entryId).product as { brand: string; name: string }
+        return [product.entryId, product.reason, shown.brand, shown.name, ...(product.verdict.taperCode ? [product.verdict.taperCode] : [])]
+      }),
+      ...full.tapers.map((taper) => taper.code),
+      STEROID_INGREDIENT,
+      'VerdictEventsBrand',
+    ].filter((text) => text.length > 0)
+
+  it('sends the preview as the verdict frame when the queued build saves, then done and closes the stream, and not a product, id, name, reason or step-down in any of the raw text', async () => {
+    const guest = await readyGuest()
+    const steroid = await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    const serum = await onShelf(guest)
+    const shows = await shelfShows(guest)
+    const { stream } = await watch(guest)
+    expect(parseFrame((await stream.read(1)).frames[0]!)).toEqual({ event: 'snapshot', data: { status: 'pending' }, comment: null })
+
+    await buildQueued(guest)
+
+    const { frames, ended } = await stream.read(3)
+    expect(frames.map(parseFrame)).toEqual([
+      {
+        event: 'verdict',
+        data: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+        comment: null,
+      },
+      { event: 'done', data: {}, comment: null },
+    ])
+    expect(ended).toBe(true)
+    // The independent source for what the frames must not say: the full verdict a member of this profile is shown.
+    const raw = frames.join('\n\n')
+    await guest.signUp()
+    const full = await dataOf<ReadyView>(await getVerdict(guest))
+    expect(full.products.map((product) => product.entryId).sort()).toEqual([steroid, serum].sort())
+    for (const text of hiddenFrom(full, shows)) expect(raw).not.toContain(text)
+    for (const field of ['products', 'tapers', 'entryId', 'reason']) expect(raw).not.toContain(`"${field}"`)
+  })
+
+  it('opens with the preview as the snapshot of a verdict that is already built, then done at once, and not a word of any product', async () => {
+    const guest = await readyGuest()
+    await onShelf(guest, [...CLEAN, STEROID_INGREDIENT])
+    await onShelf(guest)
+    const shows = await shelfShows(guest)
+    await getVerdict(guest)
+    await buildQueued(guest)
+
+    const { stream } = await watch(guest)
+
+    const { frames, ended } = await stream.read(3)
+    expect(frames.map(parseFrame)).toEqual([
+      {
+        event: 'snapshot',
+        data: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...NO_GROUPS, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+        comment: null,
+      },
+      { event: 'done', data: {}, comment: null },
+    ])
+    expect(ended).toBe(true)
+    const raw = frames.join('\n\n')
+    await guest.signUp()
+    for (const text of hiddenFrom(await dataOf<ReadyView>(await getVerdict(guest)), shows)) expect(raw).not.toContain(text)
+  })
+
+  it('sends the preview with the fit not ready and the undecided product counted, leaves the stream open, then the retry\'s preview with the fit ready, then done', async () => {
+    const guest = await readyGuest()
+    await onShelf(guest)
+    const { stream } = await watch(guest)
+    await stream.read(1)
+
+    await buildWithFitFailing(guest)
+
+    const first = await stream.read(2, QUIET_MS)
+    expect(first.frames.map(parseFrame)).toEqual([
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'not-ready', total: 1, counts: { ...NO_GROUPS, undecided: 1 }, escalates: 0 }, comment: null },
+    ])
+    expect(first.ended).toBe(false)
+
+    await buildQueued(guest)
+
+    const { frames, ended } = await stream.read(3)
+    expect(frames.map(parseFrame)).toEqual([
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
+      { event: 'done', data: {}, comment: null },
+    ])
+    expect(ended).toBe(true)
+  })
+
+  it('is sent the preview while the account it becomes is sent the full verdict, from the same build: one build publishes to both streams', async () => {
+    const guest = await readyGuest()
+    const entryId = await onShelf(guest)
+    const shows = await shelfShows(guest)
+    const asGuest = await watch(guest)
+    await asGuest.stream.read(1)
+    await guest.signUp()
+    const asMember = await watch(guest)
+    expect(parseFrame((await asMember.stream.read(1)).frames[0]!)).toEqual({ event: 'snapshot', data: { status: 'pending' }, comment: null })
+
+    await buildQueued(guest)
+
+    const members = await asMember.stream.read(3)
+    expect(members.frames.map(parseFrame)).toEqual([
+      { event: 'verdict', data: helpingBody(entryId, shows(entryId)), comment: null },
+      { event: 'done', data: {}, comment: null },
+    ])
+    const guests = await asGuest.stream.read(3)
+    expect(guests.frames.map(parseFrame)).toEqual([
+      { event: 'verdict', data: { status: 'ready', locked: true, fit: 'ready', total: 1, counts: { ...NO_GROUPS, helping: 1 }, escalates: 0 }, comment: null },
+      { event: 'done', data: {}, comment: null },
+    ])
+    expect(guests.frames.join('\n\n')).not.toContain(entryId)
+    expect(queuedFor(guest)).toHaveLength(1)
+  })
+
+  it('opens with the full verdict for the same profile once the guest has signed up, with no new build', async () => {
+    const guest = await readyGuest()
+    const entryId = await onShelf(guest)
+    const shows = await shelfShows(guest)
+    await getVerdict(guest)
+    await buildQueued(guest)
+    await guest.signUp()
+
+    const { stream } = await watch(guest)
+
+    const { frames } = await stream.read(3)
+    expect(frames.map(parseFrame)).toEqual([
+      { event: 'snapshot', data: helpingBody(entryId, shows(entryId)), comment: null },
+      { event: 'done', data: {}, comment: null },
+    ])
+    expect(queuedFor(guest)).toHaveLength(1)
   })
 })

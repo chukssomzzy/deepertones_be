@@ -3,7 +3,7 @@ import { describeError } from '../../jobs/safe-error'
 import { requireUser } from '../../lib/context'
 import { ConflictError, UnavailableError } from '../../lib/errors'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
-import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
+import type { ScanEvent, ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { VerdictFitter } from '../../providers/verdict-fitting/verdict-fitter.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
@@ -21,13 +21,13 @@ import { buildVerdictSpec, type BuildVerdictMessage } from './verdicts.job-specs
 import { mergeVerdict, type MergedVerdict } from './verdicts.merge'
 import type { FitState, ShelfVerdictRow, VerdictsRepository } from './verdicts.repository'
 import type { SavedVerdictProduct, ShownVerdictProduct } from './verdicts.types'
-import { toShelfVerdictResponse, type VerdictView } from './verdicts.view'
+import { previewOf, toShelfVerdictResponse, type VerdictView } from './verdicts.view'
 
 export type VerdictServiceDeps = {
   repository: VerdictsRepository
   fitter: VerdictFitter
   jobs: JobQueue
-  /** Tells whoever follows a profile's verdict that it was built (`verdict:<profileId>`). */
+  /** Tells whoever follows a profile's verdict that it was built: the full verdict on `verdict:<profileId>`, the guest's preview on `verdict-preview:<profileId>`. */
   events: ScanEvents
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>
@@ -42,8 +42,13 @@ export type VerdictServiceDeps = {
 /** The saved verdict as the routine reads it. */
 export type SavedVerdictView = { fingerprint: string; fit: 'ready' | 'not-ready'; builtAt: Date; rulesVersion: string | null; products: SavedVerdictProduct[] }
 
+/** The two streams of a profile's verdict: the account's full verdict, and the guest's locked preview. A guest is never subscribed to the full one. */
+type VerdictStream = 'full' | 'preview'
+
 /** A ready row: the build columns a saved verdict always has are not null. */
 type ReadyRow = ShelfVerdictRow & { status: 'ready'; fit: 'ready' | 'not-ready'; builtAt: Date }
+
+const BOTH_STREAMS: readonly VerdictStream[] = ['full', 'preview']
 
 const isReady = (row: ShelfVerdictRow | null): row is ReadyRow => row !== null && row.status === 'ready' && row.fit !== null && row.builtAt !== null
 
@@ -100,15 +105,17 @@ export class VerdictService {
    * The caller's verdict. 503 `VERDICT_UNAVAILABLE` while either step-down template is not approved (a stopped product could not be shown its taper), then 409
    * `GOAL_REQUIRED` for a profile with no goal. A saved verdict built from the inputs as they are now is served, whatever its fit. Otherwise the build is claimed
    * and queued (a request still fresh is not queued twice) and the answer is `pending`, the previous verdict included: it is not served as if it were current.
+   * A guest (status `anonymous`) is answered the locked preview of the same saved row and a verified user the full verdict: one build, read two ways.
    */
   async current(): Promise<VerdictView> {
-    const { profileId } = requireUser()
+    const { profileId, status } = requireUser()
     const { reference, goal } = await this.gated(profileId)
-    return this.viewOf(profileId, await this.servable(profileId, reference, goal))
+    return this.viewOf(profileId, await this.servable(profileId, reference, goal), VerdictService.streamOf(status))
   }
 
   /**
-   * The caller's verdict followed live, as the `text/event-stream` of `verdict:<profileId>`. The gates, the claim and the queued build are `current`'s (nothing is
+   * The caller's verdict followed live, as the `text/event-stream` of `verdict:<profileId>`, or of `verdict-preview:<profileId>` for a guest, whose snapshot and
+   * frames are only ever the locked preview. The gates, the claim and the queued build are `current`'s (nothing is
    * subscribed or queued when a gate throws). It starts with the verdict `current` would answer, then carries each `verdict` a build saves, and ends with `done`
    * once nothing more is coming soon: the fit is ready, or its day's attempts and its retry are spent (`fitRetried`). A verdict whose fit is not ready and still
    * has an attempt coming leaves the stream open to see that land. The snapshot is read before the stream opens, so the verdict is read again once it is open:
@@ -116,10 +123,11 @@ export class VerdictService {
    * re-read (`watch-reread-failed`), which still hands back the stream.
    */
   async watch(): Promise<Response> {
-    const { profileId } = requireUser()
+    const { profileId, status } = requireUser()
+    const mine = VerdictService.streamOf(status)
     const { reference, goal } = await this.gated(profileId)
     const row = await this.servable(profileId, reference, goal)
-    const stream = await this.events.subscribe(VerdictService.streamKey(profileId), toShelfVerdictResponse(await this.viewOf(profileId, row)))
+    const stream = await this.events.subscribe(VerdictService.streamKey(profileId, mine), toShelfVerdictResponse(await this.viewOf(profileId, row, mine)))
     let latest: ReadyRow | null
     try {
       latest = (await this.lookup(profileId, reference, goal)).row ?? row
@@ -128,21 +136,9 @@ export class VerdictService {
       return stream
     }
     if (!latest) return stream
-    // The frame joins the shelf's products and can fail on its own; `done` is sent apart from it, so a failed join never leaves the stream open.
-    if (latest.builtAt.getTime() !== row?.builtAt.getTime()) {
-      try {
-        await this.publishVerdict(profileId, latest.fit, latest.products)
-      } catch {
-        console.error({ outcome: 'publish-failed', profileId })
-      }
-    }
-    if (VerdictService.isFinished(latest)) {
-      try {
-        await this.publishDone(profileId)
-      } catch {
-        console.error({ outcome: 'publish-failed', profileId })
-      }
-    }
+    // The full frame joins the shelf's products and can fail on its own; `done` is sent apart from it, so a failed join never leaves the stream open.
+    if (latest.builtAt.getTime() !== row?.builtAt.getTime()) await this.publishVerdict(profileId, latest.fit, latest.products, [mine])
+    if (VerdictService.isFinished(latest)) await this.publishDone(profileId, [mine])
     return stream
   }
 
@@ -214,19 +210,11 @@ export class VerdictService {
     const fingerprintNow = (await this.assemble(profileId, asNow.reference, asNow.goal, await this.safety.snapshotFor(profileId))).fingerprint
     const outdated = fingerprintNow !== fingerprint
     if (outdated) await this.claimAndEnqueue(profileId, fingerprintNow)
-    // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream. The frame joins the
+    // Sent before the failure below is thrown: the saved verdict is already the user's, and the retry's verdict follows it on the same stream. The full frame joins the
     // shelf's products and can fail on that; `done` does not depend on it, so it is sent whatever became of the frame.
-    try {
-      if (outdated) await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict: toShelfVerdictResponse({ status: 'pending' }) })
-      else await this.publishVerdict(profileId, merged.fit, products)
-    } catch {
-      console.error({ outcome: 'publish-failed', profileId })
-    }
-    try {
-      if (!outdated && VerdictService.isFinished({ fit: merged.fit, fitRetried: fitState.fitRetried })) await this.publishDone(profileId)
-    } catch {
-      console.error({ outcome: 'publish-failed', profileId })
-    }
+    if (outdated) await this.publishPending(profileId)
+    else await this.publishVerdict(profileId, merged.fit, products, BOTH_STREAMS)
+    if (!outdated && VerdictService.isFinished({ fit: merged.fit, fitRetried: fitState.fitRetried })) await this.publishDone(profileId, BOTH_STREAMS)
     // Saved first, so the user has the verdict whether or not the queue tries again. Only the attempts before the day's last leave `fitRetried` false. An
     // outdated build is not retried: the build just queued for the inputs as they are now has its own attempts, and a retry of this one would bill twice.
     if (failed && !fitState.fitRetried && !outdated) throw failure
@@ -266,16 +254,8 @@ export class VerdictService {
       fitRetryDueAt: final ? null : new Date(this.now().getTime() + VerdictService.DAY_MS),
     })
     // Nothing more is coming soon, so a stream still open is told what the row holds and that it is over. Never throws: the retry above is already scheduled. The verdict's frame joins the shelf's products and can fail on that, which must not skip `done`.
-    try {
-      if (isReady(row)) await this.publishVerdict(row.profileId, row.fit, row.products)
-    } catch {
-      console.error({ outcome: 'publish-failed', profileId: row.profileId })
-    }
-    try {
-      await this.publishDone(row.profileId)
-    } catch {
-      console.error({ outcome: 'publish-failed', profileId: row.profileId })
-    }
+    if (isReady(row)) await this.publishVerdict(row.profileId, row.fit, row.products, BOTH_STREAMS)
+    await this.publishDone(row.profileId, BOTH_STREAMS)
   }
 
   /**
@@ -300,10 +280,15 @@ export class VerdictService {
     return { reference, goal }
   }
 
-  private async viewOf(profileId: string, row: ReadyRow | null): Promise<VerdictView> {
+  /** The row as the stream's reader is shown it. The preview reads only what was saved, so a guest costs no shelf lookup. */
+  private async viewOf(profileId: string, row: ReadyRow | null, stream: VerdictStream): Promise<VerdictView> {
     if (!row) return { status: 'pending' }
-    const products = await this.shown(profileId, row.products)
-    return { status: 'ready', fit: row.fit, products, tapers: await this.tapersOf(products) }
+    return stream === 'preview' ? previewOf(row.fit, row.products) : this.fullViewOf(profileId, row.fit, row.products)
+  }
+
+  private async fullViewOf(profileId: string, fit: 'ready' | 'not-ready', saved: readonly SavedVerdictProduct[]): Promise<VerdictView> {
+    const products = await this.shown(profileId, saved)
+    return { status: 'ready', locked: false, fit, products, tapers: await this.tapersOf(products) }
   }
 
   /**
@@ -328,15 +313,51 @@ export class VerdictService {
     return { fingerprint, row: isReady(row) && row.fingerprint === fingerprint ? row : null }
   }
 
-  /** The verdict as the stream carries it: the public body GET answers. Throws when it cannot be sent; callers log that. */
-  private async publishVerdict(profileId: string, fit: 'ready' | 'not-ready', products: SavedVerdictProduct[]): Promise<void> {
-    const shown = await this.shown(profileId, products)
-    const verdict = toShelfVerdictResponse({ status: 'ready', fit, products: shown, tapers: await this.tapersOf(shown) })
-    await this.events.publish(VerdictService.streamKey(profileId), { type: 'verdict', verdict })
+  /**
+   * The verdict as each stream carries it: the public body GET answers for that stream's reader. Never throws, so a caller's next send (`done`) never depends on it;
+   * a failure is logged. When the full verdict's frame cannot be built (its join of the shelf's products failed) nothing of this verdict is sent, so the two streams
+   * never tell different stories; each stream's frame is otherwise sent in a try of its own.
+   */
+  private async publishVerdict(profileId: string, fit: 'ready' | 'not-ready', products: SavedVerdictProduct[], streams: readonly VerdictStream[]): Promise<void> {
+    let full: VerdictView | undefined
+    if (streams.includes('full')) {
+      try {
+        full = await this.fullViewOf(profileId, fit, products)
+      } catch {
+        console.error({ outcome: 'publish-failed', profileId })
+        return
+      }
+    }
+    for (const stream of streams) {
+      await this.publishTo(profileId, stream, { type: 'verdict', verdict: toShelfVerdictResponse(stream === 'full' ? full! : previewOf(fit, products)) })
+    }
   }
 
-  private static streamKey(profileId: string): string {
-    return `verdict:${profileId}`
+  /** The inputs changed under a build: every stream is told the verdict it was following is pending again. */
+  private async publishPending(profileId: string): Promise<void> {
+    for (const stream of BOTH_STREAMS) await this.publishTo(profileId, stream, { type: 'verdict', verdict: toShelfVerdictResponse({ status: 'pending' }) })
+  }
+
+  private async publishDone(profileId: string, streams: readonly VerdictStream[]): Promise<void> {
+    for (const stream of streams) await this.publishTo(profileId, stream, { type: 'done' })
+  }
+
+  /** Sends one frame to one stream. A failure to send is logged by profile id and never thrown: the saved verdict is the truth. */
+  private async publishTo(profileId: string, stream: VerdictStream, frame: ScanEvent): Promise<void> {
+    try {
+      await this.events.publish(VerdictService.streamKey(profileId, stream), frame)
+    } catch {
+      console.error({ outcome: 'publish-failed', profileId })
+    }
+  }
+
+  /** The stream a caller reads: only a verified account is given the full verdict. */
+  private static streamOf(status: 'anonymous' | 'verified'): VerdictStream {
+    return status === 'verified' ? 'full' : 'preview'
+  }
+
+  private static streamKey(profileId: string, stream: VerdictStream): string {
+    return `${stream === 'full' ? 'verdict' : 'verdict-preview'}:${profileId}`
   }
 
   /** The ready row built from the inputs as they are now. Otherwise null, after claiming and queuing the build (a request still fresh is not queued twice). */
@@ -372,10 +393,6 @@ export class VerdictService {
   /** The stream ends after a verdict whose fit is ready, or one whose fit is not but has had its retry: nothing more is coming soon (the next try is a day away or none). */
   private static isFinished(row: { fit: 'ready' | 'not-ready'; fitRetried: boolean }): boolean {
     return row.fit === 'ready' || row.fitRetried
-  }
-
-  private async publishDone(profileId: string): Promise<void> {
-    await this.events.publish(VerdictService.streamKey(profileId), { type: 'done' })
   }
 
   /** Both step-down kinds must have an approved template, whatever this shelf needs: the shelf can change under a saved verdict, and a stop with no taper is never shown. */

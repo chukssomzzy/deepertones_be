@@ -68,7 +68,7 @@ const freshBrand = () => `${runSalt}${counter++}x Brand`
 const db = createDb(env.DB)
 const users = new D1UsersRepository(db)
 const verdictRows = new D1VerdictsRepository(db)
-const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'anonymous', profileId: `profile-${userId}` }, fn)
+const asUser = <T>(userId: string, fn: () => Promise<T>) => runAs({ kind: 'user', userId, status: 'verified', profileId: `profile-${userId}` }, fn)
 
 // A build refuses to run without an approved step-down template for each kind (a shelf may need either), so the two are put in the way the team does.
 beforeAll(async () => {
