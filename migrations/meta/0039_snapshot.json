@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "cbf2fa2f-2d5b-4d2d-b416-0d77daa2cf92",
+  "id": "b9b669ee-e3a6-4122-b403-7396c3940c14",
   "prevId": "38f21823-1ff7-47ce-9d9e-22109818e1bc",
   "tables": {
     "job_runs": {
@@ -2641,6 +2641,13 @@
         "goal": {
           "name": "goal",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "ready_at": {
+          "name": "ready_at",
+          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false

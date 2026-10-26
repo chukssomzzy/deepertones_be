@@ -22,7 +22,7 @@ import { checkRoutine } from './routines.gates'
 import { routineFingerprint } from './routines.fingerprint'
 import { FakeRoutinesRepository } from './routines.repository.fake'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
-import { RoutineService } from './routines.service'
+import { RoutineService, type RoutineServiceDeps } from './routines.service'
 import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './routines.types'
 
 // The routine service (spec #189, PR 2b): `build` (what the build-routine job will run), `current`, `start` and `gotIt`. The other services are Pick<> fakes that
@@ -80,6 +80,8 @@ type World = {
   /** The actor in force at each call that needs a session in life (candidatesFor and shelf.add both require a user). */
   actors: Actor[]
   shelfAdds: { productId: string; clientIp: string }[]
+  /** Runs inside shelf.add, after the product is added: a build or a Start that lands while the user taps "I got it". */
+  duringAdd: (() => Promise<void>) | null
 }
 
 const safetyView = (choices: SafetyChoice[]): SafetyView => ({
@@ -157,6 +159,7 @@ const newWorld = (): World => ({
   profiles: new Map([[AMARA_PROFILE, AMARA_USER]]),
   actors: [],
   shelfAdds: [],
+  duringAdd: null,
 })
 
 let world: World
@@ -300,7 +303,7 @@ beforeEach(() => {
   repository = new FakeRoutinesRepository()
   writer = new HookedWriter()
   script()
-  const deps = {
+  const deps: RoutineServiceDeps = {
     verdicts: {
       savedFor: async () => (world.saved ? structuredClone(world.saved) : null),
     } satisfies Pick<VerdictService, 'savedFor'>,
@@ -326,6 +329,7 @@ beforeEach(() => {
         world.actors.push(currentActor())
         requireUser()
         world.shelfAdds.push({ productId, clientIp })
+        await world.duringAdd?.()
         return { status: 'started' as const, scanId: 'scan-1', itemId: 'item-1' }
       },
     } satisfies Pick<ShelfService, 'activeEntriesFor' | 'add'>,
@@ -337,7 +341,7 @@ beforeEach(() => {
       countries: async () => structuredClone(world.countries),
       // Where the catalog version a routine records comes from.
       verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion: 42, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
-    },
+    } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference'>,
     profiles: {
       find: async (profileId: string) => (world.profiles.has(profileId) ? { id: profileId, userId: world.profiles.get(profileId)! } : null),
     } satisfies Pick<ProfilesService, 'find'>,
@@ -347,7 +351,7 @@ beforeEach(() => {
     now: () => clock,
     newId: () => `version-${++ids}`,
   }
-  service = new RoutineService(deps as never)
+  service = new RoutineService(deps)
 })
 
 afterEach(() => {
@@ -569,7 +573,7 @@ describe('RoutineService.build: a writer that gets it wrong', () => {
 
     expect(writer.retries).toEqual([undefined, FREQUENCY_AT_PROTECT, FREQUENCY_AT_PROTECT])
     const row = await latestRow()
-    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
+    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
     // The rules' own routine: fixed words for each step, no grounding, and the same step-down.
     expect(row.steps).toEqual([
       { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null },
@@ -591,7 +595,7 @@ describe('RoutineService.build: a writer that gets it wrong', () => {
     expect(await build('first')).toBe('built')
 
     expect(attempts).toBe(3)
-    expect(await latestRow()).toMatchObject({ source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(DAY) })
+    expect(await latestRow()).toMatchObject({ source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(DAY) })
   })
 
   it('counts a build whose writer calls all failed toward the daily limit, because those calls were paid for', async () => {
@@ -806,7 +810,7 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
     expect(plain(row)).toEqual(plain(before))
   })
 
-  it('completes a version with no writer call when only the step-down changed, taking the new template with no start date and keeping the steps', async () => {
+  it('completes a version with no writer call when only the step-down changed, taking the new template, dated the day of the rebuild, and keeping the steps', async () => {
     const before = await started()
     saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, verdict: { kind: 'stop' as const, taperTemplateId: 'TPR-STEROID-2' } } : p)))
     setClock(2 * DAY + HOUR)
@@ -816,7 +820,7 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
     expect(attempts).toBe(1)
     const row = await latestRow()
     expect(row).toMatchObject({ id: 'version-2', writerCalls: 0, reason: 'verdict', startedOn: before.startedOn })
-    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-2', startedOn: null }])
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-2', startedOn: new Date('2030-06-17T00:00:00.000Z') }])
     expect(plain(row)).toEqual(plain(before))
     expect(row.expectation).toBe(before.expectation)
   })
@@ -830,7 +834,7 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
     expect(await build('shelf')).toBe('built')
 
     const row = await latestRow()
-    expect(row).toMatchObject({ source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(3 * DAY + HOUR) })
+    expect(row).toMatchObject({ source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(3 * DAY + HOUR) })
     expect(row.steps[0]).toMatchObject({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, frequency: 'am', reason: 'A gentle cleanser that cleans the skin without stripping it.' })
     expect(row.steps.slice(1)).toEqual(before.steps.slice(1).map((step) => ({ ...step, fixedFrom: before.id })))
   })
@@ -1045,5 +1049,242 @@ describe('RoutineService.current', () => {
     const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call))).join('\n')
     expect(logged).not.toContain('Karo Glow Cream')
     expect(logged).not.toContain('Calm Cleanser')
+  })
+})
+
+describe('RoutineService.current: the safety hide', () => {
+  /** The person reports a prescription and a pregnancy: the cautions the routine in force was not built under. */
+  const reportMoreCautions = () => {
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'prescription', 'pregnant']) }
+  }
+
+  it('hides the routine in force as soon as the safety answers differ from the ones it was built under, with no build under way: a reaction reported while the verdict is not ready', async () => {
+    await firstBuild()
+    world.saved = null
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+
+    expect(await build('safety')).toBe('waiting')
+
+    expect(await current()).toEqual({ status: 'pending' })
+  })
+
+  it('shows the routine again once the build that stores the new cautions is done', async () => {
+    await firstBuild()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    reverdict()
+    setClock(MINUTE)
+    expect(await current()).toEqual({ status: 'pending' })
+
+    expect(await build('safety')).toBe('built')
+
+    expect(await current()).toMatchObject({ status: 'ready', version: { cautions: ['pregnant', 'tapering', 'recent-reaction'] } })
+  })
+
+  it('hides it even when the only pending version is a stale one from a build that died', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    vi.spyOn(repository, 'complete').mockRejectedValueOnce(new Error('the worker died'))
+    setClock(2 * DAY + HOUR)
+    await expect(build('shelf')).rejects.toThrow('the worker died')
+    reportMoreCautions()
+
+    setClock(2 * DAY + HOUR + 3 * HOUR)
+
+    expect(await current()).toEqual({ status: 'pending' })
+  })
+
+  it('does not hide it for a caution that comes from the shelf (tapering) rather than from an answer', async () => {
+    await started()
+    saveVerdict(productsOfVerdict().filter((p) => p.entryId !== 'entry-b'))
+
+    expect(await current()).toMatchObject({ status: 'ready' })
+  })
+
+  it('never shows the old routine with the old cautions, before, while or after the copy that stores the new cautions is appended (no step changed, so no writer is asked)', async () => {
+    const before = await started()
+    reportMoreCautions()
+    reverdict()
+    setClock(2 * DAY + HOUR)
+    const seen: unknown[] = [await current()]
+    const original = repository.append.bind(repository)
+    vi.spyOn(repository, 'append').mockImplementation(async (row) => {
+      seen.push(await current())
+      await original(row)
+    })
+
+    expect(await build('safety')).toBe('built')
+
+    seen.push(await current())
+    expect(seen.slice(0, 2)).toEqual([{ status: 'pending' }, { status: 'pending' }])
+    expect(seen[2]).toMatchObject({ status: 'ready', version: { id: 'version-2', cautions: ['pregnant', 'tapering', 'recent-reaction', 'prescription'] } })
+    expect(attempts).toBe(1)
+    expect(plain((await currentRow()))).toEqual(plain(before))
+  })
+})
+
+describe('RoutineService.gotIt racing a build', () => {
+  it('copies the version a build made while the product was being added, with that step marked got, when the step still holds the same product', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    world.duringAdd = async () => {
+      setClock(2 * DAY + 2 * HOUR)
+      await build('shelf')
+      setClock(2 * DAY + 3 * HOUR)
+    }
+
+    await gotIt('moisturise')
+
+    const row = await currentRow()
+    expect(row).toMatchObject({ id: 'version-3', reason: 'got-it', writerCalls: 0 })
+    // The cleanse step is the build's new pick, not the old shelf product the got-it started from.
+    expect(row.steps[0]).toMatchObject({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' } })
+    expect(row.steps.map((s) => s.gotIt)).toEqual([false, false, true, false])
+    expect(world.shelfAdds).toHaveLength(1)
+  })
+
+  it('is 409 STEP_NOT_RECOMMENDED, with the product already on the shelf and no got-it version appended, when the build that landed meanwhile chose another product for the step', async () => {
+    await started()
+    world.duringAdd = async () => {
+      for (const country of ['NG', 'GH'] as const) world.candidates[country].moisturise = [candidate('MOIST-2', 2600, 'am-pm')]
+      reverdict()
+      setClock(2 * DAY + 2 * HOUR)
+      await build('verdict')
+      setClock(2 * DAY + 3 * HOUR)
+    }
+
+    const error = await errorOf(gotIt('moisturise'))
+
+    expect(error).toMatchObject({ code: 'STEP_NOT_RECOMMENDED' })
+    expect(world.shelfAdds).toHaveLength(1)
+    const row = await latestRow()
+    expect(row).toMatchObject({ id: 'version-2', reason: 'verdict' })
+    expect(row.steps[2]).toMatchObject({ product: { kind: 'candidate', code: 'MOIST-2' }, gotIt: false })
+  })
+
+  it('keeps the got mark through a build that was under way when it was tapped: the build\'s version has the step marked', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    writer.hook = async () => {
+      writer.hook = null
+      await gotIt('moisturise')
+      setClock(2 * DAY + 2 * HOUR)
+    }
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await currentRow()
+    expect(row.id).toBe('version-2')
+    expect(row.steps.map((s) => s.gotIt)).toEqual([false, false, true, false])
+    expect(world.shelfAdds).toEqual([{ productId: 'prod-MOIST-1', clientIp: CLIENT_IP }])
+  })
+
+  it('records the got-it copy with the source, model and prompt hash of the version it copies, and no writer calls', async () => {
+    const before = await started()
+
+    await gotIt('protect')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', writerCalls: 0, source: before.source, model: 'claude-test-model', promptHash: 'prompt-hash-test' })
+  })
+})
+
+describe('RoutineService.build: a Start that lands during a build', () => {
+  it('dates the version, and its step-down, when Start lands between the read of the routine in force and the pending version being appended', async () => {
+    await firstBuild()
+    removeShelfProduct('entry-a')
+    setClock(DAY)
+    const original = repository.append.bind(repository)
+    vi.spyOn(repository, 'append').mockImplementation(async (row) => {
+      if (row.status === 'pending') await start()
+      await original(row)
+    })
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await currentRow()
+    expect(row.id).toBe('version-2')
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(DAY)))
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: row.startedOn }])
+  })
+
+  it('dates a version appended ready by the daily limit when Start lands just before it', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    setClock(10 * MINUTE)
+    // Start lands after the build has read the routine in force and before it appends: while it counts the day's writer builds.
+    const counted = repository.writerBuildsSince.bind(repository)
+    vi.spyOn(repository, 'writerBuildsSince').mockImplementationOnce(async (profileId, since) => {
+      await start()
+      return counted(profileId, since)
+    })
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({ source: 'rules', writerCalls: 0 })
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(10 * MINUTE)))
+    expect(row.tapers.every((taper) => taper.startedOn !== null)).toBe(true)
+  })
+})
+
+describe('RoutineService.build: a step-down that begins after Start', () => {
+  it('dates a new stop the day of the rebuild, in UTC, and keeps the date of one already under way', async () => {
+    const before = await started()
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    setClock(3 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect(attempts).toBe(1)
+    expect((await currentRow()).tapers).toEqual([
+      { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
+      { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-18T00:00:00.000Z') },
+    ])
+  })
+})
+
+describe('RoutineService.build: a writer retry with nothing to change', () => {
+  it('answers unchanged and clears the version\'s retry due time, calling no writer', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    script(throws(), throws(), throws())
+    setClock(2 * DAY + HOUR)
+    await build('shelf')
+    const rulesBuilt = await currentRow()
+    expect(rulesBuilt.writerRetryDueAt).not.toBeNull()
+    const asked = attempts
+    setClock(3 * DAY + 2 * HOUR)
+
+    expect(await build('writer-retry')).toBe('unchanged')
+
+    expect(attempts).toBe(asked)
+    expect(await currentRow()).toEqual({ ...rulesBuilt, writerRetryDueAt: null })
+  })
+
+  it('does not clear the due time on an unchanged answer to any other reason', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    script(throws(), throws(), throws())
+    setClock(2 * DAY + HOUR)
+    await build('shelf')
+    const rulesBuilt = await currentRow()
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toEqual(rulesBuilt)
+  })
+})
+
+describe('RoutineService.build: a profile that does not exist', () => {
+  it('answers waiting and logs the id, nothing else', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(await runAs(SYSTEM, () => service.build('profile-nobody', 'first'))).toBe('waiting')
+
+    expect(log).toHaveBeenCalledWith({ outcome: 'routine-profile-missing', profileId: 'profile-nobody' })
+    expect(await repository.latest('profile-nobody')).toBeNull()
   })
 })

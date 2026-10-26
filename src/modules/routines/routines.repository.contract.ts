@@ -11,25 +11,28 @@ import type { CautionState } from './routines.types'
 // Assumed shapes (what this file pins):
 //   append(row)                    resolves to undefined. `row` has every column: id, profileId, status, createdAt, steps, tapers, expectation, startedOn,
 //                                  servedAt, model, promptHash, catalogVersion, rulesVersion, hintsShown, verdictFingerprint, routineFingerprint, source,
-//                                  reason, writerRetryDueAt, writerCalls, cautions, goal. A pending row has steps [], tapers [], expectation null, cautions null,
+//                                  reason, writerRetryDueAt, writerCalls, cautions, goal, readyAt. A pending row has steps [], tapers [], expectation null, cautions null,
 //                                  source null and no writer calls yet; a rules-built row has no model or prompt hash. An id already used rejects.
 //                                  Each taper is { shelfProductId, templateId, startedOn: Date | null } (a StoredTaper) and must come back with its
 //                                  startedOn a Date, to the millisecond, or null: a JSON column keeps text, so the repository has to turn it back.
 //                                  `cautions` is the skeleton's CautionState[] (order kept, [] is not null) or null while pending. `goal` is the goal the
-//                                  version was built for, or null while pending (and on a row written before the column).
+//                                  version was built for, or null while pending (and on a row written before the column). `readyAt` is when the version became ready:
+//                                  the caller gives it for a row appended already ready, and null for a pending one.
 
 //   complete(id, built)            fills that one pending row with the finished build (steps, tapers, expectation, model, promptHash, catalogVersion,
-//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal) and makes it 'ready', resolving to true. It does so
+//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal, readyAt) and makes it 'ready', resolving to true. It does so
 //                                  once: an unknown id, or a row that is already ready, resolves to false and changes nothing.
 //   latest(profileId)              the row with the newest createdAt, whatever its status, or null.
-//   current(profileId)             the row with the newest createdAt among the `ready` ones, or null.
+//   current(profileId)             the `ready` row that became ready last (readyAt, then the larger id; a row with no readyAt counts from its createdAt),
+//                                  or null: a build that was created first but finished last is the current one.
+//   clearWriterRetry(id)           sets writerRetryDueAt to null on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined.
 //   markStarted(profileId, on)     sets startedOn to `on` on every row of that profile whose startedOn is null, a pending row included, and on no other row:
 //                                  an earlier start is never moved, so calling it again is a no-op. Resolves to undefined; a profile with no rows is ignored.
 //                                  It also stamps `on` as the startedOn of each step-down of those rows whose startedOn is null (one already dated keeps
 //                                  its date): that is how Start puts the date on a step-down of the routine in force. Otherwise a ready row is changed by
 //                                  nothing but servedAt and startedOn (the other markStarted tests use rows with no step-downs, to keep that apart).
-//   lastServedBefore(profileId, excludeId)   the profile's newest `ready` row (by createdAt) whose servedAt is not null and whose id is not `excludeId`, or null.
+//   lastServedBefore(profileId, excludeId)   the profile's newest `ready` row (in the order `current` uses) whose servedAt is not null and whose id is not `excludeId`, or null.
 //                                  Pending rows never count, even when marked served. It is "every served version but this one", not "older than this one".
 //   writerBuildsSince(profileId, since)   how many of that profile's rows have writerCalls > 0 and createdAt >= since, whatever their source, status or reason.
 //
@@ -90,6 +93,7 @@ const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partia
   expectation: null,
   cautions: null,
   goal: null,
+  readyAt: null,
   startedOn: null,
   servedAt: null,
   model: null,
@@ -117,6 +121,7 @@ const readyRow = (profileId: string, id: string, createdAt: Date, over: Partial<
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  readyAt: createdAt,
   startedOn: at(-DAY),
   servedAt: null,
   model: 'claude-sonnet-5-5',
@@ -140,6 +145,7 @@ const builtOf = (over: Partial<Completed> = {}): Completed => ({
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  readyAt: at(DAY),
   model: 'claude-sonnet-5-5',
   promptHash: 'prompt-hash-1',
   catalogVersion: 7,
@@ -314,6 +320,42 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
 
         expect((await latestOf(repository, profileId)).id).toBe(second.id)
         expect((await repository.current(profileId))!.id).toBe(second.id)
+      })
+
+      it('makes current the version that became ready last, not the one created last: a build asked for first that finishes after a later one replaces it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const slow = pendingRow(profileId, crypto.randomUUID(), at(HOUR), { reason: 'shelf' })
+        const quick = readyRow(profileId, crypto.randomUUID(), at(2 * HOUR), { reason: 'got-it', routineFingerprint: 'routine-fp-quick' })
+        await repository.append(slow)
+        await repository.append(quick)
+        expect((await repository.current(profileId))!.id).toBe(quick.id)
+
+        await repository.complete(slow.id, builtOf({ readyAt: at(3 * HOUR) }))
+
+        expect((await repository.current(profileId))!.id).toBe(slow.id)
+        expect((await repository.latest(profileId))!.id).toBe(quick.id)
+      })
+
+      it('goes by the larger id when two versions became ready at the same moment', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const [low, high] = ['a-version', 'b-version']
+        await repository.append(readyRow(profileId, high!, at(HOUR), { readyAt: at(3 * HOUR), routineFingerprint: 'routine-fp-high' }))
+        await repository.append(readyRow(profileId, low!, at(2 * HOUR), { readyAt: at(3 * HOUR), routineFingerprint: 'routine-fp-low' }))
+
+        expect((await repository.current(profileId))!.id).toBe(high)
+      })
+
+      it('counts a ready version with no readyAt from its creation time', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const old = readyRow(profileId, crypto.randomUUID(), at(HOUR), { readyAt: null, routineFingerprint: 'routine-fp-old' })
+        const earlier = readyRow(profileId, crypto.randomUUID(), at(2 * HOUR), { readyAt: at(30 * MINUTE), routineFingerprint: 'routine-fp-earlier' })
+        await repository.append(earlier)
+        await repository.append(old)
+
+        expect((await repository.current(profileId))!.id).toBe(old.id)
       })
 
       it('never gives one profile another profile\'s versions', async () => {
@@ -717,6 +759,33 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await expect(repository.markStarted(profileId, at(HOUR))).resolves.toBeUndefined()
 
         expect(await repository.latest(profileId)).toBeNull()
+      })
+    })
+
+    describe('clearWriterRetry', () => {
+      it('clears the writer retry due time of that version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { source: 'rules', model: null, promptHash: null, writerRetryDueAt: at(DAY) })
+        await repository.append(row)
+
+        await expect(repository.clearWriterRetry(row.id)).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, writerRetryDueAt: null })
+      })
+
+      it('leaves the profile\'s other versions, and a version nobody has, alone', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE, { writerRetryDueAt: at(DAY) })
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR), { writerRetryDueAt: at(2 * DAY), routineFingerprint: 'routine-fp-2' })
+        await repository.append(first)
+        await repository.append(second)
+
+        await repository.clearWriterRetry(first.id)
+        await expect(repository.clearWriterRetry(crypto.randomUUID())).resolves.toBeUndefined()
+
+        expect((await repository.current(profileId))!.writerRetryDueAt).toEqual(at(2 * DAY))
       })
     })
 

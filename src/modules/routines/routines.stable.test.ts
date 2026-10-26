@@ -320,6 +320,23 @@ describe('stableMerge: the same product no longer in the same place', () => {
     expect(gapCodes(merge.writerSkeleton)?.[2]).toEqual(['protect', ['pr-ng']])
   })
 
+  it('offers a step that is broken only the products the person\'s country sells: a re-added product stays in the gaps of the fixed steps', async () => {
+    // Protect keeps its re-added pr-uk. Moisturise is broken (its reason uses forbidden wording) and also had a re-added mo-uk: the writer must not be offered it.
+    const steps = [...previousSteps().slice(0, 2), entry('moisturise', { kind: 'candidate', code: 'mo-uk' }, 'am-pm', links('mo-uk'), { reason: 'A fairer tone.' }), entry('protect', { kind: 'candidate', code: 'pr-uk' }, 'am', links('pr-uk'))]
+    const skeleton = skeletonOf([shelfProduct('cleanser-1', 'cleanse')], { treat: [candidate('tr-1')], moisturise: [candidate('mo-1')], protect: [candidate('pr-ng')] })
+
+    const merge = stableMerge(previousOf({ steps }), skeleton, { candidates: { moisturise: [candidate('mo-uk')], protect: [candidate('pr-uk')] }, onShelf: {} })
+
+    expect(fixedSteps(merge)).toEqual(['cleanse', 'treat', 'protect'])
+    expect(gapCodes(merge.writerSkeleton)).toEqual([
+      ['treat', ['tr-1']],
+      ['moisturise', ['mo-1']],
+      ['protect', ['pr-uk']],
+    ])
+    // The final check still knows every product the routine may keep.
+    expect(merge.checking.gaps.find((g) => g.step === 'moisturise')!.candidates.map((c) => c.code)).toEqual(['mo-1', 'mo-uk'])
+  })
+
   it('does not put a re-added product in a gap twice when the gap already offers it', () => {
     const merge = stableMerge(previousOf(), baseSkeleton(), { candidates: { moisturise: [candidate('mo-1')] }, onShelf: {} })
 

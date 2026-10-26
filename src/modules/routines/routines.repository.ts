@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gt, gte, isNotNull, isNull, ne } from 'drizzle-orm'
+import { and, count, desc, eq, gt, gte, isNotNull, isNull, ne, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
@@ -10,13 +10,16 @@ export type RoutineVersionRow = typeof routineVersions.$inferSelect
 export type CompletedRoutineBuild = Pick<
   RoutineVersionRow,
   'steps' | 'tapers' | 'expectation' | 'cautions' | 'goal' | 'model' | 'promptHash' | 'catalogVersion' | 'routineFingerprint' | 'hintsShown' | 'writerRetryDueAt' | 'writerCalls'
-> & { source: NonNullable<RoutineVersionRow['source']> }
+> & { source: NonNullable<RoutineVersionRow['source']>; readyAt: Date }
 
 // A JSON column keeps a step-down's start date as text, so every row read turns it back into a Date.
 const revived = (row: RoutineVersionRow): RoutineVersionRow => ({
   ...row,
   tapers: row.tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn === null ? null : new Date(taper.startedOn) })),
 })
+
+// The order ready versions are in force: the one that became ready last. A row with no `ready_at` counts from its creation.
+const readyOrder = [desc(sql`coalesce(${routineVersions.readyAt}, ${routineVersions.createdAt})`), desc(routineVersions.id)] as const
 
 export class D1RoutinesRepository {
   constructor(private readonly db: Db) {}
@@ -37,13 +40,13 @@ export class D1RoutinesRepository {
     return row ? revived(row) : null
   }
 
-  /** The profile's newest `ready` version (the routine in force), or null. */
+  /** The profile's `ready` version that became ready last (the routine in force), or null. */
   async current(profileId: string): Promise<RoutineVersionRow | null> {
     const [row] = await this.db
       .select()
       .from(routineVersions)
       .where(and(eq(routineVersions.profileId, profileId), eq(routineVersions.status, 'ready')))
-      .orderBy(desc(routineVersions.createdAt), desc(routineVersions.id))
+      .orderBy(...readyOrder)
       .limit(1)
     return row ? revived(row) : null
   }
@@ -54,9 +57,14 @@ export class D1RoutinesRepository {
       .select()
       .from(routineVersions)
       .where(and(eq(routineVersions.profileId, profileId), eq(routineVersions.status, 'ready'), isNotNull(routineVersions.servedAt), ne(routineVersions.id, excludeId)))
-      .orderBy(desc(routineVersions.createdAt), desc(routineVersions.id))
+      .orderBy(...readyOrder)
       .limit(1)
     return row ? revived(row) : null
+  }
+
+  /** Clears when the version was due another try by the writer, changing nothing else of it. A version nobody has is ignored. */
+  async clearWriterRetry(id: string): Promise<void> {
+    await this.db.update(routineVersions).set({ writerRetryDueAt: null }).where(eq(routineVersions.id, id))
   }
 
   /** Sets when the version was last returned to the user, changing nothing else of it. A version nobody has is ignored. */
