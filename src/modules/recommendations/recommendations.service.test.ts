@@ -1026,6 +1026,25 @@ describe('RecommendationService.candidatesFor: what a candidate carries', () => 
     })
   })
 
+  it('carries the row\'s key ingredient and strength for the app to show, and null for both on a row that has neither', async () => {
+    const ctx = setup()
+    stock(ctx, [row('AZELAIC', { keyIngredient: 'Azelaic acid', strength: '10%', priceMin: 1000 }), row('PLAIN', { priceMin: 2000 })])
+    await ready(ctx)
+
+    const [azelaic, plain] = await candidates(ctx)
+
+    expect(azelaic).toMatchObject({ code: 'AZELAIC', keyIngredient: 'Azelaic acid', strength: '10%' })
+    expect(plain).toMatchObject({ code: 'PLAIN', keyIngredient: null, strength: null })
+  })
+
+  it('decides nothing by the key ingredient or strength: a dearer row that has them is neither put first nor left out (the order is price, then code)', async () => {
+    const ctx = setup()
+    stock(ctx, [row('CHEAP-PLAIN', { priceMin: 1000 }), row('DEAR-NAMED', { priceMin: 2000, keyIngredient: 'Azelaic acid', strength: '10%' })])
+    await ready(ctx)
+
+    expect(await codesOf(ctx)).toEqual(['CHEAP-PLAIN', 'DEAR-NAMED'])
+  })
+
   it('still offers a row with no evidence links and no ingredients source link, with an empty list and a null', async () => {
     const ctx = setup()
     stock(ctx, [row('NO-LINKS', { evidenceUrls: [], ingredientsSourceUrl: null })])

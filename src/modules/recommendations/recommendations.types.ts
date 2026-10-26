@@ -27,6 +27,9 @@ export type Candidate = {
   /** Context for the AI that writes the routine and for the team. Never in a response or on a screen. */
   evidenceUrls: string[]
   ingredientsSourceUrl: string | null
+  /** What to look for, shown to the person by the routine stage. The routine writer and every rule never read them. */
+  keyIngredient: string | null
+  strength: string | null
   passed: CandidateRule[]
   sharedWithReaction: SharedWithReaction[]
   origin: Origin
