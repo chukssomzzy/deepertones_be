@@ -1,3 +1,4 @@
+import type { EmailAddress } from '../../src/lib/email-address'
 import { env } from 'cloudflare:workers'
 import { createDb } from '../../src/lib/db'
 import { D1ProfilesRepository } from '../../src/modules/profiles/profiles.repository'
@@ -13,6 +14,9 @@ profilesRepositoryContract('D1', () => {
   const users = new D1UsersRepository(db)
   return {
     repository: new D1ProfilesRepository(db),
+    verify: async (userId) => {
+      await users.promote(userId, { kind: 'email', email: `${userId}@example.com` as EmailAddress }, BASE)
+    },
     newUser: async () => {
       const userId = crypto.randomUUID()
       const profileId = crypto.randomUUID()

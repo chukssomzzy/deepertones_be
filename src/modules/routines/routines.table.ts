@@ -7,7 +7,8 @@ import type { CautionState, StoredRoutineStep, StoredTaper } from './routines.ty
 /**
  * A profile's routine versions (spec #189): one row per build. A build appends a `pending` row, which is filled in once, to `ready`, when the build is done
  * (a build that needs no pending phase may append a `ready` row). A ready row is never changed again, except `served_at`, `started_on` (and the dates of its
- * `tapers`, set with it) and `writer_retry_due_at` (cleared when a retry finds nothing to rewrite). The `ready` row that became ready last (`ready_at`, the time
+ * `tapers`, set with it), `writer_retry_due_at` (cleared when a retry finds nothing to rewrite) and `routine_fingerprint` (set when a rebuild finds nothing to
+ * change, so the routine in force records the inputs it was last checked against). The `ready` row that became ready last (`ready_at`, the time
  * a row was appended ready or completed, not when its build began) is the profile's routine in force; a newer `pending` row is a build asked for and not
  * done. Rows go with their profile (cascade).
  *

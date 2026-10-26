@@ -14,6 +14,8 @@ const at = (offsetMs: number) => new Date(BASE.getTime() + offsetMs)
 export type ProfilesContractSetup = {
   repository: ProfilesRepository
   newUser: () => Promise<{ userId: string; defaultProfile: Profile }>
+  /** Verifies the user in place, the way signing in with a code does: a guest becomes `verified`. */
+  verify: (userId: string) => Promise<void>
 }
 
 const profileOf = (userId: string, over: Partial<Profile> = {}): Profile => ({
@@ -48,6 +50,43 @@ export const profilesRepositoryContract = (name: string, make: () => ProfilesCon
         const { repository } = await make()
 
         expect(await repository.findById(crypto.randomUUID())).toBeNull()
+      })
+    })
+
+    describe('findWithOwner', () => {
+      it('returns the profile\'s id and user with the status of that user: a guest is anonymous', async () => {
+        const { repository, newUser } = await make()
+        const { userId, defaultProfile } = await newUser()
+
+        expect(await repository.findWithOwner(defaultProfile.id)).toEqual({ id: defaultProfile.id, userId, ownerStatus: 'anonymous' })
+      })
+
+      it('says verified once the user has verified, for the default profile and for another of theirs', async () => {
+        const { repository, newUser, verify } = await make()
+        const { userId, defaultProfile } = await newUser()
+        const second = profileOf(userId)
+        await repository.insert(second)
+
+        await verify(userId)
+
+        expect(await repository.findWithOwner(defaultProfile.id)).toEqual({ id: defaultProfile.id, userId, ownerStatus: 'verified' })
+        expect(await repository.findWithOwner(second.id)).toEqual({ id: second.id, userId, ownerStatus: 'verified' })
+      })
+
+      it('gives each profile the status of its own user', async () => {
+        const { repository, newUser, verify } = await make()
+        const verified = await newUser()
+        const guest = await newUser()
+        await verify(verified.userId)
+
+        expect((await repository.findWithOwner(verified.defaultProfile.id))!.ownerStatus).toBe('verified')
+        expect((await repository.findWithOwner(guest.defaultProfile.id))!.ownerStatus).toBe('anonymous')
+      })
+
+      it('returns null for an unknown id', async () => {
+        const { repository } = await make()
+
+        expect(await repository.findWithOwner(crypto.randomUUID())).toBeNull()
       })
     })
 

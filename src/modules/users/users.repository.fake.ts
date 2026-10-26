@@ -73,6 +73,7 @@ export class FakeUsersRepository implements UsersRepository {
     if (!user || user.status !== 'anonymous') return { outcome: 'not-guest' }
     if (clash(this.users, userId, identifier)) return { outcome: 'taken' }
     user.status = 'verified'
+    this.profiles.markVerified(userId)
     if (identifier.kind === 'email') user.email = identifier.email
     else user.phone = identifier.phone
     user.tokenVersion += 1

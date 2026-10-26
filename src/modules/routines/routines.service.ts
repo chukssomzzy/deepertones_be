@@ -147,12 +147,17 @@ export class RoutineService {
   /**
    * Builds the profile's next routine version: `waiting` (nothing appended) while the verdict is not saved and ready for the inputs as they are, or the goal, the
    * safety answers or the shopping country are missing. After Start, `unchanged` (nothing appended) when no step, step-down or caution changed; otherwise `built`.
-   * A failure of the repository or of reading the other modules throws, leaving a pending version if one was appended, which goes stale on its own.
+   * A profile whose user has not verified (a guest) never gets one: `waiting`, however the build was asked for. A failure of the repository or of reading the other
+   * modules throws, leaving a pending version if one was appended, which goes stale on its own.
    */
   async build(profileId: string, reason: RoutineBuildReason, options: RoutineBuildOptions = {}): Promise<RoutineBuildResult> {
     const profile = await this.profiles.find(profileId)
     if (!profile) {
       console.log({ outcome: 'routine-profile-missing', profileId })
+      return 'waiting'
+    }
+    if (profile.ownerStatus !== 'verified') {
+      console.log({ outcome: 'routine-not-verified', profileId })
       return 'waiting'
     }
     return runAs(RoutineService.actorOf(profile.userId, profileId), () => this.buildAs(profileId, reason, options))
@@ -170,9 +175,12 @@ export class RoutineService {
     return { status: 'updating', version: ready }
   }
 
-  /** Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one. Starting again changes nothing. */
+  /**
+   * Makes today day 1 of the routine in force, and of its step-downs. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
+   * answers pending): a routine the person cannot see is not started. Starting again changes nothing.
+   */
   async start(profileId: string): Promise<void> {
-    if (!(await this.repository.current(profileId))) throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    if ((await this.current(profileId)).status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
     const now = this.now()
     await this.repository.markStarted(profileId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())))
   }
@@ -180,15 +188,18 @@ export class RoutineService {
   /**
    * "I got it" for a recommended product: puts it on the shelf (by its catalog product, as the shelf's own add does) and appends a copy of the routine in force with
    * that step marked got, with no writer call. 409 `ROUTINE_NOT_READY` before there is a routine and 409 `STEP_NOT_RECOMMENDED` when the step does not hold a
-   * recommended product, or its product is sold nowhere now. The swap to the shelf entry happens at the next rebuild, once the shelf holds the product.
+   * recommended product, or its product is sold nowhere now. The swap to the shelf entry happens at the next rebuild, once the shelf holds the product. Also 409
+   * `ROUTINE_NOT_READY` while a safety change hides the routine. Idempotent: a step already marked got changes nothing (no shelf add, no version).
    */
   async gotIt(profileId: string, step: RoutineStep, clientIp: string): Promise<void> {
     const profile = await this.profiles.find(profileId)
     if (!profile) throw new NotFoundError('PROFILE_NOT_FOUND', 'No such profile')
-    const ready = await this.repository.current(profileId)
-    if (!ready) throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    const view = await this.current(profileId)
+    if (view.status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    const ready = view.version
     const chosen = ready.steps.find((entry) => entry.step === step && entry.product.kind === 'candidate')
     if (chosen?.product.kind !== 'candidate') throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
+    if (chosen.gotIt) return
     const code = chosen.product.code
     await runAs(RoutineService.actorOf(profile.userId, profileId), async () => {
       const found = await this.findAnywhere(profileId, step, code)
@@ -201,9 +212,11 @@ export class RoutineService {
     const inForce = (await this.repository.current(profileId)) ?? ready
     const holdsIt = (version: RoutineVersionRow) => version.steps.some((entry) => entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code)
     if (!holdsIt(inForce)) throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
+    // A tap that raced this one has marked it already: its version stands.
+    if (inForce.steps.some((entry) => entry.step === step && entry.gotIt)) return
     const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true } : entry))
     const now = this.now()
-    await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, servedAt: null })
+    await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, hintsShown: false, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
     await this.tell(profileId)
   }
@@ -211,30 +224,40 @@ export class RoutineService {
   /**
    * Asks for a build of the profile's routine, to be run by the queue. Does nothing when routines are switched off. Otherwise claims the request by its key and
    * queues it, unless a request is already being worked on (a different key too: a request made mid-build is dropped, and the triggers ask again afterwards). If
-   * the queue refuses, the claim is given back. `options.exclude` rides in the queued message for `run` to hand to the build. Never throws: a trigger must not fail
-   * for it. Logs ids and outcomes only.
+   * the queue refuses, the claim is given back. `options.exclude` rides in the queued message for `run` to hand to the build. Does nothing for a profile whose
+   * user has not verified (a guest has no routine): no claim is made either. Never throws: a trigger must not fail for it. Logs ids and outcomes only. Answers
+   * whether a build was queued; a trigger that can ask again later may ignore it, but a caller whose request would be lost if dropped (an exclusion) must not.
    */
-  async request(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<void> {
-    await this.ask(profileId, reason, requestKey, options)
+  async request(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<boolean> {
+    return this.ask(profileId, reason, requestKey, options)
   }
 
   /**
    * Asks for a build of the profile's routine when its inputs are not the ones the routine in force was built from (or there is no routine yet and the verdict is
    * ready), keyed by the fingerprint of those inputs. For the read that shows the routine to call: the person may have changed the shelf, the goal or the safety
-   * answers since the build, and the triggers may not have caught up. Runs as the caller, who is the profile's own user. Never throws.
+   * answers since the build, and the triggers may not have caught up. Runs as the caller, who is the profile's own user. Asks for nothing while the build would only
+   * wait (no saved ready verdict, goal, safety answers or shopping country), or for a guest, so a read that cannot be answered yet does not ask again each time.
+   * Never throws.
    */
   async requestIfStale(profileId: string): Promise<void> {
     if (!this.enabled) return
     try {
+      if (!(await this.isVerified(profileId))) return
       const saved = await this.verdicts.savedFor(profileId)
       if (!saved || saved.fit !== 'ready') return
       const [goal, safety] = await Promise.all([this.goals.goalFor(profileId), this.safety.snapshotFor(profileId)])
       if (goal === null || safety.view === null) return
+      try {
+        await this.recommendations.shoppingFor(profileId)
+      } catch (error) {
+        if (error instanceof ConflictError && NOT_YET.has(error.code)) return
+        throw error
+      }
       // The shelf as the build keeps it: an entry the build leaves out, or a reduced sunscreen the build keeps, must not make the two fingerprints differ.
       const shelf = (await this.shelfOf(profileId, saved)).shelf.map(sunscreenKept)
       const fingerprint = await RoutineService.fingerprintOf(goal, cautionsOf(safety.view.choices, shelf), shelf)
       if ((await this.repository.current(profileId))?.routineFingerprint === fingerprint) return
-      await this.request(profileId, 'verdict', fingerprint)
+      await this.enqueue(profileId, 'verdict', fingerprint)
     } catch (error) {
       console.error({ outcome: 'routine-stale-check-failed', profileId, error: describeError(error) })
     }
@@ -243,6 +266,7 @@ export class RoutineService {
   /**
    * The daily sweeps, run by the cron with no session. Each looks at 200 rows at most, and a failure of one does not stop the others (the first is thrown at the end).
    * Does nothing while routines are off. Answers how many builds it queued.
+   * - Nothing is queued for a profile whose user has not verified (a guest).
    * - A build request whose dead-letter retry is due is queued again, marked as the retry, and its due date cleared. It is not claimed, as the first try was: the
    *   claim is long released, and a second build that overlapped it would find nothing to change. A queue that refuses it keeps the due date for the next run.
    * - A rules-only routine in force whose writer retry is due is requested again, with `writer-retry`.
@@ -272,20 +296,31 @@ export class RoutineService {
   private async ask(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<boolean> {
     if (!this.enabled) return false
     try {
-      const now = this.now()
-      if (!(await this.repository.claim(profileId, requestKey, now, new Date(now.getTime() - RoutineService.CLAIM_STALE_AFTER_MS)))) return false
-      try {
-        await this.jobs.enqueue(buildRoutineSpec, { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0, ...(options.exclude ? { exclude: options.exclude } : {}) })
-      } catch (error) {
-        // A claim with no job behind it would hold every ask off for 15 minutes. If the release fails too the claim goes stale on its own.
-        await this.repository.release(profileId, now).catch(() => undefined)
-        throw error
-      }
-      return true
+      if (!(await this.isVerified(profileId))) return false
+      return await this.enqueue(profileId, reason, requestKey, options)
     } catch (error) {
       console.error({ outcome: 'routine-request-failed', profileId, reason, error: describeError(error) })
       return false
     }
+  }
+
+  /** Whether the profile exists and its user has verified: a guest is never given a routine. */
+  private async isVerified(profileId: string): Promise<boolean> {
+    return (await this.profiles.find(profileId))?.ownerStatus === 'verified'
+  }
+
+  /** Claims the request and queues the build, saying whether it did. Throws what the repository or the queue throws, the claim given back where it can be. */
+  private async enqueue(profileId: string, reason: RoutineBuildReason, requestKey: string, options: RoutineBuildOptions = {}): Promise<boolean> {
+    const now = this.now()
+    if (!(await this.repository.claim(profileId, requestKey, now, new Date(now.getTime() - RoutineService.CLAIM_STALE_AFTER_MS)))) return false
+    try {
+      await this.jobs.enqueue(buildRoutineSpec, { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0, ...(options.exclude ? { exclude: options.exclude } : {}) })
+    } catch (error) {
+      // A claim with no job behind it would hold every ask off for 15 minutes. If the release fails too the claim goes stale on its own.
+      await this.repository.release(profileId, now).catch(() => undefined)
+      throw error
+    }
+    return true
   }
 
   private async retryDeadLetters(now: Date): Promise<number> {
@@ -293,6 +328,11 @@ export class RoutineService {
     for (const row of await this.repository.dueRequests(now, RoutineService.SWEEP_LIMIT)) {
       const { profileId, requestKey } = row
       try {
+        // A guest's request (one made before guests were refused) is not retried, and its due date is cleared so it stops filling the sweep's 200.
+        if (!(await this.isVerified(profileId))) {
+          await this.repository.setRequestRetry(profileId, { retried: true, retryDueAt: null })
+          continue
+        }
         await this.jobs.enqueue(buildRoutineSpec, { profileId, reason: RoutineService.reasonOf(requestKey), requestKey, requestedAt: now.getTime(), waits: 0, retry: true })
         queued++
         // Only once it is queued: a refused message leaves the retry due for the next run.
@@ -377,8 +417,9 @@ export class RoutineService {
     if (!facts) return 'waiting'
     // The version's id is minted before anything is written from the skeleton, because whether the writer sees outcome hints is decided by it.
     const versionId = this.newId()
-    const shown = hintsShown(versionId)
-    const skeleton = shown ? await this.withHints(facts) : facts.skeleton
+    // Hints are only counted as shown once the counts are read: a read that fails costs the hints, not the build.
+    const hinted = hintsShown(versionId) ? await this.withHints(facts) : null
+    const skeleton = hinted ?? facts.skeleton
 
     const current = await this.repository.current(profileId)
     const previous = current?.startedOn ? current : null
@@ -406,7 +447,7 @@ export class RoutineService {
       promptHash: null,
       catalogVersion,
       rulesVersion: ROUTINE_RULES_VERSION,
-      hintsShown: shown,
+      hintsShown: false,
       verdictFingerprint: saved.fingerprint,
       routineFingerprint: routine,
       source: 'rules',
@@ -430,6 +471,8 @@ export class RoutineService {
       if (RoutineService.sameAs(current!, kept) && stableJson(current!.cautions) === stableJson(skeleton.person.cautions)) {
         // A retry that finds nothing to rewrite is done with: the version is not due another.
         if (reason === 'writer-retry' && current!.writerRetryDueAt !== null) await this.repository.clearWriterRetry(current!.id)
+        // The inputs changed (or the stale read would ask again on every read) but the routine did not: it now stands for the inputs it was just checked against.
+        if (current!.routineFingerprint !== routine) await this.repository.setRoutineFingerprint(current!.id, routine)
         console.log({ outcome: 'routine-unchanged', profileId })
         return 'unchanged'
       }
@@ -469,7 +512,8 @@ export class RoutineService {
       promptHash: calls > 0 ? this.writerIdentity.promptHash : null,
       catalogVersion,
       routineFingerprint: routine,
-      hintsShown: shown,
+      // Recorded only when a writer call received the hinted skeleton and the routine is what it wrote: a rules-built routine (daily limit, three failures) shows none.
+      hintsShown: hinted !== null && written !== null,
       source: written ? 'writer' : 'rules',
       writerRetryDueAt: written ? null : new Date(at.getTime() + RoutineService.DAY_MS),
       writerCalls: calls,
@@ -592,10 +636,19 @@ export class RoutineService {
     return routineFingerprint({ goal, cautions, products: shelf.map((p) => ({ entryId: p.id, verdict: p.verdict, step: p.step })), rulesVersion: ROUTINE_RULES_VERSION })
   }
 
-  /** The skeleton with each gap candidate's outcome hint, from the counts of people with the same goal and skin type in the same country. */
-  private async withHints({ profileId, skeleton, country }: Facts): Promise<RoutineSkeleton> {
+  /**
+   * The skeleton with each gap candidate's outcome hint, from the counts of people with the same goal and skin type in the same country. Null when the counts cannot
+   * be read: they are only hints, so the build goes on without them (logging the id only).
+   */
+  private async withHints({ profileId, skeleton, country }: Facts): Promise<RoutineSkeleton | null> {
     const codes = skeleton.gaps.flatMap((gap) => gap.candidates.map((candidate) => candidate.code))
-    const counts = await this.outcomeCounts.counts({ goal: skeleton.goal, skinType: skeleton.person.skinType, country }, codes)
+    let counts: Awaited<ReturnType<RoutineServiceDeps['outcomeCounts']['counts']>>
+    try {
+      counts = await this.outcomeCounts.counts({ goal: skeleton.goal, skinType: skeleton.person.skinType, country }, codes)
+    } catch {
+      console.log({ outcome: 'hint-counts-failed', profileId })
+      return null
+    }
     return applyOutcomeHints(skeleton, counts, true, (code) => console.log({ outcome: 'hint-counts-corrupt', profileId, code }))
   }
 

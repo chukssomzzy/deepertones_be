@@ -26,12 +26,14 @@ import type { CautionState } from './routines.types'
 //   current(profileId)             the `ready` row that became ready last (readyAt, then the larger id; a row with no readyAt counts from its createdAt),
 //                                  or null: a build that was created first but finished last is the current one.
 //   clearWriterRetry(id)           sets writerRetryDueAt to null on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
+//   setRoutineFingerprint(id, fingerprint)   sets routineFingerprint on that one row (a rebuild that found nothing to change records the inputs it checked), changing
+//                                  nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined.
 //   markStarted(profileId, on)     sets startedOn to `on` on every row of that profile whose startedOn is null, a pending row included, and on no other row:
 //                                  an earlier start is never moved, so calling it again is a no-op. Resolves to undefined; a profile with no rows is ignored.
 //                                  It also stamps `on` as the startedOn of each step-down of those rows whose startedOn is null (one already dated keeps
 //                                  its date): that is how Start puts the date on a step-down of the routine in force. Otherwise a ready row is changed by
-//                                  nothing but servedAt and startedOn (the other markStarted tests use rows with no step-downs, to keep that apart).
+//                                  nothing but servedAt, startedOn, writerRetryDueAt (clearWriterRetry) and routineFingerprint (setRoutineFingerprint) (the other markStarted tests use rows with no step-downs, to keep that apart).
 //   lastServedBefore(profileId, excludeId)   the profile's newest `ready` row (in the order `current` uses) whose servedAt is not null and whose id is not `excludeId`, or null.
 //                                  Pending rows never count, even when marked served. It is "every served version but this one", not "older than this one".
 //   writerBuildsSince(profileId, since)   how many of that profile's rows have writerCalls > 0 and createdAt >= since, whatever their source, status or reason.
@@ -53,7 +55,7 @@ import type { CautionState } from './routines.types'
 //   writerRetriesDue(now, limit)   the routine in force (the profile's `ready` version that became ready last, as `current` answers) of each profile, when that version's
 //                                  writerRetryDueAt is `now` or earlier; a version a newer ready version has replaced is never returned, even with a retry due. Rows are
 //                                  RoutineVersionRows (the sweep keys its request by the version's id).
-//   retiredCodeVersions(limit)     the routine in force of each profile, when one of its steps holds a recommended product (product.kind 'candidate') whose code is
+//   retiredCodeVersions(limit)     (in the order of the versions' ids, so the rows a run leaves for the next are always the same) the routine in force of each profile, when one of its steps holds a recommended product (product.kind 'candidate') whose code is
 //                                  `retired` in the catalog with updatedInVersion greater than the version's catalogVersion (that is, retired after the version was built;
 //                                  equal is not). Each version once, however many of its codes are retired; a version replaced by a newer ready one is never returned.
 //                                  Rows are RoutineVersionRows. The catalog is not this repository's table, so the setup gives the contract `retireCode`.
@@ -816,6 +818,45 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
       })
     })
 
+    describe('setRoutineFingerprint', () => {
+      it('sets the routine fingerprint of that version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: 'routine-fp-1' })
+        await repository.append(row)
+
+        await expect(repository.setRoutineFingerprint(row.id, 'routine-fp-2')).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, routineFingerprint: 'routine-fp-2' })
+      })
+
+      it('leaves the profile\'s other versions, and a version nobody has, alone', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: 'routine-fp-1' })
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR), { routineFingerprint: 'routine-fp-2' })
+        await repository.append(first)
+        await repository.append(second)
+
+        await repository.setRoutineFingerprint(first.id, 'routine-fp-3')
+        await expect(repository.setRoutineFingerprint(crypto.randomUUID(), 'routine-fp-4')).resolves.toBeUndefined()
+
+        expect((await repository.current(profileId))!.routineFingerprint).toBe('routine-fp-2')
+        expect((await repository.latest(profileId))!.routineFingerprint).toBe('routine-fp-2')
+      })
+
+      it('can fill a fingerprint that was null', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: null })
+        await repository.append(row)
+
+        await repository.setRoutineFingerprint(row.id, 'routine-fp-1')
+
+        expect((await repository.current(profileId))!.routineFingerprint).toBe('routine-fp-1')
+      })
+    })
+
     describe('lastServedBefore', () => {
       it('is the newest ready version that was served, apart from the one named', async () => {
         const { repository, newAccount } = await make()
@@ -1346,6 +1387,20 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await retireCode(code, 8)
 
         expect(mine(await repository.retiredCodeVersions(1000), profileId).map((row) => row.id)).toEqual([newest])
+      })
+
+      it('returns the versions in the order of their ids, whichever order they were stored in, so a run that stops at the limit leaves the same rest each day', async () => {
+        const { repository, newAccount, retireCode } = await make()
+        const code = newCode()
+        const accounts = [await newAccount(), await newAccount(), await newAccount()]
+        const ids = [crypto.randomUUID(), crypto.randomUUID(), crypto.randomUUID()].sort()
+        // Stored last-id first, and on the accounts in the opposite order again, so neither insertion order nor profile order is the id order.
+        for (const [i, id] of [ids[2]!, ids[0]!, ids[1]!].entries()) await repository.append(versionHolding(accounts[i]!.profileId, id, BASE, [code]))
+        await retireCode(code, 8)
+
+        const returned = mine(await repository.retiredCodeVersions(1000), ...accounts.map((a) => a.profileId)).map((row) => row.id)
+
+        expect(returned).toEqual(ids)
       })
 
       it('returns at most the limit', async () => {

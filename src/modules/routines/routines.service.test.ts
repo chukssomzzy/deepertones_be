@@ -47,7 +47,7 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 //   gotIt(profileId, step, clientIp): Promise<void>    ConflictError STEP_NOT_RECOMMENDED unless the step's product is a recommended one; calls shelf.add(product id, clientIp)
 //
 // PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
-//   request(profileId, reason, requestKey): Promise<void>   never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
+//   request(profileId, reason, requestKey): Promise<boolean>   (whether a build was queued) never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
 //       repository.claim(profileId, requestKey, now, now - a stale cut-off) and, when it wins, enqueues the job `build-routine` with
 //       { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0 } and no delay. A queue that refuses gives the claim back. Failures are logged by id.
 //   run(body: BuildRoutineMessage): Promise<void>   calls build(body.profileId, body.reason). On 'waiting' for reason `first` or `review-point` while
@@ -92,6 +92,8 @@ type World = {
   seen: Awaited<ReturnType<FaceScanService['seenFor']>>
   countries: Country[]
   profiles: Map<string, string>
+  /** The users who have not verified: guests. Everyone else is verified (every test but the guest ones is about a signed-up account). */
+  guests: Set<string>
   /** The actor in force at each call that needs a session in life (candidatesFor and shelf.add both require a user). */
   actors: Actor[]
   shelfAdds: { productId: string; clientIp: string }[]
@@ -174,6 +176,7 @@ const newWorld = (): World => ({
     { code: 'GH', currency: 'GHS', lowMax: 100, midMax: 300, status: 'active' },
   ],
   profiles: new Map([[AMARA_PROFILE, AMARA_USER]]),
+  guests: new Set(),
   actors: [],
   shelfAdds: [],
   duringAdd: null,
@@ -371,7 +374,10 @@ beforeEach(() => {
       verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
     } satisfies Pick<CatalogWorkbookService, 'countries' | 'verdictReference'>,
     profiles: {
-      find: async (profileId: string) => (world.profiles.has(profileId) ? { id: profileId, userId: world.profiles.get(profileId)! } : null),
+      find: async (profileId: string) => {
+        const userId = world.profiles.get(profileId)
+        return userId === undefined ? null : { id: profileId, userId, ownerStatus: world.guests.has(userId) ? ('anonymous' as const) : ('verified' as const) }
+      },
     } satisfies Pick<ProfilesService, 'find'>,
     writer,
     writerIdentity: { model: 'claude-test-model', promptHash: 'prompt-hash-test' },
@@ -606,7 +612,7 @@ describe('RoutineService.build: a writer that gets it wrong', () => {
 
     expect(writer.retries).toEqual([undefined, FREQUENCY_AT_PROTECT, FREQUENCY_AT_PROTECT])
     const row = await latestRow()
-    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: true })
+    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: 'claude-test-model', promptHash: 'prompt-hash-test', writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
     // The rules' own routine: fixed words for each step, no grounding, and the same step-down.
     expect(row.steps).toEqual([
       { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null },
@@ -950,6 +956,65 @@ describe('RoutineService.start', () => {
   })
 })
 
+describe('RoutineService.start: a routine hidden by a safety change', () => {
+  it('is 409 ROUTINE_NOT_READY, and the routine in force is not started, while a reported reaction or pregnancy hides it', async () => {
+    const before = await firstBuild()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    expect(await current()).toEqual({ status: 'pending' })
+    setClock(2 * DAY)
+
+    const error = await errorOf(start())
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    expect((await currentRow()).startedOn).toBeNull()
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+
+  it('starts it once the build that stores the new cautions has replaced it', async () => {
+    await firstBuild()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    reverdict()
+    await build('safety')
+    setClock(2 * DAY)
+
+    await start()
+
+    expect((await currentRow()).startedOn).not.toBeNull()
+  })
+})
+
+describe('RoutineService.gotIt: a routine hidden by a safety change', () => {
+  it('is 409 ROUTINE_NOT_READY, adding nothing to the shelf and appending no version, while a reported reaction or pregnancy hides it', async () => {
+    const before = await started()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    expect(await current()).toEqual({ status: 'pending' })
+
+    const error = await errorOf(gotIt('treat'))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    expect(world.shelfAdds).toEqual([])
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+})
+
+describe('RoutineService.gotIt: tapping it again', () => {
+  it('is idempotent: three taps leave one got-it version and one shelf add, and the later taps return without error', async () => {
+    await started()
+    await gotIt('treat')
+    const afterFirst = await repository.latest(AMARA_PROFILE)
+    setClock(2 * DAY + HOUR)
+
+    await expect(gotIt('treat')).resolves.toBeUndefined()
+    await expect(gotIt('treat')).resolves.toBeUndefined()
+
+    expect(world.shelfAdds).toHaveLength(1)
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(afterFirst)
+    expect(ids).toBe(2)
+  })
+})
+
 describe('RoutineService.gotIt: "I got it"', () => {
   it('appends a ready version that is the routine in force with that step marked got, no writer call, and the product on the shelf', async () => {
     const before = await started()
@@ -1170,7 +1235,7 @@ describe('RoutineService.request', () => {
       const spies = spyOnConsole()
       jobs.failNextWith(new Error('queue down while holding Karo Glow Cream'))
 
-      await expect(request()).resolves.toBeUndefined()
+      await expect(request()).resolves.toBe(false)
 
       expect(loggedText(spies)).toContain(AMARA_PROFILE)
       expect(loggedText(spies)).not.toContain('Karo Glow Cream')
@@ -1191,9 +1256,31 @@ describe('RoutineService.request', () => {
       spyOnConsole()
       vi.spyOn(repository, 'claim').mockRejectedValueOnce(new Error('the database is down'))
 
-      await expect(request()).resolves.toBeUndefined()
+      await expect(request()).resolves.toBe(false)
 
       expect(queued()).toEqual([])
+    })
+  })
+
+  describe('whether anything was queued', () => {
+    it('answers true when the build was queued', async () => {
+      await expect(request()).resolves.toBe(true)
+    })
+
+    it('answers false when a request already being worked on holds the claim, whatever its key', async () => {
+      await request('verdict', 'routine-fp-1')
+      setClock(MINUTE)
+
+      await expect(request('sold-here', 'sold-here:version-1:treat')).resolves.toBe(false)
+      expect(queued()).toHaveLength(1)
+    })
+
+    it('answers false when routines are switched off, and for a guest', async () => {
+      service = new RoutineService({ ...deps, enabled: false })
+      await expect(request()).resolves.toBe(false)
+      service = new RoutineService({ ...deps, enabled: true })
+      asGuest()
+      await expect(request()).resolves.toBe(false)
     })
   })
 })
@@ -1996,6 +2083,7 @@ describe('RoutineService.sweep: the dead-letter retry due', () => {
 
   it('queues at most 200 retries a run, the longest overdue first, and the rest on the next run', async () => {
     for (let i = 0; i <= 200; i++) {
+      world.profiles.set(`profile-${i}`, `user-${i}`)
       await repository.claim(`profile-${i}`, `routine-fp-${i}`, at(0), at(-HOUR))
       await repository.setRequestRetry(`profile-${i}`, { retried: true, retryDueAt: at(HOUR + i * SECOND) })
     }
@@ -2090,6 +2178,7 @@ describe('RoutineService.sweep: the writer retry due', () => {
     const base = await rulesBuilt()
     // 201 more profiles with a rules-only routine due at the same time: 202 are due in all.
     for (let i = 0; i <= 200; i++) {
+      world.profiles.set(`profile-${i}`, `user-${i}`)
       await repository.append({ ...base, id: `version-due-${i}`, profileId: `profile-${i}`, createdAt: at(i * SECOND), readyAt: at(i * SECOND) })
     }
 
@@ -2280,5 +2369,265 @@ describe('RoutineService.build: outcome hints', () => {
     expect(minted).toEqual(['minted-1'])
     expect(idWhenWriting).toBe('minted-1')
     expect((await latestRow()).id).toBe('minted-1')
+  })
+})
+
+// ---- PR 3d: guests never trigger a build, a stale read settles, honest hintsShown, a counts failure costs no build (spec #189) ----
+//
+// New on the deps: profiles.find answers { id, userId, ownerStatus: 'anonymous' | 'verified' }, the status of the profile's owner. Only a verified owner gets a routine:
+//   request / the sweeps' asks / requestIfStale: do nothing at all for a guest (no claim, nothing queued, the verdict not even read for the stale read);
+//   build: answers 'waiting' for a guest, appending nothing and calling no writer, and logs { outcome: 'routine-not-verified', profileId }.
+// New on the repository: setRoutineFingerprint(id, fingerprint), which a build that ends 'unchanged' calls on the routine in force.
+
+const asGuest = () => world.guests.add(AMARA_USER)
+
+describe('RoutineService: a guest never gets a routine built', () => {
+  it('queues nothing and claims nothing when a guest\'s verdict save asks for a build, whatever the reason', async () => {
+    asGuest()
+
+    for (const [reason, key] of [['verdict', 'verdict-fp-1'], ['first', 'first'], ['review-point', 'review-point:scan-1']] as const) await service.request(AMARA_PROFILE, reason, key)
+
+    expect(queued()).toEqual([])
+    expect(await repository.findRequest(AMARA_PROFILE)).toBeNull()
+  })
+
+  it('still queues the build of a verified account', async () => {
+    await service.request(AMARA_PROFILE, 'verdict', 'verdict-fp-1')
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('asks for nothing on a stale read of a guest, and does not read the verdict for it', async () => {
+    asGuest()
+    const savedFor = vi.spyOn(deps.verdicts, 'savedFor')
+    service = new RoutineService(deps)
+
+    await expect(requestIfStale()).resolves.toBeUndefined()
+
+    expect(queued()).toEqual([])
+    expect(await repository.findRequest(AMARA_PROFILE)).toBeNull()
+    expect(savedFor).not.toHaveBeenCalled()
+  })
+
+  it('answers waiting for a guest with a ready verdict, appending nothing, calling no writer and logging only the id', async () => {
+    asGuest()
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(await build('first')).toBe('waiting')
+
+    expect(await repository.latest(AMARA_PROFILE)).toBeNull()
+    expect(writer.calls).toEqual([])
+    expect(log).toHaveBeenCalledWith({ outcome: 'routine-not-verified', profileId: AMARA_PROFILE })
+  })
+
+  it('does not build for a guest when the queue runs an old message, and gives the claim back', async () => {
+    await service.request(AMARA_PROFILE, 'verdict', 'verdict-fp-1')
+    const body = queuedBody()
+    asGuest()
+
+    await run(body)
+
+    expect(writer.calls).toEqual([])
+    expect(await repository.latest(AMARA_PROFILE)).toBeNull()
+  })
+
+  it('queues nothing from the sweeps for a guest: not a writer retry due, not a retired code, not a dead-letter retry', async () => {
+    setClock(0)
+    await started()
+    removeShelfProduct('entry-a')
+    script(throws(), throws(), throws())
+    setClock(2 * DAY + HOUR)
+    await build('shelf')
+    expect((await currentRow()).writerRetryDueAt).not.toBeNull()
+    await repository.retireCode('SERUM-1', 43)
+    await repository.claim(AMARA_PROFILE, 'review-point:scan-1', at(DAY), at(0))
+    await repository.setRequestRetry(AMARA_PROFILE, { retried: true, retryDueAt: at(2 * DAY) })
+    asGuest()
+    const before = jobs.enqueued.length
+
+    expect(await sweep(5 * DAY)).toBe(0)
+
+    expect(jobs.enqueued).toHaveLength(before)
+    // The guest's retry is dropped rather than left due, where it would take one of the 200 places of every run.
+    expect(await repository.findRequest(AMARA_PROFILE)).toMatchObject({ requestKey: 'review-point:scan-1', retryDueAt: null })
+  })
+
+  it('sweeps a verified account as before', async () => {
+    setClock(0)
+    await firstBuild()
+    await repository.retireCode('SERUM-1', 43)
+
+    expect(await sweep(HOUR)).toBe(1)
+  })
+
+  it('builds for a verified account (the profile read says verified)', async () => {
+    expect(await build('first')).toBe('built')
+  })
+})
+
+describe('RoutineService.requestIfStale: after a build that found nothing to change', () => {
+  // Start, then a shelf product the verdict has no step for: the inputs' fingerprint moves, and the routine does not.
+  const droppedProduct = () => {
+    addProduct('entry-c', CLEAN, { name: 'Spare Toner' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'keep' }, null)])
+  }
+
+  it('records the new fingerprint on the routine in force when the rebuild is unchanged, and so asks for nothing the next time', async () => {
+    const before = await started()
+    droppedProduct()
+    await requestIfStale()
+    expect(queued()).toHaveLength(1)
+    const key = queuedBody().requestKey
+    expect(key).not.toBe(before.routineFingerprint)
+
+    await run(queuedBody())
+
+    expect(attempts).toBe(1)
+    expect(await currentRow()).toEqual({ ...before, routineFingerprint: key })
+    await requestIfStale()
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('answers unchanged and records the fingerprint of the build itself', async () => {
+    const before = await started()
+    droppedProduct()
+    setClock(3 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect((await currentRow()).routineFingerprint).not.toBe(before.routineFingerprint)
+    expect((await currentRow()).routineFingerprint).toBe(await routineFingerprint({
+      goal: 'fade-dark-marks',
+      cautions: ['tapering', 'recent-reaction'],
+      products: [
+        { entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' },
+        { entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' },
+        { entryId: 'entry-c', verdict: { kind: 'keep' }, step: null },
+      ],
+      rulesVersion: ROUTINE_RULES_VERSION,
+    }))
+  })
+
+  it('leaves the fingerprint alone when it is already the build\'s', async () => {
+    const before = await started()
+    const set = vi.spyOn(repository, 'setRoutineFingerprint')
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(set).not.toHaveBeenCalled()
+    expect(await currentRow()).toEqual(before)
+  })
+})
+
+describe('RoutineService.requestIfStale: while the routine cannot be built yet', () => {
+  it('asks for nothing for a verified account with a ready verdict and no shopping country, however often it is read', async () => {
+    world.shopping = null
+
+    await requestIfStale()
+    await requestIfStale()
+
+    expect(queued()).toEqual([])
+    expect(await repository.findRequest(AMARA_PROFILE)).toBeNull()
+  })
+
+  it('asks as soon as the country is set', async () => {
+    world.shopping = null
+    await requestIfStale()
+    world.shopping = { country: 'NG', budgetBand: 'mid' }
+
+    await requestIfStale()
+
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('logs nothing as a failure for the missing country', async () => {
+    world.shopping = null
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    await requestIfStale()
+
+    expect(error).not.toHaveBeenCalled()
+  })
+})
+
+describe('RoutineService.build: hintsShown is recorded only when the writer saw the hints', () => {
+  const SHOWN_ID = 'version-1'
+  const HIDDEN_ID = 'hidden-6'
+  const withId = (id: string) => {
+    service = new RoutineService({ ...deps, newId: () => id })
+  }
+
+  it('is true for a version the writer wrote from the hinted skeleton, and is the same the writer was given', async () => {
+    withId(SHOWN_ID)
+
+    await build('first')
+
+    expect(writer.calls[0]!.hintsShown).toBe(true)
+    expect(await latestRow()).toMatchObject({ source: 'writer', hintsShown: true })
+  })
+
+  it('is false when the rules wrote the routine after three failed tries, though the writer was called', async () => {
+    withId(SHOWN_ID)
+    script(throws(), throws(), throws())
+
+    await build('first')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 3, hintsShown: false })
+  })
+
+  it('is false when the daily limit sent the build to the rules alone', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    // The sixth build's id is one of the nine tenths that show hints, so only the daily limit keeps the hints from the writer.
+    expect(hintsShown('version-7')).toBe(true)
+    withId('version-7')
+    setClock(10 * MINUTE)
+
+    await build('shelf')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0, hintsShown: false })
+  })
+
+  it('is false for a build after Start that rewrote nothing and only kept the routine with new cautions', async () => {
+    await started()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    setClock(3 * DAY)
+
+    expect(await build('safety')).toBe('built')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0, hintsShown: false })
+  })
+
+  it('is false for the copy that "I got it" makes of a routine whose writer saw hints', async () => {
+    await firstBuild()
+    expect(await currentRow()).toMatchObject({ hintsShown: true })
+
+    await gotIt('treat')
+
+    expect(await latestRow()).toMatchObject({ reason: 'got-it', writerCalls: 0, hintsShown: false })
+  })
+
+  it('is false when the routine is one of the tenth that shows no hints', async () => {
+    withId(HIDDEN_ID)
+
+    await build('first')
+
+    expect(await latestRow()).toMatchObject({ source: 'writer', hintsShown: false })
+  })
+})
+
+describe('RoutineService.build: the outcome counts are only hints', () => {
+  it('builds without hints when the counts cannot be read, logging the id and nothing else, and records that none were shown', async () => {
+    vi.spyOn(outcomeCounts, 'counts').mockRejectedValue(new Error('the database is down'))
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {})
+
+    expect(await build('first')).toBe('built')
+
+    expect(log).toHaveBeenCalledWith({ outcome: 'hint-counts-failed', profileId: AMARA_PROFILE })
+    expect(writer.calls[0]!.hintsShown).toBe(false)
+    expect(writer.calls[0]!.gaps.flatMap((gap) => gap.candidates.map((c) => c.outcomeHint))).toSatisfy((hints: unknown[]) => hints.every((hint) => hint === null))
+    expect(await latestRow()).toMatchObject({ status: 'ready', source: 'writer', hintsShown: false })
   })
 })

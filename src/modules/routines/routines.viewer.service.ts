@@ -15,7 +15,7 @@ import type { RoutineService, RoutineView } from './routines.service'
 import type { RoutineResponse } from './routines.schemas'
 import { isSoldIn, toRoutineResponse } from './routines.view'
 
-export type RoutineViewServiceDeps = {
+export type RoutineViewerServiceDeps = {
   routines: Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>
   goals: Pick<GoalsService, 'requireGoal'>
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries'>
@@ -25,6 +25,8 @@ export type RoutineViewServiceDeps = {
   repository: Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
   /** Tells whoever follows a profile's routine that it changed (`routine:<profileId>`). */
   events: ScanEvents
+  /** Whether routines are switched on in this environment (the routine service's own switch): off, a build is never queued, and "find one sold here" answers as if it were. */
+  enabled: boolean
   now?: () => Date
 }
 
@@ -36,18 +38,19 @@ export type RoutineViewServiceDeps = {
  * The gates, in order: 401, 403 `SIGNUP_REQUIRED` for a guest (a routine is saved with an account), 409 `GOAL_REQUIRED`, then 503 `VERDICT_UNAVAILABLE` while a step-down
  * template of the verdict is not approved, since the routine is built from the verdict and would stay pending for ever.
  */
-export class RoutineViewService {
-  private readonly routines: RoutineViewServiceDeps['routines']
-  private readonly goals: RoutineViewServiceDeps['goals']
-  private readonly workbook: RoutineViewServiceDeps['workbook']
-  private readonly catalog: RoutineViewServiceDeps['catalog']
-  private readonly shelf: RoutineViewServiceDeps['shelf']
-  private readonly recommendations: RoutineViewServiceDeps['recommendations']
-  private readonly repository: RoutineViewServiceDeps['repository']
+export class RoutineViewerService {
+  private readonly routines: RoutineViewerServiceDeps['routines']
+  private readonly goals: RoutineViewerServiceDeps['goals']
+  private readonly workbook: RoutineViewerServiceDeps['workbook']
+  private readonly catalog: RoutineViewerServiceDeps['catalog']
+  private readonly shelf: RoutineViewerServiceDeps['shelf']
+  private readonly recommendations: RoutineViewerServiceDeps['recommendations']
+  private readonly repository: RoutineViewerServiceDeps['repository']
   private readonly events: ScanEvents
+  private readonly enabled: boolean
   private readonly now: () => Date
 
-  constructor(deps: RoutineViewServiceDeps) {
+  constructor(deps: RoutineViewerServiceDeps) {
     this.routines = deps.routines
     this.goals = deps.goals
     this.workbook = deps.workbook
@@ -56,6 +59,7 @@ export class RoutineViewService {
     this.recommendations = deps.recommendations
     this.repository = deps.repository
     this.events = deps.events
+    this.enabled = deps.enabled
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -76,7 +80,7 @@ export class RoutineViewService {
     const profileId = await this.gated()
     await this.routines.requestIfStale(profileId)
     const view = await this.routines.current(profileId)
-    const stream = await this.events.subscribe(RoutineViewService.streamKey(profileId), await this.shown(profileId, view, true))
+    const stream = await this.events.subscribe(RoutineViewerService.streamKey(profileId), await this.shown(profileId, view, true))
     let latest: RoutineView
     try {
       latest = await this.routines.current(profileId)
@@ -84,7 +88,7 @@ export class RoutineViewService {
       console.error({ outcome: 'routine-watch-reread-failed', profileId })
       return stream
     }
-    if (latest.status !== view.status || RoutineViewService.versionIdOf(latest) !== RoutineViewService.versionIdOf(view)) await this.publishRoutine(profileId, latest)
+    if (latest.status !== view.status || RoutineViewerService.versionIdOf(latest) !== RoutineViewerService.versionIdOf(view)) await this.publishRoutine(profileId, latest)
     if (latest.status === 'ready') await this.publishDone(profileId)
     return stream
   }
@@ -106,7 +110,9 @@ export class RoutineViewService {
   /**
    * "Find one sold here": asks for the step to be built again without its recommended product, which the shopping country does not sell (or nobody sells any more).
    * 409 `ROUTINE_NOT_READY` before there is a routine, 409 `STEP_NOT_RECOMMENDED` for a step with no recommended product or one sold here already. The build runs in
-   * the job. The answer is the routine in force, as `updating`, whether or not a build was queued (one may be under way already, which will have it).
+   * the job. The answer is the routine in force, as `updating`. When routines are on and nothing was queued, the person's request would be lost (another build or a
+   * read's own request holds the profile's claim, and a request made mid-build is dropped), so it is 409 `BUILD_IN_PROGRESS`: try again in a moment. With routines
+   * off nothing is ever queued and the answer is as ever.
    */
   async findSoldHere(step: RoutineStep): Promise<RoutineResponse> {
     const profileId = await this.gated()
@@ -117,7 +123,8 @@ export class RoutineViewService {
     const { code } = chosen
     const row = (await this.workbook.recommendedByCode([code])).get(code)
     if (row && isSoldIn(row, (await this.recommendations.shoppingFor(profileId)).country)) throw new ConflictError('STEP_NOT_RECOMMENDED', 'This product is sold in your country')
-    await this.routines.request(profileId, 'sold-here', `sold-here:${view.version.id}:${step}`, { exclude: { step, code } })
+    const queued = await this.routines.request(profileId, 'sold-here', `sold-here:${view.version.id}:${step}`, { exclude: { step, code } })
+    if (!queued && this.enabled) throw new ConflictError('BUILD_IN_PROGRESS', 'Your routine is being updated right now. Try again in a moment.')
     return this.shown(profileId, { status: 'updating', version: view.version }, false)
   }
 
@@ -142,7 +149,7 @@ export class RoutineViewService {
 
   private async publishRoutine(profileId: string, view: RoutineView): Promise<void> {
     try {
-      await this.events.publish(RoutineViewService.streamKey(profileId), { type: 'routine', routine: await this.shown(profileId, view, false) })
+      await this.events.publish(RoutineViewerService.streamKey(profileId), { type: 'routine', routine: await this.shown(profileId, view, false) })
     } catch {
       console.error({ outcome: 'routine-publish-failed', profileId })
     }
@@ -150,7 +157,7 @@ export class RoutineViewService {
 
   private async publishDone(profileId: string): Promise<void> {
     try {
-      await this.events.publish(RoutineViewService.streamKey(profileId), { type: 'done' })
+      await this.events.publish(RoutineViewerService.streamKey(profileId), { type: 'done' })
     } catch {
       console.error({ outcome: 'routine-publish-failed', profileId })
     }
@@ -164,7 +171,8 @@ export class RoutineViewService {
     if (view.status === 'pending') return { status: 'pending' }
     const { version } = view
     const previous = await this.repository.lastServedBefore(profileId, version.id)
-    const codes = [...new Set(version.steps.flatMap(({ product }) => (product.kind === 'candidate' ? [product.code] : [])))]
+    // The shown version's recommended products, and the previous one's: a product that has since become the user's own is compared by its formulation.
+    const codes = [...new Set([...version.steps, ...(previous?.steps ?? [])].flatMap(({ product }) => (product.kind === 'candidate' ? [product.code] : [])))]
     const [shopping, entries, recommended, countries, tapers] = await Promise.all([
       this.recommendations.shoppingFor(profileId),
       this.shelf.activeEntriesFor(profileId),
@@ -173,10 +181,13 @@ export class RoutineViewService {
       this.workbook.tapersByCode([...new Set(version.tapers.map(({ templateId }) => templateId))]),
     ])
     const facts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
-    const own = new Map<string, { brand: string | null; name: string }>()
+    const own = new Map<string, { brand: string | null; name: string; formulationId?: string }>()
     for (const entry of entries) {
-      const named = entry.kind === 'no-label' ? { brand: null, name: NO_LABEL_NAME } : facts.get(entry.formulationId)
-      if (named) own.set(entry.id, { brand: named.brand, name: named.name })
+      if (entry.kind === 'no-label') own.set(entry.id, { brand: null, name: NO_LABEL_NAME })
+      else {
+        const named = facts.get(entry.formulationId)
+        if (named) own.set(entry.id, { brand: named.brand, name: named.name, formulationId: entry.formulationId })
+      }
     }
     const summaries = await this.catalog.productSummaries([...recommended.values()].flatMap((row) => (row.formulationId ? [row.formulationId] : [])))
     const body = toRoutineResponse({ status: view.status, version, previous, country: shopping.country, countries, own, recommended, summaries, tapers })

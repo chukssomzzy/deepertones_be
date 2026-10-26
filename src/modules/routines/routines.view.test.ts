@@ -16,7 +16,7 @@ import { toRoutineResponse, type RoutineViewInput } from './routines.view'
 //     previous: RoutineVersionRow | null               the newest served version other than `version` (repository.lastServedBefore), for `changed`
 //     country: string                                  the profile's shopping country
 //     countries: CountryRow[]                          workbook.countries(): the currency of `country`
-//     own: ReadonlyMap<entryId, { brand: string | null; name: string }>             the shelf entries the version names
+//     own: ReadonlyMap<entryId, { brand: string | null; name: string; formulationId?: string }>   the shelf entries the version names (the formulation of a product entry, for `changed`)
 //     recommended: ReadonlyMap<code, RecommendedByCode>                             workbook.recommendedByCode(codes), retired rows included
 //     summaries: ReadonlyMap<formulationId, ProductSummary>                         catalog.productSummaries(formulationIds), for brand, name and image
 //     tapers: ReadonlyMap<templateId, TaperRow>                                     workbook.tapersByCode(codes)
@@ -393,6 +393,34 @@ describe('toRoutineResponse: what changed since the routine was last shown', () 
 
     expect(changedFlags([ownStep('cleanse', 'entry-a', 'am'), ownStep('treat', 'entry-z', 'pm'), noneStep('protect', 'am')], previous)).toEqual([false, true, false])
     expect(changedFlags([ownStep('cleanse', 'entry-a', 'am'), noneStep('treat', 'pm'), noneStep('protect', 'am')], previous)).toEqual([false, true, false])
+  })
+
+  describe('when the user got the recommended product and it became their own shelf entry (story 30)', () => {
+    const previous = () => served(BASE_STEPS())
+    const swapped = (formulationId: string | undefined) => {
+      const own = new Map([
+        ['entry-a', { brand: 'Orbis', name: 'Calm Cleanser' }],
+        ['entry-s', { brand: 'Lumina', name: 'Bright Serum', ...(formulationId === undefined ? {} : { formulationId }) }],
+      ])
+      const current = [ownStep('cleanse', 'entry-a', 'am'), ownStep('treat', 'entry-s', 'pm'), noneStep('protect', 'am')]
+      return wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own }))).steps.map((s: any) => s.changed)
+    }
+
+    it('does not mark the step changed when the shelf entry is the same formulation as the recommended product it replaces', () => {
+      expect(swapped('form-SERUM-1')).toEqual([false, false, false])
+    })
+
+    it('marks it changed when the shelf entry is a different formulation, or its formulation is not known', () => {
+      expect(swapped('form-SOMETHING-ELSE')).toEqual([false, true, false])
+      expect(swapped(undefined)).toEqual([false, true, false])
+    })
+
+    it('still marks it changed when the frequency moved with the swap', () => {
+      const own = new Map([['entry-s', { brand: 'Lumina', name: 'Bright Serum', formulationId: 'form-SERUM-1' }]])
+      const current = [ownStep('cleanse', 'entry-a', 'am'), ownStep('treat', 'entry-s', 'am'), noneStep('protect', 'am')]
+
+      expect(wire(toRoutineResponse(input({ version: version({ steps: current }), previous: previous(), own }))).steps.map((s: any) => s.changed)).toEqual([false, true, false])
+    })
   })
 
   it('marks a step changed when only its frequency is different', () => {

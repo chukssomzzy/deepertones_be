@@ -25,6 +25,11 @@ export class FakeRoutinesRepository implements RoutinesRepository {
     if (row) this.rows.set(id, { ...row, writerRetryDueAt: null })
   }
 
+  async setRoutineFingerprint(id: string, fingerprint: string): Promise<void> {
+    const row = this.rows.get(id)
+    if (row) this.rows.set(id, { ...row, routineFingerprint: fingerprint })
+  }
+
   async markServed(id: string, at: Date): Promise<void> {
     const row = this.rows.get(id)
     if (row) this.rows.set(id, { ...row, servedAt: new Date(at) })
@@ -93,6 +98,7 @@ export class FakeRoutinesRepository implements RoutinesRepository {
   async retiredCodeVersions(limit: number): Promise<RoutineVersionRow[]> {
     return this.inForce()
       .filter((row) => row.catalogVersion !== null && row.steps.some((entry) => entry.product.kind === 'candidate' && (this.retired.get(entry.product.code) ?? -Infinity) > row.catalogVersion!))
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .slice(0, limit)
       .map((row) => structuredClone(row))
   }

@@ -148,6 +148,14 @@ describe('ProfilesService.find', () => {
     expect(await service.find('p-ada-2')).toMatchObject({ id: 'p-ada-2', userId: 'u-ada' })
   })
 
+  it('says whether the owner is a guest or verified, in the same read', async () => {
+    const { service, repository } = await setup()
+    repository.markVerified('u-bo')
+
+    expect(await service.find('p-ada')).toEqual({ id: 'p-ada', userId: 'u-ada', ownerStatus: 'anonymous' })
+    expect(await service.find('p-bo')).toEqual({ id: 'p-bo', userId: 'u-bo', ownerStatus: 'verified' })
+  })
+
   it('returns null for an id that is no profile', async () => {
     const { service } = await setup()
 

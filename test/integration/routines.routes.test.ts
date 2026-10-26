@@ -39,7 +39,7 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 // Every one is for a signed-up account: 401 AUTH_REQUIRED, then 403 SIGNUP_REQUIRED (a guest), then 409 GOAL_REQUIRED, then 503 VERDICT_UNAVAILABLE (a step-down
 // template of the verdict is not approved yet). Note the order against the verdict's own, which answers 503 before 409.
 // Start answers 200 with the body (409 ROUTINE_NOT_READY before there is a routine) and is idempotent; got-it answers 200 with the body (409 ROUTINE_NOT_READY,
-// 409 STEP_NOT_RECOMMENDED, 429 on the shelf-add limits); find-sold-here answers 202 with the `updating` body (the build runs in the job, never in the request).
+// 409 STEP_NOT_RECOMMENDED, 429 on the shelf-add limits); find-sold-here answers 202 with the `updating` body (the build runs in the job, never in the request), or 409 BUILD_IN_PROGRESS when routines are on and nothing could be queued.
 // Never in any body: grounding, fixedFrom, source links, the model and prompt, the workbook's audit columns, ids of the catalog.
 //
 // The step-down templates are the workbook's, one database for the whole file, so the first describes run in order against the state the one before left: no
@@ -734,6 +734,21 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(await readyOf(guest)).toMatchObject({ startedOn: first.startedOn })
     })
 
+    it('answers 409 ROUTINE_NOT_READY, and does not start it, while a safety change hides the routine; it starts once the change is undone', async () => {
+      const { guest } = await withRoutine()
+      await putSafety(guest, { choices: ['pregnant'] })
+      expect(await bodyOf(guest)).toEqual({ status: 'pending' })
+
+      const res = await startRoutine(guest)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ROUTINE_NOT_READY')
+      expect((await routines.current(guest.profileId))!.startedOn).toBeNull()
+      await putSafety(guest, { choices: ['none'] })
+      expect((await readyOf(guest)).startedOn).toBeNull()
+      expect((await startRoutine(guest)).status).toBe(200)
+    })
+
     it('answers with no request body: it takes none', async () => {
       const { guest } = await withRoutine()
 
@@ -787,6 +802,31 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(body.steps[1]!.product).toMatchObject({ code: TREAT_GH.code, notYetGot: true })
       // The routine read afterwards says so too.
       expect((await readyOf(guest)).steps[2]!.product).toMatchObject({ notYetGot: false })
+    })
+
+    it('answers 409 ROUTINE_NOT_READY, and appends no version, while a safety change hides the routine', async () => {
+      const { guest, version } = await withRoutine()
+      await putSafety(guest, { choices: ['pregnant'] })
+
+      const res = await gotIt('moisturise', guest)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('ROUTINE_NOT_READY')
+      expect((await routines.latest(guest.profileId))!.id).toBe(version.id)
+    })
+
+    it('is idempotent: tapping it three times answers 200 each time and leaves one got-it version', async () => {
+      const { guest } = await withRoutine()
+      expect((await gotIt('moisturise', guest)).status).toBe(200)
+      const afterFirst = (await routines.latest(guest.profileId))!
+
+      const second = await gotIt('moisturise', guest)
+      const third = await gotIt('moisturise', guest)
+
+      expect([second.status, third.status]).toEqual([200, 200])
+      expect((await dataOf<ReadyBody>(third)).steps[2]!.product).toMatchObject({ notYetGot: false })
+      expect((await routines.latest(guest.profileId))!.id).toBe(afterFirst.id)
+      expect(afterFirst.reason).toBe('got-it')
     })
 
     it('answers 429 RATE_LIMITED with Retry-After to the 11th of one account in a minute (the shelf\'s add limits)', async () => {
@@ -870,15 +910,28 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect((await readyOf(guest)).status).toBe('ready')
     })
 
-    it('queues no second build when asked again for the same step of the same routine', async () => {
+    it('answers 409 BUILD_IN_PROGRESS, queuing no second build, when asked again for the same step while the first build is waiting', async () => {
       const { guest } = await withRoutine()
       routinesEnabled = true
       await findSoldHere('treat', guest)
 
       const again = await findSoldHere('treat', guest)
 
-      expect(again.status).toBe(202)
+      expect(again.status).toBe(409)
+      expect(await errorCodeOf(again)).toBe('BUILD_IN_PROGRESS')
       expect(queuedFor(guest)).toHaveLength(1)
+    })
+
+    it('answers 409 BUILD_IN_PROGRESS, not 202, when another build holds the claim so the exclusion could not be queued', async () => {
+      const { guest } = await withRoutine()
+      routinesEnabled = true
+      expect(await routines.claim(guest.profileId, 'verdict-fp', new Date(), new Date(Date.now() - 15 * MINUTE))).toBe(true)
+
+      const res = await findSoldHere('treat', guest)
+
+      expect(res.status).toBe(409)
+      expect(await res.json()).toMatchObject({ success: false, status: 409, message: expect.stringMatching(/try again/i), error: { code: 'BUILD_IN_PROGRESS' } })
+      expect(queuedFor(guest)).toEqual([])
     })
 
     it('queues nothing when routines are switched off, and still answers 202 with the routine', async () => {

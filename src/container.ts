@@ -29,7 +29,7 @@ import { RecommendationService } from './modules/recommendations/recommendations
 import { D1OutcomeCountsRepository } from './modules/routines/routines.outcome-counts.repository'
 import { D1RoutinesRepository } from './modules/routines/routines.repository'
 import { RoutineService } from './modules/routines/routines.service'
-import { RoutineViewService } from './modules/routines/routines.viewer.service'
+import { RoutineViewerService } from './modules/routines/routines.viewer.service'
 import type { RoutineTrigger } from './modules/routines/routines.trigger'
 import { D1SafetyRepository } from './modules/safety/safety.repository'
 import { SafetyService } from './modules/safety/safety.service'
@@ -331,7 +331,10 @@ export const buildContainer = (env: CloudflareBindings) => {
   const perfectCorp = once(() => new RestPerfectCorpClient({ apiKey: env.PERFECT_CORP_API_KEY, webhookSecret: env.PERFECT_CORP_WEBHOOK_SECRET, baseUrl: env.PERFECT_CORP_BASE_URL }))
 
   // Lazily: the routines service reads the modules that call this, so it cannot be built before them. The annotation keeps the types of the two from defining each other.
-  const routineTrigger: RoutineTrigger = (profileId, reason, requestKey) => routines().request(profileId, reason, requestKey)
+  const routineTrigger: RoutineTrigger = async (profileId, reason, requestKey) => {
+    // Triggers ask again at their next event, so whether a build was queued is not theirs to know.
+    await routines().request(profileId, reason, requestKey)
+  }
 
   const faceScans = once(
     () =>
@@ -413,7 +416,7 @@ export const buildContainer = (env: CloudflareBindings) => {
 
   const routineViewer = once(
     () =>
-      new RoutineViewService({
+      new RoutineViewerService({
         routines: routines(),
         goals: goals(),
         workbook: catalogWorkbook(),
@@ -422,6 +425,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         recommendations: recommendations(),
         repository: new D1RoutinesRepository(db()),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
+        enabled: env.ROUTINES_ENABLED === 'true',
         now: () => new Date(),
       }),
   )

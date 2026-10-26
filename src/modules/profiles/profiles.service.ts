@@ -1,5 +1,5 @@
 import type { ProfilesRepository } from './profiles.repository'
-import type { Profile } from './profiles.types'
+import type { Profile, ProfileWithOwner } from './profiles.types'
 
 export type ProfilesServiceDeps = {
   repository: ProfilesRepository
@@ -41,10 +41,12 @@ export class ProfilesService {
     return created
   }
 
-  /** The profile's id and the user it belongs to, whoever that is and default or not, or null for an id that is no profile: what a job needs to act as the profile's user. */
-  async find(profileId: string): Promise<Pick<Profile, 'id' | 'userId'> | null> {
-    const profile = await this.repository.findById(profileId)
-    return profile && { id: profile.id, userId: profile.userId }
+  /**
+   * The profile's id and the user it belongs to, whoever that is and default or not, with the status of that user (`ownerStatus`), or null for an id that is no
+   * profile: what a job needs to act as the profile's user, and to know whether that user is verified.
+   */
+  async find(profileId: string): Promise<ProfileWithOwner | null> {
+    return this.repository.findWithOwner(profileId)
   }
 
   /** The profile if it exists and belongs to the user; null for an unknown id or another user's profile. */
