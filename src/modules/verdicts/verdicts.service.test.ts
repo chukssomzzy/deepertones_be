@@ -61,8 +61,10 @@ const MAX_WAITS = 15
 const SECRET = 'QZ7'
 
 const actor = (userId: string, profileId: string, status: 'anonymous' | 'verified' = 'anonymous'): Actor => ({ kind: 'user', userId, status, profileId })
-const AMARA = actor('user-amara', 'profile-amara-1')
+// Amara and Tolu hold accounts, so they read the full verdict. Ngozi is a guest (status 'anonymous'): spec #171, owner decision, a guest is only ever given the locked preview.
+const AMARA = actor('user-amara', 'profile-amara-1', 'verified')
 const TOLU = actor('user-tolu', 'profile-tolu-1', 'verified')
+const NGOZI = actor('user-ngozi', 'profile-ngozi-1', 'anonymous')
 const SYSTEM: Actor = { kind: 'system', job: 'build-verdict' }
 const PUBLIC: Actor = { kind: 'public' }
 
@@ -397,9 +399,10 @@ describe('VerdictService.current: asking for the verdict', () => {
   })
 
   it('serves a guest: the verdict needs a session but not a verified account', async () => {
-    expect(AMARA.kind === 'user' && AMARA.status).toBe('anonymous')
+    expect(NGOZI.kind === 'user' && NGOZI.status).toBe('anonymous')
 
-    expect(await current(AMARA)).toEqual({ status: 'pending' })
+    expect(await current(NGOZI)).toEqual({ status: 'pending' })
+    expect(lastBody().profileId).toBe('profile-ngozi-1')
   })
 
   it('refuses a request with no session, writing and queuing nothing', async () => {
@@ -564,7 +567,7 @@ describe('VerdictService.build: a verdict from the shelf', () => {
     await built()
 
     expect(fitter.calls).toEqual([])
-    expect(await current()).toEqual({ status: 'ready', fit: 'ready', products: [], tapers: [] })
+    expect(await current()).toEqual({ status: 'ready', locked: false, fit: 'ready', products: [], tapers: [] })
   })
 
   it('does nothing when the row is already built from this fingerprint: no second bill for the fit judge, and the saved verdict is untouched', async () => {
@@ -627,12 +630,13 @@ describe('VerdictService.build: a verdict from the shelf', () => {
     for (const line of lines) expect(line).not.toContain(SECRET)
   })
 
-  it('keeps a verdict built for a guest when the guest signs up: the profile is the same, so it is served at once', async () => {
-    await built(AMARA)
-    const verified = actor('user-amara', 'profile-amara-1', 'verified')
+  it('keeps a verdict built for a guest when the guest signs up: the profile is the same, so it is served at once, in full, and the judge is not asked again', async () => {
+    await built(NGOZI)
+    const verified = actor('user-ngozi', 'profile-ngozi-1', 'verified')
 
-    expect(await current(verified)).toMatchObject({ status: 'ready', fit: 'ready' })
+    expect(await current(verified)).toMatchObject({ status: 'ready', locked: false, fit: 'ready', products: [{ entryId: 'entry-a' }, { entryId: 'entry-b' }] })
     expect(jobs.enqueued).toHaveLength(1)
+    expect(fitter.calls).toHaveLength(1)
   })
 })
 
@@ -1318,6 +1322,12 @@ describe('VerdictService.savedFor: what the routine reads', () => {
 
 const KEY = 'verdict:profile-amara-1'
 const TOLU_KEY = 'verdict:profile-tolu-1'
+// A guest follows a stream of its own, `verdict-preview:<profileId>`, which only ever carries the locked preview. The full verdict's `verdict:<profileId>` is never
+// subscribed to by a guest, so a frame published there cannot reach one.
+const PREVIEW_KEY = 'verdict-preview:profile-amara-1'
+const TOLU_PREVIEW_KEY = 'verdict-preview:profile-tolu-1'
+const NGOZI_KEY = 'verdict:profile-ngozi-1'
+const NGOZI_PREVIEW_KEY = 'verdict-preview:profile-ngozi-1'
 const STEROID_TAPER_BODY = {
   code: 'TPR-STEROID-1',
   kind: 'steroid',
@@ -1335,6 +1345,7 @@ const PRODUCT_B = publicProductOf('entry-b', 'Karo Glow Cream')
 /** Amara's shelf as a client reads it: the serum the judge decided (or left undecided when its fit is not ready), and the steroid cream stopped by its step-down. */
 const amarasBody = (fit: 'ready' | 'not-ready') => ({
   status: 'ready',
+  locked: false,
   fit,
   products: [
     fit === 'ready'
@@ -1533,7 +1544,7 @@ describe('VerdictService.markFitFailed: telling the stream', () => {
     await markFitFailed(body)
 
     expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), DONE_FRAME])
-    expect(events.published.every((p) => p.scanId === KEY)).toBe(true)
+    expect(events.published.every((p) => p.scanId === KEY || p.scanId === PREVIEW_KEY)).toBe(true)
   })
 
   it('sends done alone when the build died before anything was saved, so the row is still pending', async () => {
@@ -1588,7 +1599,7 @@ describe('VerdictService.build: telling the stream', () => {
 
     expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
     expect(events.eventsFor(TOLU_KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
-    expect([...new Set(events.published.map((p) => p.scanId))].sort()).toEqual([KEY, TOLU_KEY])
+    expect([...new Set(events.published.map((p) => p.scanId))].sort()).toEqual([KEY, PREVIEW_KEY, TOLU_KEY, TOLU_PREVIEW_KEY].sort())
   })
 
   it('publishes nothing while the build only waits for the shelf to settle', async () => {
@@ -2090,5 +2101,365 @@ describe('VerdictService: the shelf entry\'s product on each verdict product', (
       expect(done).toEqual(DONE_FRAME)
       expect(rest).toEqual([])
     })
+  })
+})
+
+// ---- The guest's locked preview (spec #171, owner decision) ----
+//
+// A GUEST (an actor whose status is 'anonymous') never receives the full verdict: not the products, the reasons, the step-downs, nor a product's name. The app shows
+// a guest its "Your result" screen, whose counts and prompt to save the result are all it needs, and a verified user gets the full verdict as before. Same build, same
+// saved row, no extra judge call: the row is saved once and only read two ways, so verifying (which keeps the profile) shows the full verdict at once.
+//
+// The contract this section pins:
+//   current() for a verified user answers { status: 'ready', locked: false, fit, products, tapers } (the full view with `locked: false` added); for a guest it answers
+//   { status: 'ready', locked: true, fit, total, counts, escalates } and nothing else:
+//     total       how many skin products the verdict holds (every saved product, whether or not its shelf view still resolves),
+//     counts      one number for each of the eight groups, 0 where there is none: helping, redundant, blocking, conflicting, likely-the-problem, cant-tell, prescribed, undecided,
+//     escalates   how many products carry `escalate` (so the app can tell a guest to see a professional without naming which product: CONTEXT.md safety).
+//   Pending is { status: 'pending' } for both, and the gates (503 VERDICT_UNAVAILABLE, then 409 GOAL_REQUIRED) are the same for both.
+//   The streams: the full verdict is published to `verdict:<profileId>` as before and its preview to `verdict-preview:<profileId>`, `done` to both. watch() opens the
+//   preview stream, with the preview as its snapshot, for a guest, and the full stream for a verified user. A frame of the preview stream is a { type: 'verdict' } whose
+//   verdict is the guest's body above, so nothing of the products ever travels on it. `pending` (inputs changed under the build) goes to both.
+//   savedFor(profileId) is the routine's and is not touched.
+
+const PREVIEW_FRAME_OF_AMARA = (fit: 'ready' | 'not-ready') => ({
+  type: 'verdict',
+  verdict: {
+    status: 'ready',
+    locked: true,
+    fit,
+    total: 2,
+    // Amara's shelf: the serum is the judge's (helping, or undecided while the fit is not ready) and the steroid cream the rules stopped.
+    counts: { helping: fit === 'ready' ? 1 : 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 1, 'cant-tell': 0, prescribed: 0, undecided: fit === 'ready' ? 0 : 1 },
+    escalates: 0,
+  },
+})
+const EVERY_GROUP_ZERO = { helping: 0, redundant: 0, blocking: 0, conflicting: 0, 'likely-the-problem': 0, 'cant-tell': 0, prescribed: 0, undecided: 0 }
+/** What must never be in anything a guest is sent: the products' ids and names, the judge's and the rules' reasons, and the step-down. */
+const PRIVATE_TO_THE_FULL_VERDICT = ['entry-', 'Calm Serum', 'Karo Glow Cream', 'Orbis', 'Suits the goal', 'Clobetasol', 'TPR-', 'prod-', 'taper', 'products', 'reason', 'verdict":{"kind']
+const expectNothingPrivate = (what: unknown) => {
+  const text = JSON.stringify(what)
+  for (const word of PRIVATE_TO_THE_FULL_VERDICT) expect(text).not.toContain(word)
+}
+const watchAsGuest = () => watch(NGOZI)
+const asGuestBuilt = () => built(NGOZI)
+
+describe('VerdictService.current: a guest is given the locked preview, never the full verdict', () => {
+  it('answers the counts of each group, the total and how many to see a professional about, with the fit, and nothing of any product', async () => {
+    await asGuestBuilt()
+
+    const view = await current(NGOZI)
+
+    expect(view).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'ready',
+      total: 2,
+      counts: { ...EVERY_GROUP_ZERO, helping: 1, 'likely-the-problem': 1 },
+      escalates: 0,
+    })
+    expect(Object.keys(view).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect(Object.keys((view as unknown as { counts: object }).counts).sort()).toEqual(Object.keys(EVERY_GROUP_ZERO).sort())
+    expectNothingPrivate(view)
+  })
+
+  it('counts every group the verdict has, the products\' own escalations, and every product however the shelf looks now', async () => {
+    world.reference.rules.push(rule({ name: 'mercury', kind: 'banned-substance', group: 'mercury', source: 'https://example.org/rules/mercury' }))
+    addProduct('entry-c', CLEAN, { name: 'Dew Lotion' })
+    addProduct('entry-d', CLEAN, { name: 'Pore Mist' })
+    addProduct('entry-m', ['Aqua', 'Mercury'], { name: 'Pearl Cream' })
+    world.entries.push({ id: 'entry-n', kind: 'no-label', addedAt: at(entryCount++ * MINUTE), itemId: 'item-entry-n' })
+    world.noLabels.set('item-entry-n', { purpose: 'moisturise', category: 'skin' })
+    world.views.set('entry-n', noLabelView('entry-n'))
+    world.steps.set('prod-entry-c', ['moisturise'])
+    fitter.respondWith((request) => ({
+      products: openIds(request).map((id) =>
+        id === 'entry-c'
+          ? { id, label: 'redundant' as const, reason: 'Does what the serum does.', sameJobAs: 'entry-a' }
+          : id === 'entry-d'
+            ? { id, label: 'blocking' as const, reason: 'Holds the goal back.', sameJobAs: null }
+            : { id, label: 'helping' as const, reason: 'Suits the goal.', sameJobAs: null },
+      ),
+      clashes: [],
+    }))
+    await asGuestBuilt()
+
+    expect(await current(NGOZI)).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'ready',
+      total: 6,
+      // helping: the serum; redundant: the lotion; blocking: the mist; likely-the-problem: the steroid cream and the mercury cream; cant-tell: the unlabelled tub.
+      counts: { ...EVERY_GROUP_ZERO, helping: 1, redundant: 1, blocking: 1, 'likely-the-problem': 2, 'cant-tell': 1 },
+      escalates: 1,
+    })
+  })
+
+  it('counts a product whose shelf view is gone, and its escalation, as the verdict saved it: the user is still told how many to see a professional about', async () => {
+    world.reference.rules.push(rule({ name: 'mercury', kind: 'banned-substance', group: 'mercury', source: 'https://example.org/rules/mercury' }))
+    addProduct('entry-m', ['Aqua', 'Mercury'], { name: 'Pearl Cream' })
+    await asGuestBuilt()
+    world.views.delete('entry-m')
+    world.views.delete('entry-a')
+
+    const view = await current(NGOZI)
+
+    expect(view).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'ready',
+      total: 3,
+      counts: { ...EVERY_GROUP_ZERO, helping: 1, 'likely-the-problem': 2 },
+      escalates: 1,
+    })
+    expect(jobs.enqueued).toHaveLength(1)
+  })
+
+  it('says 0 for every group and a total of 0 for a profile with no skin products, and does not throw', async () => {
+    world.entries = []
+
+    await asGuestBuilt()
+
+    expect(await current(NGOZI)).toEqual({ status: 'ready', locked: true, fit: 'ready', total: 0, counts: EVERY_GROUP_ZERO, escalates: 0 })
+  })
+
+  it('carries the fit as it is: not ready, with the products the judge has not decided counted as undecided', async () => {
+    await current(NGOZI)
+    fitFails()
+    await expect(build(lastBody())).rejects.toThrow()
+
+    expect(await current(NGOZI)).toEqual({
+      status: 'ready',
+      locked: true,
+      fit: 'not-ready',
+      total: 2,
+      counts: { ...EVERY_GROUP_ZERO, undecided: 1, 'likely-the-problem': 1 },
+      escalates: 0,
+    })
+  })
+
+  it('answers pending as it does for anyone, and queues the one build', async () => {
+    expect(await current(NGOZI)).toEqual({ status: 'pending' })
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(lastBody().profileId).toBe('profile-ngozi-1')
+  })
+
+  it('is the same ready view for the same row whichever product the shelf later loses: the preview is read from the saved verdict', async () => {
+    await asGuestBuilt()
+    const before = await current(NGOZI)
+
+    world.views.clear()
+
+    expect(await current(NGOZI)).toEqual(before)
+  })
+
+  it('keeps the gates: 503 VERDICT_UNAVAILABLE while a step-down template is not approved, then 409 GOAL_REQUIRED, queuing nothing', async () => {
+    delete world.reference.tapers.steroid
+    expect(await errorOf(current(NGOZI))).toMatchObject({ code: 'VERDICT_UNAVAILABLE' })
+    world.reference.tapers.steroid = 'TPR-STEROID-1'
+    world.goal = null
+
+    expect(await errorOf(current(NGOZI))).toMatchObject({ code: 'GOAL_REQUIRED' })
+
+    expect(jobs.enqueued).toEqual([])
+  })
+
+  it('serves the full verdict to the same profile once the guest has verified: locked false, the products and the step-downs, from the same row, with no new build and no new judge call', async () => {
+    await asGuestBuilt()
+    const verified = actor('user-ngozi', 'profile-ngozi-1', 'verified')
+
+    const view = await current(verified)
+
+    expect(view).toMatchObject({
+      status: 'ready',
+      locked: false,
+      fit: 'ready',
+      products: [
+        { entryId: 'entry-a', group: 'helping', kind: 'product' },
+        { entryId: 'entry-b', group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' } },
+      ],
+      tapers: [expect.objectContaining({ code: 'TPR-STEROID-1' })],
+    })
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(fitter.calls).toHaveLength(1)
+  })
+
+  it('adds locked false to the verified user\'s view and changes nothing else of it', async () => {
+    await built(TOLU)
+
+    const view = (await current(TOLU)) as unknown as { locked: boolean; products: object[] }
+
+    expect(view.locked).toBe(false)
+    expect(Object.keys(view).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect(view.products).toHaveLength(2)
+  })
+
+  it('leaves what the routine reads alone: savedFor answers the saved products of a guest\'s profile in full, with no preview fields', async () => {
+    await asGuestBuilt()
+
+    const saved = await savedFor('profile-ngozi-1')
+
+    expect(saved).toMatchObject({ fit: 'ready', products: [{ entryId: 'entry-a', group: 'helping' }, { entryId: 'entry-b', group: 'likely-the-problem', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' } }] })
+    for (const preview of ['locked', 'total', 'counts', 'escalates']) expect(saved).not.toHaveProperty(preview)
+  })
+})
+
+describe('VerdictService.watch: a guest follows a stream of the locked preview only', () => {
+  it('subscribes the guest to the profile\'s preview stream, never the full one, with a pending snapshot, and queues one build', async () => {
+    await watchAsGuest()
+
+    expect(events.subscribed).toEqual([{ scanId: NGOZI_PREVIEW_KEY, snapshot: { status: 'pending' } }])
+    expect(events.subscribed.map((s) => s.scanId)).not.toContain(NGOZI_KEY)
+    expect(queued()).toHaveLength(1)
+  })
+
+  it('opens the preview as the snapshot of a verdict already built, not the full verdict', async () => {
+    await asGuestBuilt()
+    events.published.length = 0
+
+    await watchAsGuest()
+
+    expect(events.subscribed).toEqual([
+      {
+        scanId: NGOZI_PREVIEW_KEY,
+        snapshot: { status: 'ready', locked: true, fit: 'ready', total: 2, counts: { ...EVERY_GROUP_ZERO, helping: 1, 'likely-the-problem': 1 }, escalates: 0 },
+      },
+    ])
+    expectNothingPrivate(events.subscribed[0]!.snapshot)
+  })
+
+  it('subscribes a verified user to the full stream as before, whatever the guest of the same profile followed', async () => {
+    await watchAsGuest()
+    const verified = actor('user-ngozi', 'profile-ngozi-1', 'verified')
+
+    await watch(verified)
+
+    expect(events.subscribed.map((s) => s.scanId)).toEqual([NGOZI_PREVIEW_KEY, NGOZI_KEY])
+    expect(events.subscribed[1]!.snapshot).toEqual({ status: 'pending' })
+  })
+
+  it('keeps the gates before any stream: 503 and 409 for a guest, subscribing and queuing nothing', async () => {
+    delete world.reference.tapers['lightening-agent']
+    expect(await errorOf(watchAsGuest())).toMatchObject({ code: 'VERDICT_UNAVAILABLE' })
+    world.reference.tapers['lightening-agent'] = 'TPR-LIGHTENING-1'
+    world.goal = null
+    expect(await errorOf(watchAsGuest())).toMatchObject({ code: 'GOAL_REQUIRED' })
+
+    expect(events.subscribed).toEqual([])
+    expect(jobs.enqueued).toEqual([])
+  })
+
+  it('sends a guest who opens the stream just as a build lands the preview of that build on the preview stream, and done once it is finished', async () => {
+    await current(NGOZI)
+    const asked = lastBody()
+    const open = events.subscribe.bind(events)
+    // The build lands after the snapshot was read and before the stream opened, as in the full stream's own test of this.
+    vi.spyOn(events, 'subscribe').mockImplementationOnce(async (key, snapshot) => {
+      await build(asked)
+      events.published.length = 0
+      return open(key, snapshot)
+    })
+
+    await watchAsGuest()
+
+    expect(events.subscribed[0]).toMatchObject({ scanId: NGOZI_PREVIEW_KEY, snapshot: { status: 'pending' } })
+    expect(events.eventsFor(NGOZI_PREVIEW_KEY).map((e) => e.type)).toEqual(['verdict', 'done'])
+    expect(events.eventsFor(NGOZI_PREVIEW_KEY)[0]).toMatchObject({ verdict: { status: 'ready', locked: true } })
+    expectNothingPrivate(events.eventsFor(NGOZI_PREVIEW_KEY))
+  })
+})
+
+describe('VerdictService.build: telling the guest\'s stream the preview and the account\'s stream the verdict', () => {
+  it('publishes the full verdict to the profile\'s stream and the preview to its preview stream, and done to both, when the fit is ready', async () => {
+    await built()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([PREVIEW_FRAME_OF_AMARA('ready'), DONE_FRAME])
+  })
+
+  it('never puts a product, a reason or a step-down on the preview stream, whatever the shelf holds', async () => {
+    world.reference.rules.push(rule({ name: 'mercury', kind: 'banned-substance', group: 'mercury', source: 'https://example.org/rules/mercury' }))
+    addProduct('entry-m', ['Aqua', 'Mercury'], { name: 'Pearl Cream' })
+    await built()
+
+    const frames = events.eventsFor(PREVIEW_KEY)
+
+    expect(frames).toHaveLength(2)
+    expect(frames[0]).toMatchObject({ type: 'verdict', verdict: { status: 'ready', locked: true, total: 3, escalates: 1 } })
+    expectNothingPrivate(frames)
+    // The full stream, one key over, does carry them: this is a split of what is sent where, not a loss of the full verdict.
+    expect(JSON.stringify(events.eventsFor(KEY))).toContain('entry-m')
+  })
+
+  it('publishes the floor-only verdict to both streams the moment it is saved, with the preview counting the undecided product, and no done: the retry is still to come', async () => {
+    await builtWithFitFailing()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready')])
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([PREVIEW_FRAME_OF_AMARA('not-ready')])
+  })
+
+  it('publishes done to both streams after the verdict of the third failed attempt of the day', async () => {
+    await builtWithThreeFailures()
+
+    expect(events.eventsFor(KEY).at(-1)).toEqual(DONE_FRAME)
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([PREVIEW_FRAME_OF_AMARA('not-ready'), PREVIEW_FRAME_OF_AMARA('not-ready'), PREVIEW_FRAME_OF_AMARA('not-ready'), DONE_FRAME])
+  })
+
+  it('publishes to the profile it built for and to neither stream of any other', async () => {
+    await built(AMARA)
+    await built(TOLU)
+
+    expect([...new Set(events.published.map((p) => p.scanId))].sort()).toEqual([KEY, PREVIEW_KEY, TOLU_KEY, TOLU_PREVIEW_KEY].sort())
+  })
+
+  it('publishes nothing to either stream while the build only waits for the shelf to settle', async () => {
+    world.inFlight = true
+    await current()
+
+    await build(lastBody())
+
+    expect(events.published).toEqual([])
+  })
+
+  it('tells both streams the verdict is pending, with no done, when what it built from changed while the fit judge was working', async () => {
+    await current()
+    fitter.respondWith((request) => {
+      addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+      return helpingAll(request)
+    })
+
+    await build(lastBody())
+
+    expect(events.eventsFor(KEY)).toEqual([{ type: 'verdict', verdict: { status: 'pending' } }])
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([{ type: 'verdict', verdict: { status: 'pending' } }])
+  })
+
+  it('does not call the judge a second time for the preview: one call serves both streams', async () => {
+    await built()
+
+    expect(fitter.calls).toHaveLength(1)
+  })
+})
+
+describe('VerdictService.markFitFailed: telling the guest\'s stream', () => {
+  it('sends the preview of the saved verdict and then done to the preview stream, as it sends the verdict and done to the full one', async () => {
+    await builtWithFitFailing()
+    const body = lastBody()
+    events.published.length = 0
+
+    await markFitFailed(body)
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), DONE_FRAME])
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([PREVIEW_FRAME_OF_AMARA('not-ready'), DONE_FRAME])
+  })
+
+  it('sends done alone to both streams when the build died before anything was saved', async () => {
+    await current()
+
+    await markFitFailed(lastBody())
+
+    expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+    expect(events.eventsFor(PREVIEW_KEY)).toEqual([DONE_FRAME])
   })
 })

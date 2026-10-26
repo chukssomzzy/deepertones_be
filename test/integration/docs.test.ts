@@ -33,6 +33,35 @@ describe('API docs, where DOCS_ENABLED is "true"', () => {
     expect(result).toContain('filled when `state` is `ready`, null otherwise')
   })
 
+  it('describe the shelf verdict as a union of pending, the guest\'s locked preview (counts only, no products) and the full verdict marked locked false', async () => {
+    const res = await fetchWorker('/openapi.json')
+    type Schema = { oneOf?: Schema[]; anyOf?: Schema[]; properties?: Record<string, Schema & { enum?: unknown[]; const?: unknown }>; required?: string[] }
+    const spec = await res.json<{ components: { schemas: Record<string, Schema> } }>()
+    // However the union is nested, its leaves are the shapes a client can read.
+    const leavesOf = (schema: Schema): Schema[] => {
+      const inner = schema.oneOf ?? schema.anyOf
+      return inner ? inner.flatMap(leavesOf) : [schema]
+    }
+    const variants = leavesOf(spec.components.schemas.ShelfVerdict!)
+    const lockedOf = (variant: Schema) => variant.properties?.locked?.enum ?? (variant.properties?.locked && 'const' in variant.properties.locked ? [variant.properties.locked.const] : undefined)
+
+    expect(variants).toHaveLength(3)
+    const [pending] = variants.filter((variant) => variant.properties?.locked === undefined)
+    expect(Object.keys(pending!.properties!)).toEqual(['status'])
+
+    const preview = variants.find((variant) => JSON.stringify(lockedOf(variant)) === '[true]')!
+    expect(Object.keys(preview.properties!).sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    expect([...preview.required!].sort()).toEqual(['counts', 'escalates', 'fit', 'locked', 'status', 'total'])
+    const groups = ['blocking', 'cant-tell', 'conflicting', 'helping', 'likely-the-problem', 'prescribed', 'redundant', 'undecided']
+    expect(Object.keys(preview.properties!.counts!.properties!).sort()).toEqual(groups)
+    expect([...preview.properties!.counts!.required!].sort()).toEqual(groups)
+    for (const never of ['products', 'tapers']) expect(preview.properties).not.toHaveProperty(never)
+
+    const full = variants.find((variant) => JSON.stringify(lockedOf(variant)) === '[false]')!
+    expect(Object.keys(full.properties!).sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+    expect([...full.required!].sort()).toEqual(['fit', 'locked', 'products', 'status', 'tapers'])
+  })
+
   it('list the origin they are served from first, so "Try it out" never targets production by accident', async () => {
     const serversAt = async (origin: string) => {
       const res = await exports.default.fetch(new Request(`${origin}/openapi.json`))
