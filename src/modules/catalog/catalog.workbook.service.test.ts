@@ -740,6 +740,47 @@ describe('CatalogWorkbookService.tapersByCode', () => {
   })
 })
 
+describe('CatalogWorkbookService.recommendedByCode', () => {
+  it('gives each row asked for by code, an approved one and a retired one, with its facts and every country it is sold in, and leaves an unknown code out of the map', async () => {
+    const { service } = build()
+    await applied(service, (w) => {
+      addProduct(w, product({ key_ingredient: 'Azelaic acid', strength: '10%' }), product({ code: 'PRD-TWO', brand: 'Beta', key_ingredient: null, strength: null }))
+      w.countries.rows.push({ ...ng, code: 'GH', currency: 'GHS' })
+      w.availability.rows.push({ product_code: 'PRD-ONE', country: 'GH', price_min: 20, price_max: 40, where_sold: 'Markets', source_url: null })
+    })
+    const [one] = await service.approvedFor({ country: 'NG', step: 'cleanse' })
+    // The next upload leaves PRD-TWO out, which retires it in place.
+    await applied(service, (w) => {
+      w.products.rows = w.products.rows.filter((row) => row.code !== 'PRD-TWO')
+      w.availability.rows = w.availability.rows.filter((row) => row.product_code !== 'PRD-TWO')
+    })
+
+    const found = await service.recommendedByCode(['PRD-ONE', 'PRD-TWO', 'PRD-NO-SUCH'])
+
+    expect([...found.keys()].sort()).toEqual(['PRD-ONE', 'PRD-TWO'])
+    expect(found.get('PRD-ONE')).toEqual({
+      code: 'PRD-ONE',
+      status: 'approved',
+      productId: one!.productId,
+      formulationId: one!.formulationId,
+      origin: 'sourced',
+      keyIngredient: 'Azelaic acid',
+      strength: '10%',
+      availability: [
+        { country: 'GH', priceMin: 20, priceMax: 40, whereSold: 'Markets' },
+        { country: 'NG', priceMin: 3000, priceMax: 4500, whereSold: null },
+      ],
+    })
+    expect(found.get('PRD-TWO')).toMatchObject({ code: 'PRD-TWO', status: 'retired', keyIngredient: null, strength: null, availability: [] })
+  })
+
+  it('answers an empty map for no codes', async () => {
+    const { service } = build()
+
+    expect((await service.recommendedByCode([])).size).toBe(0)
+  })
+})
+
 describe('CatalogWorkbookService.stepsFor', () => {
   it('gives the routine steps an approved recommended product fills, by the id of its catalog product', async () => {
     const { service } = build()
