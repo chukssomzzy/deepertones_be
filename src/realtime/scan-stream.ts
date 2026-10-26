@@ -29,8 +29,9 @@ const PING = encoder.encode(': ping\n\n')
 type Client = { writer: WritableStreamDefaultWriter<Uint8Array>; stopTimers: () => void }
 
 /**
- * The open event streams of one scan. The Worker opens one per client with `stub.fetch(snapshot)`; whatever changes the
- * scan calls `stub.publish(event)` over RPC. Everything is in memory: a deploy or an eviction drops the streams, and each
+ * The open event streams of one key: a product or shelf scan (`scanId`), a face scan, or a profile's shelf verdict (`verdict:<profileId>`). The Worker opens
+ * one per client with `stub.fetch(snapshot)`; whatever changes the subject calls `stub.publish(event)` over RPC. A stream carries `photo`, `item` and `done` for
+ * a scan, `face` and `done` for a face scan, and `verdict` and `done` for a verdict. Everything is in memory: a deploy or an eviction drops the streams, and each
  * client reconnects to a new snapshot. Nothing is stored.
  */
 export class ScanStream extends DurableObject<CloudflareBindings> {
@@ -68,7 +69,9 @@ export class ScanStream extends DurableObject<CloudflareBindings> {
         ? frame('photo', JSON.stringify(event.photo))
         : event.type === 'face'
           ? frame('face', JSON.stringify(event.faceScan))
-          : frame('item', JSON.stringify(event.item))
+          : event.type === 'verdict'
+            ? frame('verdict', JSON.stringify(event.verdict))
+            : frame('item', JSON.stringify(event.item))
     for (const client of [...this.clients]) this.send(client, bytes)
   }
 
