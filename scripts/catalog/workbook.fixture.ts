@@ -33,6 +33,8 @@ export const product = (over: Row = {}): Row => ({
   category: 'skin',
   ingredients: 'Aqua; Glycerin; Cetearyl Alcohol',
   ingredients_source_url: 'https://www.cerave.com/hydrating-cleanser',
+  key_ingredient: null,
+  strength: null,
   skin_concerns: 'hd_moisture; hd_redness',
   skin_types: 'dry; combination',
   steps: 'cleanse',
