@@ -69,6 +69,27 @@ export class ShelfService {
   }
 
   /**
+   * One of the caller's entries, as `list` shows it (the same view path). 404 `SHELF_ENTRY_NOT_FOUND` for an id that is unknown, removed or another profile's, which are
+   * not told apart, and for an entry whose product or answers no longer resolve (logged by id only), which `list` leaves out.
+   */
+  async entry(entryId: string): Promise<ShelfEntryView> {
+    const { profileId } = requireUser()
+    const [view] = await this.viewsOf(await this.repository.activeByIds(profileId, [entryId]))
+    if (!view) throw new NotFoundError('SHELF_ENTRY_NOT_FOUND', 'Shelf entry not found')
+    return view
+  }
+
+  /**
+   * The views of these entries of the given profile, by entry id, built as `list` builds them, in one batched read of the products and one of the no-label answers
+   * for the whole ask. By the profile id given with no session, since a verdict is read by jobs too, and not capped at SHELF_POLICY.maxEntries. An entry that is
+   * removed, another profile's, unknown or unresolved is left out of the map (the unresolved logged by id only): the caller decides what that means.
+   */
+  async viewsFor(profileId: string, entryIds: string[]): Promise<Map<string, ShelfEntryView>> {
+    const views = await this.viewsOf(await this.repository.activeByIds(profileId, entryIds))
+    return new Map(views.map((view) => [view.id, view]))
+  }
+
+  /**
    * The profile's whole active shelf as narrow rows, oldest added first (entries added at the same time by id), so a fingerprint or a response built from them is the same
    * on every read. By the given profile with no session, since the verdict is built by a job. Not capped at SHELF_POLICY.maxEntries, which only bounds what `list` shows.
    * Entries are not resolved: one whose formulation or no-label item no longer resolves is still returned, and the caller (the verdict build) must handle the missing
@@ -104,7 +125,7 @@ export class ShelfService {
     return { status: 'started', ...(await this.scans.createTyped({ productId, clientIp })) }
   }
 
-  /** Rows as views; see `list` for how a row that no longer resolves is treated. */
+  /** Rows as views, the one path `list`, `entry`, `add` and `viewsFor` share; see `list` for how a row that no longer resolves is treated. */
   private async viewsOf(rows: ShelfEntryRow[]): Promise<ShelfEntryView[]> {
     const formulationIds = rows.flatMap((row) => (row.kind === 'product' && row.formulationId !== null ? [row.formulationId] : []))
     const noLabelItemIds = rows.filter((row) => row.kind === 'no-label').map((row) => row.itemId)

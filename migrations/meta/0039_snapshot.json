@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b9b669ee-e3a6-4122-b403-7396c3940c14",
+  "id": "fac7a847-dad0-4a28-8b0f-3a84792989d6",
   "prevId": "38f21823-1ff7-47ce-9d9e-22109818e1bc",
   "tables": {
     "job_runs": {
@@ -2579,6 +2579,102 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "routine_outcome_counts": {
+      "name": "routine_outcome_counts",
+      "columns": {
+        "goal": {
+          "name": "goal",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "skin_type": {
+          "name": "skin_type",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": "''"
+        },
+        "country": {
+          "name": "country",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "code": {
+          "name": "code",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "n": {
+          "name": "n",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "fainter": {
+          "name": "fainter",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "flared": {
+          "name": "flared",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "flared_or_stopped": {
+          "name": "flared_or_stopped",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "fainter_and_flared_or_stopped": {
+          "name": "fainter_and_flared_or_stopped",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "routine_outcome_counts_goal_skin_type_country_code_pk": {
+          "columns": [
+            "goal",
+            "skin_type",
+            "country",
+            "code"
+          ],
+          "name": "routine_outcome_counts_goal_skin_type_country_code_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "routine_versions": {
       "name": "routine_versions",
       "columns": {
@@ -2627,27 +2723,6 @@
         "expectation": {
           "name": "expectation",
           "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "cautions": {
-          "name": "cautions",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "goal": {
-          "name": "goal",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "ready_at": {
-          "name": "ready_at",
-          "type": "integer",
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
