@@ -14,6 +14,7 @@ import type { Band, ShownConcern, SkinTypeLabel } from '../../src/modules/face-s
 import { concernsForGoal } from '../../src/modules/face-scans/face-scans.tables'
 import type { Goal } from '../../src/modules/goals/goals.vocabulary'
 import type { SafetyChoice } from '../../src/modules/safety/safety.vocabulary'
+import { cautionsOf } from '../../src/modules/routines/routines.skeleton'
 import type { CautionState, SeenConcern, ShelfVerdict, SkeletonShelfProduct } from '../../src/modules/routines/routines.types'
 
 /** The measurement sets: dev is tuned on, holdout is the bar. */
@@ -106,15 +107,6 @@ const reactionAndPrescription = (reacted: string[], prescribed: string[]): Safet
 const levels = (pairs: Seen): SeenConcern[] => pairs.map(([concern, level]) => ({ concern, level }))
 const seenOf = (goal: Goal, bands: Levels): SeenConcern[] => concernsForGoal(goal).map((concern, i) => ({ concern, level: bands[i]! }))
 
-/** The cautions the app would state: from the safety answers, and tapering when the rules stop a shelf product. */
-const cautionsOf = (safety: Safety, shelf: SkeletonShelfProduct[]): CautionState[] => [
-  ...(safety.choices.includes('pregnant') ? (['pregnant'] as const) : []),
-  ...(safety.choices.includes('breastfeeding') ? (['breastfeeding'] as const) : []),
-  ...(shelf.some((p) => p.verdict.kind === 'stop') ? (['tapering'] as const) : []),
-  ...(safety.choices.includes('reaction') ? (['recent-reaction'] as const) : []),
-  ...(safety.choices.includes('prescription') ? (['prescription'] as const) : []),
-]
-
 const person = (
   id: string,
   persona: Persona,
@@ -128,7 +120,7 @@ const person = (
   ...items: OnShelf[]
 ): RoutineCase => {
   const shelf = shelfOf(...items)
-  return { id, persona, goal, country, budgetBand, skinType, seen: seenOf(goal, seen), alsoNoticed: levels(alsoNoticed), safety, cautions: cautionsOf(safety, shelf), shelf }
+  return { id, persona, goal, country, budgetBand, skinType, seen: seenOf(goal, seen), alsoNoticed: levels(alsoNoticed), safety, cautions: cautionsOf(safety.choices, shelf), shelf }
 }
 
 export const ROUTINE_DEV: RoutineCase[] = [

@@ -1556,6 +1556,172 @@ describe('FaceScanService.latestConcernLevelsFor', () => {
   })
 })
 
+// What the routine stage reads of the face scan (#189, PR 2a): by profile id, from the profile's newest ready scan, the goal's own concerns that were seen (a faint one
+// included, as the verdict reads them), the other measured concerns that can be seen (the scan's also-noticed ones, which are not stored: they are worked out from the stored
+// score rows), and the skin type. Like latestConcernLevelsFor it needs no session or consent, and it only reads.
+describe('FaceScanService.seenFor', () => {
+  /** Finishes a scan the way the analysis does, with raw scores for the given concerns (the bands come from the tables, not from the test). */
+  const finish = (ctx: Ctx, scanId: string, over: { scores: [string, number][]; skinType?: 'oily' | 'dry' | 'combination' | 'normal' | null }) => {
+    ctx.advance(HOUR)
+    return ctx.repository.completeFaceScan(scanId, {
+      results: over.scores.map(([concern, rawScore]) => ({ faceScanId: scanId, userId: USER, concern, region: 'whole', rawScore, uiScore: 0 })),
+      masks: [],
+      skinType: over.skinType ?? null,
+      skinAge: null,
+      tablesVersion: 'tables-under-test',
+      updatedAt: ctx.now(),
+    })
+  }
+  const seenFor = (ctx: Ctx, profileId = PROFILE) => ctx.service.seenFor(profileId)
+  const NOTHING = { seen: [], alsoNoticed: [], skinType: null }
+
+  // fade-dark-marks shows hd_age_spot, hd_acne and hd_texture; hd_pore and hd_oiliness are measured for every goal, so they are its also-noticed candidates, in that order.
+  // Raw scores worked out from the tables' cut-offs (visible / some / clear): hd_age_spot 86 / 81 / 76, hd_acne 68 / 60 / 55, hd_texture 40 / 30 / 20, hd_pore 60 / 43 / 25,
+  // hd_oiliness 82 / 72 / 62. A score above `visible` is faint.
+  it('gives nothing for a profile with no scan', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+
+    expect(await seenFor(ctx)).toEqual(NOTHING)
+  })
+
+  it('gives nothing while the only scan is still being analysed', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    await create(ctx)
+
+    expect(await seenFor(ctx)).toEqual(NOTHING)
+  })
+
+  it('gives the goal\'s seen concerns as concern and level in goal order, a faint one included, then the also-noticed ones that can be seen, and the skin type', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, {
+      skinType: 'combination',
+      // age_spot 78 is some, acne 90 is faint, texture 35 is a-little; pore 30 is some, oiliness 90 is faint.
+      scores: [['hd_oiliness', 90], ['hd_texture', 35], ['hd_pore', 30], ['hd_age_spot', 78], ['hd_acne', 90]],
+    })
+
+    expect(await seenFor(ctx)).toEqual({
+      seen: [
+        { concern: 'hd_age_spot', level: 'some' },
+        { concern: 'hd_acne', level: 'faint' },
+        { concern: 'hd_texture', level: 'a-little' },
+      ],
+      alsoNoticed: [{ concern: 'hd_pore', level: 'some' }],
+      skinType: 'combination',
+    })
+  })
+
+  it('gives the also-noticed concerns in core order, each with its band', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    // oiliness 70 is some, pore 20 is clear: given oiliness first, they come back pore first.
+    await finish(ctx, made.id, { scores: [['hd_oiliness', 70], ['hd_pore', 20]] })
+
+    expect((await seenFor(ctx)).alsoNoticed).toEqual([
+      { concern: 'hd_pore', level: 'clear' },
+      { concern: 'hd_oiliness', level: 'some' },
+    ])
+  })
+
+  it('counts an also-noticed concern right at its visible cut-off and drops one a point above it', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    // hd_oiliness is visible up to 82 (a-little); hd_pore is visible up to 60, so 61 is faint and is not an also-noticed concern.
+    await finish(ctx, made.id, { scores: [['hd_pore', 61], ['hd_oiliness', 82]] })
+
+    expect((await seenFor(ctx)).alsoNoticed).toEqual([{ concern: 'hd_oiliness', level: 'a-little' }])
+  })
+
+  it('leaves out a seen or also-noticed concern the scan has no row for, and never repeats a goal concern as also-noticed', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    // hd_texture and hd_oiliness were not measured; hd_radiance is not measured for this goal at all and has a row anyway.
+    await finish(ctx, made.id, { scores: [['hd_age_spot', 78], ['hd_acne', 58], ['hd_pore', 30], ['hd_radiance', 65]] })
+
+    expect(await seenFor(ctx)).toEqual({
+      seen: [
+        { concern: 'hd_age_spot', level: 'some' },
+        { concern: 'hd_acne', level: 'some' },
+      ],
+      alsoNoticed: [{ concern: 'hd_pore', level: 'some' }],
+      skinType: null,
+    })
+  })
+
+  it('gives a null skin type when the scan found none, and still the concerns', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { skinType: null, scores: [['hd_age_spot', 78]] })
+
+    expect(await seenFor(ctx)).toEqual({ seen: [{ concern: 'hd_age_spot', level: 'some' }], alsoNoticed: [], skinType: null })
+  })
+
+  it('reads the scan under the goal it was taken under, not the goal the profile has now', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { scores: [['hd_age_spot', 78], ['hd_radiance', 65]] })
+    ctx.advance(MINUTE)
+    await setGoal(ctx, 'glow')
+
+    // hd_radiance is one of glow's own concerns, but the scan was taken for fade-dark-marks: it is neither seen nor also-noticed.
+    expect(await seenFor(ctx)).toEqual({ seen: [{ concern: 'hd_age_spot', level: 'some' }], alsoNoticed: [], skinType: null })
+  })
+
+  it('reads only the newest ready scan, whole: nothing of an older one is mixed in, not even its skin type, and a newer scan still being analysed does not hide it', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const first = await create(ctx)
+    await finish(ctx, first.id, { skinType: 'dry', scores: [['hd_age_spot', 78], ['hd_acne', 58], ['hd_texture', 25], ['hd_pore', 30]] })
+    ctx.advance(SCAN_SPACING)
+    await setGoal(ctx, 'glow')
+    const second = await create(ctx, { front: face({}, 2) })
+    // The newest ready scan found no skin type and no pore reading: it is the profile's latest word, so neither comes from the first scan.
+    await finish(ctx, second.id, { skinType: null, scores: [['hd_radiance', 70], ['hd_moisture', 31], ['hd_acne', 50]] })
+    ctx.advance(SCAN_SPACING)
+    await setGoal(ctx, 'even-tone')
+    await create(ctx, { front: face({}, 3) })
+
+    expect(await seenFor(ctx)).toEqual({
+      seen: [
+        { concern: 'hd_radiance', level: 'a-little' },
+        { concern: 'hd_moisture', level: 'a-little' },
+      ],
+      alsoNoticed: [{ concern: 'hd_acne', level: 'clear' }],
+      skinType: null,
+    })
+  })
+
+  it('reads the profile it is asked about: another profile of the account, and another account, see nothing of it', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { skinType: 'dry', scores: [['hd_age_spot', 78], ['hd_pore', 30]] })
+
+    expect(await seenFor(ctx, OTHER_PROFILE)).toEqual(NOTHING)
+    expect(await seenFor(ctx, 'profile-of-another-account')).toEqual(NOTHING)
+  })
+
+  it('needs no session, no verification and no consent: it answers for a guest\'s profile and after the consent is withdrawn', async () => {
+    const ctx = setup()
+    await ready(ctx, 'fade-dark-marks')
+    const made = await create(ctx)
+    await finish(ctx, made.id, { scores: [['hd_age_spot', 78]] })
+    await withdrawConsent(ctx)
+
+    const expected = { seen: [{ concern: 'hd_age_spot', level: 'some' }], alsoNoticed: [], skinType: null }
+    expect(await seenFor(ctx)).toEqual(expected)
+    expect(await asGuest(() => ctx.service.seenFor(PROFILE), 'someone-else', 'profile-of-someone-else')).toEqual(expected)
+  })
+})
+
 describe('FaceScanService.photoForLink', () => {
   const tokenOf = (view: any, position = 'front') => (view.photos[position].url as string).slice('/api/v1/scans/faces/photos/'.length)
 

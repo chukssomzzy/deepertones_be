@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Routine, RoutineSkeleton } from '../../modules/routines/routines.types'
+import type { GateFailure, Routine, RoutineSkeleton } from '../../modules/routines/routines.types'
 import { MemoryRoutineWriter } from './memory.routine-writer'
 
 const skeleton = (goal: RoutineSkeleton['goal']): RoutineSkeleton => ({
@@ -53,5 +53,48 @@ describe('MemoryRoutineWriter', () => {
 
     await expect(writer.write(skeleton('glow'))).resolves.toEqual(routine('ok'))
     expect(writer.calls).toEqual([skeleton('glow')])
+  })
+
+  describe('retries', () => {
+    const FAILED: GateFailure[] = [
+      { gate: 'unknown-product', step: 'treat' },
+      { gate: 'gap', step: 'protect' },
+    ]
+
+    it('records the retry each call was given, alongside the skeleton it was given with', async () => {
+      const writer = new MemoryRoutineWriter()
+      writer.respondWith(() => routine('x'))
+      const first = skeleton('even-tone')
+
+      await writer.write(first, { failed: FAILED })
+
+      expect(writer.calls).toEqual([first])
+      expect(writer.retries).toEqual([{ failed: FAILED }])
+    })
+
+    it('records undefined for a call with no retry, keeping retries in step with calls', async () => {
+      const writer = new MemoryRoutineWriter()
+      writer.respondWith(() => routine('x'))
+
+      await writer.write(skeleton('even-tone'))
+      await writer.write(skeleton('even-tone'), { failed: FAILED })
+      await writer.write(skeleton('glow'))
+
+      expect(writer.calls).toHaveLength(3)
+      expect(writer.retries).toEqual([undefined, { failed: FAILED }, undefined])
+    })
+
+    it('records no retry for a call that fails, as it records no skeleton for it', async () => {
+      const writer = new MemoryRoutineWriter()
+      writer.respondWith(() => routine('ok'))
+      writer.failNextWith(new Error('boom'))
+
+      await expect(writer.write(skeleton('even-tone'), { failed: FAILED })).rejects.toThrow('boom')
+      expect(writer.retries).toEqual([])
+
+      await writer.write(skeleton('glow'))
+      expect(writer.retries).toEqual([undefined])
+      expect(writer.calls).toHaveLength(1)
+    })
   })
 })
