@@ -3,6 +3,7 @@ import { PermanentJobError } from '../../jobs/job'
 import { type Actor, runAs } from '../../lib/context'
 import { ConflictError, UnavailableError } from '../../lib/errors'
 import { MemoryJobQueue } from '../../providers/job-queue/memory.job-queue'
+import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import type { FitRequest, FitResult } from '../../providers/verdict-fitting/verdict-fitter.provider'
 import { MemoryVerdictFitter } from '../../providers/verdict-fitting/memory.verdict-fitter'
 import type { ShelfFacts } from '../catalog/catalog.service'
@@ -29,17 +30,15 @@ import { VerdictService } from './verdicts.service'
 // `world`, so a test changes the world (a product added, a goal changed) and reads the outcome from the queue, the repository and the service. A "ready" row is only
 // ever reached the way life reaches it: current() asks, the queue message it left is handed to build().
 //
-// Shapes assumed (the contract this file pins):
-//   new VerdictService({ repository, fitter, jobs, workbook, catalog, shelf, scans, safety, goals, faceScans, now })
-//     workbook  Pick<CatalogWorkbookService, 'verdictReference' | 'tapersByCode' | 'stepsFor' | 'skinConcernsFor'>
-//     catalog   Pick<ProductCatalogService, 'shelfFacts' | 'latestIngredients'>       (latestIngredients gives the ingredients of a product the user named)
-//     shelf     Pick<ShelfService, 'activeEntriesFor'>        scans  Pick<ScanService, 'noLabelFacts' | 'hasShelfWorkInFlight'>
-//     safety    Pick<SafetyService, 'snapshotFor'>            goals  Pick<GoalsService, 'goalFor'>      faceScans  Pick<FaceScanService, 'latestConcernLevelsFor'>
-//     Everything is read by profile id (current() uses the session's profile), so build() needs no session; the GOAL_REQUIRED of current() is thrown by the service.
-//   current(): Promise<{ status: 'pending' } | { status: 'ready'; fit: 'ready' | 'not-ready'; products: SavedVerdictProduct[]; tapers: TaperRow[] }>
-//     `tapers` is a top-level list of the rows (retired ones included) of the step-down codes the products use, each once; [] when none is used.
-//   build(body): Promise<void>      requeueDueFits(now): Promise<number> (how many it queued, as SafetyService.requeueDueParses)      markFitFailed(body): Promise<void>
-//   savedFor(profileId): Promise<null | { fingerprint, fit, builtAt, rulesVersion, products }>
+// The contract this file pins:
+//   new VerdictService({ repository, fitter, jobs, events, workbook, catalog, shelf, scans, safety, goals, faceScans, now }), where the services are the Pick<> of
+//   what the verdict reads: workbook (verdictReference, tapersByCode, stepsFor, skinConcernsFor), catalog (shelfFacts, latestIngredients), shelf (activeEntriesFor), scans (noLabelFacts,
+//   hasShelfWorkInFlight), safety (snapshotFor), goals (goalFor), faceScans (latestConcernLevelsFor). Everything is read by profile id, so build() needs no session;
+//   current() uses the session's profile and throws GOAL_REQUIRED itself.
+//   current()      answers { status: 'pending' } or { status: 'ready', fit: 'ready' | 'not-ready', products, tapers }; `tapers` lists, once each, the rows (retired ones
+//                  included) of the step-down codes the products use, and is [] when none is used.
+//   build(body)    runs the build-verdict job. requeueDueFits(now) answers how many retries it queued. markFitFailed(body) is the dead-letter hook.
+//   savedFor(profileId)   answers null, or { fingerprint, fit, builtAt, rulesVersion, products }.
 
 type BuildBody = z.infer<typeof buildVerdictSpec.schema>
 
@@ -174,6 +173,7 @@ let clock: Date
 let repository: FakeVerdictsRepository
 let fitter: MemoryVerdictFitter
 let jobs: MemoryJobQueue
+let events: MemoryScanEvents
 let service: VerdictService
 
 const profileOf = (who: Actor): string => (who.kind === 'user' ? who.profileId : '')
@@ -231,10 +231,12 @@ beforeEach(() => {
   fitter = new MemoryVerdictFitter()
   fitter.respondWith(helpingAll)
   jobs = new MemoryJobQueue()
+  events = new MemoryScanEvents()
   const deps = {
     repository,
     fitter,
     jobs,
+    events,
     workbook: {
       verdictReference: async () => structuredClone(world.reference),
       tapersByCode: async (codes: string[]) => {
@@ -1248,6 +1250,443 @@ describe('VerdictService.savedFor: what the routine reads', () => {
       expect(await savedFor('profile-amara-1')).toBeNull()
 
       expect(jobs.enqueued).toHaveLength(1)
+    })
+  })
+})
+
+// ---- D3: following the verdict live (GET /me/verdict/events) ----
+//
+// The contract this section pins (the precedent is FaceScanService.watch and publishFrame):
+//   events is a ScanEvents (the port the face scans use), keyed by `verdict:<profileId>`.
+//   watch() answers the `text/event-stream` from events.subscribe(key, snapshot). The gates and the claim are `current()`'s: 503 VERDICT_UNAVAILABLE, then 409
+//   GOAL_REQUIRED, nothing subscribed; otherwise the build is claimed and queued as `current` does.
+//   The snapshot, and the body of every `verdict` frame, is the PUBLIC body `GET /me/verdict` answers: { status: 'pending' } or { status: 'ready', fit, products,
+//   tapers }. `facts`, `step`, `sourceUrls` and the saved `taperTemplateId` never reach a frame.
+//   The events are { type: 'verdict'; verdict: <that body> } and { type: 'done' }, which ends the stream.
+//   When `done` is sent: after a ready verdict whose fit is 'ready', and after one whose fit is 'not-ready' but whose `fitRetried` is true, because the queue has no
+//   retry coming within seconds (the next try is the daily sweep's, a day on, or there is none). Only a verdict whose fit is 'not-ready' with `fitRetried` false
+//   (attempts 1 and 2, which the queue retries within seconds) leaves the stream open for that retry's verdict. build() and the snapshot of watch() follow the same rule.
+//   markFitFailed (the queue gave up on a build) sends `done` too, since no retry is coming soon: after the saved verdict's frame when the row is ready, alone when it is
+//   still pending, and nothing when it ignores the dead letter. A failure to send is logged as publish-failed and never thrown.
+//   A build whose inputs changed while it ran (the fingerprint recomputed after the save is not the one it built) sends { status: 'pending' } as its verdict, with no
+//   `done`, and claims and queues the build for the new fingerprint, as `current` does; that build's verdict reaches the stream later.
+//   build() publishes after the verdict is saved and before it throws for the queue's retry. A publish that fails never fails the build: it is logged as
+//   { outcome: 'publish-failed', profileId } and the saved verdict is the truth.
+
+const KEY = 'verdict:profile-amara-1'
+const TOLU_KEY = 'verdict:profile-tolu-1'
+const STEROID_TAPER_BODY = {
+  code: 'TPR-STEROID-1',
+  kind: 'steroid',
+  schedule: [{ fromWeek: 1, toWeek: 2, frequency: 'alternate-days' }],
+  whatToExpect: 'Skin may flare for a few days after each step down.',
+  seeAProfessionalIf: 'The redness spreads or the skin weeps.',
+}
+/** Amara's shelf as a client reads it: the serum the judge decided (or left undecided when its fit is not ready), and the steroid cream stopped by its step-down. */
+const amarasBody = (fit: 'ready' | 'not-ready') => ({
+  status: 'ready',
+  fit,
+  products: [
+    fit === 'ready'
+      ? { entryId: 'entry-a', group: 'helping', verdict: { kind: 'keep' }, reason: 'Suits the goal.', escalate: false }
+      : { entryId: 'entry-a', group: 'undecided', verdict: { kind: 'keep' }, reason: expect.any(String), escalate: false },
+    { entryId: 'entry-b', group: 'likely-the-problem', verdict: { kind: 'stop', taperCode: 'TPR-STEROID-1' }, reason: expect.any(String), escalate: false },
+  ],
+  tapers: [STEROID_TAPER_BODY],
+})
+const verdictFrame = (fit: 'ready' | 'not-ready') => ({ type: 'verdict', verdict: amarasBody(fit) })
+const DONE_FRAME = { type: 'done' }
+
+const watch = (who: Actor = AMARA) => runAs(who, () => service.watch())
+/** The fit judge failing on the first attempt: the build saves the floor alone and throws for the queue to try again. */
+const builtWithFitFailing = async () => {
+  await current()
+  fitFails()
+  await expect(build(lastBody())).rejects.toThrow()
+}
+/** The judge failing all three attempts of the day: the third returns normally, with the retry due in 24 hours. */
+const builtWithThreeFailures = async () => {
+  await builtWithFitFailing()
+  const body = lastBody()
+  await expect(build(body)).rejects.toThrow()
+  await expect(build(body)).resolves.toBeUndefined()
+}
+
+describe('VerdictService.watch: opening the stream', () => {
+  it('subscribes to the profile\'s own verdict stream with a pending snapshot, answers the event stream, and queues one build', async () => {
+    const response = await watch()
+
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+    expect(events.subscribed).toEqual([{ scanId: KEY, snapshot: { status: 'pending' } }])
+    expect(events.published).toEqual([])
+    expect(queued()).toEqual([
+      { job: 'build-verdict', body: { profileId: 'profile-amara-1', fingerprint: expect.stringMatching(/^[0-9a-f]{64}$/), requestedAt: T0.getTime(), waits: 0 }, delaySeconds: 0 },
+    ])
+    expect(await rowOf()).toMatchObject({ status: 'pending', fingerprint: lastBody().fingerprint })
+  })
+
+  it('queues one build however many ask at once, by watching or by reading', async () => {
+    await Promise.all([watch(), watch(), current()])
+    await watch()
+
+    expect(jobs.enqueued).toHaveLength(1)
+    expect(events.subscribed).toHaveLength(3)
+  })
+
+  it('keys the stream by the session\'s profile, so two profiles never share one', async () => {
+    await watch(AMARA)
+    await watch(TOLU)
+
+    expect(events.subscribed.map((s) => s.scanId)).toEqual([KEY, TOLU_KEY])
+  })
+
+  describe('the gates are the verdict\'s own and come before any stream', () => {
+    it('answers 503 VERDICT_UNAVAILABLE while a step-down template is not approved, subscribing and queuing nothing', async () => {
+      delete world.reference.tapers['lightening-agent']
+
+      const error = await errorOf(watch())
+
+      expect(error).toBeInstanceOf(UnavailableError)
+      expect(error).toMatchObject({ code: 'VERDICT_UNAVAILABLE' })
+      expect(events.subscribed).toEqual([])
+      expect(jobs.enqueued).toEqual([])
+      expect(await repository.find('profile-amara-1')).toBeNull()
+    })
+
+    it('answers 409 GOAL_REQUIRED for a profile with no goal, subscribing and queuing nothing', async () => {
+      world.goal = null
+
+      const error = await errorOf(watch())
+
+      expect(error).toBeInstanceOf(ConflictError)
+      expect(error).toMatchObject({ code: 'GOAL_REQUIRED' })
+      expect(events.subscribed).toEqual([])
+      expect(jobs.enqueued).toEqual([])
+    })
+
+    it('checks the step-down gate before the goal: with neither, it is VERDICT_UNAVAILABLE', async () => {
+      delete world.reference.tapers.steroid
+      world.goal = null
+
+      expect(await errorOf(watch())).toMatchObject({ code: 'VERDICT_UNAVAILABLE' })
+    })
+  })
+
+  it('fails with the event store\'s own error when the stream cannot be opened, since there is no stream without it', async () => {
+    const down = new Error('the stream is down')
+    vi.spyOn(events, 'subscribe').mockRejectedValue(down)
+
+    expect(await errorOf(watch())).toBe(down)
+  })
+})
+
+describe('VerdictService.watch: a verdict that is already built', () => {
+  it('starts with the public body GET answers, with the step-down by its code and nothing of how the rules reached the verdict, then closes at once when the fit is ready', async () => {
+    await built()
+    // The build's own frames went to listeners of its day; this client starts afresh.
+    events.published.length = 0
+
+    await watch()
+
+    expect(events.subscribed).toHaveLength(1)
+    expect(events.subscribed[0]!.scanId).toBe(KEY)
+    expect(events.subscribed[0]!.snapshot).toEqual(amarasBody('ready'))
+    const snapshot = events.subscribed[0]!.snapshot as unknown as { products: object[] }
+    for (const product of snapshot.products) for (const internal of ['facts', 'step', 'sourceUrls', 'taperTemplateId']) expect(product).not.toHaveProperty(internal)
+    // Nothing but `done` follows the snapshot, and no second copy of the verdict.
+    expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+  })
+
+  it('starts with the verdict and leaves the stream open when the fit is not ready and the queue is still to retry it (attempt 1 failed)', async () => {
+    await builtWithFitFailing()
+    expect(await rowOf()).toMatchObject({ fit: 'not-ready', fitRetried: false })
+    events.published.length = 0
+
+    await watch()
+
+    expect(events.subscribed[0]!.snapshot).toEqual(amarasBody('not-ready'))
+    expect(events.published).toEqual([])
+  })
+
+  it('starts with the verdict and then sends done when the fit is not ready and no retry is coming soon (the third attempt failed, the next is a day on)', async () => {
+    await builtWithThreeFailures()
+    expect(await rowOf()).toMatchObject({ fit: 'not-ready', fitRetried: true })
+    events.published.length = 0
+
+    await watch()
+
+    expect(events.subscribed[0]!.snapshot).toEqual(amarasBody('not-ready'))
+    expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+  })
+
+  it('sends done after the snapshot of a not-ready verdict whose 24 hour retry is spent too', async () => {
+    await builtWithThreeFailures()
+    await requeueDueFits(at(DAY))
+    await expect(build(lastBody())).resolves.toBeUndefined()
+    expect(await rowOf()).toMatchObject({ fit: 'not-ready', fitRetried: true, fitRetryDueAt: null })
+    events.published.length = 0
+
+    await watch()
+
+    expect(events.subscribed[0]!.snapshot).toEqual(amarasBody('not-ready'))
+    expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+  })
+
+  it('does not queue a build for a verdict that is current', async () => {
+    await built()
+
+    await watch()
+
+    expect(jobs.enqueued).toHaveLength(1)
+  })
+
+  it('sends what a build saved in the moment between the snapshot and the open stream: the verdict, and done', async () => {
+    await current()
+    const body = lastBody()
+    const open = events.subscribe.bind(events)
+    vi.spyOn(events, 'subscribe').mockImplementation(async (key, snapshot) => {
+      // The build lands after the snapshot was read; nobody was listening yet, so what it published reached no one.
+      await build(body)
+      events.published.length = 0
+      return open(key, snapshot)
+    })
+
+    await watch()
+
+    expect(events.subscribed[0]!.snapshot).toEqual({ status: 'pending' })
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+  })
+
+  it('logs a failure to send, by profile id, and still hands back the stream', async () => {
+    await built()
+    const spies = spyOnConsole()
+    vi.spyOn(events, 'publish').mockRejectedValue(new Error(SECRET))
+
+    const response = await watch()
+
+    expect(response.headers.get('Content-Type')).toContain('text/event-stream')
+    const lines = loggedBy(spies).filter((line) => line.includes('publish-failed'))
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      expect(line).toContain('profile-amara-1')
+      expect(line).not.toContain(SECRET)
+    }
+  })
+})
+
+describe('VerdictService.markFitFailed: telling the stream', () => {
+  it('sends the saved verdict and then done when the queue gives up on a build whose floor-only verdict was saved: no retry is coming soon', async () => {
+    await builtWithFitFailing()
+    const body = lastBody()
+    events.published.length = 0
+
+    await markFitFailed(body)
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), DONE_FRAME])
+    expect(events.published.every((p) => p.scanId === KEY)).toBe(true)
+  })
+
+  it('sends done alone when the build died before anything was saved, so the row is still pending', async () => {
+    await current()
+    expect(await rowOf()).toMatchObject({ status: 'pending' })
+
+    await markFitFailed(lastBody())
+
+    expect(events.eventsFor(KEY)).toEqual([DONE_FRAME])
+  })
+
+  it('sends nothing for a dead letter it ignores: a verdict that is finished, or a build the row has moved on from', async () => {
+    await built()
+    events.published.length = 0
+    await markFitFailed(lastBody())
+    expect(events.published).toEqual([])
+
+    world.goal = 'glow'
+    await current()
+    const moved = { ...lastBody(), fingerprint: 'a'.repeat(64) }
+    await markFitFailed(moved)
+    expect(events.published).toEqual([])
+  })
+
+  it('logs a failure to send as publish-failed with the profile id alone, still marks the retry, and never throws', async () => {
+    await builtWithFitFailing()
+    const body = lastBody()
+    const spies = spyOnConsole()
+    vi.spyOn(events, 'publish').mockRejectedValue(new Error(SECRET))
+
+    await expect(markFitFailed(body)).resolves.toBeUndefined()
+
+    expect(await rowOf()).toMatchObject({ fitRetried: true, fitRetryDueAt: at(DAY) })
+    const lines = loggedBy(spies)
+    const failed = lines.filter((line) => line.includes('publish-failed'))
+    expect(failed.length).toBeGreaterThan(0)
+    for (const line of failed) expect(line).toContain('profile-amara-1')
+    for (const line of lines) for (const private_ of [SECRET, 'Calm Serum', 'Karo Glow Cream', 'Suits the goal', 'Clobetasol', 'TPR-STEROID-1']) expect(line).not.toContain(private_)
+  })
+})
+
+describe('VerdictService.build: telling the stream', () => {
+  it('publishes the ready verdict, the public body, to the profile\'s stream and then done, when the fit is ready', async () => {
+    await built()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+  })
+
+  it('publishes to the profile it built for and to no other', async () => {
+    await built(AMARA)
+    await built(TOLU)
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+    expect(events.eventsFor(TOLU_KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+    expect([...new Set(events.published.map((p) => p.scanId))].sort()).toEqual([KEY, TOLU_KEY])
+  })
+
+  it('publishes nothing while the build only waits for the shelf to settle', async () => {
+    world.inFlight = true
+    await current()
+
+    await build(lastBody())
+
+    expect(events.published).toEqual([])
+  })
+
+  it('publishes the floor-only verdict the moment it is saved, even though the judge failed, and not done: the retry is still to come', async () => {
+    await builtWithFitFailing()
+
+    // The build threw for the queue to retry, and the verdict it saved had already been sent.
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready')])
+  })
+
+  it('publishes the verdict again, with the fit ready, and then done, when a retry gets an answer', async () => {
+    await builtWithFitFailing()
+    const body = lastBody()
+    fitter.respondWith(helpingAll)
+
+    await build(body)
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), verdictFrame('ready'), DONE_FRAME])
+  })
+
+  it('publishes the verdict, and done, for the judge\'s third failure of the day: the next try is a day away, so nothing more is coming soon', async () => {
+    await builtWithFitFailing()
+    const body = lastBody()
+    await expect(build(body)).rejects.toThrow()
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), verdictFrame('not-ready')])
+
+    await expect(build(body)).resolves.toBeUndefined()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), verdictFrame('not-ready'), verdictFrame('not-ready'), DONE_FRAME])
+  })
+
+  it('publishes the verdict, and done, when the single 24 hour retry fails too', async () => {
+    await builtWithThreeFailures()
+    events.published.length = 0
+    await requeueDueFits(at(DAY))
+
+    await expect(build(lastBody())).resolves.toBeUndefined()
+
+    expect(events.eventsFor(KEY)).toEqual([verdictFrame('not-ready'), DONE_FRAME])
+  })
+
+  describe('when what it built from changed while the fit judge was working', () => {
+    /** The shelf gains a product during the judge's call, so the verdict saved is of a shelf that is gone by the time it is saved. */
+    const shelfChangesDuringTheFit = () =>
+      fitter.respondWith((request) => {
+        addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+        return helpingAll(request)
+      })
+
+    it('tells the stream the verdict is pending, not ready and done, and queues the build for the shelf as it now is', async () => {
+      await current()
+      const asked = lastBody()
+      shelfChangesDuringTheFit()
+
+      await build(asked)
+
+      expect(events.eventsFor(KEY)).toEqual([{ type: 'verdict', verdict: { status: 'pending' } }])
+      expect(jobs.enqueued).toHaveLength(2)
+      expect(lastBody()).toMatchObject({ profileId: 'profile-amara-1', waits: 0 })
+      expect(lastBody().fingerprint).not.toBe(asked.fingerprint)
+      // The new request is claimed as GET claims it, so asking again right away queues nothing more.
+      expect(await rowOf()).toMatchObject({ status: 'pending', fingerprint: lastBody().fingerprint })
+      expect(await current()).toEqual({ status: 'pending' })
+      expect(jobs.enqueued).toHaveLength(2)
+    })
+
+    it('is not retried when the fit judge also failed: the queued build has its own attempts, so the shelf is never judged twice', async () => {
+      await current()
+      let judged = 0
+      fitter.respondWith(() => {
+        judged += 1
+        addProduct('entry-c', CLEAN, { name: 'Late Toner' })
+        throw new Error('judge down')
+      })
+
+      // Resolving is the point: a throw would have the queue deliver it again, and that delivery would judge the new shelf beside the build queued for it.
+      await expect(build(lastBody())).resolves.toBeUndefined()
+
+      expect(judged).toBe(1)
+      expect(jobs.enqueued).toHaveLength(2)
+      expect(events.eventsFor(KEY)).toEqual([{ type: 'verdict', verdict: { status: 'pending' } }])
+    })
+
+    it('sends the verdict of the new shelf, and done, once the queued build runs', async () => {
+      await current()
+      shelfChangesDuringTheFit()
+      await build(lastBody())
+      fitter.respondWith(helpingAll)
+
+      await build(lastBody())
+
+      const [pending, verdict, done, ...rest] = events.eventsFor(KEY)
+      expect(pending).toEqual({ type: 'verdict', verdict: { status: 'pending' } })
+      expect(verdict).toMatchObject({ type: 'verdict', verdict: { status: 'ready', fit: 'ready' } })
+      expect((verdict as unknown as { verdict: { products: { entryId: string }[] } }).verdict.products.map((p) => p.entryId)).toContain('entry-c')
+      expect(done).toEqual(DONE_FRAME)
+      expect(rest).toEqual([])
+    })
+
+    it('does not say pending when nothing changed: the verdict and done as before', async () => {
+      await built()
+
+      expect(events.eventsFor(KEY)).toEqual([verdictFrame('ready'), DONE_FRAME])
+      expect(jobs.enqueued).toHaveLength(1)
+    })
+  })
+
+  describe('when the stream cannot be reached', () => {
+    it('still saves the verdict and resolves: the verdict is the source of truth and the client reads it again', async () => {
+      await current()
+      vi.spyOn(events, 'publish').mockRejectedValue(new Error(SECRET))
+
+      await expect(build(lastBody())).resolves.toBeUndefined()
+
+      expect(await rowOf()).toMatchObject({ status: 'ready', fit: 'ready' })
+      expect(await current()).toMatchObject({ status: 'ready', fit: 'ready' })
+    })
+
+    it('does not turn a failed fit into a different failure: the build still throws the judge\'s error for the queue\'s retry', async () => {
+      await current()
+      fitFails('the fit judge is unavailable')
+      vi.spyOn(events, 'publish').mockRejectedValue(new Error(SECRET))
+
+      await expect(build(lastBody())).rejects.toThrow('the fit judge is unavailable')
+
+      expect(await rowOf()).toMatchObject({ status: 'ready', fit: 'not-ready', fitAttempts: 1 })
+    })
+
+    it('logs it as publish-failed with the profile id alone: no product, reason, error text or step-down', async () => {
+      await current()
+      const spies = spyOnConsole()
+      vi.spyOn(events, 'publish').mockRejectedValue(new Error(SECRET))
+
+      await build(lastBody())
+
+      const lines = loggedBy(spies)
+      const failed = lines.filter((line) => line.includes('publish-failed'))
+      expect(failed.length).toBeGreaterThan(0)
+      for (const line of failed) expect(line).toContain('profile-amara-1')
+      for (const line of lines) for (const private_ of [SECRET, 'Calm Serum', 'Karo Glow Cream', 'Suits the goal', 'Clobetasol', 'TPR-STEROID-1']) expect(line).not.toContain(private_)
     })
   })
 })

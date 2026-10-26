@@ -1,8 +1,10 @@
 import type { z } from '@hono/zod-openapi'
 import type { TaperRow } from '../catalog/catalog.workbook.schema'
-import type { VerdictView } from './verdicts.service'
 import type { SavedVerdictProduct } from './verdicts.types'
 import type { ShelfVerdictResponse, VerdictProductResponse, VerdictTaperResponse } from './verdicts.schemas'
+
+/** What GET /me/verdict answers: the build is on its way, or the saved verdict with the step-down templates its stopped products use (retired ones included). */
+export type VerdictView = { status: 'pending' } | { status: 'ready'; fit: 'ready' | 'not-ready'; products: SavedVerdictProduct[]; tapers: TaperRow[] }
 
 type PublicProduct = z.infer<typeof VerdictProductResponse>
 
@@ -28,5 +30,6 @@ const toTaper = ({ code, kind, schedule, whatToExpect, seeAProfessionalIf }: Tap
   seeAProfessionalIf,
 })
 
+// The service sends this same body on the event stream, and the routes answer it: one mapping, in a file both may import.
 export const toShelfVerdictResponse = (view: VerdictView): z.infer<typeof ShelfVerdictResponse> =>
   view.status === 'pending' ? { status: 'pending' } : { status: 'ready', fit: view.fit, products: view.products.map(toProduct), tapers: view.tapers.map(toTaper) }
