@@ -46,7 +46,7 @@ type Reading = { flag: string; value: string }
  * run before it spends money. `known` are the flags the command takes; `repeatable` may be given more than once; `bare` are the switches among them, which
  * take no value (their reading is `true`) and so cannot be written `--flag=value`.
  */
-const read = (argv: string[], known: readonly string[], repeatable: readonly string[], usage: string, bare: readonly string[] = []): Reading[] => {
+export const read = (argv: string[], known: readonly string[], repeatable: readonly string[], usage: string, bare: readonly string[] = []): Reading[] => {
   const fail = (reason: string): never => {
     throw new RoutineUsageError(`${reason}. ${usage}`)
   }
@@ -79,7 +79,7 @@ const judgeNamesOf = (value: string, fail: (reason: string) => never): JudgeName
 
 const wholeNumber = (value: string): boolean => /^\d+$/.test(value)
 
-const dollars = (value: string, flag: string, usage: string): number => {
+export const dollars = (value: string, flag: string, usage: string): number => {
   if (!/^\d+(\.\d+)?$/.test(value) || !(Number(value) > 0) || !Number.isFinite(Number(value))) throw new RoutineUsageError(`${flag} must be a number of dollars above 0. ${usage}`)
   return Number(value)
 }
