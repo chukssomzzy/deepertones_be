@@ -1328,7 +1328,8 @@ export const catalogRepositoryContract = (name: string, make: () => CatalogRepos
           expect(await repo.findProductById(made[0]!.id)).toMatchObject({ searchText: `acme ${w} n0z` })
           expect(await repo.findProductById(made[499]!.id)).toMatchObject({ searchText: `acme ${w} n499z` })
           expect((await repo.search(`${w} n250z`, 10)).map((p) => p.id)).toEqual([made[250]!.id])
-        })
+          // 500 sequential inserts: ~0.7s alone, but over the 5s default on a loaded CI runner (staging run 40336099906).
+        }, 30_000)
       })
 
       it('setSearchText for an unknown id does nothing and does not throw', async () => {
