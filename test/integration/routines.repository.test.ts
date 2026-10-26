@@ -116,3 +116,62 @@ describe('routine_versions in D1', () => {
     expect(await repository.writerBuildsSince(guest.profileId, new Date(createdAt.getTime() + 1))).toBe(0)
   })
 })
+
+describe('routine_requests in D1', () => {
+  const stale = new Date(BASE.getTime() - HOUR)
+
+  it('removes a user\'s build request with the user (a guest purged by the cleanup), and leaves other accounts\' requests', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const guest = await newGuest()
+    const kept = await newGuest()
+    await repository.claim(guest.profileId, 'routine-fp-1', BASE, stale)
+    await repository.claim(kept.profileId, 'routine-fp-1', BASE, stale)
+
+    expect(await users.deleteUsers([guest.userId])).toBe(1)
+
+    expect(await repository.findRequest(guest.profileId)).toBeNull()
+    expect(await repository.findRequest(kept.profileId)).not.toBeNull()
+  })
+
+  it('keeps the request when the guest signs up, because the account and its profile are promoted in place', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const guest = await newGuest()
+    await repository.claim(guest.profileId, 'routine-fp-1', BASE, stale)
+
+    const { outcome } = await users.promote(guest.userId, { kind: 'email', email: `routine-request-${crypto.randomUUID()}@example.com` as EmailAddress }, new Date(BASE.getTime() + HOUR))
+
+    expect(outcome).toBe('promoted')
+    expect(await repository.findRequest(guest.profileId)).toMatchObject({ profileId: guest.profileId, requestKey: 'routine-fp-1' })
+  })
+
+  it('refuses a claim for a profile that does not exist', async () => {
+    const repository = new D1RoutinesRepository(db)
+
+    await expect(repository.claim(crypto.randomUUID(), 'routine-fp-1', BASE, stale)).rejects.toThrow()
+  })
+
+  it('lets exactly one of 20 parallel claims for one profile win', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const guest = await newGuest()
+
+    const answers = await Promise.all(Array.from({ length: 20 }, () => repository.claim(guest.profileId, 'routine-fp-1', BASE, stale)))
+
+    expect(answers.filter(Boolean)).toHaveLength(1)
+  })
+
+  it('stores the claim time and the retry due time to the millisecond, and compares the cut-off to the millisecond', async () => {
+    const repository = new D1RoutinesRepository(db)
+    const guest = await newGuest()
+    const requestedAt = new Date(BASE.getTime() + 123)
+    const retryDueAt = new Date(BASE.getTime() + 24 * HOUR + 456)
+    await repository.claim(guest.profileId, 'routine-fp-1', requestedAt, stale)
+    await repository.setRequestRetry(guest.profileId, { retried: true, retryDueAt })
+
+    const stored = await repository.findRequest(guest.profileId)
+
+    expect(stored!.requestedAt.getTime()).toBe(requestedAt.getTime())
+    expect(stored!.retryDueAt!.getTime()).toBe(retryDueAt.getTime())
+    expect(await repository.claim(guest.profileId, 'routine-fp-1', new Date(requestedAt.getTime() + 1), new Date(requestedAt.getTime() - 1))).toBe(false)
+    expect(await repository.claim(guest.profileId, 'routine-fp-1', new Date(requestedAt.getTime() + 1), requestedAt)).toBe(true)
+  })
+})

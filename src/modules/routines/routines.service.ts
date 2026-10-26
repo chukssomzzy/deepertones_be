@@ -3,6 +3,7 @@ import type { Actor } from '../../lib/context'
 import { runAs } from '../../lib/context'
 import { ConflictError, NotFoundError } from '../../lib/errors'
 import { stableJson } from '../../lib/stable-json'
+import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { RoutineRetry, RoutineWriter } from '../../providers/routine-writing/routine-writer.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
 import { ROUTINE_STEPS, type RoutineStep } from '../catalog/catalog.vocabulary'
@@ -20,6 +21,7 @@ import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.serv
 import { expectationFor } from './routines.copy'
 import { checkRoutine } from './routines.gates'
 import { routineFingerprint } from './routines.fingerprint'
+import { buildRoutineSpec, type BuildRoutineMessage } from './routines.job-specs'
 import type { CompletedRoutineBuild, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 import { rulesOnlyRoutine } from './routines.rules-only'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
@@ -41,6 +43,9 @@ export type RoutineServiceDeps = {
   /** The model and prompt hash the writer runs under, recorded on every routine it writes. */
   writerIdentity: { model: string; promptHash: string }
   repository: RoutinesRepository
+  jobs: JobQueue
+  /** Whether routines are switched on in this environment: off, `request` does nothing at all. */
+  enabled: boolean
   now?: () => Date
   newId?: () => string
 }
@@ -83,6 +88,12 @@ export class RoutineService {
   private static readonly WRITER_TRIES = 3
   // Builds that called the writer in the last 24 hours; at this many, the rules alone write the next.
   private static readonly WRITER_BUILDS_PER_DAY = 5
+  // A build request claimed this long ago had its build die: the next request takes the claim over.
+  private static readonly CLAIM_STALE_AFTER_MS = 15 * RoutineService.MINUTE_MS
+  // The first build and the review-point rebuild wait for the verdict to be ready: a minute apart, 15 times, then they give up quietly.
+  private static readonly MAX_WAITS = 15
+  private static readonly WAIT_SECONDS = 60
+  private static readonly WAITING_REASONS: ReadonlySet<RoutineBuildReason> = new Set(['first', 'review-point'])
 
   private readonly verdicts: RoutineServiceDeps['verdicts']
   private readonly recommendations: RoutineServiceDeps['recommendations']
@@ -96,6 +107,8 @@ export class RoutineService {
   private readonly writer: RoutineWriter
   private readonly writerIdentity: RoutineServiceDeps['writerIdentity']
   private readonly repository: RoutinesRepository
+  private readonly jobs: JobQueue
+  private readonly enabled: boolean
   private readonly now: () => Date
   private readonly newId: () => string
 
@@ -112,6 +125,8 @@ export class RoutineService {
     this.writer = deps.writer
     this.writerIdentity = deps.writerIdentity
     this.repository = deps.repository
+    this.jobs = deps.jobs
+    this.enabled = deps.enabled
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
@@ -177,6 +192,59 @@ export class RoutineService {
     const now = this.now()
     await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
+  }
+
+  /**
+   * Asks for a build of the profile's routine, to be run by the queue. Does nothing when routines are switched off. Otherwise claims the request by its key and
+   * queues it, unless a request is already being worked on (a different key too: a request made mid-build is dropped, and the triggers ask again afterwards). If
+   * the queue refuses, the claim is given back. Never throws: a trigger must not fail for it. Logs ids and outcomes only.
+   */
+  async request(profileId: string, reason: RoutineBuildReason, requestKey: string): Promise<void> {
+    if (!this.enabled) return
+    try {
+      const now = this.now()
+      if (!(await this.repository.claim(profileId, requestKey, now, new Date(now.getTime() - RoutineService.CLAIM_STALE_AFTER_MS)))) return
+      try {
+        await this.jobs.enqueue(buildRoutineSpec, { profileId, reason, requestKey, requestedAt: now.getTime(), waits: 0 })
+      } catch (error) {
+        // A claim with no job behind it would hold every ask off for 15 minutes. If the release fails too the claim goes stale on its own.
+        await this.repository.release(profileId, now).catch(() => undefined)
+        throw error
+      }
+    } catch (error) {
+      console.error({ outcome: 'routine-request-failed', profileId, reason, error: describeError(error) })
+    }
+  }
+
+  /**
+   * The body of the build job, run by the queue as the system actor. Builds the routine. While the verdict is not ready for the first build or a review-point
+   * rebuild it queues itself again a minute on, up to 15 times, keeping the claim, and then gives up. Any other outcome gives the claim back. An error is thrown
+   * for the queue to retry, the claim kept.
+   */
+  async run(body: BuildRoutineMessage): Promise<void> {
+    const { profileId, reason } = body
+    const result = await this.build(profileId, reason)
+    if (result === 'waiting' && RoutineService.WAITING_REASONS.has(reason) && body.waits < RoutineService.MAX_WAITS) {
+      await this.jobs.enqueue(buildRoutineSpec, { ...body, waits: body.waits + 1 }, { delaySeconds: RoutineService.WAIT_SECONDS })
+      return
+    }
+    if (result === 'waiting') console.log({ outcome: 'routine-gave-up-waiting', profileId, reason, waits: body.waits })
+    await this.repository.release(profileId, new Date(body.requestedAt))
+  }
+
+  /**
+   * Where the dead-letter queue lands a build whose retries ran out. Gives the claim back, and the first time sets a retry due in 24 hours for the daily sweep to
+   * queue; nothing is queued here. A second dead letter (the retry's own, or one on a request that was already retried) is final: nothing more is due, and it is
+   * logged. A request that has moved on to another key has its own dead letter, so it is left alone.
+   */
+  async markBuildFailed(body: BuildRoutineMessage): Promise<void> {
+    const { profileId } = body
+    await this.repository.release(profileId, new Date(body.requestedAt))
+    const row = await this.repository.findRequest(profileId)
+    if (!row || row.requestKey !== body.requestKey) return
+    const final = row.retried || body.retry === true
+    await this.repository.setRequestRetry(profileId, { retried: true, retryDueAt: final ? null : new Date(this.now().getTime() + RoutineService.DAY_MS) })
+    if (final) console.error({ outcome: 'routine-build-failed-final', profileId, reason: body.reason })
   }
 
   private static actorOf(userId: string, profileId: string): Actor {

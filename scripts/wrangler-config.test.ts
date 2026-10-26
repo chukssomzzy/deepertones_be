@@ -453,6 +453,61 @@ describe('wrangler.jsonc verdicts queue', () => {
   })
 })
 
+// The routine's build (issue #189): the build-routine job runs on a queue of its own (never the verdicts queue: a bare verdict body in flight at deploy would be
+// dropped by a shared consumer), with a dead-letter queue, per environment. One message at a time, 4 retries to make the 5 attempts the job's ladder expects.
+describe('wrangler.jsonc routines queue', () => {
+  it.each(scanBlocks)('%s produces to the routines queue as ROUTINES_QUEUE', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'ROUTINES_QUEUE')?.queue).toBe(`deepertones-routines-${environment}`)
+  })
+
+  it.each(scanBlocks)('%s consumes the routines queue one message at a time with 4 retries, then its dead-letter queue', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-routines-${environment}`)
+
+    expect(consumer).toMatchObject({ max_batch_size: 1, max_retries: 4, dead_letter_queue: `deepertones-routines-dlq-${environment}` })
+  })
+
+  it.each(scanBlocks)('%s consumes the routines dead-letter queue, so dead letters reach the job\'s dead-letter hook', (_, block, environment) => {
+    const consumer = block?.queues?.consumers?.find((c) => c.queue === `deepertones-routines-dlq-${environment}`)
+
+    expect(consumer).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps the verdicts queue and its consumers as they were, beside the routines queue', (_, block, environment) => {
+    expect(block?.queues?.producers?.find((p) => p.binding === 'VERDICTS_QUEUE')?.queue).toBe(`deepertones-verdicts-${environment}`)
+    expect(block?.queues?.consumers?.find((c) => c.queue === `deepertones-verdicts-${environment}`)).toMatchObject({ max_batch_size: 1, max_retries: 4, dead_letter_queue: `deepertones-verdicts-dlq-${environment}` })
+    expect(block?.queues?.consumers?.find((c) => c.queue === `deepertones-verdicts-dlq-${environment}`)).toBeDefined()
+  })
+
+  it.each(scanBlocks)('%s keeps every queue it already had beside it', (_, block, environment) => {
+    const bindings = Object.fromEntries((block?.queues?.producers ?? []).map((p) => [p.binding, p.queue]))
+
+    expect(bindings).toMatchObject({
+      OTP_DELIVERY_QUEUE: `deepertones-otp-delivery-${environment}`,
+      SCAN_ITEMS_QUEUE: `deepertones-scan-items-${environment}`,
+      PUSH_DELIVERY_QUEUE: `deepertones-push-delivery-${environment}`,
+      PUSH_RECEIPTS_QUEUE: `deepertones-push-receipts-${environment}`,
+      PARSE_SAFETY_QUEUE: `deepertones-parse-safety-${environment}`,
+      EMAIL_QUEUE: `deepertones-email-${environment}`,
+      FACE_SCANS_QUEUE: `deepertones-face-scans-${environment}`,
+      VERDICTS_QUEUE: `deepertones-verdicts-${environment}`,
+    })
+  })
+})
+
+// The switch for every routine trigger and sweep. Env blocks do not inherit vars, so each restates it: off in dev and test (no job runs by itself), on in
+// staging, and off in production until the routine is launched there. A string, as every wrangler var.
+describe('wrangler.jsonc routines switch', () => {
+  const switches: [string, Block | undefined, string][] = [
+    ['top level', catalogConfig, 'false'],
+    ['env.staging', catalogConfig.env.staging, 'true'],
+    ['env.production', catalogConfig.env.production, 'false'],
+  ]
+
+  it.each(switches)('%s sets ROUTINES_ENABLED to its own value, as a string', (_, block, expected) => {
+    expect(block?.vars?.ROUTINES_ENABLED).toBe(expected)
+  })
+})
+
 // The admin catalog routes: the token is a secret in every block (env blocks do not inherit `secrets`), and the limiter has an id of its own in each.
 describe('wrangler.jsonc admin catalog access', () => {
   const adminBlocks: [string, { secrets?: { required?: string[] }; vars?: Record<string, string>; ratelimits?: { name: string; namespace_id: string }[] } | undefined, string][] = [

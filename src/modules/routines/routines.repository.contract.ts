@@ -36,6 +36,17 @@ import type { CautionState } from './routines.types'
 //                                  Pending rows never count, even when marked served. It is "every served version but this one", not "older than this one".
 //   writerBuildsSince(profileId, since)   how many of that profile's rows have writerCalls > 0 and createdAt >= since, whatever their source, status or reason.
 //
+// The build requests (spec #189, PR 3b): ONE row per profile in `routine_requests`, which keeps the same request from being queued twice and holds the
+// state of the dead-letter retry. A claim is held until it is released or goes stale. Assumed shapes (what this file pins; the first two are the brief's):
+//   claim(profileId, key, now, staleBefore)   boolean. True on a profile with no request row (the row is created: requestKey `key`, requestedAt `now`, no retry
+//                                  due, not retried) and on a row whose requestedAt is `staleBefore` or older (taken over: key and time rewritten, retry fields
+//                                  reset). False, changing nothing, on a row whose requestedAt is newer than `staleBefore`. One statement, so parallel claims
+//                                  cannot both win. Rejects (D1) a profile that does not exist.
+//   release(profileId, requestedAt)   gives back the claim made at exactly that time (moves the row's requestedAt to the epoch, so the next claim wins at once);
+//                                  a no-op for any other requestedAt and for a missing row. Resolves to undefined.
+//   findRequest(profileId)         { profileId, requestKey, requestedAt, retryDueAt, retried } | null.
+//   setRequestRetry(profileId, { retried, retryDueAt })   sets those two columns, nothing else of the row; a profile with no request row is ignored (not created).
+//
 // Fixtures never give two rows of one profile the same createdAt: which of two such rows is newest is not specified.
 
 const BASE = new Date('2030-06-15T12:00:00.000Z')
@@ -931,6 +942,191 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
 
         expect(await repository.writerBuildsSince(profileId, at(-DAY))).toBe(1)
         expect(await repository.writerBuildsSince(other.profileId, at(-DAY))).toBe(2)
+      })
+    })
+
+    describe('build requests: claim', () => {
+      const KEY_1 = 'routine-fp-1'
+      const KEY_2 = 'review-point:scan-9'
+
+      it('creates the request on a profile with none, holding it at the time of the claim, and answers true', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.claim(profileId, KEY_1, BASE, at(-HOUR))).toBe(true)
+
+        expect(await repository.findRequest(profileId)).toEqual({ profileId, requestKey: KEY_1, requestedAt: BASE, retryDueAt: null, retried: false })
+      })
+
+      it('has no request for a profile that never asked for a build', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        expect(await repository.findRequest(profileId)).toBeNull()
+      })
+
+      it('lets exactly one of two parallel claims win', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        const answers = await Promise.all([repository.claim(profileId, KEY_1, BASE, at(-HOUR)), repository.claim(profileId, KEY_1, BASE, at(-HOUR))])
+
+        expect(answers.filter(Boolean)).toHaveLength(1)
+      })
+
+      it('answers false and changes nothing for the same key while the claim is newer than staleBefore', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+        const before = await repository.findRequest(profileId)
+
+        // staleBefore is one millisecond before the claim: the claim is not stale.
+        expect(await repository.claim(profileId, KEY_1, at(HOUR), at(-1))).toBe(false)
+
+        expect(await repository.findRequest(profileId)).toEqual(before)
+      })
+
+      it('answers false and changes nothing while the claim is newer than staleBefore, even with a different key', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+        const before = await repository.findRequest(profileId)
+
+        expect(await repository.claim(profileId, KEY_2, at(HOUR), at(-1))).toBe(false)
+
+        expect(await repository.findRequest(profileId)).toEqual(before)
+      })
+
+      it('takes the claim over when it was made exactly at staleBefore', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+
+        expect(await repository.claim(profileId, KEY_1, at(HOUR), BASE)).toBe(true)
+
+        expect(await repository.findRequest(profileId)).toMatchObject({ requestKey: KEY_1, requestedAt: at(HOUR) })
+      })
+
+      it('takes the claim over when it was made before staleBefore, rewriting the key and the time', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+
+        expect(await repository.claim(profileId, KEY_2, at(HOUR), at(1))).toBe(true)
+
+        expect(await repository.findRequest(profileId)).toMatchObject({ requestKey: KEY_2, requestedAt: at(HOUR) })
+      })
+
+      it('lets exactly one of two parallel takeovers of a stale claim win', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+
+        const answers = await Promise.all([repository.claim(profileId, KEY_1, at(HOUR), at(MINUTE)), repository.claim(profileId, KEY_1, at(HOUR), at(MINUTE))])
+
+        expect(answers.filter(Boolean)).toHaveLength(1)
+      })
+
+      it('resets the dead-letter retry when it takes a claim over: a new request supersedes the retry that was waiting', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: at(DAY) })
+
+        await repository.claim(profileId, KEY_1, at(HOUR), at(MINUTE))
+
+        expect(await repository.findRequest(profileId)).toMatchObject({ retried: false, retryDueAt: null })
+      })
+
+      it('keeps one profile\'s claim apart from another\'s', async () => {
+        const { repository, newAccount } = await make()
+        const first = await newAccount()
+        const second = await newAccount()
+        await repository.claim(first.profileId, KEY_1, BASE, at(-HOUR))
+
+        expect(await repository.claim(second.profileId, KEY_1, BASE, at(-HOUR))).toBe(true)
+      })
+    })
+
+    describe('build requests: release', () => {
+      const KEY_1 = 'routine-fp-1'
+
+      it('lets the very next claim win when the claim made at exactly that time is released', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+
+        await repository.release(profileId, BASE)
+
+        // The same key, one millisecond on, with a cut-off far older than the claim: only the release makes it claimable.
+        expect(await repository.claim(profileId, KEY_1, at(1), at(-HOUR))).toBe(true)
+      })
+
+      it('leaves a claim made at another time alone: a claim taken since by another request is not given back', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, at(MINUTE), at(-HOUR))
+
+        await repository.release(profileId, BASE)
+        await repository.release(profileId, at(MINUTE + 1))
+
+        expect(await repository.claim(profileId, KEY_1, at(2 * MINUTE), at(-HOUR))).toBe(false)
+        expect(await repository.findRequest(profileId)).toMatchObject({ requestedAt: at(MINUTE) })
+      })
+
+      it('ignores a profile with no request row, creating nothing', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        await expect(repository.release(profileId, BASE)).resolves.toBeUndefined()
+
+        expect(await repository.findRequest(profileId)).toBeNull()
+      })
+
+      it('keeps the dead-letter retry that was set: giving back a claim does not cancel it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, KEY_1, BASE, at(-HOUR))
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: at(DAY) })
+
+        await repository.release(profileId, BASE)
+
+        expect(await repository.findRequest(profileId)).toMatchObject({ retried: true, retryDueAt: at(DAY) })
+      })
+    })
+
+    describe('build requests: the dead-letter retry', () => {
+      it('stores when the retry is due and that it was used, to the millisecond, changing nothing else of the request', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, 'routine-fp-1', BASE, at(-HOUR))
+        const due = new Date(BASE.getTime() + DAY + 789)
+
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: due })
+
+        const row = await repository.findRequest(profileId)
+        expect(row).toMatchObject({ profileId, requestKey: 'routine-fp-1', requestedAt: BASE, retried: true })
+        expect(row!.retryDueAt!.getTime()).toBe(due.getTime())
+      })
+
+      it('clears a retry that was due when set to none', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.claim(profileId, 'routine-fp-1', BASE, at(-HOUR))
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: at(DAY) })
+
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: null })
+
+        expect(await repository.findRequest(profileId)).toMatchObject({ retried: true, retryDueAt: null })
+      })
+
+      it('ignores a profile with no request row, creating nothing', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        await repository.setRequestRetry(profileId, { retried: true, retryDueAt: at(DAY) })
+
+        expect(await repository.findRequest(profileId)).toBeNull()
       })
     })
   })

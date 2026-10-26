@@ -61,3 +61,27 @@ export const routineVersions = sqliteTable(
     index('routine_versions_writer_retry_due_idx').on(t.writerRetryDueAt).where(sql`${t.writerRetryDueAt} IS NOT NULL`),
   ],
 )
+
+/**
+ * A profile's routine build request (spec #189), ONE row per profile: the claim that keeps the same request from being queued twice, and the state of the
+ * dead-letter retry. `request_key` is what the request was for (a routine fingerprint, `review-point:<scanId>` or `writer-retry:<versionId>`) and `requested_at`
+ * when it was claimed: a claim older than the stale cut-off is a build that died and is taken over, and a released claim has its time moved to the epoch.
+ * `retry_due_at` is when the one more try after a dead letter is due (null when none is) and `retried` whether it has been given. A new claim resets both.
+ * Rows go with their profile (cascade).
+ */
+export const routineRequests = sqliteTable(
+  'routine_requests',
+  {
+    profileId: text('profile_id')
+      .primaryKey()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    requestKey: text('request_key').notNull(),
+    requestedAt: integer('requested_at', { mode: 'timestamp_ms' }).notNull(),
+    retryDueAt: integer('retry_due_at', { mode: 'timestamp_ms' }),
+    retried: integer('retried', { mode: 'boolean' }).notNull().default(false),
+  },
+  (t) => [
+    // The dead-letter retry sweep's lookup (PR 3c): only the rows with a retry due, a small set, by due time.
+    index('routine_requests_retry_due_idx').on(t.retryDueAt).where(sql`${t.retryDueAt} IS NOT NULL`),
+  ],
+)

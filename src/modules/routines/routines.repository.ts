@@ -1,10 +1,15 @@
-import { and, count, desc, eq, gt, gte, isNotNull, isNull, ne, sql } from 'drizzle-orm'
+import { and, count, desc, eq, gt, gte, isNotNull, isNull, lte, ne, sql } from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
-import { routineVersions } from './routines.table'
+import { routineRequests, routineVersions } from './routines.table'
 
 export type RoutineVersionRow = typeof routineVersions.$inferSelect
+
+export type RoutineRequestRow = typeof routineRequests.$inferSelect
+
+/** The dead-letter retry of one profile's build request. */
+export type RoutineRequestRetry = Pick<RoutineRequestRow, 'retried' | 'retryDueAt'>
 
 /** What a build fills a pending row with: everything the pending row did not know yet. `source` is always set once a build is done. */
 export type CompletedRoutineBuild = Pick<
@@ -111,6 +116,47 @@ export class D1RoutinesRepository {
       .from(routineVersions)
       .where(and(eq(routineVersions.profileId, profileId), gt(routineVersions.writerCalls, 0), gte(routineVersions.createdAt, since)))
     return row?.builds ?? 0
+  }
+
+  /**
+   * Claims a build request for the profile: a new row, or one whose claim is `staleBefore` or older (its build died or was released), taken over with the key
+   * and time rewritten and the dead-letter retry reset. One statement, so parallel claims cannot both win. False when nothing was claimed: a claim still fresh,
+   * whatever its key. Rejects a profile that does not exist.
+   */
+  async claim(profileId: string, key: string, now: Date, staleBefore: Date): Promise<boolean> {
+    const claimed = await this.db
+      .insert(routineRequests)
+      .values({ profileId, requestKey: key, requestedAt: now })
+      .onConflictDoUpdate({
+        target: routineRequests.profileId,
+        set: { requestKey: key, requestedAt: now, retried: false, retryDueAt: null },
+        // <=, not <: a claim made exactly at the cut-off is already stale.
+        setWhere: lte(routineRequests.requestedAt, staleBefore),
+      })
+      .returning({ profileId: routineRequests.profileId })
+    return claimed.length === 1
+  }
+
+  /**
+   * Gives back the claim made at exactly `requestedAt`: its time moves to the epoch, so the next `claim` finds it stale and wins at once. One statement; a claim
+   * taken since by another request and a missing row are left alone, and the dead-letter retry is kept.
+   */
+  async release(profileId: string, requestedAt: Date): Promise<void> {
+    await this.db
+      .update(routineRequests)
+      .set({ requestedAt: new Date(0) })
+      .where(and(eq(routineRequests.profileId, profileId), eq(routineRequests.requestedAt, requestedAt)))
+  }
+
+  /** The profile's build request, or null when it never asked for one. */
+  async findRequest(profileId: string): Promise<RoutineRequestRow | null> {
+    const [row] = await this.db.select().from(routineRequests).where(eq(routineRequests.profileId, profileId)).limit(1)
+    return row ?? null
+  }
+
+  /** Sets the two dead-letter retry columns, changing nothing else of the request. A profile with no request is ignored, never created. */
+  async setRequestRetry(profileId: string, { retried, retryDueAt }: RoutineRequestRetry): Promise<void> {
+    await this.db.update(routineRequests).set({ retried, retryDueAt }).where(eq(routineRequests.profileId, profileId))
   }
 }
 
