@@ -1,0 +1,1049 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { type Actor, currentActor, requireUser, runAs } from '../../lib/context'
+import { ConflictError } from '../../lib/errors'
+import { MemoryRoutineWriter } from '../../providers/routine-writing/memory.routine-writer'
+import type { RoutineRetry } from '../../providers/routine-writing/routine-writer.provider'
+import type { ProductCatalogService, ShelfFacts } from '../catalog/catalog.service'
+import type { RoutineStep } from '../catalog/catalog.vocabulary'
+import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
+import type { FaceScanService } from '../face-scans/face-scans.service'
+import type { GoalsService } from '../goals/goals.service'
+import type { Goal } from '../goals/goals.vocabulary'
+import type { RecommendationService } from '../recommendations/recommendations.service'
+import type { Candidate } from '../recommendations/recommendations.types'
+import type { SafetyService } from '../safety/safety.service'
+import type { ParseState, SafetyMentionRow, SafetyView } from '../safety/safety.types'
+import type { SafetyChoice } from '../safety/safety.vocabulary'
+import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { ProfilesService } from '../profiles/profiles.service'
+import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
+import type { SavedVerdictProduct } from '../verdicts/verdicts.types'
+import { checkRoutine } from './routines.gates'
+import { routineFingerprint } from './routines.fingerprint'
+import { FakeRoutinesRepository } from './routines.repository.fake'
+import { ROUTINE_RULES_VERSION } from './routines.rules'
+import { RoutineService } from './routines.service'
+import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './routines.types'
+
+// The routine service (spec #189, PR 2b): `build` (what the build-routine job will run), `current`, `start` and `gotIt`. The other services are Pick<> fakes that
+// answer from one mutable `world`, as the verdicts test does, so a test changes the world (a product removed, a country changed, a safety answer added) and
+// reads the outcome from the repository, the writer's record and the service. The writer is the real MemoryRoutineWriter, the repository the real fake. A routine
+// is only ever reached the way life reaches it: first build, Start, then a change and a rebuild. `stableMerge` is the service's own dependency and is not tested
+// here: only what a caller can see (which steps the writer was asked about, which steps came out the same).
+//
+// The contract this file pins:
+//   new RoutineService({ verdicts, recommendations, goals, safety, shelf, catalog, faceScans, workbook, profiles, writer, writerIdentity, repository, now, newId }),
+//   the first nine being the Pick<> of what the build reads: verdicts (savedFor), recommendations (candidatesFor, shoppingFor), goals (goalFor), safety (snapshotFor),
+//   shelf (activeEntriesFor, add), catalog (shelfFacts), faceScans (seenFor), workbook (countries, verdictReference), profiles (find). `writerIdentity` is
+//   { model, promptHash }. `newId()` is called once for each version appended, in order.
+//   build(profileId, reason, options?: { exclude?: { step, code } }): Promise<'built' | 'unchanged' | 'waiting'>   all run by profile id, as a job runs them
+//   current(profileId): Promise<{ status: 'pending' } | { status: 'updating'; version } | { status: 'ready'; version }>   `version` is the stored row (id, steps, tapers, ...)
+//   start(profileId): Promise<void>    ConflictError ROUTINE_NOT_READY without a ready version
+//   gotIt(profileId, step, clientIp): Promise<void>    ConflictError STEP_NOT_RECOMMENDED unless the step's product is a recommended one; calls shelf.add(product id, clientIp)
+
+// The one clock every test hangs off; later times are offsets from it.
+const T0 = new Date('2030-06-15T12:00:00.000Z')
+const SECOND = 1000
+const MINUTE = 60 * SECOND
+const HOUR = 60 * MINUTE
+const DAY = 24 * HOUR
+const at = (offsetMs: number) => new Date(T0.getTime() + offsetMs)
+const utcDay = (date: Date) => date.toISOString().slice(0, 10)
+
+const AMARA_PROFILE = 'profile-amara-1'
+const AMARA_USER = 'user-amara'
+// Who a read by profile id must run as: the account that owns the profile, verified (the routine is for signed-up accounts).
+const AMARA_ACTOR: Actor = { kind: 'user', userId: AMARA_USER, status: 'verified', profileId: AMARA_PROFILE }
+const SYSTEM: Actor = { kind: 'system', job: 'build-routine' }
+
+const CLEAN = ['Aqua', 'Glycerin', 'Cetearyl Alcohol']
+const STEROID = ['Aqua', 'Clobetasol Propionate']
+const STEROID_SOURCE = 'https://example.org/rules/clobetasol'
+const CLIENT_IP = '203.0.113.7'
+
+// ---- the world the other services answer from ----
+
+type NG_OR_GH = 'NG' | 'GH'
+type Country = Awaited<ReturnType<CatalogWorkbookService['countries']>>[number]
+
+type World = {
+  saved: SavedVerdictView | null
+  goal: Goal | null
+  safety: { view: SafetyView | null; parseState: ParseState | null; mentions: SafetyMentionRow[] }
+  shopping: { country: string; budgetBand: 'low' | 'mid' | 'high' | null } | null
+  entries: ShelfActiveEntry[]
+  facts: Map<string, ShelfFacts>
+  candidates: Record<NG_OR_GH, Partial<Record<RoutineStep, Candidate[]>>>
+  seen: Awaited<ReturnType<FaceScanService['seenFor']>>
+  countries: Country[]
+  profiles: Map<string, string>
+  /** The actor in force at each call that needs a session in life (candidatesFor and shelf.add both require a user). */
+  actors: Actor[]
+  shelfAdds: { productId: string; clientIp: string }[]
+}
+
+const safetyView = (choices: SafetyChoice[]): SafetyView => ({
+  choices,
+  reactionText: null,
+  prescriptionText: null,
+  excludesPregnancyCaution: choices.includes('pregnant') || choices.includes('breastfeeding'),
+  updatedAt: T0,
+})
+
+const candidate = (code: string, priceMin: number, frequency: Candidate['frequency']): Candidate => ({
+  code,
+  product: { id: `prod-${code}`, kind: 'named', brand: `Brand ${code}`, name: `Name ${code}`, variant: null, form: 'cream', category: 'skin', imageUrl: null },
+  skinConcerns: ['hd_age_spot'],
+  ingredients: ['Aqua', 'Niacinamide'],
+  evidenceUrls: [`https://example.org/evidence/${code}`],
+  ingredientsSourceUrl: `https://example.org/ingredients/${code}`,
+  passed: ['country', 'step'],
+  sharedWithReaction: [],
+  origin: 'sourced',
+  frequency,
+  priceMin,
+  priceMax: priceMin + 1000,
+  whereSold: 'Pharmacies',
+})
+
+const verdictProduct = (entryId: string, verdict: ShelfVerdict, step: RoutineStep | null, over: Partial<SavedVerdictProduct> = {}): SavedVerdictProduct => ({
+  entryId,
+  group: verdict.kind === 'stop' ? 'likely-the-problem' : 'helping',
+  verdict,
+  escalate: false,
+  reason: 'A test reason.',
+  facts: [],
+  step,
+  sourceUrls: [],
+  ...over,
+})
+
+const newWorld = (): World => ({
+  saved: {
+    fingerprint: 'verdict-fp-1',
+    fit: 'ready',
+    builtAt: T0,
+    rulesVersion: 'verdict-rules-7',
+    products: [
+      verdictProduct('entry-a', { kind: 'keep' }, 'cleanse'),
+      verdictProduct('entry-b', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, 'treat', { sourceUrls: [STEROID_SOURCE] }),
+    ],
+  },
+  goal: 'fade-dark-marks',
+  safety: { view: safetyView(['reaction']), parseState: 'done', mentions: [] },
+  shopping: { country: 'NG', budgetBand: 'mid' },
+  entries: [],
+  facts: new Map(),
+  // Cheapest first, as the recommendation rules give them. SERUM-1 is sold in NG only.
+  candidates: {
+    NG: {
+      cleanse: [candidate('CLEANSER-1', 2000, 'am'), candidate('CLEANSER-2', 3500, 'pm')],
+      treat: [candidate('SERUM-1', 3000, 'pm'), candidate('SERUM-2', 5000, 'alternate-days')],
+      moisturise: [candidate('MOIST-1', 2500, 'am-pm')],
+      protect: [candidate('SPF-1', 4000, 'am')],
+    },
+    GH: {
+      cleanse: [candidate('CLEANSER-1', 2000, 'am')],
+      treat: [candidate('SERUM-GH', 3500, 'pm')],
+      moisturise: [candidate('MOIST-1', 2500, 'am-pm')],
+      protect: [candidate('SPF-1', 4000, 'am')],
+    },
+  },
+  seen: { seen: [{ concern: 'hd_age_spot', level: 'some' }], alsoNoticed: [{ concern: 'hd_radiance', level: 'faint' }], skinType: 'combination' },
+  countries: [
+    { code: 'NG', currency: 'NGN', lowMax: 5000, midMax: 15000, status: 'active' },
+    { code: 'GH', currency: 'GHS', lowMax: 100, midMax: 300, status: 'active' },
+  ],
+  profiles: new Map([[AMARA_PROFILE, AMARA_USER]]),
+  actors: [],
+  shelfAdds: [],
+})
+
+let world: World
+let entryCount = 0
+let verdictRevision = 1
+
+/** Puts a product on the shelf the way the accessors give it: an active entry, and the formulation facts it points at. */
+const addProduct = (id: string, ingredients: string[], over: Partial<ShelfFacts> = {}) => {
+  world.entries.push({ id, kind: 'product', addedAt: at(entryCount++ * MINUTE), productId: `prod-${id}`, formulationId: `form-${id}` })
+  world.facts.set(`form-${id}`, { productId: `prod-${id}`, brand: 'Orbis', name: `Product ${id}`, variant: null, form: 'cream', category: 'skin', ingredients, ...over })
+}
+
+/** The verdict was saved again from different inputs: a new fingerprint, these products. */
+const saveVerdict = (products: SavedVerdictProduct[]) => {
+  world.saved = { ...world.saved!, fingerprint: `verdict-fp-${++verdictRevision}`, products }
+}
+const productsOfVerdict = () => world.saved!.products
+/** The same verdict saved again from other inputs (a new fingerprint), nothing in it different. */
+const reverdict = () => saveVerdict(productsOfVerdict())
+const removeShelfProduct = (id: string) => {
+  world.entries = world.entries.filter((entry) => entry.id !== id)
+  saveVerdict(productsOfVerdict().filter((p) => p.entryId !== id))
+}
+/** SERUM-1 leaves the catalog: it is sold nowhere. */
+const retireSerum1 = () => {
+  for (const country of ['NG', 'GH'] as const) {
+    world.candidates[country].treat = (world.candidates[country].treat ?? []).filter((c) => c.code !== 'SERUM-1')
+  }
+}
+
+// ---- the writer: a Memory writer that can pause at the start of a call, so a test can look at the service while a build is running ----
+
+class HookedWriter extends MemoryRoutineWriter {
+  hook: (() => Promise<void>) | null = null
+  async write(skeleton: RoutineSkeleton, retry?: RoutineRetry): Promise<Routine> {
+    await this.hook?.()
+    return super.write(skeleton, retry)
+  }
+}
+
+/** A routine in "the writer's words": every reason says which attempt wrote it, so a step taken from one build is told from a step written by another. */
+const routineFrom = (skeleton: RoutineSkeleton, tag: string): Routine => {
+  const steps: RoutineEntry[] = skeleton.steps.map((step): RoutineEntry => {
+    const allowed = skeleton.limits.allowed[step]
+    const kept = skeleton.shelf.find((p) => p.step === step && (p.verdict.kind === 'keep' || p.verdict.kind === 'reduce'))
+    if (kept) return { step, product: { kind: 'shelf', id: kept.id }, frequency: allowed[0]!, reason: `${tag}: ${step}.`, grounding: [] }
+    const first = skeleton.gaps.find((gap) => gap.step === step)?.candidates[0]
+    if (!first) return { step, product: { kind: 'none' }, frequency: allowed[0]!, reason: `${tag}: ${step}.`, grounding: [] }
+    return { step, product: { kind: 'candidate', code: first.code }, frequency: allowed.includes(first.frequency) ? first.frequency : allowed[0]!, reason: `${tag}: ${step}.`, grounding: [] }
+  })
+  const tapers = skeleton.shelf.flatMap((p) => (p.verdict.kind === 'stop' ? [{ shelfProductId: p.id, templateId: p.verdict.taperTemplateId }] : []))
+  return { steps, tapers, expectation: `${tag}: expect results in 8 to 12 weeks.` }
+}
+
+type Answer = (skeleton: RoutineSkeleton) => Routine
+/** A routine that breaks exactly one gate, the frequency one, at the protect step. */
+const breaksFrequency = (answer: Answer): Answer => (skeleton) => {
+  const routine = answer(skeleton)
+  return { ...routine, steps: routine.steps.map((entry) => (entry.step === 'protect' ? { ...entry, frequency: 'pm' as const } : entry)) }
+}
+const FREQUENCY_AT_PROTECT = { failed: [{ gate: 'frequency', step: 'protect' }] }
+
+let clock: Date
+let repository: FakeRoutinesRepository
+let writer: HookedWriter
+let service: RoutineService
+/** How many times the writer was asked, failed asks included. The words of the n-th ask are tagged "Written n". */
+let attempts: number
+let ids: number
+
+const setClock = (offsetMs: number) => {
+  clock = at(offsetMs)
+}
+/** The writer answers the next asks with these (a function that throws is a writer error), then well. */
+const script = (...answers: Answer[]) => {
+  let asked = 0
+  writer.respondWith((skeleton) => {
+    attempts++
+    const answer = answers[asked++] ?? ((s: RoutineSkeleton) => routineFrom(s, `Written ${attempts}`))
+    return answer(skeleton)
+  })
+}
+const good = (): Answer => (skeleton) => routineFrom(skeleton, `Written ${attempts}`)
+const throws = (): Answer => () => {
+  throw new Error('the routine writer is unavailable')
+}
+
+type Reason = Parameters<RoutineService['build']>[1]
+const build = (reason: Reason = 'first', options?: Parameters<RoutineService['build']>[2]) => runAs(SYSTEM, () => service.build(AMARA_PROFILE, reason, options))
+const current = () => runAs(SYSTEM, () => service.current(AMARA_PROFILE))
+const start = () => runAs(SYSTEM, () => service.start(AMARA_PROFILE))
+const gotIt = (step: RoutineStep) => runAs(SYSTEM, () => service.gotIt(AMARA_PROFILE, step, CLIENT_IP))
+const latestRow = async () => (await repository.latest(AMARA_PROFILE))!
+const currentRow = async () => (await repository.current(AMARA_PROFILE))!
+const errorOf = async (promise: Promise<unknown>) => {
+  try {
+    await promise
+  } catch (error) {
+    return error as Error & { code?: string }
+  }
+  throw new Error('expected the promise to reject')
+}
+
+type Row = NonNullable<Awaited<ReturnType<FakeRoutinesRepository['latest']>>>
+/** A step as the user sees it: with the bookkeeping (gotIt, fixedFrom) taken off. */
+const plain = (row: Row) => row.steps.map(({ gotIt: _gotIt, fixedFrom: _fixedFrom, ...entry }) => entry)
+const shapeOf = (row: Row) => row.steps.map(({ step, product, frequency }) => ({ step, product, frequency }))
+const FIRST_SHAPE = [
+  { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am' },
+  { step: 'treat', product: { kind: 'candidate', code: 'SERUM-1' }, frequency: 'pm' },
+  { step: 'moisturise', product: { kind: 'candidate', code: 'MOIST-1' }, frequency: 'am-pm' },
+  { step: 'protect', product: { kind: 'candidate', code: 'SPF-1' }, frequency: 'am' },
+]
+
+/** The first build, the way a verified account gets it. */
+const firstBuild = async (): Promise<Row> => {
+  expect(await build('first')).toBe('built')
+  return currentRow()
+}
+/** The first build, then the user taps Start two days on: a routine after which only the broken steps change. Returns the version in force. */
+const started = async (): Promise<Row> => {
+  await firstBuild()
+  setClock(2 * DAY)
+  await start()
+  return currentRow()
+}
+
+const spyOnConsole = () => (['log', 'debug', 'info', 'warn', 'error'] as const).map((method) => vi.spyOn(console, method).mockImplementation(() => {}))
+
+beforeEach(() => {
+  clock = T0
+  entryCount = 0
+  verdictRevision = 1
+  attempts = 0
+  ids = 0
+  world = newWorld()
+  // Amara's shelf: a cleanser the rules keep, and a cream with a steroid in it, which the rules stop (with the steroid step-down).
+  addProduct('entry-a', CLEAN, { name: 'Calm Cleanser' })
+  addProduct('entry-b', STEROID, { name: 'Karo Glow Cream' })
+
+  repository = new FakeRoutinesRepository()
+  writer = new HookedWriter()
+  script()
+  const deps = {
+    verdicts: {
+      savedFor: async () => (world.saved ? structuredClone(world.saved) : null),
+    } satisfies Pick<VerdictService, 'savedFor'>,
+    recommendations: {
+      candidatesFor: async ({ step, country }: { step: RoutineStep; country?: string }) => {
+        world.actors.push(currentActor())
+        requireUser()
+        if (world.goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
+        if (world.safety.view === null) throw new ConflictError('SAFETY_ANSWERS_REQUIRED', 'Answer the safety questions first')
+        if (world.shopping === null) throw new ConflictError('SHOPPING_REQUIRED', 'Say which country you shop in first')
+        return structuredClone(world.candidates[(country ?? world.shopping.country) as NG_OR_GH]?.[step] ?? [])
+      },
+      shoppingFor: async () => {
+        if (world.shopping === null) throw new ConflictError('SHOPPING_REQUIRED', 'Say which country you shop in first')
+        return { ...world.shopping, updatedAt: T0 }
+      },
+    } satisfies Pick<RecommendationService, 'candidatesFor' | 'shoppingFor'>,
+    goals: { goalFor: async () => world.goal } satisfies Pick<GoalsService, 'goalFor'>,
+    safety: { snapshotFor: async () => structuredClone(world.safety) } satisfies Pick<SafetyService, 'snapshotFor'>,
+    shelf: {
+      activeEntriesFor: async () => structuredClone(world.entries),
+      add: async (productId: string, clientIp: string) => {
+        world.actors.push(currentActor())
+        requireUser()
+        world.shelfAdds.push({ productId, clientIp })
+        return { status: 'started' as const, scanId: 'scan-1', itemId: 'item-1' }
+      },
+    } satisfies Pick<ShelfService, 'activeEntriesFor' | 'add'>,
+    catalog: {
+      shelfFacts: async (formulationIds: string[]) => new Map(formulationIds.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
+    } satisfies Pick<ProductCatalogService, 'shelfFacts'>,
+    faceScans: { seenFor: async () => structuredClone(world.seen) } satisfies Pick<FaceScanService, 'seenFor'>,
+    workbook: {
+      countries: async () => structuredClone(world.countries),
+      // Where the catalog version a routine records comes from.
+      verdictReference: async () => ({ rulesVersion: 'verdict-rules-7', catalogVersion: 42, rules: [], claimPhrases: [], tapers: { steroid: 'TPR-STEROID-1', 'lightening-agent': 'TPR-LIGHTENING-1' } }),
+    },
+    profiles: {
+      find: async (profileId: string) => (world.profiles.has(profileId) ? { id: profileId, userId: world.profiles.get(profileId)! } : null),
+    } satisfies Pick<ProfilesService, 'find'>,
+    writer,
+    writerIdentity: { model: 'claude-test-model', promptHash: 'prompt-hash-test' },
+    repository,
+    now: () => clock,
+    newId: () => `version-${++ids}`,
+  }
+  service = new RoutineService(deps as never)
+})
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('RoutineService.build: when there is nothing to build from yet', () => {
+  it.each([
+    ['the saved verdict is not available (outdated, or its build is still queued)', () => (world.saved = null)],
+    ['the saved verdict is there but its fit is not ready', () => (world.saved = { ...world.saved!, fit: 'not-ready' })],
+    ['the profile has no goal', () => (world.goal = null)],
+    ['the profile has not answered the safety question', () => (world.safety = { view: null, parseState: null, mentions: [] })],
+    ['the profile has not said where it shops', () => (world.shopping = null)],
+  ])('answers waiting, appending nothing and not calling the writer, when %s', async (_why, change) => {
+    change()
+
+    expect(await build('first')).toBe('waiting')
+
+    expect(await repository.latest(AMARA_PROFILE)).toBeNull()
+    expect(writer.calls).toEqual([])
+    expect(attempts).toBe(0)
+  })
+
+  it('leaves the routine already in force as it was when the verdict has gone out of date', async () => {
+    const first = await firstBuild()
+    world.saved = null
+
+    expect(await build('verdict')).toBe('waiting')
+
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(first)
+  })
+})
+
+describe('RoutineService.build: the first build', () => {
+  it('writes the routine with the writer and saves it ready, each step the skeleton allows: a kept shelf product, and the cheapest candidate for each gap', async () => {
+    expect(await build('first')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.status).toBe('ready')
+    expect(shapeOf(row)).toEqual(FIRST_SHAPE)
+    expect(row.steps.map((s) => s.reason)).toEqual(['Written 1: cleanse.', 'Written 1: treat.', 'Written 1: moisturise.', 'Written 1: protect.'])
+    expect(row.steps.every((s) => !s.gotIt && s.fixedFrom === null && s.grounding.length === 0)).toBe(true)
+    expect(row.expectation).toBe('Written 1: expect results in 8 to 12 weeks.')
+    // The step-down is set in code from the stopped product, naming the verdict's own template, and not started.
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: null }])
+    expect(await repository.current(AMARA_PROFILE)).toEqual(row)
+  })
+
+  it('gives the writer the skeleton the rules made: the goal, the person, the shelf with the verdict\'s decisions, and every gap with its candidates', async () => {
+    await build('first')
+
+    expect(writer.calls).toHaveLength(1)
+    expect(writer.retries).toEqual([undefined])
+    expect(writer.calls[0]).toMatchObject({
+      goal: 'fade-dark-marks',
+      steps: ['cleanse', 'treat', 'moisturise', 'protect'],
+      person: {
+        seen: [{ concern: 'hd_age_spot', level: 'some' }],
+        alsoNoticed: [{ concern: 'hd_radiance', level: 'faint' }],
+        skinType: 'combination',
+        cautions: ['tapering', 'recent-reaction'],
+        budgetBand: 'mid',
+      },
+      shelf: [
+        { id: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser', ingredients: CLEAN, step: 'cleanse', verdict: { kind: 'keep' }, sourceUrls: [] },
+        { id: 'entry-b', brand: 'Orbis', name: 'Karo Glow Cream', ingredients: STEROID, step: 'treat', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, sourceUrls: [STEROID_SOURCE] },
+      ],
+      limits: { maxNewProducts: 3 },
+      hintsShown: false,
+    })
+    const gaps = writer.calls[0]!.gaps.map((gap) => [gap.step, gap.candidates.map((c) => c.code)])
+    expect(gaps).toEqual([
+      ['treat', ['SERUM-1', 'SERUM-2']],
+      ['moisturise', ['MOIST-1']],
+      ['protect', ['SPF-1']],
+    ])
+  })
+
+  it('names a shelf entry with no label with the verdict\'s own "no label" words, no brand and no ingredients, and leaves out an entry whose product cannot be found', async () => {
+    world.entries.push({ id: 'entry-n', kind: 'no-label', addedAt: at(10 * MINUTE), itemId: 'item-n' })
+    addProduct('entry-lost', CLEAN)
+    world.facts.delete('form-entry-lost')
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-n', { kind: 'drop' }, null), verdictProduct('entry-lost', { kind: 'keep' }, 'moisturise')])
+
+    await build('first')
+
+    const shelf = writer.calls[0]!.shelf
+    // The words are hashed into the verdict's fingerprint, so they are pinned here as literals: rewording them would re-bill every shelf with a no-label item.
+    expect(shelf.find((p) => p.id === 'entry-n')).toMatchObject({ brand: null, name: 'A product with no label', ingredients: [], verdict: { kind: 'drop' } })
+    expect(shelf.map((p) => p.id)).toEqual(['entry-a', 'entry-b', 'entry-n'])
+  })
+
+  it('reads everything that needs a session as the profile\'s own verified user, whoever runs the build', async () => {
+    await build('first')
+
+    expect(world.actors.length).toBeGreaterThan(0)
+    for (const actor of world.actors) expect(actor).toEqual(AMARA_ACTOR)
+  })
+
+  it('has the version pending while the writer works, filled in to the very same version when it is done', async () => {
+    let during: Row | null = null
+    let viewDuring: unknown
+    writer.hook = async () => {
+      during = await repository.latest(AMARA_PROFILE)
+      viewDuring = await current()
+    }
+
+    await build('first')
+
+    expect(during).toMatchObject({ status: 'pending', id: 'version-1', reason: 'first', steps: [], tapers: [], expectation: null, source: null, verdictFingerprint: 'verdict-fp-1' })
+    expect(viewDuring).toEqual({ status: 'pending' })
+    expect((await latestRow()).id).toBe('version-1')
+    expect(ids).toBe(1)
+  })
+
+  it('records what the version was built from: the writer, the rules and catalog it ran under, the fingerprints, the cautions and why', async () => {
+    setClock(5 * MINUTE)
+    await build('shelf')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({
+      id: 'version-1',
+      profileId: AMARA_PROFILE,
+      status: 'ready',
+      createdAt: at(5 * MINUTE),
+      source: 'writer',
+      model: 'claude-test-model',
+      promptHash: 'prompt-hash-test',
+      catalogVersion: 42,
+      rulesVersion: ROUTINE_RULES_VERSION,
+      hintsShown: false,
+      verdictFingerprint: 'verdict-fp-1',
+      cautions: ['tapering', 'recent-reaction'],
+      reason: 'shelf',
+      writerCalls: 1,
+      writerRetryDueAt: null,
+      startedOn: null,
+      servedAt: null,
+    })
+    // What the routine's own freshness is judged by: the goal, the cautions, each verdict product's decision and the rules version, as the spec lists them.
+    expect(row.routineFingerprint).toBe(
+      await routineFingerprint({
+        goal: 'fade-dark-marks',
+        cautions: ['tapering', 'recent-reaction'],
+        products: [
+          { entryId: 'entry-a', verdict: { kind: 'keep' }, step: 'cleanse' },
+          { entryId: 'entry-b', verdict: { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, step: 'treat' },
+        ],
+        rulesVersion: ROUTINE_RULES_VERSION,
+      }),
+    )
+  })
+
+  it('gives the same fingerprint to a routine built again from the same inputs, and another when the goal differs', async () => {
+    await build('first')
+    const first = (await latestRow()).routineFingerprint
+    setClock(MINUTE)
+    await build('first')
+    const again = (await latestRow()).routineFingerprint
+    world.goal = 'glow'
+    setClock(2 * MINUTE)
+    await build('goal')
+    const otherGoal = (await latestRow()).routineFingerprint
+
+    expect(again).toBe(first)
+    expect(otherGoal).not.toBe(first)
+    expect(otherGoal).toMatch(/^[0-9a-f]{64}$/)
+  })
+
+  it('writes a whole new routine, not a patched one, when the shelf changes before the routine is started', async () => {
+    await firstBuild()
+    removeShelfProduct('entry-a')
+    setClock(MINUTE)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row.id).toBe('version-2')
+    expect(row.steps.map((s) => s.reason)).toEqual(['Written 2: cleanse.', 'Written 2: treat.', 'Written 2: moisturise.', 'Written 2: protect.'])
+    expect(row.steps.every((s) => s.fixedFrom === null)).toBe(true)
+    expect(writer.calls[1]!.gaps.map((gap) => [gap.step, gap.candidates.length])).toEqual([
+      ['cleanse', 2],
+      ['treat', 2],
+      ['moisturise', 1],
+      ['protect', 1],
+    ])
+  })
+})
+
+describe('RoutineService.build: a writer that gets it wrong', () => {
+  it('asks again, told the gates it failed, when its routine breaks one, and saves the second answer', async () => {
+    script(breaksFrequency(good()), good())
+
+    expect(await build('first')).toBe('built')
+
+    expect(writer.calls).toHaveLength(2)
+    expect(writer.retries).toEqual([undefined, FREQUENCY_AT_PROTECT])
+    const row = await latestRow()
+    expect(row).toMatchObject({ source: 'writer', writerCalls: 2, model: 'claude-test-model', promptHash: 'prompt-hash-test', writerRetryDueAt: null })
+    expect(row.steps.map((s) => s.reason)).toEqual(['Written 2: cleanse.', 'Written 2: treat.', 'Written 2: moisturise.', 'Written 2: protect.'])
+    expect(shapeOf(row)).toEqual(FIRST_SHAPE)
+  })
+
+  it('counts a writer error as a failed try, and tries again', async () => {
+    script(throws(), good())
+
+    expect(await build('first')).toBe('built')
+
+    expect(attempts).toBe(2)
+    expect(await latestRow()).toMatchObject({ source: 'writer', writerCalls: 2, model: 'claude-test-model' })
+    expect((await latestRow()).steps[0]!.reason).toBe('Written 2: cleanse.')
+  })
+
+  it('falls back to the rules alone after three failed tries, each retry told the gates it failed, and marks the routine for the writer a day on', async () => {
+    script(breaksFrequency(good()), breaksFrequency(good()), breaksFrequency(good()))
+    setClock(10 * MINUTE)
+
+    expect(await build('first')).toBe('built')
+
+    expect(writer.retries).toEqual([undefined, FREQUENCY_AT_PROTECT, FREQUENCY_AT_PROTECT])
+    const row = await latestRow()
+    expect(row).toMatchObject({ status: 'ready', source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'first', hintsShown: false })
+    // The rules' own routine: fixed words for each step, no grounding, and the same step-down.
+    expect(row.steps).toEqual([
+      { step: 'cleanse', product: { kind: 'shelf', id: 'entry-a' }, frequency: 'am', reason: 'Your cleanser, used as it is.', grounding: [], gotIt: false, fixedFrom: null },
+      { step: 'treat', product: { kind: 'candidate', code: 'SERUM-1' }, frequency: 'pm', reason: 'A treatment product, used at a gentle pace.', grounding: [], gotIt: false, fixedFrom: null },
+      { step: 'moisturise', product: { kind: 'candidate', code: 'MOIST-1' }, frequency: 'am-pm', reason: 'A simple moisturiser that keeps the skin soft and comfortable.', grounding: [], gotIt: false, fixedFrom: null },
+      { step: 'protect', product: { kind: 'candidate', code: 'SPF-1' }, frequency: 'am', reason: 'A daily sunscreen that protects the skin from the sun.', grounding: [], gotIt: false, fixedFrom: null },
+    ])
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: null }])
+    expect(row.expectation).not.toBe('')
+    expect(row.expectation).not.toMatch(/^Written/)
+    // It passes the same gates the writer's routine has to.
+    const asRoutine: Routine = { steps: plain(row), tapers: row.tapers.map(({ shelfProductId, templateId }) => ({ shelfProductId, templateId })), expectation: row.expectation! }
+    expect(checkRoutine(writer.calls[0]!, asRoutine)).toEqual([])
+  })
+
+  it('falls back to the rules after three writer errors too, never throwing to the caller', async () => {
+    script(throws(), throws(), throws())
+
+    expect(await build('first')).toBe('built')
+
+    expect(attempts).toBe(3)
+    expect(await latestRow()).toMatchObject({ source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(DAY) })
+  })
+
+  it('counts a build whose writer calls all failed toward the daily limit, because those calls were paid for', async () => {
+    script(throws(), throws(), throws())
+    await build('first')
+
+    expect(await repository.writerBuildsSince(AMARA_PROFILE, at(-DAY))).toBe(1)
+  })
+})
+
+describe('RoutineService.build: at most 5 writer builds a profile a day', () => {
+  /** Five full builds before Start, a minute apart from T0, each with the writer. */
+  const fiveWriterBuilds = async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      expect(await build('shelf')).toBe('built')
+      expect((await latestRow()).source).toBe('writer')
+    }
+    expect(attempts).toBe(5)
+  }
+
+  it('uses the writer for the fifth build and the rules alone for the sixth, with no writer call and a retry due a day on', async () => {
+    await fiveWriterBuilds()
+    setClock(10 * MINUTE)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect(attempts).toBe(5)
+    expect(await latestRow()).toMatchObject({ source: 'rules', model: null, promptHash: null, writerCalls: 0, writerRetryDueAt: at(10 * MINUTE + DAY), reason: 'shelf' })
+    expect((await latestRow()).steps.map((s) => s.reason)).toContain('Your cleanser, used as it is.')
+  })
+
+  it('counts the last 24 hours rolling: a build exactly 24 hours old still counts', async () => {
+    await fiveWriterBuilds()
+    // The first of the five was at T0; at T0 + 24h its age is exactly a day, and the cut-off is "a day ago or later".
+    setClock(DAY)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect(attempts).toBe(5)
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0 })
+  })
+
+  it('stops counting a build a millisecond older than 24 hours: the writer is used again', async () => {
+    await fiveWriterBuilds()
+    setClock(DAY + 1)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect(attempts).toBe(6)
+    expect(await latestRow()).toMatchObject({ source: 'writer', writerCalls: 1 })
+  })
+
+  it('still keeps a started routine current past the limit, by the rules alone: only the broken step is refilled and the writer is not called', async () => {
+    await fiveWriterBuilds()
+    setClock(10 * MINUTE)
+    await start()
+    const before = await currentRow()
+    removeShelfProduct('entry-a')
+    setClock(20 * MINUTE)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect(attempts).toBe(5)
+    const row = await latestRow()
+    expect(row).toMatchObject({ source: 'rules', writerCalls: 0, model: null, promptHash: null, startedOn: before.startedOn })
+    expect(row.steps[0]).toMatchObject({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, reason: 'A gentle cleanser that cleans the skin without stripping it.' })
+    expect(row.steps.slice(1)).toEqual(before.steps.slice(1).map((step) => ({ ...step, fixedFrom: before.id })))
+  })
+})
+
+describe('RoutineService.build: after Start, only what broke changes', () => {
+  it('refills only the step whose shelf product is gone, asking the writer about that step alone, and keeps every other step as it was', async () => {
+    const before = await started()
+    removeShelfProduct('entry-a')
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    // The writer was shown the cleanse gap whole, and each fixed step's gap narrowed to the one product it already has.
+    expect(writer.calls).toHaveLength(2)
+    expect(writer.calls[1]!.gaps.map((gap) => [gap.step, gap.candidates.map((c) => c.code)])).toEqual([
+      ['cleanse', ['CLEANSER-1', 'CLEANSER-2']],
+      ['treat', ['SERUM-1']],
+      ['moisturise', ['MOIST-1']],
+      ['protect', ['SPF-1']],
+    ])
+    const row = await latestRow()
+    expect(row).toMatchObject({ id: 'version-2', status: 'ready', reason: 'shelf', source: 'writer', writerCalls: 1 })
+    expect(row.steps[0]).toEqual({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, frequency: 'am', reason: 'Written 2: cleanse.', grounding: [], gotIt: false, fixedFrom: null })
+    // The fixed steps are the earlier ones whole (words included, not the writer's new words), marked as carried from the version they came from.
+    expect(row.steps.slice(1)).toEqual(before.steps.slice(1).map((step) => ({ ...step, fixedFrom: before.id })))
+    expect(row.steps.slice(1).map((s) => s.reason)).toEqual(['Written 1: treat.', 'Written 1: moisturise.', 'Written 1: protect.'])
+  })
+
+  it('carries the start date, the step-down under way with its date, and the expectation into the new version', async () => {
+    const before = await started()
+    expect(before.startedOn).not.toBeNull()
+    removeShelfProduct('entry-a')
+    setClock(2 * DAY + HOUR)
+
+    await build('shelf')
+
+    const row = await latestRow()
+    expect(row.startedOn).toEqual(before.startedOn)
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn }])
+    expect(row.expectation).toBe('Written 1: expect results in 8 to 12 weeks.')
+  })
+
+  it('answers unchanged, appending nothing and not calling the writer, when nothing is broken: the verdict was saved again but decides the same', async () => {
+    const before = await started()
+    reverdict()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(attempts).toBe(1)
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+
+  it('answers unchanged at the review point when every step is still allowed: the check-in confirms the routine and swaps nothing', async () => {
+    const before = await started()
+    setClock(2 * DAY + 6 * 7 * DAY)
+
+    expect(await build('review-point')).toBe('unchanged')
+
+    expect(attempts).toBe(1)
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+
+  it.each<Reason>(['review-point', 'catalog-retired'])('re-picks the step whose recommended product left the catalog, with reason %s, even though the routine\'s own inputs (the fingerprint) are the same', async (reason) => {
+    const before = await started()
+    retireSerum1()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build(reason)).toBe('built')
+
+    expect(writer.calls[1]!.gaps.map((gap) => [gap.step, gap.candidates.map((c) => c.code)])).toEqual([
+      ['treat', ['SERUM-2']],
+      ['moisturise', ['MOIST-1']],
+      ['protect', ['SPF-1']],
+    ])
+    const row = await latestRow()
+    expect(row.reason).toBe(reason)
+    expect(row.routineFingerprint).toBe(before.routineFingerprint)
+    expect(shapeOf(row)).toEqual([FIRST_SHAPE[0], { step: 'treat', product: { kind: 'candidate', code: 'SERUM-2' }, frequency: 'alternate-days' }, FIRST_SHAPE[2], FIRST_SHAPE[3]])
+    expect(row.steps[0]).toEqual({ ...before.steps[0], fixedFrom: before.id })
+  })
+
+  it('re-picks one step when "find one sold here" excludes its product: the other candidate, and nothing else changes', async () => {
+    const before = await started()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('sold-here', { exclude: { step: 'treat', code: 'SERUM-1' } })).toBe('built')
+
+    // The excluded code is not among the choices the writer is given for that step.
+    expect(writer.calls[1]!.gaps.find((gap) => gap.step === 'treat')!.candidates.map((c) => c.code)).toEqual(['SERUM-2'])
+    const row = await latestRow()
+    expect(row.reason).toBe('sold-here')
+    expect(shapeOf(row)).toEqual([FIRST_SHAPE[0], { step: 'treat', product: { kind: 'candidate', code: 'SERUM-2' }, frequency: 'alternate-days' }, FIRST_SHAPE[2], FIRST_SHAPE[3]])
+    expect([0, 2, 3].map((i) => row.steps[i])).toEqual([0, 2, 3].map((i) => ({ ...before.steps[i], fixedFrom: before.id })))
+  })
+
+  it('keeps a recommended product that is not sold in the new shopping country: the routine is not rebuilt for a country', async () => {
+    const before = await started()
+    world.shopping = { country: 'GH', budgetBand: 'mid' }
+    reverdict()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(attempts).toBe(1)
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+
+  it('still refills a step when its product is sold nowhere, in the new country or any other', async () => {
+    await started()
+    world.shopping = { country: 'GH', budgetBand: 'mid' }
+    retireSerum1()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('catalog-retired')).toBe('built')
+
+    const treat = (await latestRow()).steps.find((s) => s.step === 'treat')!
+    expect(treat.product).toEqual({ kind: 'candidate', code: 'SERUM-GH' })
+  })
+
+  it('does not soften a step that is still allowed when a caution is added: the same frequency and words stay', async () => {
+    const before = await started()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'prescription']) }
+    reverdict()
+    setClock(2 * DAY + HOUR)
+
+    await build('safety')
+
+    expect(attempts).toBe(1)
+    expect(plain(await currentRow())).toEqual(plain(before))
+  })
+
+  it('rewrites the expectation, and records the new goal, when the goal changed even though the build is asked for under another reason, keeping every step that still passes', async () => {
+    const before = await started()
+    expect(before.goal).toBe('fade-dark-marks')
+    world.goal = 'glow'
+    reverdict()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({ reason: 'verdict', goal: 'glow', source: 'writer', writerCalls: 1 })
+    expect(row.expectation).toBe('Written 2: expect results in 8 to 12 weeks.')
+    expect(plain(row)).toEqual(plain(before))
+  })
+
+  it('completes a version with no writer call when only the step-down changed, taking the new template with no start date and keeping the steps', async () => {
+    const before = await started()
+    saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, verdict: { kind: 'stop' as const, taperTemplateId: 'TPR-STEROID-2' } } : p)))
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect(attempts).toBe(1)
+    const row = await latestRow()
+    expect(row).toMatchObject({ id: 'version-2', writerCalls: 0, reason: 'verdict', startedOn: before.startedOn })
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-2', startedOn: null }])
+    expect(plain(row)).toEqual(plain(before))
+    expect(row.expectation).toBe(before.expectation)
+  })
+
+  it('refills the step with the rules\' own pick when the writer fails three times, keeping the fixed steps the writer wrote', async () => {
+    const before = await started()
+    removeShelfProduct('entry-a')
+    script(throws(), throws(), throws())
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    const row = await latestRow()
+    expect(row).toMatchObject({ source: 'rules', model: null, promptHash: null, writerCalls: 3, writerRetryDueAt: at(3 * DAY + HOUR) })
+    expect(row.steps[0]).toMatchObject({ step: 'cleanse', product: { kind: 'candidate', code: 'CLEANSER-1' }, frequency: 'am', reason: 'A gentle cleanser that cleans the skin without stripping it.' })
+    expect(row.steps.slice(1)).toEqual(before.steps.slice(1).map((step) => ({ ...step, fixedFrom: before.id })))
+  })
+
+  it('switches a recommended product the user has got to their own shelf product when it joins the shelf, keeping its frequency and words, with no writer call', async () => {
+    await started()
+    await gotIt('treat')
+    const gotItVersion = await currentRow()
+    // The product the user got is on their shelf now (the typed scan finished) and the verdict keeps it for the treat step.
+    addProduct('entry-s', ['Aqua', 'Niacinamide'], { productId: 'prod-SERUM-1', name: 'Name SERUM-1', brand: 'Brand SERUM-1' })
+    world.entries = world.entries.map((entry) => (entry.id === 'entry-s' && entry.kind === 'product' ? { ...entry, productId: 'prod-SERUM-1' } : entry))
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-s', { kind: 'keep' }, 'treat')])
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect(attempts).toBe(1)
+    const row = await latestRow()
+    expect(row.writerCalls).toBe(0)
+    expect(row.steps[1]).toMatchObject({ step: 'treat', product: { kind: 'shelf', id: 'entry-s' }, frequency: 'pm', reason: 'Written 1: treat.', gotIt: false })
+    expect(row.steps.filter((_, i) => i !== 1).map(({ gotIt, fixedFrom, ...entry }) => entry)).toEqual(gotItVersion.steps.filter((_, i) => i !== 1).map(({ gotIt, fixedFrom, ...entry }) => entry))
+  })
+})
+
+describe('RoutineService.start', () => {
+  it('is 409 ROUTINE_NOT_READY before there is a routine, and while the first one is only pending', async () => {
+    expect(await errorOf(start())).toBeInstanceOf(ConflictError)
+    expect(await errorOf(start())).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    writer.hook = async () => {
+      expect(await errorOf(start())).toMatchObject({ code: 'ROUTINE_NOT_READY' })
+    }
+
+    await build('first')
+
+    expect((await currentRow()).startedOn).toBeNull()
+  })
+
+  it('makes today day 1, on the routine in force and its step-downs', async () => {
+    await firstBuild()
+    setClock(2 * DAY + 3 * HOUR)
+
+    await start()
+
+    const view = await current()
+    expect(view.status).toBe('ready')
+    const version = (view as { version: Row }).version
+    expect(version.startedOn).toBeInstanceOf(Date)
+    expect(utcDay(version.startedOn!)).toBe(utcDay(clock))
+    expect(version.tapers).toHaveLength(1)
+    expect(version.tapers[0]!.startedOn).toEqual(version.startedOn)
+  })
+
+  it('is idempotent: starting again on a later day moves nothing and appends no version', async () => {
+    await firstBuild()
+    setClock(2 * DAY)
+    await start()
+    const afterFirstStart = await currentRow()
+    setClock(5 * DAY)
+
+    await expect(start()).resolves.toBeUndefined()
+
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(afterFirstStart)
+    expect(ids).toBe(1)
+  })
+
+  it('reaches a build that is under way, so the version it completes already has the start date', async () => {
+    await firstBuild()
+    removeShelfProduct('entry-a')
+    setClock(DAY)
+    writer.hook = async () => {
+      await start()
+    }
+
+    await build('shelf')
+
+    const row = await currentRow()
+    expect(row.id).toBe('version-2')
+    expect(row.startedOn).not.toBeNull()
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(DAY)))
+  })
+})
+
+describe('RoutineService.gotIt: "I got it"', () => {
+  it('appends a ready version that is the routine in force with that step marked got, no writer call, and the product on the shelf', async () => {
+    const before = await started()
+    setClock(2 * DAY + HOUR)
+
+    await gotIt('treat')
+
+    const row = await currentRow()
+    expect(row).toMatchObject({ id: 'version-2', status: 'ready', reason: 'got-it', writerCalls: 0, createdAt: at(2 * DAY + HOUR), startedOn: before.startedOn })
+    expect(row.steps.map((s) => s.gotIt)).toEqual([false, true, false, false])
+    expect(plain(row)).toEqual(plain(before))
+    expect(row.tapers).toEqual(before.tapers)
+    expect(row.expectation).toBe(before.expectation)
+    expect(attempts).toBe(1)
+    // The shelf module is asked by catalog product id (what its add takes), with the caller's address for its limits, as the user.
+    expect(world.shelfAdds).toEqual([{ productId: 'prod-SERUM-1', clientIp: CLIENT_IP }])
+    expect(world.actors.at(-1)).toEqual(AMARA_ACTOR)
+  })
+
+  it('does not count toward the daily limit of writer builds', async () => {
+    await started()
+
+    await gotIt('moisturise')
+
+    expect(await repository.writerBuildsSince(AMARA_PROFILE, at(-DAY))).toBe(1)
+  })
+
+  it('is 409 STEP_NOT_RECOMMENDED for a step that holds the user\'s own product, appending nothing and adding nothing to the shelf', async () => {
+    const before = await started()
+
+    const error = await errorOf(gotIt('cleanse'))
+
+    expect(error).toBeInstanceOf(ConflictError)
+    expect(error).toMatchObject({ code: 'STEP_NOT_RECOMMENDED' })
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+    expect(world.shelfAdds).toEqual([])
+  })
+
+  it('is 409 STEP_NOT_RECOMMENDED for a step that says "use what you have"', async () => {
+    world.candidates.NG.moisturise = []
+    const before = await started()
+    expect(before.steps[2]!.product).toEqual({ kind: 'none' })
+
+    expect(await errorOf(gotIt('moisturise'))).toMatchObject({ code: 'STEP_NOT_RECOMMENDED' })
+
+    expect(world.shelfAdds).toEqual([])
+    expect(await repository.latest(AMARA_PROFILE)).toEqual(before)
+  })
+})
+
+describe('RoutineService.current', () => {
+  it('is pending before any routine is built', async () => {
+    expect(await current()).toEqual({ status: 'pending' })
+  })
+
+  it('serves the routine in force as ready', async () => {
+    const row = await firstBuild()
+
+    const view = await current()
+
+    expect(view).toMatchObject({ status: 'ready', version: { id: row.id, steps: row.steps, tapers: row.tapers, expectation: row.expectation, startedOn: null } })
+  })
+
+  it('serves the routine in force as updating, not a pending one, while a newer one is being built', async () => {
+    const before = await started()
+    removeShelfProduct('entry-a')
+    let viewDuring: unknown
+    writer.hook = async () => {
+      viewDuring = await current()
+    }
+    setClock(2 * DAY + HOUR)
+
+    await build('shelf')
+
+    expect(viewDuring).toMatchObject({ status: 'updating', version: { id: before.id, steps: before.steps } })
+    expect(await current()).toMatchObject({ status: 'ready', version: { id: 'version-2' } })
+  })
+
+  it('serves nothing but pending while the routine is being rebuilt after a safety change that the old routine does not reflect', async () => {
+    await started()
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    // The cleanser is gone too, so a step is broken and the writer has work: the build is then really under way.
+    removeShelfProduct('entry-a')
+    let viewDuring: unknown
+    writer.hook = async () => {
+      viewDuring = await current()
+    }
+    setClock(2 * DAY + HOUR)
+
+    await build('safety')
+
+    expect(viewDuring).toEqual({ status: 'pending' })
+    expect((await current()).status).toBe('ready')
+  })
+
+  it('stops counting a pending version from a build that died: young enough it is still an update under way, old enough it is ignored and the routine in force is simply ready', async () => {
+    const before = await started()
+    removeShelfProduct('entry-a')
+    vi.spyOn(repository, 'complete').mockRejectedValueOnce(new Error('the worker died'))
+    setClock(2 * DAY + HOUR)
+    await expect(build('shelf')).rejects.toThrow('the worker died')
+    expect((await latestRow()).status).toBe('pending')
+
+    setClock(2 * DAY + HOUR + 2 * MINUTE)
+    expect(await current()).toMatchObject({ status: 'updating', version: { id: before.id } })
+
+    setClock(2 * DAY + HOUR + 3 * HOUR)
+    expect(await current()).toMatchObject({ status: 'ready', version: { id: before.id } })
+  })
+
+  it('builds again over a pending version left by a build that died, and serves the new one', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    vi.spyOn(repository, 'complete').mockRejectedValueOnce(new Error('the worker died'))
+    setClock(2 * DAY + HOUR)
+    await expect(build('shelf')).rejects.toThrow('the worker died')
+
+    setClock(2 * DAY + 5 * HOUR)
+    expect(await build('shelf')).toBe('built')
+
+    expect(await current()).toMatchObject({ status: 'ready', version: { id: 'version-3' } })
+  })
+
+  it('keeps the logs free of what the person said and of product names', async () => {
+    const spies = spyOnConsole()
+    script(throws(), throws(), throws())
+
+    await build('first')
+
+    const logged = spies.flatMap((spy) => spy.mock.calls.map((call) => JSON.stringify(call))).join('\n')
+    expect(logged).not.toContain('Karo Glow Cream')
+    expect(logged).not.toContain('Calm Cleanser')
+  })
+})

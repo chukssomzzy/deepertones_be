@@ -1,15 +1,20 @@
 import { sql } from 'drizzle-orm'
 import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
+import { GOALS } from '../goals/goals.vocabulary'
 import { profiles } from '../profiles/profiles.table'
-import type { Routine, StoredRoutineStep } from './routines.types'
+import type { CautionState, StoredRoutineStep, StoredTaper } from './routines.types'
 
 /**
  * A profile's routine versions (spec #189): one row per build. A build appends a `pending` row, which is filled in once, to `ready`, when the build is done
- * (a build that needs no pending phase may append a `ready` row). A ready row is never changed again, except `served_at`. The newest `ready` row of a
+ * (a build that needs no pending phase may append a `ready` row). A ready row is never changed again, except `served_at` and `started_on` (and the dates of its
+ * `tapers`, set with it). The newest `ready` row of a
  * profile is its routine in force; a newer `pending` row is a build asked for and not done. Rows go with their profile (cascade).
  *
- * The routine is `steps` (the stored step list, with grounding kept here and never served), `tapers` and `expectation`: `[]`, `[]` and null while pending.
- * `started_on` is when the routine was started, carried forward by later builds; `served_at` is when this version was last returned to the user.
+ * The routine is `steps` (the stored step list, with grounding kept here and never served), `tapers` (each with the day its step-down began, null until the
+ * routine is started) and `expectation`: `[]`, `[]` and null while pending. `cautions` are the skeleton's cautions the build was made under (null while
+ * pending): a later read compares them with the person's current safety answers. `goal` is the goal it was built for (null while pending, and on a row
+ * written before the column existed), so a rebuild knows whether the goal has changed. `started_on` is when the routine was started, carried forward by later
+ * builds; `served_at` is when this version was last returned to the user.
  *
  * The rest records the build. `source` is who wrote the words (`writer` or the `rules` alone, then `model` and `prompt_hash` are null), null while pending,
  * and `reason` why it was built. `rules_version`, `catalog_version`, `verdict_fingerprint` and `routine_fingerprint` say what it was built from and what it
@@ -26,8 +31,10 @@ export const routineVersions = sqliteTable(
     status: text('status', { enum: ['pending', 'ready'] }).notNull(),
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
     steps: text('steps', { mode: 'json' }).$type<StoredRoutineStep[]>().notNull(),
-    tapers: text('tapers', { mode: 'json' }).$type<Routine['tapers']>().notNull(),
+    tapers: text('tapers', { mode: 'json' }).$type<StoredTaper[]>().notNull(),
     expectation: text('expectation'),
+    cautions: text('cautions', { mode: 'json' }).$type<CautionState[]>(),
+    goal: text('goal', { enum: GOALS }),
     startedOn: integer('started_on', { mode: 'timestamp_ms' }),
     servedAt: integer('served_at', { mode: 'timestamp_ms' }),
     model: text('model'),

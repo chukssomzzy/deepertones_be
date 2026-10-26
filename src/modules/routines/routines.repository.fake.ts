@@ -23,6 +23,17 @@ export class FakeRoutinesRepository implements RoutinesRepository {
     if (row) this.rows.set(id, { ...row, servedAt: new Date(at) })
   }
 
+  async markStarted(profileId: string, on: Date): Promise<void> {
+    for (const [id, row] of this.rows) {
+      if (row.profileId !== profileId || row.startedOn !== null) continue
+      this.rows.set(id, { ...row, startedOn: new Date(on), tapers: row.tapers.map((taper) => ({ ...taper, startedOn: new Date(taper.startedOn ?? on) })) })
+    }
+  }
+
+  async lastServedBefore(profileId: string, excludeId: string): Promise<RoutineVersionRow | null> {
+    return this.newest(profileId, (row) => row.status === 'ready' && row.servedAt !== null && row.id !== excludeId)
+  }
+
   async complete(id: string, built: CompletedRoutineBuild): Promise<boolean> {
     const row = this.rows.get(id)
     if (!row || row.status !== 'pending') return false

@@ -163,6 +163,16 @@ export type StoredRoutineStep = RoutineEntry & {
   fixedFrom: string | null
 }
 
+/** A step-down as stored: the rules' choice of template for a stopped product, and the day it began (set when the routine is started), or null before that. */
+export type StoredTaper = {
+  /** The shelf product being stopped. */
+  shelfProductId: string
+  /** The approved taper template, exactly as the verdict named it. */
+  templateId: string
+  /** The day the step-down began, or null while the routine is not started. */
+  startedOn: Date | null
+}
+
 export type Routine = {
   /** The entries, in routine order. */
   steps: RoutineEntry[]

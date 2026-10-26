@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { RoutinesRepository } from './routines.repository'
+import type { Goal } from '../goals/goals.vocabulary'
+import type { CautionState } from './routines.types'
 
 // The stored routine versions (spec #189): one row per build, appended `pending` and filled in once to `ready` (or appended `ready` outright), with the
 // newest `ready` row being the routine in force. Behaviour every
@@ -9,15 +11,26 @@ import type { RoutinesRepository } from './routines.repository'
 // Assumed shapes (what this file pins):
 //   append(row)                    resolves to undefined. `row` has every column: id, profileId, status, createdAt, steps, tapers, expectation, startedOn,
 //                                  servedAt, model, promptHash, catalogVersion, rulesVersion, hintsShown, verdictFingerprint, routineFingerprint, source,
-//                                  reason, writerRetryDueAt, writerCalls. A pending row has steps [], tapers [], expectation null, source null and no
-//                                  writer calls yet; a rules-built row has no model or prompt hash. An id already used rejects.
+//                                  reason, writerRetryDueAt, writerCalls, cautions, goal. A pending row has steps [], tapers [], expectation null, cautions null,
+//                                  source null and no writer calls yet; a rules-built row has no model or prompt hash. An id already used rejects.
+//                                  Each taper is { shelfProductId, templateId, startedOn: Date | null } (a StoredTaper) and must come back with its
+//                                  startedOn a Date, to the millisecond, or null: a JSON column keeps text, so the repository has to turn it back.
+//                                  `cautions` is the skeleton's CautionState[] (order kept, [] is not null) or null while pending. `goal` is the goal the
+//                                  version was built for, or null while pending (and on a row written before the column).
+
 //   complete(id, built)            fills that one pending row with the finished build (steps, tapers, expectation, model, promptHash, catalogVersion,
-//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls) and makes it 'ready', resolving to true. It does so
+//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal) and makes it 'ready', resolving to true. It does so
 //                                  once: an unknown id, or a row that is already ready, resolves to false and changes nothing.
 //   latest(profileId)              the row with the newest createdAt, whatever its status, or null.
 //   current(profileId)             the row with the newest createdAt among the `ready` ones, or null.
-//   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined. A ready
-//                                  row is changed by nothing else.
+//   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined.
+//   markStarted(profileId, on)     sets startedOn to `on` on every row of that profile whose startedOn is null, a pending row included, and on no other row:
+//                                  an earlier start is never moved, so calling it again is a no-op. Resolves to undefined; a profile with no rows is ignored.
+//                                  It also stamps `on` as the startedOn of each step-down of those rows whose startedOn is null (one already dated keeps
+//                                  its date): that is how Start puts the date on a step-down of the routine in force. Otherwise a ready row is changed by
+//                                  nothing but servedAt and startedOn (the other markStarted tests use rows with no step-downs, to keep that apart).
+//   lastServedBefore(profileId, excludeId)   the profile's newest `ready` row (by createdAt) whose servedAt is not null and whose id is not `excludeId`, or null.
+//                                  Pending rows never count, even when marked served. It is "every served version but this one", not "older than this one".
 //   writerBuildsSince(profileId, since)   how many of that profile's rows have writerCalls > 0 and createdAt >= since, whatever their source, status or reason.
 //
 // Fixtures never give two rows of one profile the same createdAt: which of two such rows is newest is not specified.
@@ -56,7 +69,15 @@ const stepsOf = (): Appended['steps'] => [
   { step: 'protect', product: { kind: 'shelf', id: 'entry-2' }, frequency: 'am', reason: 'Sunscreen keeps dark marks from coming back.', grounding: ['https://example.org/evidence/spf'], gotIt: false, fixedFrom: 'version-0' },
 ]
 
-const tapersOf = (): Appended['tapers'] => [{ shelfProductId: 'entry-3', templateId: 'TPR-STEROID-1' }]
+// One step-down under way (a start date, to the millisecond) and one not started (null): a JSON column must give both back as they were.
+const tapersOf = (): Appended['tapers'] => [
+  { shelfProductId: 'entry-3', templateId: 'TPR-STEROID-1', startedOn: new Date(BASE.getTime() - DAY + 456) },
+  { shelfProductId: 'entry-4', templateId: 'TPR-LIGHTENING-1', startedOn: null },
+]
+
+const cautionsOf = (): CautionState[] => ['tapering', 'recent-reaction']
+
+const GOAL: Goal = 'fade-dark-marks'
 
 /** A pending row: a build requested and not yet done. The routine and what only the build knows are empty. */
 const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partial<Appended> = {}): Appended => ({
@@ -67,6 +88,8 @@ const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partia
   steps: [],
   tapers: [],
   expectation: null,
+  cautions: null,
+  goal: null,
   startedOn: null,
   servedAt: null,
   model: null,
@@ -92,6 +115,8 @@ const readyRow = (profileId: string, id: string, createdAt: Date, over: Partial<
   steps: stepsOf(),
   tapers: tapersOf(),
   expectation: 'Give it 8 to 12 weeks before judging.',
+  cautions: cautionsOf(),
+  goal: GOAL,
   startedOn: at(-DAY),
   servedAt: null,
   model: 'claude-sonnet-5-5',
@@ -113,6 +138,8 @@ const builtOf = (over: Partial<Completed> = {}): Completed => ({
   steps: stepsOf(),
   tapers: tapersOf(),
   expectation: 'Give it 8 to 12 weeks before judging.',
+  cautions: cautionsOf(),
+  goal: GOAL,
   model: 'claude-sonnet-5-5',
   promptHash: 'prompt-hash-1',
   catalogVersion: 7,
@@ -489,6 +516,283 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await expect(repository.markServed(crypto.randomUUID(), at(HOUR))).resolves.toBeUndefined()
 
         expect(await repository.latest(profileId)).toBeNull()
+      })
+    })
+
+    describe('cautions', () => {
+      it('keeps the cautions of a version in the order they were given, and an empty list as an empty list, not as null', async () => {
+        const { repository, newAccount } = await make()
+        const withSome = await newAccount()
+        const withNone = await newAccount()
+        await repository.append(readyRow(withSome.profileId, crypto.randomUUID(), BASE, { cautions: ['pregnant', 'tapering', 'prescription'] }))
+        await repository.append(readyRow(withNone.profileId, crypto.randomUUID(), BASE, { cautions: [] }))
+
+        expect((await latestOf(repository, withSome.profileId)).cautions).toEqual(['pregnant', 'tapering', 'prescription'])
+        expect((await latestOf(repository, withNone.profileId)).cautions).toEqual([])
+      })
+
+      it('has none recorded on a version appended without them: null, which is not the same as no cautions', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { cautions: null }))
+
+        expect((await latestOf(repository, profileId)).cautions).toBeNull()
+      })
+
+      it('is null while a version is pending, and is filled in with the build\'s cautions when it completes', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        expect((await latestOf(repository, profileId)).cautions).toBeNull()
+
+        await repository.complete(pending.id, builtOf({ cautions: ['breastfeeding', 'recent-reaction'] }))
+
+        expect((await latestOf(repository, profileId)).cautions).toEqual(['breastfeeding', 'recent-reaction'])
+      })
+    })
+
+    describe('goal', () => {
+      it('keeps the goal a version was built for, and null for one appended without it', async () => {
+        const { repository, newAccount } = await make()
+        const withGoal = await newAccount()
+        const withNone = await newAccount()
+        await repository.append(readyRow(withGoal.profileId, crypto.randomUUID(), BASE, { goal: 'glow' }))
+        await repository.append(readyRow(withNone.profileId, crypto.randomUUID(), BASE, { goal: null }))
+
+        expect((await latestOf(repository, withGoal.profileId)).goal).toBe('glow')
+        expect((await latestOf(repository, withNone.profileId)).goal).toBeNull()
+      })
+
+      it('is null while a version is pending, and is filled in with the build\'s goal when it completes', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        expect((await latestOf(repository, profileId)).goal).toBeNull()
+
+        await repository.complete(pending.id, builtOf({ goal: 'glow' }))
+
+        expect((await latestOf(repository, profileId)).goal).toBe('glow')
+      })
+    })
+
+    describe('step-downs as stored', () => {
+      it('gives each start date back as a Date to the millisecond, and a step-down not started as null, from an appended version', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE))
+
+        const [started, notStarted] = (await latestOf(repository, profileId)).tapers
+
+        expect(started!.startedOn).toBeInstanceOf(Date)
+        expect(started!.startedOn!.getTime()).toBe(BASE.getTime() - DAY + 456)
+        expect(notStarted).toEqual({ shelfProductId: 'entry-4', templateId: 'TPR-LIGHTENING-1', startedOn: null })
+      })
+
+      it('gives the same back from a version completed from pending', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+
+        await repository.complete(pending.id, builtOf())
+
+        const [started, notStarted] = (await latestOf(repository, profileId)).tapers
+        expect(started).toEqual({ shelfProductId: 'entry-3', templateId: 'TPR-STEROID-1', startedOn: new Date(BASE.getTime() - DAY + 456) })
+        expect(started!.startedOn).toBeInstanceOf(Date)
+        expect(notStarted!.startedOn).toBeNull()
+      })
+    })
+
+    describe('markStarted', () => {
+      it('sets the start date on the profile\'s ready version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] })
+        await repository.append(row)
+
+        await expect(repository.markStarted(profileId, at(HOUR))).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, startedOn: at(HOUR) })
+      })
+
+      it('stamps the start date on each step-down of the version that is not dated yet, and leaves a step-down already under way with its own date', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null })
+        await repository.append(row)
+
+        await repository.markStarted(profileId, at(HOUR))
+
+        const stored = await latestOf(repository, profileId)
+        expect(stored.startedOn).toEqual(at(HOUR))
+        expect(stored.tapers).toEqual([
+          { shelfProductId: 'entry-3', templateId: 'TPR-STEROID-1', startedOn: new Date(BASE.getTime() - DAY + 456) },
+          { shelfProductId: 'entry-4', templateId: 'TPR-LIGHTENING-1', startedOn: at(HOUR) },
+        ])
+        expect(stored.steps).toEqual(row.steps)
+      })
+
+      it('starts a pending version too, so a build under way carries the start date into its routine', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const ready = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] })
+        const pending = pendingRow(profileId, crypto.randomUUID(), at(MINUTE))
+        await repository.append(ready)
+        await repository.append(pending)
+
+        await repository.markStarted(profileId, at(HOUR))
+
+        expect(await repository.latest(profileId)).toEqual({ ...pending, startedOn: at(HOUR) })
+        expect(await repository.current(profileId)).toEqual({ ...ready, startedOn: at(HOUR) })
+      })
+
+      it('starts every version of the profile that has no start date, the older ready ones included', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const oldest = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] })
+        const newest = readyRow(profileId, crypto.randomUUID(), at(HOUR), { startedOn: null, tapers: [], routineFingerprint: 'routine-fp-2' })
+        await repository.append(oldest)
+        await repository.append(newest)
+        // The only way to read an older row back is as the last one served.
+        await repository.markServed(oldest.id, at(2 * HOUR))
+
+        await repository.markStarted(profileId, at(3 * HOUR))
+
+        expect(await repository.lastServedBefore(profileId, newest.id)).toEqual({ ...oldest, servedAt: at(2 * HOUR), startedOn: at(3 * HOUR) })
+        expect((await latestOf(repository, profileId)).startedOn).toEqual(at(3 * HOUR))
+      })
+
+      it('keeps a start date already set: the first start is the start, so asking again moves nothing', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] })
+        await repository.append(row)
+        await repository.markStarted(profileId, at(HOUR))
+
+        await expect(repository.markStarted(profileId, at(5 * DAY))).resolves.toBeUndefined()
+
+        expect((await latestOf(repository, profileId)).startedOn).toEqual(at(HOUR))
+      })
+
+      it('does not move the start date of a version that was already started when it was appended', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: at(-3 * DAY), tapers: [] })
+        await repository.append(row)
+
+        await repository.markStarted(profileId, at(HOUR))
+
+        expect(await repository.latest(profileId)).toEqual(row)
+      })
+
+      it('starts only that profile\'s versions', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const other = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] }))
+        const othersRow = readyRow(other.profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] })
+        await repository.append(othersRow)
+
+        await repository.markStarted(profileId, at(HOUR))
+
+        expect(await repository.latest(other.profileId)).toEqual(othersRow)
+      })
+
+      it('keeps the start date to the millisecond', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] }))
+
+        await repository.markStarted(profileId, new Date(BASE.getTime() + 789))
+
+        expect((await latestOf(repository, profileId)).startedOn!.getTime()).toBe(BASE.getTime() + 789)
+      })
+
+      it('ignores a profile with no versions, creating nothing', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+
+        await expect(repository.markStarted(profileId, at(HOUR))).resolves.toBeUndefined()
+
+        expect(await repository.latest(profileId)).toBeNull()
+      })
+    })
+
+    describe('lastServedBefore', () => {
+      it('is the newest ready version that was served, apart from the one named', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: 'routine-fp-1' })
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR), { routineFingerprint: 'routine-fp-2' })
+        const third = readyRow(profileId, crypto.randomUUID(), at(2 * HOUR), { routineFingerprint: 'routine-fp-3' })
+        for (const row of [first, second, third]) await repository.append(row)
+        await repository.markServed(first.id, at(3 * HOUR))
+        await repository.markServed(second.id, at(4 * HOUR))
+
+        expect(await repository.lastServedBefore(profileId, third.id)).toEqual({ ...second, servedAt: at(4 * HOUR) })
+      })
+
+      it('skips a version that was never served, however new: the current version is not the one the user last saw', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const served = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: 'routine-fp-1' })
+        const unserved = readyRow(profileId, crypto.randomUUID(), at(HOUR), { routineFingerprint: 'routine-fp-2' })
+        await repository.append(served)
+        await repository.append(unserved)
+        await repository.markServed(served.id, at(2 * HOUR))
+
+        expect(await repository.lastServedBefore(profileId, crypto.randomUUID())).toEqual({ ...served, servedAt: at(2 * HOUR) })
+      })
+
+      it('goes by the version named, not by age: naming the older one gives the newer served one', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const older = readyRow(profileId, crypto.randomUUID(), BASE, { routineFingerprint: 'routine-fp-1' })
+        const newer = readyRow(profileId, crypto.randomUUID(), at(HOUR), { routineFingerprint: 'routine-fp-2' })
+        await repository.append(older)
+        await repository.append(newer)
+        await repository.markServed(older.id, at(2 * HOUR))
+        await repository.markServed(newer.id, at(3 * HOUR))
+
+        expect((await repository.lastServedBefore(profileId, older.id))?.id).toBe(newer.id)
+        expect((await repository.lastServedBefore(profileId, newer.id))?.id).toBe(older.id)
+      })
+
+      it('is null when no version was served, and when the only served one is the one named', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(row)
+        expect(await repository.lastServedBefore(profileId, crypto.randomUUID())).toBeNull()
+
+        await repository.markServed(row.id, at(HOUR))
+
+        expect(await repository.lastServedBefore(profileId, row.id)).toBeNull()
+        expect((await repository.lastServedBefore(profileId, crypto.randomUUID()))?.id).toBe(row.id)
+      })
+
+      it('never gives a pending version, even one marked served', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        await repository.markServed(pending.id, at(HOUR))
+
+        expect(await repository.lastServedBefore(profileId, crypto.randomUUID())).toBeNull()
+      })
+
+      it('gives only that profile\'s versions', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const other = await newAccount()
+        const othersRow = readyRow(other.profileId, crypto.randomUUID(), BASE)
+        await repository.append(othersRow)
+        await repository.markServed(othersRow.id, at(HOUR))
+
+        expect(await repository.lastServedBefore(profileId, crypto.randomUUID())).toBeNull()
+        expect((await repository.lastServedBefore(other.profileId, crypto.randomUUID()))?.id).toBe(othersRow.id)
       })
     })
 

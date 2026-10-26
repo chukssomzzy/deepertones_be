@@ -139,3 +139,18 @@ describe('ProfilesService.of', () => {
     expect(await service.of('u-nobody')).toEqual([])
   })
 })
+
+describe('ProfilesService.find', () => {
+  it('returns the profile by its id with the user it belongs to, default or not (what a job needs to act as the user)', async () => {
+    const { service } = await setup()
+
+    expect(await service.find('p-ada')).toMatchObject({ id: 'p-ada', userId: 'u-ada' })
+    expect(await service.find('p-ada-2')).toMatchObject({ id: 'p-ada-2', userId: 'u-ada' })
+  })
+
+  it('returns null for an id that is no profile', async () => {
+    const { service } = await setup()
+
+    expect(await service.find('no-such-profile')).toBeNull()
+  })
+})
