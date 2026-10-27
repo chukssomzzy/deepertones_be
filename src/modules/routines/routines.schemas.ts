@@ -124,3 +124,40 @@ export const RoutineResponse = z
   })
 
 export type RoutineResponse = z.infer<typeof RoutineResponse>
+
+const LookForProduct = z
+  .object({
+    code: z.string().openapi({ description: 'The catalog code of the product.' }),
+    brand: z.string(),
+    name: z.string(),
+    imageUrl: z.string().nullable(),
+    origin: z.literal('brand-submitted').optional().openapi({ description: 'Only on a product a brand submitted for review, which says so. The review fee never affects the choice.' }),
+    aboutPrice: z.object({ amount: z.number(), currency: z.string() }).openapi({ description: 'About what it costs: the lowest price it is sold at in the country the profile shops in.' }),
+    whereSold: z.string().nullable().openapi({ description: 'Where to find it in the shopping country; null when the review does not say.' }),
+    why: z.string().openapi({ description: 'One fixed line on why this product is here: the concerns of the goal it works on, in plain words.' }),
+    keyIngredient: z.string().nullable(),
+    strength: z.string().nullable(),
+    inYourRoutine: z.boolean().openapi({ description: 'True for the product the routine recommends for this step; it is listed first.' }),
+  })
+  .openapi('LookForProduct')
+
+export const LookForResponse = z
+  .object({
+    category: z.string().openapi({ description: 'The step\'s plain noun: Cleanser, Treatment, Moisturiser or Sunscreen.' }),
+    guide: z
+      .object({
+        whatItDoes: z.string(),
+        lookFor: z.string().openapi({ description: 'What to look for in this kind of product. For a person who is pregnant or breastfeeding it is the guide\'s pregnancy-safe text when it has one.' }),
+        forDeeperSkin: z.string(),
+      })
+      .openapi({ description: 'Reviewed copy for the step, written for the person\'s goal when the guide has a row for it.' }),
+    typicalPrice: z
+      .object({ low: z.number(), high: z.number(), currency: z.string() })
+      .nullable()
+      .openapi({ description: 'The lowest price to the highest price across every reviewed product for the step in the shopping country, not only the ones listed; null when there are none.' }),
+    commonlySoldAt: z.array(z.string()).openapi({ description: 'Up to three places that most of those products are sold at, most common first.' }),
+    products: z.array(LookForProduct).openapi({ description: 'At most ten reviewed products that suit the person: the routine\'s pick first, then the cheapest.' }),
+  })
+  .openapi('LookFor')
+
+export type LookForResponse = z.infer<typeof LookForResponse>

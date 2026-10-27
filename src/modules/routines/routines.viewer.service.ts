@@ -6,22 +6,28 @@ import type { ProductCatalogService } from '../catalog/catalog.service'
 import type { ProductForm, RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
 import type { GoalsService } from '../goals/goals.service'
+import type { Goal } from '../goals/goals.vocabulary'
 import type { RecommendationService } from '../recommendations/recommendations.service'
+import type { SafetyService } from '../safety/safety.service'
 import type { ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { VerdictService } from '../verdicts/verdicts.service'
 import type { RoutinesRepository } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
-import type { RoutineResponse } from './routines.schemas'
+import { titleFor } from './routines.copy'
+import { commonlySoldAt, LOOK_FOR_PRODUCTS, whyFor } from './routines.look-for'
+import type { LookForResponse, RoutineResponse } from './routines.schemas'
 import { isSoldIn, toRoutineResponse } from './routines.view'
 
 export type RoutineViewerServiceDeps = {
   routines: Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>
   goals: Pick<GoalsService, 'requireGoal'>
-  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries'>
+  workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor'>
   catalog: Pick<ProductCatalogService, 'shelfFacts' | 'productSummaries'>
   shelf: Pick<ShelfService, 'activeEntriesFor'>
-  recommendations: Pick<RecommendationService, 'shoppingFor'>
+  recommendations: Pick<RecommendationService, 'shoppingFor' | 'candidatesFor'>
+  /** Whether the person is pregnant or breastfeeding, for the guide's pregnancy text. */
+  safety: Pick<SafetyService, 'currentOrNull'>
   repository: Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
   /** Tells whoever follows a profile's routine that it changed (`routine:<profileId>`). */
   events: ScanEvents
@@ -45,6 +51,7 @@ export class RoutineViewerService {
   private readonly catalog: RoutineViewerServiceDeps['catalog']
   private readonly shelf: RoutineViewerServiceDeps['shelf']
   private readonly recommendations: RoutineViewerServiceDeps['recommendations']
+  private readonly safety: RoutineViewerServiceDeps['safety']
   private readonly repository: RoutineViewerServiceDeps['repository']
   private readonly events: ScanEvents
   private readonly enabled: boolean
@@ -57,6 +64,7 @@ export class RoutineViewerService {
     this.catalog = deps.catalog
     this.shelf = deps.shelf
     this.recommendations = deps.recommendations
+    this.safety = deps.safety
     this.repository = deps.repository
     this.events = deps.events
     this.enabled = deps.enabled
@@ -129,6 +137,62 @@ export class RoutineViewerService {
   }
 
   /**
+   * What to look for in a step, and the reviewed products that suit the person (screens 4.7 and 4.8). The gates are `current`'s; then 409 `ROUTINE_NOT_READY` when there is
+   * no routine to show (a safety change that hides it included), 409 `STEP_IS_YOURS` when the routine uses the person's own product for the step (they are not pushed to
+   * buy a replacement), and 503 `GUIDE_UNAVAILABLE` when no approved guide covers the step. A recommended step and a "use what you have" step both answer. Reads only: it
+   * asks for no build and marks nothing served.
+   *
+   * The products are the step's candidates as the recommendation rules found them, none filtered here: the routine's pick first (counted in the ten) when it is one
+   * of them, then the rest as they came (cheapest, then code). A pick that is not a candidate (sold elsewhere now, or retired) is not shown. The price range and the
+   * places are over every candidate, not only the ten shown.
+   */
+  async lookFor(step: RoutineStep): Promise<LookForResponse> {
+    const { profileId, goal } = await this.gatedWithGoal()
+    const view = await this.routines.current(profileId)
+    if (view.status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
+    const chosen = view.version.steps.find((entry) => entry.step === step)?.product
+    if (chosen?.kind === 'shelf') throw new ConflictError('STEP_IS_YOURS', 'You already use your own product for this step')
+    const guide = await this.workbook.guideFor(step, goal)
+    if (guide === null) throw new UnavailableError('GUIDE_UNAVAILABLE', 'The guide for this step is not available yet')
+    const [candidates, shopping, countries, safety] = await Promise.all([
+      this.recommendations.candidatesFor({ step }),
+      this.recommendations.shoppingFor(profileId),
+      this.workbook.countries(),
+      this.safety.currentOrNull(),
+    ])
+    const currency = countries.find((country) => country.code === shopping.country)?.currency
+    const pick = chosen?.kind === 'candidate' ? chosen.code : null
+    const shown = [...candidates.filter(({ code }) => code === pick), ...candidates.filter(({ code }) => code !== pick)].slice(0, LOOK_FOR_PRODUCTS)
+    return {
+      category: titleFor({ step, form: null }),
+      guide: {
+        whatItDoes: guide.whatItDoes,
+        lookFor: safety?.excludesPregnancyCaution && guide.lookForWhenPregnant !== null ? guide.lookForWhenPregnant : guide.lookFor,
+        forDeeperSkin: guide.forDeeperSkin,
+      },
+      // A candidate is only ever found in an active country, which has a currency; with none there is nothing to price.
+      typicalPrice: currency === undefined || candidates.length === 0 ? null : { low: Math.min(...candidates.map((c) => c.priceMin)), high: Math.max(...candidates.map((c) => c.priceMax)), currency },
+      commonlySoldAt: commonlySoldAt(candidates),
+      products:
+        currency === undefined
+          ? []
+          : shown.map((candidate) => ({
+              code: candidate.code,
+              brand: candidate.product.brand,
+              name: candidate.product.name,
+              imageUrl: candidate.product.imageUrl,
+              ...(candidate.origin === 'brand-submitted' ? { origin: 'brand-submitted' as const } : {}),
+              aboutPrice: { amount: candidate.priceMin, currency },
+              whereSold: candidate.whereSold,
+              why: whyFor(goal, candidate.skinConcerns),
+              keyIngredient: candidate.keyIngredient,
+              strength: candidate.strength,
+              inYourRoutine: candidate.code === pick,
+            })),
+    }
+  }
+
+  /**
    * Sends the profile's routine to whoever follows it, as the body GET answers (`routine`), and `done` when it is ready. For the build to call, by profile id with no
    * gates and no session. Never marks a version served: only a person looking at it does. Throws when it cannot be sent; callers log that.
    */
@@ -140,11 +204,17 @@ export class RoutineViewerService {
 
   /** The caller's profile once they may see a routine: signed up, with a goal, and the verdict available. */
   private async gated(): Promise<string> {
+    return (await this.gatedWithGoal()).profileId
+  }
+
+  /** `gated`, and the goal it found. */
+  private async gatedWithGoal(): Promise<{ profileId: string; goal: Goal }> {
     const user = requireUser()
     if (user.status !== 'verified') throw new ForbiddenError('SIGNUP_REQUIRED', 'Sign up to get your routine')
-    await this.goals.requireGoal()
+    // requireGoal only answers a goal that was sorted, so there is one.
+    const goal = (await this.goals.requireGoal()).goal!
     if (VerdictService.lacksTapers(await this.workbook.verdictReference())) throw new UnavailableError('VERDICT_UNAVAILABLE', 'The routine is not available yet')
-    return user.profileId
+    return { profileId: user.profileId, goal }
   }
 
   private async publishRoutine(profileId: string, view: RoutineView): Promise<void> {

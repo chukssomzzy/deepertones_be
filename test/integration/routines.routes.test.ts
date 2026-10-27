@@ -17,7 +17,7 @@ import { MemoryEmailSender } from '../../src/providers/email/memory.email'
 import { MemoryJobQueue } from '../../src/providers/job-queue/memory.job-queue'
 import { MemoryProductAnalyst } from '../../src/providers/product-analysis/memory.product-analyst'
 import { MemoryProductResearcher } from '../../src/providers/product-research/memory.product-researcher'
-import { applied, code, taperRow } from './admin.catalog.support'
+import { applied, code, guideRow, taperRow } from './admin.catalog.support'
 import { availabilityRow, countryRow, productRow, putCountry, type RawWorkbook } from './catalog.workbook.support'
 import { BURST_NEEDS_MS, inOneRateWindow, RATE_TEST_TIMEOUT_MS } from './rate-window'
 import { parseFrame, sseReader, type SseReader } from './sse'
@@ -38,7 +38,8 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 //   product = { kind: 'own', entryId, brand, name } | { kind: 'recommended', code, brand, name, imageUrl, origin?, price: { min, max, currency } | null, whereSold,
 //             soldInCurrentCountry, soldElsewhere, keyIngredient, strength, notYetGot } | { kind: 'none' }
 //   Taper = { entryId, brand, name, code, kind, whatToExpect, seeAProfessionalIf, steps: { fromWeek, toWeek, frequency, fromDate?, toDate? }[] }
-// GET /me/routine, GET /me/routine/events, POST /me/routine/start, POST /me/routine/steps/{step}/got-it and POST /me/routine/steps/{step}/find-sold-here.
+// GET /me/routine, GET /me/routine/events, POST /me/routine/start, POST /me/routine/steps/{step}/got-it, POST /me/routine/steps/{step}/find-sold-here and (#217 PR 2)
+// GET /me/routine/steps/{step}/look-for, whose body is pinned in its own describe at the foot of this file.
 // Every one is for a signed-up account: 401 AUTH_REQUIRED, then 403 SIGNUP_REQUIRED (a guest), then 409 GOAL_REQUIRED, then 503 VERDICT_UNAVAILABLE (a step-down
 // template of the verdict is not approved yet). Note the order against the verdict's own, which answers 503 before 409.
 // Start answers 200 with the body (409 ROUTINE_NOT_READY before there is a routine) and is idempotent; got-it answers 200 with the body (409 ROUTINE_NOT_READY,
@@ -211,6 +212,7 @@ const getRoutine = (guest?: Guest) => send('GET', '', guest)
 const startRoutine = (guest?: Guest) => send('POST', '/start', guest)
 const gotIt = (step: string, guest?: Guest) => send('POST', `/steps/${step}/got-it`, guest)
 const findSoldHere = (step: string, guest?: Guest) => send('POST', `/steps/${step}/find-sold-here`, guest)
+const lookFor = (step: string, guest?: Guest) => send('GET', `/steps/${step}/look-for`, guest)
 const eventsOf = (guest?: Guest) => send('GET', '/events', guest)
 const watch = async (guest: Guest) => {
   const res = await eventsOf(guest)
@@ -232,6 +234,7 @@ const ENDPOINTS: [string, (guest?: Guest) => Promise<Response>][] = [
   ['POST /me/routine/start', startRoutine],
   ['POST /me/routine/steps/{step}/got-it', (guest) => gotIt('moisturise', guest)],
   ['POST /me/routine/steps/{step}/find-sold-here', (guest) => findSoldHere('treat', guest)],
+  ['GET /me/routine/steps/{step}/look-for', (guest) => lookFor('treat', guest)],
 ]
 
 // --- the shelf and the catalog ---
@@ -1131,6 +1134,167 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const noGoal = await eventsOf(guest)
       expect(noGoal.status).toBe(409)
       expect(await errorCodeOf(noGoal)).toBe('GOAL_REQUIRED')
+    })
+  })
+
+  // #217 PR 2 (screens 4.7 and 4.8). The body is { category, guide: { whatItDoes, lookFor, forDeeperSkin }, typicalPrice: { low, high, currency } | null, commonlySoldAt: string[],
+  // products: { code, brand, name, imageUrl, origin?, aboutPrice: { amount, currency }, whereSold, why, keyIngredient, strength, inYourRoutine }[] }. The guide texts are the
+  // workbook's base rows (admin.catalog.support's baseGuideRows says "What moisturise does." and so on), the prices and places are the seeded availability rows, and the
+  // routine is the seeded one: moisturise's pick is MOIST_NG (3000 to 4500, brand-submitted) and a cheaper MOIST_GH_TOO (2500 to 3000) is the other Nigerian candidate.
+  // The seeded person has the glow goal (radiance, moisture, texture), so a product for hd_moisture works on "dry skin".
+  describe('GET /api/v1/me/routine/steps/{step}/look-for', () => {
+    const PREGNANT_LOOK_FOR = 'Look for a plain moisturiser with no added actives.'
+    const GLOW_PROTECT = { what_it_does: 'Protects your glow from the sun.', look_for: 'A sunscreen that feels light on the skin.', for_deeper_skin: 'Pick a finish that leaves no grey film.' }
+    type LookForBody = {
+      category: string
+      guide: { whatItDoes: string; lookFor: string; forDeeperSkin: string }
+      typicalPrice: { low: number; high: number; currency: string } | null
+      commonlySoldAt: string[]
+      products: Record<string, any>[]
+    }
+    const lookForOf = async (step: string, guest: Guest) => dataOf<LookForBody>(await lookFor(step, guest))
+
+    beforeAll(async () => {
+      await applied((workbook) => {
+        const moisturiseBase = workbook.guides.rows.find((row) => row.step === 'moisturise' && row.goal === null)!
+        moisturiseBase.look_for_when_pregnant = PREGNANT_LOOK_FOR
+        workbook.guides.rows.push(guideRow({ step: 'protect', goal: 'glow', ...GLOW_PROTECT }))
+      })
+    })
+
+    it('answers a recommended step with its guide, price range, places and reviewed products: the routine\'s pick first although a cheaper one exists', async () => {
+      const { guest } = await withRoutine()
+
+      const res = await lookFor('moisturise', guest)
+
+      expect(res.status).toBe(200)
+      expect(await res.json()).toEqual({
+        success: true,
+        status: 200,
+        message: expect.any(String),
+        data: {
+          category: 'Moisturiser',
+          guide: { whatItDoes: 'What moisturise does.', lookFor: 'What to look for in moisturise.', forDeeperSkin: 'Deeper skin and moisturise.' },
+          typicalPrice: { low: 2500, high: 4500, currency: 'NGN' },
+          commonlySoldAt: ['Pharmacies and online'],
+          products: [
+            {
+              code: MOIST_NG.code,
+              brand: MOIST_NG.brand,
+              name: MOIST_NG.name,
+              imageUrl: null,
+              origin: 'brand-submitted',
+              aboutPrice: { amount: 3000, currency: 'NGN' },
+              whereSold: 'Pharmacies and online',
+              why: 'Works on dry skin.',
+              keyIngredient: 'Shea butter',
+              strength: '15%',
+              inYourRoutine: true,
+            },
+            {
+              code: MOIST_GH_TOO.code,
+              brand: MOIST_GH_TOO.brand,
+              name: MOIST_GH_TOO.name,
+              imageUrl: null,
+              aboutPrice: { amount: 2500, currency: 'NGN' },
+              whereSold: 'Pharmacies and online',
+              why: 'Works on dry skin.',
+              keyIngredient: null,
+              strength: null,
+              inYourRoutine: false,
+            },
+          ],
+        },
+      })
+    })
+
+    it('answers a step whose pick is sold only in another country with the guide and no products or price, not an error', async () => {
+      const { guest } = await withRoutine()
+
+      const body = await lookForOf('treat', guest)
+
+      expect(body).toEqual({
+        category: 'Treatment',
+        guide: { whatItDoes: 'What treat does.', lookFor: 'What to look for in treat.', forDeeperSkin: 'Deeper skin and treat.' },
+        typicalPrice: null,
+        commonlySoldAt: [],
+        products: [],
+      })
+    })
+
+    it('answers a "use what you have" step with the guide written for the person\'s goal instead of the step\'s base row', async () => {
+      const { guest } = await withRoutine()
+
+      const body = await lookForOf('protect', guest)
+
+      expect(body.category).toBe('Sunscreen')
+      expect(body.guide).toEqual({ whatItDoes: GLOW_PROTECT.what_it_does, lookFor: GLOW_PROTECT.look_for, forDeeperSkin: GLOW_PROTECT.for_deeper_skin })
+      expect(body.products).toEqual([])
+    })
+
+    it.each(['pregnant', 'breastfeeding'])('serves the pregnancy-safe look-for text to a person who ticked %s', async (choice) => {
+      const { guest, version } = await withRoutine({ cautions: [] })
+      // The routine in force for her is one built under that caution (the one built before she ticked it is hidden until the rebuild), appended as the build does.
+      await putSafety(guest, { choices: [choice] })
+      await appendVersion(guest, { steps: version.steps, cautions: [choice as never] })
+
+      const body = await lookForOf('moisturise', guest)
+
+      expect(body.guide.lookFor).toBe(PREGNANT_LOOK_FOR)
+      expect(body.guide).not.toHaveProperty('lookForWhenPregnant')
+      expect(body.guide.whatItDoes).toBe('What moisturise does.')
+      expect(body.guide.forDeeperSkin).toBe('Deeper skin and moisturise.')
+    })
+
+    it('answers 409 STEP_IS_YOURS for a step that is the person\'s own shelf product', async () => {
+      const { guest } = await withRoutine()
+
+      const res = await lookFor('cleanse', guest)
+
+      expect(res.status).toBe(409)
+      expect(await errorCodeOf(res)).toBe('STEP_IS_YOURS')
+    })
+
+    it('answers 409 ROUTINE_NOT_READY before there is a routine, and while a safety change hides it', async () => {
+      const none = await account()
+      const none409 = await lookFor('moisturise', none)
+      expect(none409.status).toBe(409)
+      expect(await errorCodeOf(none409)).toBe('ROUTINE_NOT_READY')
+
+      const { guest } = await withRoutine({ cautions: [] })
+      await putSafety(guest, { choices: ['pregnant'] })
+      const hidden = await lookFor('moisturise', guest)
+      expect(hidden.status).toBe(409)
+      expect(await errorCodeOf(hidden)).toBe('ROUTINE_NOT_READY')
+    })
+
+    it('answers 400 VALIDATION_FAILED for a step that is not one of the four', async () => {
+      const { guest } = await withRoutine()
+
+      const res = await lookFor('serum', guest)
+
+      expect(res.status).toBe(400)
+      expect(await errorCodeOf(res)).toBe('VALIDATION_FAILED')
+    })
+
+    it('has no internal field or value in the body: nothing of how a product or a guide was reached', async () => {
+      const { guest } = await withRoutine()
+      const res = await lookFor('moisturise', guest)
+      const text = await res.text()
+
+      const keys = new Set<string>()
+      const walk = (value: unknown): void => {
+        if (Array.isArray(value)) value.forEach(walk)
+        else if (value !== null && typeof value === 'object') for (const [key, inner] of Object.entries(value)) (keys.add(key), walk(inner))
+      }
+      // The body, not the envelope: the envelope's own `status` is the HTTP status, not a stored one.
+      walk(JSON.parse(text).data)
+
+      expect(res.status).toBe(200)
+      for (const internal of ['ingredients', 'evidenceUrls', 'ingredientsSourceUrl', 'passed', 'sharedWithReaction', 'frequency', 'skinConcerns', 'productId', 'formulationId', 'id', 'product', 'lookForWhenPregnant', 'approvedBy', 'approvedOn', 'auditedBy', 'status', 'grounding', 'priceMin', 'priceMax']) {
+        expect(keys, internal).not.toContain(internal)
+      }
+      for (const value of ['shop.example', 'Cetearyl', 'Test Reviewer', 'Dr A. Reviewer', 'internal.example']) expect(text, value).not.toContain(value)
     })
   })
 

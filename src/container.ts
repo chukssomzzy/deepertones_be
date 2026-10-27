@@ -423,6 +423,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         catalog: catalog(),
         shelf: shelf(),
         recommendations: recommendations(),
+        safety: safety(),
         repository: new D1RoutinesRepository(db()),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         enabled: env.ROUTINES_ENABLED === 'true',
