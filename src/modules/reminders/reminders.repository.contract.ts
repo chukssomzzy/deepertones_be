@@ -20,6 +20,7 @@ type Account = { userId: string; profileId: string }
  *   the defaults of a new row: enabled false, morning '07:00', evening '21:00', timeZone null, stepDownAlerts true, missedDaysNudge true
  *   listEnabled(): Promise<ReminderSettings[]>             every row whose `enabled` is true, whole (PR 4b's send job reads it, once per run), in no particular order; a disabled
  *                                                          profile and one with no row are not in it
+ *   enabledOn (a later addition, #217 PR 4c): 'YYYY-MM-DD' | null, null in a new row. The repository only stores it: a patch that names it writes it (null clears it), one that does not keeps it
  *   One row per profile (not per user): two profiles of one account keep their own settings.
  */
 export type RemindersContractSetup = {
@@ -131,6 +132,27 @@ export const remindersRepositoryContract = (name: string, make: () => RemindersC
       expect(mine.map((row) => row.profileId).sort()).toEqual([on, alsoOn].sort())
       expect(mine.find((row) => row.profileId === on)).toMatchObject({ ...DEFAULTS, enabled: true, morning: '06:30', timeZone: 'Africa/Lagos' })
       expect(mine.find((row) => row.profileId === alsoOn)).toMatchObject({ ...DEFAULTS, enabled: true, stepDownAlerts: false })
+    })
+
+    it('stores the day reminders were turned on, keeps it across patches that do not name it, and lets a patch change or clear it', async () => {
+      const { repository, newAccount } = await make()
+      const { profileId } = await newAccount()
+      expect((await repository.upsert(profileId, { timeZone: 'Africa/Lagos' }, at(MINUTE))).enabledOn).toBeNull()
+
+      expect(await repository.upsert(profileId, { enabled: true, enabledOn: '2030-06-15' }, at(2 * MINUTE))).toMatchObject({ enabled: true, enabledOn: '2030-06-15' })
+      expect(await repository.upsert(profileId, { timeZone: 'Europe/London', morning: '08:00' }, at(3 * MINUTE))).toMatchObject({ enabledOn: '2030-06-15' })
+      expect(await repository.get(profileId)).toMatchObject({ enabledOn: '2030-06-15' })
+      expect(await repository.upsert(profileId, { enabled: false }, at(4 * MINUTE))).toMatchObject({ enabledOn: '2030-06-15' })
+      expect(await repository.upsert(profileId, { enabled: true, enabledOn: '2030-06-20' }, at(5 * MINUTE))).toMatchObject({ enabledOn: '2030-06-20' })
+      expect(await repository.upsert(profileId, { enabledOn: null }, at(6 * MINUTE))).toMatchObject({ enabledOn: null })
+    })
+
+    it('lists the day reminders were turned on with the enabled row', async () => {
+      const { repository, newAccount } = await make()
+      const { profileId } = await newAccount()
+      await repository.upsert(profileId, { enabled: true, enabledOn: '2030-06-15' }, at(MINUTE))
+
+      expect((await repository.listEnabled()).find((row) => row.profileId === profileId)).toMatchObject({ enabledOn: '2030-06-15' })
     })
 
     it('answers an empty patch with the stored values (or the defaults when there is no row), and does not fail', async () => {

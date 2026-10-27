@@ -20,6 +20,7 @@ export class FakeRemindersRepository implements RemindersRepository {
       timeZone: null,
       stepDownAlerts: true,
       missedDaysNudge: true,
+      enabledOn: null,
       updatedAt: at,
     }
     const next: ReminderSettings = {
@@ -31,6 +32,7 @@ export class FakeRemindersRepository implements RemindersRepository {
       timeZone: patch.timeZone === undefined ? current.timeZone : patch.timeZone,
       stepDownAlerts: patch.stepDownAlerts ?? current.stepDownAlerts,
       missedDaysNudge: patch.missedDaysNudge ?? current.missedDaysNudge,
+      enabledOn: patch.enabledOn === undefined ? current.enabledOn : patch.enabledOn,
       updatedAt: at,
     }
     this.rows.set(profileId, next)

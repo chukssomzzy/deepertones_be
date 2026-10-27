@@ -1,5 +1,7 @@
 import { requireUser } from '../../lib/context'
 import { ForbiddenError, ValidationError } from '../../lib/errors'
+import { localDay } from '../../lib/local-day'
+import type { ProfilesService } from '../profiles/profiles.service'
 import type { UsersService } from '../users/users.service'
 import type { RemindersRepository } from './reminders.repository'
 import type { ReminderSettings, ReminderSettingsPatch } from './reminders.types'
@@ -8,6 +10,8 @@ export type RemindersServiceDeps = {
   repository: RemindersRepository
   /** Read for the account's verified phone, which is its WhatsApp address. */
   users: Pick<UsersService, 'get'>
+  /** Read to get from a profile id to the account whose phone decides the nudge's channel. */
+  profiles: Pick<ProfilesService, 'find'>
   /** Whether WhatsApp is an enabled OTP channel in this environment; the container derives it from OTP_CHANNELS. */
   whatsappEnabled: boolean
   now?: () => Date
@@ -39,12 +43,14 @@ export class RemindersService {
 
   private readonly repository: RemindersRepository
   private readonly users: RemindersServiceDeps['users']
+  private readonly profiles: RemindersServiceDeps['profiles']
   private readonly whatsappEnabled: boolean
   private readonly now: () => Date
 
   constructor(deps: RemindersServiceDeps) {
     this.repository = deps.repository
     this.users = deps.users
+    this.profiles = deps.profiles
     this.whatsappEnabled = deps.whatsappEnabled
     this.now = deps.now ?? (() => new Date())
   }
@@ -64,7 +70,7 @@ export class RemindersService {
   async update(patch: ReminderSettingsPatch): Promise<ReminderSettingsView> {
     const { userId, profileId } = RemindersService.signedUp()
     const checked = RemindersService.checked(patch)
-    return this.viewOf(userId, await this.repository.upsert(profileId, checked, this.now()))
+    return this.viewOf(userId, await this.repository.upsert(profileId, await this.withEnabledOn(profileId, checked), this.now()))
   }
 
   /** The profile's stored time zone by profile id, with no session (a job and the routine service call it); null while none is stored. */
@@ -75,6 +81,36 @@ export class RemindersService {
   /** Whether the profile has reminders on, by profile id with no session (the notification send reads it); false with no row, and for an unknown profile. */
   async enabledFor(profileId: string): Promise<boolean> {
     return (await this.repository.get(profileId))?.enabled ?? false
+  }
+
+  /** Whether the profile wants step-down alerts: reminders on and the alerts switch on. By profile id with no session; false with no row, and for an unknown profile. */
+  async stepDownAlertsFor(profileId: string): Promise<boolean> {
+    const row = await this.repository.get(profileId)
+    return (row?.enabled && row.stepDownAlerts) ?? false
+  }
+
+  /** Whether the profile wants the missed-days nudge: reminders on and the nudge switch on. By profile id with no session; false with no row, and for an unknown profile. */
+  async missedDaysNudgeFor(profileId: string): Promise<boolean> {
+    const row = await this.repository.get(profileId)
+    return (row?.enabled && row.missedDaysNudge) ?? false
+  }
+
+  /** The channel the nudge goes by for the profile's account, by the rule the view's `missedDaysChannel` follows; a push for a profile that does not exist. */
+  async missedDaysChannelFor(profileId: string): Promise<'push' | 'whatsapp'> {
+    const profile = await this.profiles.find(profileId)
+    return profile === null ? 'push' : this.channelFor(profile.userId)
+  }
+
+  /**
+   * Stamps `enabledOn` (the local day, in the zone the row will have) when the patch turns reminders on from off or no row, which is what the missed-days nudge counts from. A patch
+   * that leaves them on, or does not name `enabled`, keeps the stored day, so a zone-only change moves nothing; turning them off and on again stamps the new day.
+   */
+  private async withEnabledOn(profileId: string, patch: ReminderSettingsPatch): Promise<ReminderSettingsPatch> {
+    if (patch.enabled !== true) return patch
+    const current = await this.repository.get(profileId)
+    if (current?.enabled) return patch
+    const zone = patch.timeZone === undefined ? (current?.timeZone ?? null) : patch.timeZone
+    return { ...patch, enabledOn: localDay(this.now(), zone) }
   }
 
   private static signedUp() {

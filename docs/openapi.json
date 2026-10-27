@@ -1722,7 +1722,7 @@
           },
           "when": {
             "type": "string",
-            "description": "How often, in words for the card: \"Every day\", \"3 evenings a week\", \"Once a week\" or \"When you need it\"."
+            "description": "How often, in words for the card: \"Every day\", \"Every other evening\", \"Once a week\" or \"When you need it\"."
           },
           "reason": {
             "type": "string",

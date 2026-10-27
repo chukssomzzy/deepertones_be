@@ -313,6 +313,7 @@ export const buildContainer = (env: CloudflareBindings) => {
       new RemindersService({
         repository: new D1RemindersRepository(db()),
         users: users(),
+        profiles: profiles(),
         whatsappEnabled: parseOtpChannels(env.OTP_CHANNELS).includes('whatsapp'),
       }),
   )
@@ -463,6 +464,8 @@ export const buildContainer = (env: CloudflareBindings) => {
         settings: new D1RemindersRepository(db()),
         sends: new D1ReminderSendsRepository(db()),
         routine: routineViewer(),
+        checkIns: routineCheckIns(),
+        channel: reminders(),
         notifications: notifications(),
       }),
   )

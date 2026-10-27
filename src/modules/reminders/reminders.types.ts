@@ -9,8 +9,11 @@ export type ReminderSettingsPatch = Partial<Omit<ReminderSettings, 'profileId' |
 /** One entry of a routine list as the send job reads it: the routine's title for the step, and the step's raw frequency. */
 export type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency }
 
+/** One day a step of a step-down begins: the product's routine title and the step's fixed line ("From today: use it every other day"), already past the wording gate. */
+export type StepDownChange = { day: string; title: string; line: string }
+
 /**
- * The routine as the send job needs it: day 1 (a calendar date, 'YYYY-MM-DD') and the morning and evening lists. This module owns the type so it never imports routines;
+ * The routine as the send job needs it: day 1 (a calendar date, 'YYYY-MM-DD'), the morning and evening lists and the days a step-down changes. This module owns the type so it never imports routines;
  * `RoutineViewerService.reminderPlanFor` answers it, and the container hands that over.
  */
-export type ReminderRoutinePlan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[] }
+export type ReminderRoutinePlan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges: StepDownChange[] }

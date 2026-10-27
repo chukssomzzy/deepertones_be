@@ -44,13 +44,28 @@ const WHEN: Record<Frequency, string> = {
   am: 'Every day',
   pm: 'Every day',
   'am-pm': 'Every day',
-  'alternate-days': '3 evenings a week',
+  'alternate-days': 'Every other evening',
   weekly: 'Once a week',
   'as-needed': 'When you need it',
 }
 
 /** The "when" label of a routine card. */
 export const whenFor = (frequency: Frequency): string => WHEN[frequency]
+
+// DRAFT copy: needs owner review before launch. The step-down alert's line for the step a schedule moves to, which the alert shows beside the product's routine title. Fixed, and
+// about the product only: it names no product, condition or result. A schedule step is a routine frequency or stop; the three daily ones share a line.
+const STEP_DOWN_LINES: Record<Frequency | 'stop', string> = {
+  am: 'From today: use it every day',
+  pm: 'From today: use it every day',
+  'am-pm': 'From today: use it every day',
+  'alternate-days': 'From today: use it every other day',
+  weekly: 'From today: use it once a week',
+  'as-needed': 'From today: use it only when you need it',
+  stop: 'From today: stop using it',
+}
+
+/** The step-down alert's line for a schedule step with this frequency. */
+export const stepDownLineFor = (frequency: Frequency | 'stop'): string => STEP_DOWN_LINES[frequency]
 
 // The forms that name a treatment better than "Treatment" does. A cleanser takes the form before its noun for its own list, and is plain "Cleanser" for the rest.
 const TREAT_FORMS: readonly ProductForm[] = ['cream', 'lotion', 'gel', 'serum', 'oil', 'balm']

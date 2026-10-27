@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import type { PhoneNumber } from '../../lib/phone'
+import type { ProfilesService } from '../profiles/profiles.service'
 import type { UsersService } from '../users/users.service'
 import type { User } from '../users/users.types'
 import { FakeRemindersRepository } from './reminders.repository.fake'
@@ -19,6 +20,12 @@ import { RemindersService } from './reminders.service'
 //   enabledFor(profileId): Promise<boolean>                   by profile id, no session (the notification send reads it): whether the profile has reminders on; false with no row, false for an unknown profile
 //   zoneFor(profileId): Promise<string | null>                by profile id, no session (a job and the routine service call it); null while no zone is stored
 //   ReminderSettingsView = { enabled, morning, evening, timeZone, stepDownAlerts, missedDaysNudge, missedDaysChannel: 'push' | 'whatsapp' } and nothing else
+//   #217 PR 4c adds three by-profile-id reads with no session, for the notification send and the send job (the PR 4c block at the foot of this file):
+//   stepDownAlertsFor(profileId) / missedDaysNudgeFor(profileId): Promise<boolean>     `enabled && its own switch` (story 30: nothing reaches a person who never turned reminders on, and
+//     the owner's decision: both alerts need the main switch). false with no row and for an unknown profile, false while reminders are off whatever the own switch says. The notification send reads
+//     ONE of them per kind and so needs no second read of `enabledFor`.
+//   missedDaysChannelFor(profileId): Promise<'push' | 'whatsapp'>     the SAME rule as the view's missedDaysChannel, for the profile's account; 'push' for an unknown profile
+//     so the service gains a fourth dependency, `profiles: Pick<ProfilesService, 'find'>` (a profile's owner), to get from a profile id to the account whose phone decides the channel.
 //   Gates, in order: 401 (no session, from requireUser), 403 SIGNUP_REQUIRED for a guest (the same check and code as the routine service), then validation.
 //   Validation (ValidationError, code VALIDATION_FAILED, nothing stored): a time must be 24-hour 'HH:MM'; a time zone must be one Intl.DateTimeFormat knows.
 //   missedDaysChannel is 'whatsapp' only when whatsappEnabled AND the account's user row has a phone (a phone is only ever stored by verifying a WhatsApp code);
@@ -58,10 +65,18 @@ let service: RemindersService
 
 const userRow = (id: string): User => ({ id, status: 'verified', email: null, phone: (phones.get(id) ?? null) as PhoneNumber | null, tokenVersion: 0, createdAt: T0, lastSeenAt: T0 })
 
+/** Whose profile is whose: the owner of each profile id. */
+const owners = new Map([
+  [AMARA, AMARA_USER],
+  [AMARA_SECOND, AMARA_USER],
+  [TOLU, TOLU_USER],
+])
+
 const makeService = (whatsappEnabled: boolean) =>
   new RemindersService({
     repository,
     users: { get: async (id: string) => userRow(id) } satisfies Pick<UsersService, 'get'>,
+    profiles: { find: async (id: string) => (owners.has(id) ? { id, userId: owners.get(id)!, ownerStatus: 'verified' as const } : null) } satisfies Pick<ProfilesService, 'find'>,
     whatsappEnabled,
     now: () => T0,
   })
@@ -69,6 +84,9 @@ const makeService = (whatsappEnabled: boolean) =>
 const settings = (who: Actor) => runAs(who, () => service.settings())
 const update = (who: Actor, patch: Parameters<RemindersService['update']>[0]) => runAs(who, () => service.update(patch))
 const enabledFor = (profileId: string) => runAs(SYSTEM, () => service.enabledFor(profileId))
+const stepDownAlertsFor = (profileId: string) => runAs(SYSTEM, () => service.stepDownAlertsFor(profileId))
+const missedDaysNudgeFor = (profileId: string) => runAs(SYSTEM, () => service.missedDaysNudgeFor(profileId))
+const missedDaysChannelFor = (profileId: string) => runAs(SYSTEM, () => service.missedDaysChannelFor(profileId))
 const zoneFor = (profileId: string) => runAs(SYSTEM, () => service.zoneFor(profileId))
 
 beforeEach(() => {
@@ -321,5 +339,192 @@ describe('RemindersService.enabledFor', () => {
     expect(await enabledFor(AMARA)).toBe(true)
     expect(await enabledFor(AMARA_SECOND)).toBe(false)
     expect(await enabledFor(TOLU)).toBe(false)
+  })
+})
+
+// --- the switches and the channel by profile id (spec #217, PR 4c) ---
+
+describe.each([
+  ['stepDownAlertsFor', 'stepDownAlerts', stepDownAlertsFor],
+  ['missedDaysNudgeFor', 'missedDaysNudge', missedDaysNudgeFor],
+] as const)('RemindersService.%s: reminders on AND its own switch', (_name, field, read) => {
+  it('is false for a profile that never saved anything, and for one that does not exist', async () => {
+    expect(await read(AMARA)).toBe(false)
+    expect(await read('profile-guest')).toBe(false)
+  })
+
+  it('is false while reminders are off, even though a new row starts with the switch on (a phone that only reported its time zone is not nagged)', async () => {
+    await update(AMARA_ACTOR, { timeZone: 'Africa/Lagos' })
+
+    expect(await read(AMARA)).toBe(false)
+    expect(await enabledFor(AMARA)).toBe(false)
+  })
+
+  it('is true once reminders are on and the switch has not been turned off', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+
+    expect(await read(AMARA)).toBe(true)
+  })
+
+  it('is false with reminders on and the switch off, and with the switch on and reminders off (the boundary: each of the two missing in turn)', async () => {
+    await update(AMARA_ACTOR, { enabled: true, [field]: false })
+    expect(await read(AMARA)).toBe(false)
+
+    await update(AMARA_ACTOR, { enabled: false, [field]: true })
+    expect(await read(AMARA)).toBe(false)
+
+    await update(AMARA_ACTOR, { enabled: true })
+    expect(await read(AMARA)).toBe(true)
+  })
+
+  it('follows both switches by profile id with no session', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    expect(await read(AMARA)).toBe(true)
+
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect(await read(AMARA)).toBe(false)
+  })
+
+  it('keeps the answer per profile', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(TOLU_ACTOR, { enabled: true, [field]: false })
+
+    expect(await read(AMARA)).toBe(true)
+    expect(await read(TOLU)).toBe(false)
+    expect(await read(AMARA_SECOND)).toBe(false)
+  })
+})
+
+describe('RemindersService.stepDownAlertsFor and missedDaysNudgeFor: the two own switches are independent', () => {
+  it('reads the alerts switch for the alerts and the nudge switch for the nudge, with reminders on', async () => {
+    await update(AMARA_ACTOR, { enabled: true, stepDownAlerts: false, missedDaysNudge: true })
+
+    expect(await stepDownAlertsFor(AMARA)).toBe(false)
+    expect(await missedDaysNudgeFor(AMARA)).toBe(true)
+  })
+})
+
+describe('RemindersService.missedDaysChannelFor', () => {
+  // The same four cases as the view's missedDaysChannel, asked by profile id with no session: the channel is the account's, found through the profile's owner.
+  it.each([
+    ['WhatsApp is enabled here and the account has a verified phone', true, TOLU, 'whatsapp'],
+    ['WhatsApp is enabled here but the account has no verified phone', true, AMARA, 'push'],
+    ['the account has a verified phone but WhatsApp is not enabled here', false, TOLU, 'push'],
+    ['WhatsApp is not enabled here and the account has no phone', false, AMARA, 'push'],
+  ])('is decided when %s', async (_label, whatsappEnabled, profileId, channel) => {
+    service = makeService(whatsappEnabled)
+
+    expect(await missedDaysChannelFor(profileId)).toBe(channel)
+  })
+
+  it('agrees with the channel the view shows the same person, whatever the rule gives', async () => {
+    service = makeService(true)
+    phones.set(AMARA_USER, '+2348039999999')
+
+    expect(await missedDaysChannelFor(AMARA)).toBe((await settings(AMARA_ACTOR)).missedDaysChannel)
+    expect(await missedDaysChannelFor(AMARA_SECOND)).toBe((await settings(AMARA_ON_SECOND)).missedDaysChannel)
+    expect(await missedDaysChannelFor(AMARA)).toBe('whatsapp')
+  })
+
+  it('follows the account\'s phone as it changes, and needs no row of reminder settings', async () => {
+    service = makeService(true)
+    expect(await missedDaysChannelFor(AMARA)).toBe('push')
+
+    phones.set(AMARA_USER, '+2348039999999')
+
+    expect(await missedDaysChannelFor(AMARA)).toBe('whatsapp')
+  })
+
+  it('is push for a profile that does not exist, so a nudge is never lost to a missing owner', async () => {
+    service = makeService(true)
+
+    expect(await missedDaysChannelFor('profile-nobody')).toBe('push')
+  })
+})
+
+// --- the day reminders were turned on (spec #217, PR 4c; the owner's decision: missed days count only from then) ---
+
+// `enabledOn` is the person's LOCAL calendar day ('YYYY-MM-DD', UTC with no zone) on which `enabled` went from off (or no row) to on. It is stored, never shown (the view has no such field), and read by the
+// send job. A patch that leaves reminders on, or does not name `enabled`, keeps it, so a zone-only PUT moves nothing; off and on again stamps the new day.
+describe('RemindersService.update: enabledOn', () => {
+  let clock: Date
+  const at = (iso: string) => {
+    clock = new Date(iso)
+  }
+  const enabledOn = async (profileId = AMARA) => (await repository.get(profileId))?.enabledOn
+  beforeEach(() => {
+    clock = T0
+    service = new RemindersService({
+      repository,
+      users: { get: async (id: string) => userRow(id) } satisfies Pick<UsersService, 'get'>,
+      profiles: { find: async () => null } as unknown as Pick<ProfilesService, 'find'>,
+      whatsappEnabled: false,
+      now: () => clock,
+    })
+  })
+
+  it('is null until reminders are turned on, and a row made by a zone alone does not stamp it', async () => {
+    expect(await enabledOn()).toBeUndefined()
+    await update(AMARA_ACTOR, { timeZone: 'Africa/Lagos' })
+
+    expect(await enabledOn()).toBeNull()
+  })
+
+  it('is the local day the first PUT that turns reminders on is made, in the zone sent with it', async () => {
+    // 23:30 UTC on the 15th is 00:30 on the 16th in Lagos and 19:30 on the 15th in New York.
+    at('2030-06-15T23:30:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true, timeZone: 'Africa/Lagos' })
+    await update(TOLU_ACTOR, { enabled: true, timeZone: 'America/New_York' })
+
+    expect(await enabledOn(AMARA)).toBe('2030-06-16')
+    expect(await enabledOn(TOLU)).toBe('2030-06-15')
+  })
+
+  it('uses the zone already stored when the PUT names none, and UTC when there is none', async () => {
+    at('2030-06-15T23:30:00.000Z')
+    await update(AMARA_ACTOR, { timeZone: 'Africa/Lagos' })
+    await update(AMARA_ACTOR, { enabled: true })
+    await update(TOLU_ACTOR, { enabled: true })
+
+    expect(await enabledOn(AMARA)).toBe('2030-06-16')
+    expect(await enabledOn(TOLU)).toBe('2030-06-15')
+  })
+
+  it('keeps the day while reminders stay on: a zone-only PUT, a time PUT and a repeated enabled: true change nothing', async () => {
+    at('2030-06-15T10:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true, timeZone: 'Africa/Lagos' })
+    at('2030-06-20T10:00:00.000Z')
+
+    await update(AMARA_ACTOR, { timeZone: 'Europe/London' })
+    await update(AMARA_ACTOR, { morning: '06:00', stepDownAlerts: false })
+    await update(AMARA_ACTOR, { enabled: true })
+
+    expect(await enabledOn()).toBe('2030-06-15')
+  })
+
+  it('stamps the new day when reminders are turned off and on again, so the count starts over', async () => {
+    at('2030-06-15T10:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true })
+    at('2030-06-18T10:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: false })
+    expect(await enabledOn()).toBe('2030-06-15')
+
+    at('2030-06-22T10:00:00.000Z')
+    await update(AMARA_ACTOR, { enabled: true })
+
+    expect(await enabledOn()).toBe('2030-06-22')
+  })
+
+  it('is not part of what the app sees', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+
+    expect(Object.keys(await settings(AMARA_ACTOR)).sort()).toEqual(Object.keys(DEFAULTS).sort())
+  })
+
+  it('stamps nothing for a refused PUT', async () => {
+    await errorOf(update(AMARA_ACTOR, { enabled: true, morning: '25:00' }))
+
+    expect(await repository.get(AMARA)).toBeNull()
   })
 })

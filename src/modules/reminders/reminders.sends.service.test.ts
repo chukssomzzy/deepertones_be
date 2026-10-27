@@ -7,15 +7,19 @@ import { sendPushSpec } from '../notifications/notifications.job-specs'
 import { FakeNotificationSettingsRepository } from '../notifications/notification-settings.repository.fake'
 import { NotificationsService } from '../notifications/notifications.service'
 import { FakePushTokensRepository } from '../notifications/push-tokens.repository.fake'
+import { FakeRoutineCheckInsRepository } from '../routines/routines.check-ins.repository.fake'
+import { RoutineCheckInsService } from '../routines/routines.check-ins.service'
+import type { RoutinesRepository } from '../routines/routines.repository'
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
+import type { ProfilesService } from '../profiles/profiles.service'
 import type { UsersService } from '../users/users.service'
 import { FakeRemindersRepository } from './reminders.repository.fake'
 import { FakeReminderSendsRepository } from './reminders.sends.repository.fake'
 import { ReminderSendsService } from './reminders.sends.service'
 import { RemindersService } from './reminders.service'
 
-// The 15-minute reminder send job (spec #217, PR 4b2): which profiles are due a reminder right now, and the push each one gets. Daily push only; the step-down alert and
-// the missed-days nudge are PR 4c. The reminder goes down the same road as every other push: sendDue enqueues one `send-push` job per due reminder
+// The 15-minute reminder send job (spec #217, PR 4b2 and 4c): which profiles are due a reminder right now, and the push each one gets: the daily push (4b2), the step-down alert and
+// the missed-days nudge (4c, pinned in the blocks at the foot of this file). The reminder goes down the same road as every other push: sendDue enqueues one `send-push` job per due reminder
 // (NotificationsService.routineReminder), and the job's body, NotificationsService.deliver, sends it. Collaborators: the settings repository and the sends repository
 // (the real fakes), the NOTIFICATIONS SERVICE (the real one over the real fakes, a MemoryJobQueue and a MemoryPushSender; the queue is drained through the real `deliver`, so what is
 // asserted last is what a phone would be handed), a real RemindersService (deliver's gate reads `enabledFor`), and the routine, a one-method fake answering from `plans`.
@@ -43,6 +47,25 @@ import { RemindersService } from './reminders.service'
 //   { to, title, body: <fixed copy>, categoryId: 'routine-reminder', data: { kind: 'routine-reminder', url: '/routine', profileId, day, time } }     `data` holds nothing else.
 // Sends are claimed in the sends table first, per (profile, local day, kind) with kind 'morning' | 'evening'. No phone means no claim, so a phone that registers in the same window still gets the push.
 // Nothing is sent before day 1; an evening with nothing due is not sent; every delivered title and body passes FORBIDDEN_WORDING.
+//
+// PR 4c CHANGES TO THE CONTRACT ABOVE (assumed: the brief fixes the kinds, the claim kinds, the switches and "a narrow plan read owned by routines"; the names are these):
+//   settings       Pick<RemindersRepository, 'listEnabled'>    UNCHANGED from 4b: the rows with `enabled` on. Every kind needs `enabled` (story 30: nothing reaches a person who never turned
+//                                                              reminders on), and then its own switch: the daily push `enabled`, the alert `enabled && stepDownAlerts`, the nudge `enabled && missedDaysNudge`.
+//   routine        reminderPlanFor(profileId) answers { dayOne, morning, evening, stepDownChanges }, stepDownChanges = { day, title, line }[] (routines.viewer.service.test.ts): the first day of each
+//                  step of each dated step-down's schedule, with the product's routine title and the step's fixed line.
+//                  (`stepDownChanges` is OPTIONAL in the type until this PR (4c2), so the 4c1 plan change leaves the 4b fixture valid; the fixture below always supplies it.)
+//   checkIns       { missedStreak(profileId, today): Promise<{ days: number; since: string | null }> }     RoutineCheckInsService answers it (reminders may not import routines, so it is a narrow type). `today`
+//                  is the profile's LOCAL day at the instant the job runs.
+//   channel        { missedDaysChannelFor(profileId): Promise<'push' | 'whatsapp'> }     RemindersService answers it, by the same rule as the view's missedDaysChannel
+//   notifications  Pick<NotificationsService, 'hasPhone' | 'routineReminder' | 'stepDownAlert' | 'missedDaysNudge'>     (notifications.reminder-alerts.test.ts)
+//                    stepDownAlert({ profileId, day, changes: { title, line }[] }): Promise<boolean>        missedDaysNudge({ profileId, since }): Promise<boolean>
+// The step-down alert: at the MORNING time (the same quarter-hour window as the daily morning push, and not at the evening time), on a local day on which at least one `stepDownChanges` entry has
+//   `day` equal to that day; one alert lists all of that day's changes, in the plan's order. Claimed as kind 'step-down' for (profile, local day). Needs `enabled`, `stepDownAlerts` and a Started routine.
+// The missed-days nudge: at the MORNING time, when missedStreak(profile, local today).days >= 2 (so also on a third morning that is the first the job sees it), and the channel is 'push'. Claimed as
+//   kind `nudge:${since}`; the claim's local day is the run's first day, `since`, NOT the day of the send, so the claim is held for the whole run and the nudge goes once per run (a claim keyed by
+//   today would send again every morning of the run). Needs `enabled` and `missedDaysNudge`. The 'whatsapp' channel is a no-op: it is logged by profile id (no token, text or zone), claims nothing and
+//   queues nothing, so the nudge goes out by push or WhatsApp once the channel changes.
+// All three pushes (daily, alert, nudge) are separate jobs with separate claims; the order per profile stays phone, plan, claim, push. `sendDue` counts every push queued, whatever its kind.
 // The job is given `new Date(controller.scheduledTime)` (test/integration/scheduled.test.ts), the quarter-hour slot, not the moment the Worker started.
 
 // The one clock every test hangs off. Midnight UTC of the test day; instants are offsets from it.
@@ -82,7 +105,9 @@ const TOLU = actor('user-tolu', 'profile-tolu-1')
 const NGOZI = actor('user-ngozi', 'profile-ngozi-1')
 
 type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency }
-type Plan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[] }
+type StepDownChange = { day: string; title: string; line: string }
+type Plan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges: StepDownChange[] }
+type Streak = { days: number; since: string | null }
 const entry = (step: RoutineStep, title: string, frequency: Frequency): PlanEntry => ({ step, title, frequency })
 
 const CLEANSER = entry('cleanse', 'Cleanser', 'am')
@@ -93,8 +118,15 @@ const plan = (over: Partial<Plan> = {}): Plan => ({
   dayOne: day(-10),
   morning: [CLEANSER, MOISTURISER, SUNSCREEN],
   evening: [entry('cleanse', 'Cleanser', 'pm'), MOISTURISER],
+  stepDownChanges: [],
   ...over,
 })
+
+// The fixed lines the routine owns for a step (routines.viewer.service.test.ts pins them) and the titles of two step-downs.
+const EVERY_OTHER_DAY = 'From today: use it every other day'
+const ONCE_A_WEEK = 'From today: use it once a week'
+const STOP = 'From today: stop using it'
+const change = (dayOffset: number, title: string, line: string): StepDownChange => ({ day: day(dayOffset), title, line })
 
 let settings: FakeRemindersRepository
 let sends: FakeReminderSendsRepository
@@ -104,8 +136,13 @@ let push: MemoryPushSender
 let jobs: MemoryJobQueue
 let notifications: NotificationsService
 let plans: Map<string, Plan>
+/** What the missed-days read answers (PR 4c): nothing missed, until a test uses the real service or sets this. */
+let missedStreak: (profileId: string, today: string) => Promise<Streak>
+/** The channel the nudge goes by, per profile; push until a test says otherwise. */
+let channels: Map<string, 'push' | 'whatsapp'>
 /** A profile whose routine cannot be read (the read throws). */
 let routineFailsFor: string | null
+let reminders: RemindersService
 let service: ReminderSendsService
 /** How many of `jobs.enqueued` have been delivered already. */
 let delivered: number
@@ -119,13 +156,22 @@ beforeEach(() => {
   jobs = new MemoryJobQueue()
   delivered = 0
   // deliver reads whether reminders are on from the real RemindersService over the same settings the job reads.
-  const reminders = new RemindersService({ repository: settings, users: { get: async () => { throw new Error('not read') } } as unknown as Pick<UsersService, 'get'>, whatsappEnabled: false })
+  reminders = new RemindersService({
+    repository: settings,
+    users: { get: async () => { throw new Error('not read') } } as unknown as Pick<UsersService, 'get'>,
+    profiles: { find: async () => null } as unknown as Pick<ProfilesService, 'find'>,
+    whatsappEnabled: false,
+  })
   notifications = new NotificationsService({ pushTokens, settings: notificationSettings, push, jobs, reminders, deviceIdKey: DEVICE_KEY, now: () => utc(0) })
   plans = new Map()
+  missedStreak = async () => ({ days: 0, since: null })
+  channels = new Map()
   routineFailsFor = null
   service = new ReminderSendsService({
     settings,
     sends,
+    checkIns: { missedStreak: (profileId: string, today: string) => missedStreak(profileId, today) },
+    channel: { missedDaysChannelFor: async (profileId: string) => channels.get(profileId) ?? 'push' },
     routine: {
       reminderPlanFor: async (profileId: string) => {
         if (profileId === routineFailsFor) throw new Error('the routine could not be read')
@@ -671,5 +717,738 @@ describe('ReminderSendsService.sendDue: failures and what is logged', () => {
 
     const logged = JSON.stringify(logs.flatMap((log) => log.mock.calls))
     for (const secret of [AMARA_TOKEN, TOLU_TOKEN, 'Cleanser', 'Sunscreen', LAGOS, NEW_YORK]) expect(logged).not.toContain(secret)
+  })
+})
+
+// --- the step-down alert (spec #217, PR 4c) ---
+
+/** Lagos 07:00 (06:00 UTC) on the day `n` days from the test day: the morning window of the usual Amara. */
+const morning = (n: number) => new Date(utc(6).getTime() + n * DAY)
+/** The messages the run put on a phone, by kind. */
+const sentOf = (kind: string) => push.sent.filter((message) => (message.data as { kind: string }).kind === kind)
+/** The send-push jobs queued so far (delivery also queues receipt checks, which are not the job's business). */
+const queued = () => jobs.enqueued.filter((entry) => entry.job === 'send-push')
+const queuedKinds = () => queued().map((entry) => (entry.body as { kind: string }).kind)
+const textOf = (message: { title: string; body: string }) => `${message.title}\n${message.body}`
+
+describe('ReminderSendsService.sendDue: the step-down alert', () => {
+  /** Amara with reminders ON, the alert switch on (the default) and NOTHING in her morning or evening, so the daily pushes have no entries and the alert is the only thing that can go. */
+  const alertsOnly = (changes: StepDownChange[], over: Partial<Plan> = {}, patch: Parameters<FakeRemindersRepository['upsert']>[1] = {}) =>
+    amara(patch, { morning: [], evening: [], stepDownChanges: changes, ...over })
+
+  it('sends the alert on a day a step of a step-down begins: the product\'s title and the fixed line, a deep link to the schedule, and the profile and local day in the payload', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+
+    expect(await sendDue(morning(0))).toBe(1)
+
+    expect(queued()).toEqual([{ job: 'send-push', body: { kind: 'step-down-alert', profileId: 'profile-amara-1', day: TODAY, changes: [{ title: 'Cream', line: EVERY_OTHER_DAY }] } }])
+    expect(push.sent).toEqual([
+      {
+        to: AMARA_TOKEN,
+        title: expect.stringMatching(/\S/),
+        body: expect.stringMatching(/\S/),
+        data: { kind: 'step-down-alert', url: '/routine/step-down', profileId: 'profile-amara-1', day: TODAY },
+      },
+    ])
+    expect(textOf(push.sent[0]!)).toContain('Cream')
+    expect(textOf(push.sent[0]!)).toContain(EVERY_OTHER_DAY)
+  })
+
+  it('sends it on day 1 itself, the first day of week one: nothing is held back for the second week', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY), change(14, 'Cream', ONCE_A_WEEK)], { dayOne: day(0) })
+
+    expect(await sendDue(morning(0))).toBe(1)
+
+    expect(sentOf('step-down-alert')).toHaveLength(1)
+    expect(textOf(push.sent[0]!)).toContain(EVERY_OTHER_DAY)
+  })
+
+  it('sends it on the change days only: not the days before, between or after, and each change day is its own alert', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY), change(3, 'Cream', ONCE_A_WEEK), change(6, 'Cream', STOP)], { dayOne: day(-1) })
+
+    const sentOn = []
+    for (let n = 0; n <= 8; n++) if ((await sendDue(morning(n))) === 1) sentOn.push(n)
+
+    expect(sentOn).toEqual([0, 3, 6])
+    expect(push.sent.map((message) => (message.data as { day: string }).day)).toEqual([day(0), day(3), day(6)])
+    expect(textOf(push.sent[1]!)).toContain(ONCE_A_WEEK)
+    expect(textOf(push.sent[2]!)).toContain(STOP)
+  })
+
+  it('sends nothing when no step of any step-down begins today, even with a step-down under way', async () => {
+    await alertsOnly([change(-3, 'Cream', EVERY_OTHER_DAY), change(11, 'Cream', ONCE_A_WEEK)])
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  it('sends one alert listing both when two step-downs change on the same day, in the plan\'s order, and leaves out one that changes on another day', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY), change(0, 'Gel cleanser', STOP), change(1, 'Serum', ONCE_A_WEEK)])
+
+    expect(await sendDue(morning(0))).toBe(1)
+
+    expect(queued()).toHaveLength(1)
+    expect((queued()[0]!.body as { changes: unknown }).changes).toEqual([
+      { title: 'Cream', line: EVERY_OTHER_DAY },
+      { title: 'Gel cleanser', line: STOP },
+    ])
+    expect(push.sent).toHaveLength(1)
+    const text = textOf(push.sent[0]!)
+    for (const part of ['Cream', EVERY_OTHER_DAY, 'Gel cleanser', STOP]) expect(text).toContain(part)
+    expect(text).not.toContain('Serum')
+    expect(text.indexOf(EVERY_OTHER_DAY)).toBeLessThan(text.indexOf(STOP))
+  })
+
+  describe.each([
+    ['Lagos', LAGOS, 6],
+    ['New York', NEW_YORK, 11],
+    ['London in summer', LONDON, 6],
+  ])('the morning window of %s', (_name, zone, openHour) => {
+    it.each([
+      { edge: '1 ms before the window opens', offsetMs: -1, expected: 0 },
+      { edge: 'the instant it opens', offsetMs: 0, expected: 1 },
+      { edge: '1 ms before it closes', offsetMs: 15 * MINUTE - 1, expected: 1 },
+      { edge: 'the instant it closes', offsetMs: 15 * MINUTE, expected: 0 },
+    ])('at $edge, sends $expected alert(s)', async ({ offsetMs, expected }) => {
+      await remind(AMARA, { morning: '07:00', timeZone: zone })
+      await phone(AMARA, AMARA_TOKEN)
+      startedRoutine(AMARA, { morning: [], evening: [], stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+
+      expect(await sendDue(new Date(utc(openHour).getTime() + offsetMs))).toBe(expected)
+    })
+  })
+
+  it('does not send it at the evening time, only at the morning time', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+
+    expect(await sendDue(utc(20))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  // The change day is the profile's LOCAL day at its morning time. The instants below are one local morning each: the UTC date differs from the local date in all three zones.
+  describe.each([
+    // Lagos 00:30 on the 16th is 23:30 UTC on the 15th.
+    ['Lagos, where the local day is ahead of UTC', LAGOS, '00:30', utc(23, 30), 1, 0],
+    // New York 21:00 on the 15th is 01:00 UTC on the 16th.
+    ['New York, where the local day is behind UTC', NEW_YORK, '21:00', utc(25), 0, 1],
+    // London (BST, UTC+1) 00:30 on the 16th is 23:30 UTC on the 15th.
+    ['London in summer', LONDON, '00:30', utc(23, 30), 1, 0],
+  ])('the local day in %s', (_name, zone, morningTime, at, localOffset, utcOffset) => {
+    it('sends the alert dated by the local day, and not one that is dated by the UTC day', async () => {
+      await remind(AMARA, { morning: morningTime, timeZone: zone })
+      await phone(AMARA, AMARA_TOKEN)
+      startedRoutine(AMARA, { morning: [], evening: [], dayOne: day(-10), stepDownChanges: [change(utcOffset, 'Serum', STOP)] })
+      expect(await sendDue(at)).toBe(0)
+
+      startedRoutine(AMARA, { morning: [], evening: [], dayOne: day(-10), stepDownChanges: [change(localOffset, 'Cream', EVERY_OTHER_DAY)] })
+      expect(await sendDue(at)).toBe(1)
+
+      expect(push.sent[0]!.data).toMatchObject({ kind: 'step-down-alert', day: day(localOffset) })
+      expect(textOf(push.sent[0]!)).toContain('Cream')
+    })
+  })
+
+  it('sends nothing with reminders off, even with the alerts switch on, and claims nothing: turning reminders on in the same window sends it (story 30)', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)], {}, { enabled: false, stepDownAlerts: true, missedDaysNudge: true })
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(queued()).toEqual([])
+    expect(push.sent).toEqual([])
+
+    await settings.upsert('profile-amara-1', { enabled: true }, utc(6, 5))
+
+    expect(await sendDue(utc(6, 6))).toBe(1)
+    expect(queuedKinds()).toEqual(['step-down-alert'])
+  })
+
+  it('sends it beside the daily push with reminders on: two separate pushes', async () => {
+    await amara({}, { stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+
+    expect(await sendDue(morning(0))).toBe(2)
+
+    expect(queuedKinds().sort()).toEqual(['routine-reminder', 'step-down-alert'])
+    expect(sentOf('routine-reminder')[0]!.title).toBe('Cleanser, Moisturiser, Sunscreen')
+    expect(textOf(sentOf('step-down-alert')[0]!)).toContain('Cream')
+  })
+
+  it('sends none when the alerts switch is off, with reminders on: the daily push still goes, the alert does not', async () => {
+    await amara({ stepDownAlerts: false }, { stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+
+    expect(await sendDue(morning(0))).toBe(1)
+
+    expect(queuedKinds()).toEqual(['routine-reminder'])
+    expect(sentOf('step-down-alert')).toEqual([])
+  })
+
+  it('sends it once the alerts switch is turned on again in the same window, because a switch that was off claimed nothing', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)], {}, { stepDownAlerts: false })
+    expect(await sendDue(morning(0))).toBe(0)
+
+    await settings.upsert('profile-amara-1', { stepDownAlerts: true }, utc(6, 2))
+
+    expect(await sendDue(utc(6, 3))).toBe(1)
+  })
+
+  it('sends none for a profile whose reminders are off and whose other two switches are off too', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)], {}, { enabled: false, stepDownAlerts: false, missedDaysNudge: false })
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  it('sends none before the routine is Started (no plan), however the alert switch is set', async () => {
+    await remind(AMARA, { timeZone: LAGOS })
+    await phone(AMARA, AMARA_TOKEN)
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  it('sends none for a change dated before day 1, which the routine never makes but a plan may carry', async () => {
+    await alertsOnly([change(-2, 'Cream', EVERY_OTHER_DAY)], { dayOne: day(1) })
+
+    expect(await sendDue(new Date(utc(6).getTime() - 2 * DAY))).toBe(0)
+  })
+
+  it('sends only to the profile whose alerts are on and whose step changes: another profile with its alerts off, or no change, gets none', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+    await remind(NGOZI, { timeZone: LONDON, stepDownAlerts: false })
+    await phone(NGOZI, NGOZI_TOKEN)
+    startedRoutine(NGOZI, { morning: [], evening: [], stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+    await remind(TOLU, { timeZone: NEW_YORK, morning: '02:00' })
+    await phone(TOLU, TOLU_TOKEN)
+    startedRoutine(TOLU, { morning: [], evening: [], stepDownChanges: [change(5, 'Cream', EVERY_OTHER_DAY)] })
+
+    // 06:00 UTC is 07:00 in Lagos and London and 02:00 in New York.
+    expect(await sendDue(utc(6))).toBe(1)
+
+    expect(push.sent.map((message) => message.to)).toEqual([AMARA_TOKEN])
+  })
+
+  it('sends it to every phone of the profile, once, and not to the account\'s other profile or anyone else', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+    await phone(AMARA, AMARA_SECOND_PHONE)
+    await phone(AMARA_OTHER_PROFILE, AMARA_OTHER_PROFILE_TOKEN)
+    await phone(NGOZI, NGOZI_TOKEN)
+
+    expect(await sendDue(morning(0))).toBe(1)
+
+    expect(queued()).toHaveLength(1)
+    expect(push.sent.map((message) => message.to).sort()).toEqual([AMARA_TOKEN, AMARA_SECOND_PHONE].sort())
+  })
+
+  it('is dropped at delivery when reminders go off after it was queued, even with the alerts switch still on', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+    expect(await service.sendDue(morning(0))).toBe(1)
+    await settings.upsert('profile-amara-1', { enabled: false }, utc(6, 5))
+
+    await drain()
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('is dropped at delivery when the alerts switch goes off after it was queued', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+    expect(await service.sendDue(morning(0))).toBe(1)
+    await settings.upsert('profile-amara-1', { stepDownAlerts: false }, utc(6, 5))
+
+    await drain()
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('sends the alert whatever the account\'s scan notification switches say', async () => {
+    await alertsOnly([change(0, 'Cream', EVERY_OTHER_DAY)])
+    await notificationSettings.upsert('user-amara', { scanFinished: false, scanNeedsYou: false }, utc(0))
+
+    expect(await sendDue(morning(0))).toBe(1)
+    expect(sentOf('step-down-alert')).toHaveLength(1)
+  })
+})
+
+describe('ReminderSendsService.sendDue: the step-down alert is sent once per profile and local day', () => {
+  const changeToday = [change(0, 'Cream', EVERY_OTHER_DAY)]
+
+  it('sends once however often the job runs in the window', async () => {
+    await amara({}, { morning: [], evening: [], stepDownChanges: changeToday })
+
+    expect(await sendDue(morning(0))).toBe(1)
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(await sendDue(utc(6, 14, 59, 999))).toBe(0)
+
+    expect(push.sent).toHaveLength(1)
+  })
+
+  it('sends once when runs overlap', async () => {
+    await amara({}, { morning: [], evening: [], stepDownChanges: changeToday })
+
+    const counts = await Promise.all([sendDue(morning(0)), sendDue(morning(0)), sendDue(utc(6, 1))])
+
+    expect(counts.reduce((total, count) => total + count, 0)).toBe(1)
+    expect(push.sent).toHaveLength(1)
+  })
+
+  it('does not send again when the plan gains another change for the same day after the alert went (one alert per day)', async () => {
+    await amara({}, { morning: [], evening: [], stepDownChanges: changeToday })
+    await sendDue(morning(0))
+    startedRoutine(AMARA, { morning: [], evening: [], stepDownChanges: [...changeToday, change(0, 'Gel cleanser', STOP)] })
+
+    expect(await sendDue(utc(6, 5))).toBe(0)
+  })
+
+  it('claims nothing while the profile has no phone, so a phone that registers in the same window still gets it', async () => {
+    await remind(AMARA, { timeZone: LAGOS })
+    startedRoutine(AMARA, { morning: [], evening: [], stepDownChanges: changeToday })
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(queued()).toEqual([])
+
+    await phone(AMARA, AMARA_TOKEN)
+
+    expect(await sendDue(utc(6, 10))).toBe(1)
+    expect(push.sent.map((message) => message.to)).toEqual([AMARA_TOKEN])
+  })
+
+  it('keeps its claim when the enqueue fails (logged and swallowed, as for the daily push), so the day is not tried again', async () => {
+    await amara({}, { morning: [], evening: [], stepDownChanges: changeToday })
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    jobs.failNextWith(new Error('the queue is down'))
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(await sendDue(utc(6, 5))).toBe(0)
+
+    expect(push.sent).toEqual([])
+  })
+})
+
+// --- the missed-days nudge (spec #217, PR 4c) ---
+
+describe('ReminderSendsService.sendDue: the missed-days nudge', () => {
+  let checkInsClock: Date
+  let checkIns: RoutineCheckInsService
+
+  /**
+   * The streak is the REAL RoutineCheckInsService over its fake repository, so a run of missed days is reached the way life reaches one: the clock passes mornings, and a check-in made through
+   * its own `checkIn` ends the run. Day 1 is read from the plan, as the routine's version gives it.
+   */
+  beforeEach(() => {
+    checkInsClock = utc(12)
+    checkIns = new RoutineCheckInsService({
+      repository: new FakeRoutineCheckInsRepository(),
+      versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
+      reminders,
+      now: () => checkInsClock,
+    })
+    missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
+  })
+
+  /** Amara in Lagos from day 1 on the test day, reminders on, her nudge switch on by default, and empty morning and evening lists (so only the nudge can go). */
+  const nudgeOnly = (patch: Parameters<FakeRemindersRepository['upsert']>[1] = {}, over: Partial<Plan> = {}) => amara(patch, { dayOne: day(0), morning: [], evening: [], ...over })
+  /** Amara ticks her morning for the local day `n`, at midday there. */
+  const checkInOn = async (n: number) => {
+    checkInsClock = new Date(utc(11).getTime() + n * DAY)
+    await runAs(AMARA, () => checkIns.checkIn(day(n), 'morning'))
+  }
+  const nudgesSent = () => sentOf('missed-days-nudge')
+
+  it('sends nothing on the morning after one missed day, and the nudge on the morning after the second (the boundary: 1 and 2)', async () => {
+    await nudgeOnly()
+
+    // Day 1 is the test day. On the morning of day 2, one day (day 1) is missed; on day 3, two.
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(await sendDue(morning(1))).toBe(0)
+    expect(nudgesSent()).toEqual([])
+
+    expect(await sendDue(morning(2))).toBe(1)
+    expect(nudgesSent()).toHaveLength(1)
+  })
+
+  it('sends a push that opens the routine, with the profile in the payload and fixed copy, and queues the profile and the first day of the run', async () => {
+    await nudgeOnly()
+
+    await sendDue(morning(2))
+
+    expect(queued()).toEqual([{ job: 'send-push', body: { kind: 'missed-days-nudge', profileId: 'profile-amara-1', since: day(0) } }])
+    expect(push.sent).toEqual([
+      {
+        to: AMARA_TOKEN,
+        title: expect.stringMatching(/\S/),
+        body: expect.stringMatching(/\S/),
+        data: { kind: 'missed-days-nudge', url: '/routine', profileId: 'profile-amara-1' },
+      },
+    ])
+  })
+
+  it('does not send it again on the third and fourth morning of the same run, and not on a re-run of the morning that sent it', async () => {
+    await nudgeOnly()
+
+    expect(await sendDue(morning(2))).toBe(1)
+    expect(await sendDue(morning(2))).toBe(0)
+    expect(await sendDue(morning(3))).toBe(0)
+    expect(await sendDue(morning(4))).toBe(0)
+    expect(await sendDue(morning(5))).toBe(0)
+
+    expect(nudgesSent()).toHaveLength(1)
+  })
+
+  it('sends it on the first morning the job sees a run of three, because the run is two days or more (a cron slot skipped, a phone registered late)', async () => {
+    await nudgeOnly()
+
+    expect(await sendDue(morning(3))).toBe(1)
+    expect(await sendDue(morning(4))).toBe(0)
+
+    expect(queued()).toEqual([{ job: 'send-push', body: { kind: 'missed-days-nudge', profileId: 'profile-amara-1', since: day(0) } }])
+  })
+
+  it('sends a new nudge for a new run after a check-in, and not before that run reaches two days', async () => {
+    await nudgeOnly()
+    expect(await sendDue(morning(2))).toBe(1)
+    expect(await sendDue(morning(3))).toBe(0)
+    expect(await sendDue(morning(4))).toBe(0)
+
+    // She ticks off day 5 (the fifth day from day 1 is day(4)), which ends the run: nothing is missed on the morning after, then one day is, then two.
+    await checkInOn(4)
+    expect(await sendDue(morning(5))).toBe(0)
+    expect(await sendDue(morning(6))).toBe(0)
+    expect(await sendDue(morning(7))).toBe(1)
+    expect(await sendDue(morning(8))).toBe(0)
+
+    expect(queued().map((entry) => (entry.body as { since: string }).since)).toEqual([day(0), day(5)])
+    expect(nudgesSent()).toHaveLength(2)
+  })
+
+  it('sends none when the nudge switch is off, and queues nothing; a switch turned on again in the same window sends it, because an off switch claimed nothing', async () => {
+    await nudgeOnly({ missedDaysNudge: false })
+    expect(await sendDue(morning(2))).toBe(0)
+    expect(queued()).toEqual([])
+
+    await settings.upsert('profile-amara-1', { missedDaysNudge: true }, utc(6, 2))
+
+    expect(await sendDue(new Date(morning(2).getTime() + 3 * MINUTE))).toBe(1)
+  })
+
+  it('sends beside the daily push with reminders on: two separate pushes', async () => {
+    await amara({}, { dayOne: day(0) })
+
+    expect(await sendDue(morning(2))).toBe(2)
+
+    expect(queuedKinds().sort()).toEqual(['missed-days-nudge', 'routine-reminder'])
+    expect(sentOf('routine-reminder')[0]!.title).toBe('Cleanser, Moisturiser, Sunscreen')
+  })
+
+  it('sends nothing with reminders off, even with the nudge switch on, and claims nothing: turning reminders on in the same window sends it (story 30)', async () => {
+    await nudgeOnly({ enabled: false, missedDaysNudge: true, stepDownAlerts: true })
+
+    expect(await sendDue(morning(2))).toBe(0)
+    expect(queued()).toEqual([])
+
+    await settings.upsert('profile-amara-1', { enabled: true }, utc(6, 2))
+
+    expect(await sendDue(new Date(morning(2).getTime() + 3 * MINUTE))).toBe(1)
+    expect(queuedKinds()).toEqual(['missed-days-nudge'])
+  })
+
+  it('does not send at the evening time, only at the morning time', async () => {
+    await nudgeOnly()
+
+    expect(await sendDue(new Date(utc(20).getTime() + 2 * DAY))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  it('sends none before the routine is Started', async () => {
+    await remind(AMARA, { timeZone: LAGOS })
+    await phone(AMARA, AMARA_TOKEN)
+
+    expect(await sendDue(morning(5))).toBe(0)
+    expect(queued()).toEqual([])
+  })
+
+  it('counts the run by the profile\'s LOCAL day: 00:30 in Lagos on the third day is 23:30 UTC on the second, and the run is already two days', async () => {
+    await nudgeOnly({ morning: '00:30' })
+
+    // Lagos local day 2 (day 1 is day(0), missed; day(1) missed) at 00:30 is 23:30 UTC on day(1). A UTC date would count one missed day and send nothing.
+    expect(await sendDue(new Date(utc(23, 30).getTime() + DAY))).toBe(1)
+    expect(await sendDue(utc(23, 30))).toBe(0)
+  })
+
+  it('counts the run by the local day in New York too: 21:00 on the second day is 01:00 UTC on the third, and the run is still one day', async () => {
+    await remind(AMARA, { morning: '21:00', timeZone: NEW_YORK })
+    await phone(AMARA, AMARA_TOKEN)
+    startedRoutine(AMARA, { morning: [], evening: [], dayOne: day(0) })
+
+    // New York local day 1 at 21:00 is 01:00 UTC on day(2). A UTC date would count two missed days and send early.
+    expect(await sendDue(new Date(utc(25).getTime() + DAY))).toBe(0)
+    expect(await sendDue(new Date(utc(25).getTime() + 2 * DAY))).toBe(1)
+  })
+
+  it('sends once when runs overlap', async () => {
+    await nudgeOnly()
+
+    const counts = await Promise.all([sendDue(morning(2)), sendDue(morning(2)), sendDue(new Date(morning(2).getTime() + MINUTE))])
+
+    expect(counts.reduce((total, count) => total + count, 0)).toBe(1)
+    expect(nudgesSent()).toHaveLength(1)
+  })
+
+  it('claims nothing while the profile has no phone, so a phone that registers in the same window still gets it', async () => {
+    await remind(AMARA, { timeZone: LAGOS })
+    startedRoutine(AMARA, { morning: [], evening: [], dayOne: day(0) })
+    expect(await sendDue(morning(2))).toBe(0)
+    expect(queued()).toEqual([])
+
+    await phone(AMARA, AMARA_TOKEN)
+
+    expect(await sendDue(new Date(morning(2).getTime() + 10 * MINUTE))).toBe(1)
+  })
+
+  it('is dropped at delivery when reminders go off after it was queued, even with the nudge switch still on', async () => {
+    await nudgeOnly()
+    expect(await service.sendDue(morning(2))).toBe(1)
+    await settings.upsert('profile-amara-1', { enabled: false }, utc(6, 5))
+
+    await drain()
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('is dropped at delivery when the nudge switch goes off after it was queued', async () => {
+    await nudgeOnly()
+    expect(await service.sendDue(morning(2))).toBe(1)
+    await settings.upsert('profile-amara-1', { missedDaysNudge: false }, utc(6, 5))
+
+    await drain()
+
+    expect(push.sent).toEqual([])
+  })
+
+  it('sends the nudge whatever the account\'s scan notification switches say', async () => {
+    await nudgeOnly()
+    await notificationSettings.upsert('user-amara', { scanFinished: false, scanNeedsYou: false }, utc(0))
+
+    expect(await sendDue(morning(2))).toBe(1)
+  })
+
+  describe('by WhatsApp', () => {
+    it('is a no-op while the channel is WhatsApp: nothing is queued or sent, and nothing is claimed', async () => {
+      await nudgeOnly()
+      channels.set('profile-amara-1', 'whatsapp')
+
+      expect(await sendDue(morning(2))).toBe(0)
+      expect(queued()).toEqual([])
+      expect(push.sent).toEqual([])
+
+      // Nothing was claimed, so the nudge still goes once the channel is push (or, later, once the WhatsApp send exists): the same run, the same window.
+      channels.set('profile-amara-1', 'push')
+      expect(await sendDue(new Date(morning(2).getTime() + 5 * MINUTE))).toBe(1)
+    })
+
+    it('logs the profile\'s id and the channel, and nothing about the person: no token, zone or text', async () => {
+      await nudgeOnly()
+      channels.set('profile-amara-1', 'whatsapp')
+      const logs = [vi.spyOn(console, 'log'), vi.spyOn(console, 'info'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')]
+      for (const log of logs) log.mockImplementation(() => undefined)
+
+      await sendDue(morning(2))
+
+      const logged = JSON.stringify(logs.flatMap((log) => log.mock.calls))
+      expect(logged).toContain('profile-amara-1')
+      expect(logged).toContain('whatsapp')
+      for (const secret of [AMARA_TOKEN, LAGOS, 'Cleanser']) expect(logged).not.toContain(secret)
+    })
+
+    it('still sends the daily push and the alert by push: only the nudge follows the channel', async () => {
+      await amara({}, { dayOne: day(0), stepDownChanges: [change(2, 'Cream', EVERY_OTHER_DAY)] })
+      channels.set('profile-amara-1', 'whatsapp')
+
+      expect(await sendDue(morning(2))).toBe(2)
+
+      expect(queuedKinds().sort()).toEqual(['routine-reminder', 'step-down-alert'])
+    })
+  })
+
+  it('carries on with the other profiles when reading one profile\'s missed days fails, and does not throw', async () => {
+    await nudgeOnly()
+    await remind(NGOZI, { timeZone: LONDON })
+    await phone(NGOZI, NGOZI_TOKEN)
+    startedRoutine(NGOZI, { morning: [], evening: [], dayOne: day(0) })
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const real = missedStreak
+    missedStreak = async (profileId, today) => {
+      if (profileId === 'profile-amara-1') throw new Error('the check-ins could not be read')
+      return real(profileId, today)
+    }
+
+    // 06:00 UTC is 07:00 in Lagos and in London.
+    const count = await sendDue(morning(2))
+
+    expect(count).toBe(1)
+    expect(push.sent.map((message) => message.to)).toEqual([NGOZI_TOKEN])
+  })
+})
+
+// --- one morning, three pushes (spec #217, PR 4c) ---
+
+describe('ReminderSendsService.sendDue: the daily push, the step-down alert and the nudge on one morning', () => {
+  let checkIns: RoutineCheckInsService
+  beforeEach(() => {
+    checkIns = new RoutineCheckInsService({
+      repository: new FakeRoutineCheckInsRepository(),
+      versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
+      reminders,
+      now: () => utc(12),
+    })
+    missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
+  })
+
+  /** Day 1 was two mornings ago and both days were missed; a step of a step-down begins today. */
+  const allThree = () => amara({}, { dayOne: day(-2), stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+
+  it('sends all three as separate pushes, and counts each', async () => {
+    await allThree()
+
+    expect(await sendDue(morning(0))).toBe(3)
+
+    expect(queuedKinds().sort()).toEqual(['missed-days-nudge', 'routine-reminder', 'step-down-alert'])
+    expect(push.sent.map((message) => (message.data as { kind: string }).kind).sort()).toEqual(['missed-days-nudge', 'routine-reminder', 'step-down-alert'])
+  })
+
+  it('sends at most one of each per local day: a re-run sends none, and the next day sends the daily push alone', async () => {
+    await allThree()
+    await sendDue(morning(0))
+
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(await sendDue(utc(6, 5))).toBe(0)
+
+    // Tomorrow: the daily push again; no step changes (it changed today), and the run is the same one, already nudged.
+    expect(await sendDue(morning(1))).toBe(1)
+    expect(sentOf('routine-reminder')).toHaveLength(2)
+    expect(sentOf('step-down-alert')).toHaveLength(1)
+    expect(sentOf('missed-days-nudge')).toHaveLength(1)
+  })
+
+  it('does not let one failed enqueue stop the others: each is its own claim and its own push', async () => {
+    await allThree()
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    jobs.failNextWith(new Error('the queue is down'))
+
+    expect(await sendDue(morning(0))).toBe(2)
+    expect(push.sent).toHaveLength(2)
+  })
+
+  it('sends each kind to the same phones, once per phone', async () => {
+    await allThree()
+    await phone(AMARA, AMARA_SECOND_PHONE)
+
+    expect(await sendDue(morning(0))).toBe(3)
+
+    expect(push.sent).toHaveLength(6)
+    for (const kind of ['routine-reminder', 'step-down-alert', 'missed-days-nudge']) expect(sentOf(kind).map((message) => message.to).sort()).toEqual([AMARA_TOKEN, AMARA_SECOND_PHONE].sort())
+  })
+
+  it('logs ids and outcomes only: never a token, a product title, a line, a time zone', async () => {
+    await allThree()
+    await remind(TOLU, { timeZone: NEW_YORK })
+    startedRoutine(TOLU, { morning: [], evening: [], stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+    const logs = [vi.spyOn(console, 'log'), vi.spyOn(console, 'info'), vi.spyOn(console, 'warn'), vi.spyOn(console, 'error')]
+    for (const log of logs) log.mockImplementation(() => undefined)
+
+    // Amara is due and has a phone; Tolu is due (11:00 UTC) later and has none.
+    await sendDue(morning(0))
+    await sendDue(utc(11))
+
+    const logged = JSON.stringify(logs.flatMap((log) => log.mock.calls))
+    for (const secret of [AMARA_TOKEN, TOLU_TOKEN, 'Cream', 'From today', LAGOS, NEW_YORK]) expect(logged).not.toContain(secret)
+  })
+})
+
+// --- missed days count only from the day reminders were turned on (spec #217, PR 4c; the owner's decision) ---
+
+// A row's `enabledOn` (the local day `enabled` last went on; RemindersService stamps it, reminders.service.test.ts) clamps the run: since' = max(missedStreak.since, enabledOn), days' = days from since' to
+// yesterday inclusive, nudged at 2 or more and claimed as `nudge:{since'}` on that day. The day reminders were turned on is itself the first day counted. A row with no `enabledOn` is not clamped.
+describe('ReminderSendsService.sendDue: the nudge counts from the day reminders were turned on', () => {
+  let clock: Date
+  let checkIns: RoutineCheckInsService
+  beforeEach(() => {
+    clock = utc(12)
+    checkIns = new RoutineCheckInsService({
+      repository: new FakeRoutineCheckInsRepository(),
+      versions: { current: async (profileId: string) => (plans.has(profileId) ? { startedOn: new Date(`${plans.get(profileId)!.dayOne}T00:00:00.000Z`) } : null) } as unknown as Pick<RoutinesRepository, 'current'>,
+      reminders,
+      now: () => clock,
+    })
+    missedStreak = (profileId, today) => checkIns.missedStreak(profileId, today)
+  })
+
+  /** Started ten days before the test day, nothing checked in, reminders turned on at the test day's start (so on day(0)) or whenever `enabledOn` says. Empty lists, so only the nudge can go. */
+  const lateOptIn = (enabledOn: string | null = TODAY) => amara({ enabledOn }, { dayOne: day(-10), morning: [], evening: [] })
+  const sinces = () => queued().map((entry) => (entry.body as { since: string }).since)
+
+  it('sends no instant nudge to someone who started days ago and turns reminders on now: the first morning and the next are quiet, the second after is the nudge', async () => {
+    await lateOptIn()
+
+    // Ten days missed in all, but only the days since they asked count: on the morning of day(1) one (day(0)) is, on day(2) two.
+    expect(await sendDue(morning(0))).toBe(0)
+    expect(await sendDue(morning(1))).toBe(0)
+    expect(queued()).toEqual([])
+
+    expect(await sendDue(morning(2))).toBe(1)
+    expect(queued()).toEqual([{ job: 'send-push', body: { kind: 'missed-days-nudge', profileId: 'profile-amara-1', since: TODAY } }])
+  })
+
+  it('claims on the clamped day, so the nudge is once for that run and not again on the mornings after', async () => {
+    await lateOptIn()
+
+    expect(await sendDue(morning(2))).toBe(1)
+    expect(await sendDue(morning(3))).toBe(0)
+    expect(await sendDue(morning(4))).toBe(0)
+
+    expect(sinces()).toEqual([TODAY])
+  })
+
+  it('does not clamp a run that began after the day reminders were turned on: it is nudged as before, on its own first day', async () => {
+    // Reminders on since day(-6) with the routine started on day(-10); a check-in for day(-3) ends the earlier run, so the run that follows begins on day(-2).
+    await lateOptIn(day(-6))
+    clock = new Date(utc(11).getTime() - 2 * DAY)
+    await runAs(AMARA, () => checkIns.checkIn(day(-3), 'morning'))
+    clock = utc(12)
+
+    expect(await sendDue(morning(0))).toBe(1)
+    expect(sinces()).toEqual([day(-2)])
+  })
+
+  it('counts a person who turns reminders off and on again from the new day: the days between are not counted', async () => {
+    await lateOptIn(day(0))
+    expect(await sendDue(morning(2))).toBe(1)
+
+    // Off at day(3) and on again on day(5), as RemindersService stamps it.
+    await settings.upsert('profile-amara-1', { enabled: false }, utc(6, 20, 0, 0))
+    await settings.upsert('profile-amara-1', { enabled: true, enabledOn: day(5) }, new Date(morning(5).getTime() - 2 * HOUR))
+
+    expect(await sendDue(morning(5))).toBe(0)
+    expect(await sendDue(morning(6))).toBe(0)
+    expect(await sendDue(morning(7))).toBe(1)
+    expect(sinces()).toEqual([day(0), day(5)])
+  })
+
+  it('counts the day reminders were turned on as the first missed day: turned on the day before yesterday, two days are missed on the morning of the third', async () => {
+    await lateOptIn(day(-2))
+
+    expect(await sendDue(morning(-1))).toBe(0)
+    expect(await sendDue(morning(0))).toBe(1)
+    expect(sinces()).toEqual([day(-2)])
+  })
+
+  it('does not clamp a row that has no day (only one the service never turned on), so it is counted from the start as before', async () => {
+    await lateOptIn(null)
+
+    expect(await sendDue(morning(0))).toBe(1)
+    expect(sinces()).toEqual([day(-10)])
+  })
+
+  it('leaves the daily push and the step-down alert alone: they do not look at the day reminders were turned on', async () => {
+    await amara({ enabledOn: day(3) }, { dayOne: day(-10), stepDownChanges: [change(0, 'Cream', EVERY_OTHER_DAY)] })
+
+    expect(await sendDue(morning(0))).toBe(2)
+    expect(queuedKinds().sort()).toEqual(['routine-reminder', 'step-down-alert'])
   })
 })

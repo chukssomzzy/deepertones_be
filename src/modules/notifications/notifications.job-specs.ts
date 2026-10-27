@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 
-export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due', 'routine-reminder'] as const
+export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due', 'routine-reminder', 'step-down-alert', 'missed-days-nudge'] as const
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number]
 
 const scanFinishedBody = z.object({
@@ -70,14 +70,30 @@ const routineReminderBody = z.object({
   title: z.string().min(1).max(200),
 })
 
+const stepDownAlertBody = z.object({
+  kind: z.literal('step-down-alert'),
+  profileId: z.string(),
+  /** The profile's local day, 'YYYY-MM-DD', on which the steps listed begin. */
+  day: z.string(),
+  /** One per step-down whose step begins that day: the product's routine title and the step's fixed line. Carried like the routine reminder's title, since only the send job knows which are due; never logged. */
+  changes: z.array(z.object({ title: z.string().min(1), line: z.string().min(1) })).min(1),
+})
+
+const missedDaysNudgeBody = z.object({
+  kind: z.literal('missed-days-nudge'),
+  profileId: z.string(),
+  /** The first day of the run of missed days, 'YYYY-MM-DD': what makes the nudge once per run. */
+  since: z.string(),
+})
+
 /**
- * What the send job carries: the kind and ids only, never a token or a link (the routine reminder's title is the one text, see its body). Those are resolved when the job runs, so a
+ * What the send job carries: the kind and ids only, never a token or a link (the routine reminder's title and the step-down alert's changes are the only text, see their bodies). Those are resolved when the job runs, so a
  * logout, a profile switch or a changed setting between the event and the send is respected.
  */
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody, stepDownAlertBody, missedDaysNudgeBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -98,6 +114,10 @@ export const sendPushSpec = jobSpec({
         return `face-check-in-due:${body.dayOneScanId}`
       case 'routine-reminder':
         return `routine-reminder:${body.profileId}:${body.day}:${body.time}`
+      case 'step-down-alert':
+        return `step-down-alert:${body.profileId}:${body.day}`
+      case 'missed-days-nudge':
+        return `missed-days-nudge:${body.profileId}:${body.since}`
     }
   },
   // A person is waiting for the notification, as with an OTP: 5 attempts finish within a couple of minutes.

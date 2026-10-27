@@ -15,6 +15,10 @@ const SECOND_RETAKE_AT = SIGNED_IN_AT + 60 * 1000
 const CHECK_IN_DUE = { kind: 'face-check-in-due', userId: 'user-1', profileId: 'profile-1', dayOneScanId: 'day-one-1' }
 // The routine reminder belongs to a profile, not an account: no user id. `day` is the profile's local day and `time` the reminder's, which is what the Done action posts to the check-in route.
 const ROUTINE_REMINDER = { kind: 'routine-reminder', profileId: 'profile-1', day: '2030-06-15', time: 'morning', title: 'Cleanser, Moisturiser, Sunscreen' }
+// The step-down alert (#217 PR 4c) belongs to a profile and carries its text like the routine reminder: one change per step-down whose step begins that local day, each a routine title and the fixed line.
+const STEP_DOWN_ALERT = { kind: 'step-down-alert', profileId: 'profile-1', day: '2030-06-15', changes: [{ title: 'Cream', line: 'From today: use it every other day' }] }
+// The missed-days nudge carries the first day of the missed run (`since`), which is what makes it once per run.
+const MISSED_DAYS_NUDGE = { kind: 'missed-days-nudge', profileId: 'profile-1', since: '2030-06-13' }
 const FACE_RETAKE = { kind: 'face-scan-needs-retake', userId: 'user-1', profileId: 'profile-1', faceScanId: 'face-1', reason: 'too-dark', at: RETAKE_AT }
 
 describe('the send-push job', () => {
@@ -24,8 +28,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the seven notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'routine-reminder', 'scan-finished', 'scan-needs-you'])
+  it('names the nine notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'missed-days-nudge', 'new-sign-in', 'routine-reminder', 'scan-finished', 'scan-needs-you', 'step-down-alert'])
   })
 
   it.each([
@@ -53,6 +57,12 @@ describe('the send-push job', () => {
   it('accepts a routine-reminder title of 1 and of 200 characters', () => {
     expect(sendPushSpec.schema.safeParse({ ...ROUTINE_REMINDER, title: 'x' }).success).toBe(true)
     expect(sendPushSpec.schema.safeParse({ ...ROUTINE_REMINDER, title: 'x'.repeat(200) }).success).toBe(true)
+  })
+
+  it('accepts a step-down-alert body with one change and with several, and a missed-days-nudge body', () => {
+    expect(sendPushSpec.schema.safeParse(STEP_DOWN_ALERT).success).toBe(true)
+    expect(sendPushSpec.schema.safeParse({ ...STEP_DOWN_ALERT, changes: [...STEP_DOWN_ALERT.changes, { title: 'Gel cleanser', line: 'From today: stop using it' }] }).success).toBe(true)
+    expect(sendPushSpec.schema.safeParse(MISSED_DAYS_NUDGE).success).toBe(true)
   })
 
   it('accepts a face-check-in-due body', () => {
@@ -91,6 +101,16 @@ describe('the send-push job', () => {
     ['a routine-reminder body with no title', { ...ROUTINE_REMINDER, title: undefined }],
     ['a routine-reminder body with an empty title', { ...ROUTINE_REMINDER, title: '' }],
     ['a routine-reminder body with a title over 200 characters', { ...ROUTINE_REMINDER, title: 'x'.repeat(201) }],
+    ['a step-down-alert body with no changes (an alert with nothing to say is never queued)', { ...STEP_DOWN_ALERT, changes: [] }],
+    ['a step-down-alert body with no changes field', { ...STEP_DOWN_ALERT, changes: undefined }],
+    ['a step-down-alert change with no title', { ...STEP_DOWN_ALERT, changes: [{ line: 'From today: stop using it' }] }],
+    ['a step-down-alert change with an empty title', { ...STEP_DOWN_ALERT, changes: [{ title: '', line: 'From today: stop using it' }] }],
+    ['a step-down-alert change with no line', { ...STEP_DOWN_ALERT, changes: [{ title: 'Cream' }] }],
+    ['a step-down-alert change with an empty line', { ...STEP_DOWN_ALERT, changes: [{ title: 'Cream', line: '' }] }],
+    ['a step-down-alert body with no day', { ...STEP_DOWN_ALERT, day: undefined }],
+    ['a step-down-alert body with no profile id', { ...STEP_DOWN_ALERT, profileId: undefined }],
+    ['a missed-days-nudge body with no since', { ...MISSED_DAYS_NUDGE, since: undefined }],
+    ['a missed-days-nudge body with no profile id', { ...MISSED_DAYS_NUDGE, profileId: undefined }],
     ['a kind that does not exist', { ...FINISHED, kind: 'marketing' }],
     ['a body with no kind', { userId: 'user-1' }],
   ])('rejects %s', (_name, body) => {
@@ -101,6 +121,19 @@ describe('the send-push job', () => {
     expect(sendPushSpec.key(FINISHED as never)).toBe('scan-finished:scan-1')
     expect(sendPushSpec.key({ ...FINISHED } as never)).toBe(sendPushSpec.key(FINISHED as never))
     expect(sendPushSpec.key(SIGN_IN as never)).toBe('new-sign-in:event-1')
+  })
+
+  it('keys a step-down alert by profile and local day, so a repeat is one alert, and two days or two profiles are two', () => {
+    expect(sendPushSpec.key(STEP_DOWN_ALERT as never)).toBe('step-down-alert:profile-1:2030-06-15')
+    expect(sendPushSpec.key({ ...STEP_DOWN_ALERT, changes: [{ title: 'Serum', line: 'From today: stop using it' }] } as never)).toBe('step-down-alert:profile-1:2030-06-15')
+    expect(sendPushSpec.key({ ...STEP_DOWN_ALERT, day: '2030-06-16' } as never)).toBe('step-down-alert:profile-1:2030-06-16')
+    expect(sendPushSpec.key({ ...STEP_DOWN_ALERT, profileId: 'profile-2' } as never)).toBe('step-down-alert:profile-2:2030-06-15')
+  })
+
+  it('keys a missed-days nudge by profile and the first day of the run, so one run of missed days is one nudge however many mornings it spans, and a new run is a new one', () => {
+    expect(sendPushSpec.key(MISSED_DAYS_NUDGE as never)).toBe('missed-days-nudge:profile-1:2030-06-13')
+    expect(sendPushSpec.key({ ...MISSED_DAYS_NUDGE, since: '2030-06-20' } as never)).toBe('missed-days-nudge:profile-1:2030-06-20')
+    expect(sendPushSpec.key({ ...MISSED_DAYS_NUDGE, profileId: 'profile-2' } as never)).toBe('missed-days-nudge:profile-2:2030-06-13')
   })
 
   it('keys a needs-you message by scan and need, so ten items needing a back photo are one notification', () => {

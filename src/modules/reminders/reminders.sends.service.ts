@@ -3,6 +3,7 @@ import type { Frequency } from '../catalog/catalog.vocabulary'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { RemindersRepository } from './reminders.repository'
 import type { ReminderSendsRepository } from './reminders.sends.repository'
+import type { RemindersService } from './reminders.service'
 import type { ReminderRoutinePlan, ReminderSettings } from './reminders.types'
 
 export type ReminderSendsServiceDeps = {
@@ -11,7 +12,11 @@ export type ReminderSendsServiceDeps = {
   sends: ReminderSendsRepository
   /** The routine as the job reads it, by profile id (RoutineViewerService.reminderPlanFor); null while the routine is not Started. */
   routine: { reminderPlanFor(profileId: string): Promise<ReminderRoutinePlan | null> }
-  notifications: Pick<NotificationsService, 'hasPhone' | 'routineReminder'>
+  /** The missed-days read (RoutineCheckInsService.missedStreak: reminders may not import routines, so this is a narrow type): `today` is the profile's local day; `since` is the run's first day. */
+  checkIns: { missedStreak(profileId: string, today: string): Promise<{ days: number; since: string | null }> }
+  /** The channel the nudge goes by (RemindersService.missedDaysChannelFor). */
+  channel: Pick<RemindersService, 'missedDaysChannelFor'>
+  notifications: Pick<NotificationsService, 'hasPhone' | 'routineReminder' | 'stepDownAlert' | 'missedDaysNudge'>
 }
 
 type ReminderTime = 'morning' | 'evening'
@@ -24,6 +29,8 @@ type Wall = string
  * push for each through NotificationsService (which sends it, with the retries, dead tokens and receipts every push has). It reads no request context, so it needs no actor.
  */
 export class ReminderSendsService {
+  /** A run of this many missed days or more is nudged. */
+  private static readonly NUDGE_AFTER_DAYS = 2
   private static readonly WINDOW_MS = 15 * 60 * 1000
   private static readonly DAY_MS = 24 * 60 * 60 * 1000
 
@@ -32,12 +39,16 @@ export class ReminderSendsService {
   private readonly settings: ReminderSendsServiceDeps['settings']
   private readonly sends: ReminderSendsRepository
   private readonly routine: ReminderSendsServiceDeps['routine']
+  private readonly checkIns: ReminderSendsServiceDeps['checkIns']
+  private readonly channel: ReminderSendsServiceDeps['channel']
   private readonly notifications: ReminderSendsServiceDeps['notifications']
 
   constructor(deps: ReminderSendsServiceDeps) {
     this.settings = deps.settings
     this.sends = deps.sends
     this.routine = deps.routine
+    this.checkIns = deps.checkIns
+    this.channel = deps.channel
     this.notifications = deps.notifications
   }
 
@@ -50,6 +61,10 @@ export class ReminderSendsService {
    * nothing is due. The evening lists only the entries due that local day: alternate-days entries on every other day counted from day 1, weekly ones on day 1's weekday,
    * never as-needed ones. The order is the phone (once per profile, before the routine is read), then per reminder the claim, then the push: a window with no phone
    * claims nothing, so a phone that registers before it closes is still sent to. A push whose enqueue fails keeps its claim, so it is not tried again that day.
+   *
+   * At the morning time there are up to two more pushes, each its own claim and its own job: the step-down alert (a step of a step-down begins that local day; claimed as 'step-down' for
+   * the day; needs the alerts switch) and the missed-days nudge (a run of two or more missed days; claimed as `nudge:{since}` on the run's first day, so once per run; needs the nudge
+   * switch and a push channel). The rows `listEnabled` answers have reminders on, which every kind needs. The count is every push queued, whatever its kind.
    *
    * One profile's failure is logged by id and does not stop the others.
    */
@@ -90,12 +105,49 @@ export class ReminderSendsService {
     let queued = 0
     for (const { time, day } of due) {
       if (day < plan.dayOne) continue
-      const title = ReminderSendsService.titleFor(plan, time, day)
-      if (title === '') continue
-      if (!(await this.sends.claim(settings.profileId, day, time, now))) continue
-      if (await this.notifications.routineReminder({ profileId: settings.profileId, day, time, title })) queued++
+      if (await this.sendDaily(settings, plan, time, day, now)) queued++
+      if (time !== 'morning') continue
+      if (settings.stepDownAlerts && (await this.sendStepDownAlert(settings.profileId, plan, day, now))) queued++
+      if (settings.missedDaysNudge && (await this.sendMissedDaysNudge(settings, day, now))) queued++
     }
     return queued
+  }
+
+  /** The daily push: claimed per (profile, local day, time), then queued. Answers whether it was queued; an empty list claims nothing. */
+  private async sendDaily(settings: ReminderSettings, plan: ReminderRoutinePlan, time: ReminderTime, day: string, now: Date): Promise<boolean> {
+    const title = ReminderSendsService.titleFor(plan, time, day)
+    if (title === '') return false
+    if (!(await this.sends.claim(settings.profileId, day, time, now))) return false
+    return this.notifications.routineReminder({ profileId: settings.profileId, day, time, title })
+  }
+
+  /** One alert listing every step-down step that begins on `day`, claimed as 'step-down' for the day. Nothing is claimed on a day with no change. */
+  private async sendStepDownAlert(profileId: string, plan: ReminderRoutinePlan, day: string, now: Date): Promise<boolean> {
+    const changes = plan.stepDownChanges.filter((change) => change.day === day).map(({ title, line }) => ({ title, line }))
+    if (changes.length === 0) return false
+    if (!(await this.sends.claim(profileId, day, 'step-down', now))) return false
+    return this.notifications.stepDownAlert({ profileId, day, changes })
+  }
+
+  /**
+   * One nudge for a run of two or more missed days, counted from the day reminders were turned on at the earliest (`enabledOn`): someone who starts late and opts in now is not
+   * nudged for days before they asked. The run is clamped here, in calendar dates, so `missedStreak` stays the plain count. A row with no `enabledOn` (only a row that has never been turned on
+   * by the service; the migration stamps the existing ones) is not clamped. Claimed as `nudge:{since}` on the run's first day (not today) so the claim is held for the whole run and every later
+   * morning of it finds it taken; a new run has a new `since`. The WhatsApp channel claims and queues nothing (the nudge goes out once that send exists) and logs the id alone.
+   */
+  private async sendMissedDaysNudge(settings: ReminderSettings, today: string, now: Date): Promise<boolean> {
+    const { profileId, enabledOn } = settings
+    const streak = await this.checkIns.missedStreak(profileId, today)
+    if (streak.since === null) return false
+    const since = enabledOn !== null && enabledOn > streak.since ? enabledOn : streak.since
+    const days = ReminderSendsService.daysBetween(since, ReminderSendsService.dayBefore(today)) + 1
+    if (days < ReminderSendsService.NUDGE_AFTER_DAYS) return false
+    if ((await this.channel.missedDaysChannelFor(profileId)) === 'whatsapp') {
+      console.log({ job: 'reminder-send', outcome: 'nudge-whatsapp-not-sent', profileId, channel: 'whatsapp' })
+      return false
+    }
+    if (!(await this.sends.claim(profileId, since, `nudge:${since}`, now))) return false
+    return this.notifications.missedDaysNudge({ profileId, since })
   }
 
   /**

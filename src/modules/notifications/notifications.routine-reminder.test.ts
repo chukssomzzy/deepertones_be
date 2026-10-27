@@ -66,7 +66,8 @@ beforeEach(() => {
     settings: scanSettings,
     push,
     jobs,
-    reminders: { enabledFor: async (profileId: string) => remindersOn.has(profileId) },
+    // PR 4c widened the dependency to the two other switches (notifications.reminder-alerts.test.ts); the reminder reads only `enabledFor`.
+    reminders: { enabledFor: async (profileId: string) => remindersOn.has(profileId), stepDownAlertsFor: async () => false, missedDaysNudgeFor: async () => false },
     deviceIdKey: DEVICE_KEY,
     now: () => T0,
   })
