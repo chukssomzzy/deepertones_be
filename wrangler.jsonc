@@ -221,11 +221,12 @@
     { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "1015", "simple": { "limit": 60, "period": 60 } }
   ],
 
-  // Two crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
-  // is a change there too. Env blocks do not inherit triggers, so each deployed environment restates both.
+  // Three crons; the Worker's scheduled handler picks the job by the cron that fired (src/jobs/scheduled.ts), so a change here
+  // is a change there too. Env blocks do not inherit triggers, so each deployed environment restates all three.
   //   17 3 * * *      daily guest cleanup (UsersService.purgeUnreachableGuests), 03:17 UTC: off the hour to dodge the top-of-hour rush.
   //   */10 * * * *    scan reaper (ScanService.reap): queues scan steps that were lost again and fails items stuck for over 2 hours.
-  "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+  //   */15 * * * *    reminder send job (ReminderSendsService.sendDue): queues the morning and evening routine pushes whose time was reached in the last 15 minutes.
+  "triggers": { "crons": ["17 3 * * *", "*/10 * * * *", "*/15 * * * *"] },
 
   "observability": {
     "enabled": true
@@ -489,8 +490,8 @@
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "2014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "2015", "simple": { "limit": 60, "period": 60 } }
       ],
-      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
-      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // Daily guest cleanup at 03:17 UTC, the scan reaper every 10 minutes and the reminder send job every 15 (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *", "*/15 * * * *"] },
       // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
       "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [
@@ -723,8 +724,8 @@
         { "name": "PRODUCT_SEARCH_IP_LIMITER", "namespace_id": "3014", "simple": { "limit": 120, "period": 60 } },
         { "name": "PRODUCT_SEARCH_USER_LIMITER", "namespace_id": "3015", "simple": { "limit": 60, "period": 60 } }
       ],
-      // Daily guest cleanup at 03:17 UTC and the scan reaper every 10 minutes (see the top level).
-      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *"] },
+      // Daily guest cleanup at 03:17 UTC, the scan reaper every 10 minutes and the reminder send job every 15 (see the top level).
+      "triggers": { "crons": ["17 3 * * *", "*/10 * * * *", "*/15 * * * *"] },
       // One ScanStream Durable Object per scan, reached by the scan's id (src/realtime/scan-stream.ts). Env blocks do not inherit this.
       "durable_objects": { "bindings": [{ "name": "SCAN_STREAM", "class_name": "ScanStream" }] },
       "d1_databases": [

@@ -18,6 +18,8 @@ type Account = { userId: string; profileId: string }
  *   upsert(profileId, patch, at): Promise<ReminderSettings>   writes only the fields in `patch`, a new row starting from the defaults, and returns the whole row
  *   ReminderSettings = { profileId, enabled, morning, evening, timeZone, stepDownAlerts, missedDaysNudge, updatedAt }
  *   the defaults of a new row: enabled false, morning '07:00', evening '21:00', timeZone null, stepDownAlerts true, missedDaysNudge true
+ *   listEnabled(): Promise<ReminderSettings[]>             every row whose `enabled` is true, whole (PR 4b's send job reads it, once per run), in no particular order; a disabled
+ *                                                          profile and one with no row are not in it
  *   One row per profile (not per user): two profiles of one account keep their own settings.
  */
 export type RemindersContractSetup = {
@@ -108,6 +110,27 @@ export const remindersRepositoryContract = (name: string, make: () => RemindersC
       expect(await repository.get(first)).toMatchObject({ enabled: true, timeZone: 'Africa/Lagos' })
       expect(await repository.upsert(second, { morning: '08:00' }, at(2 * MINUTE))).toMatchObject({ ...DEFAULTS, morning: '08:00' })
       expect(await repository.get(first)).toMatchObject({ enabled: true, morning: '07:00', timeZone: 'Africa/Lagos' })
+    })
+
+    it('lists only the profiles that have reminders on, each row whole', async () => {
+      const { repository, newAccount } = await make()
+      const on = (await newAccount()).profileId
+      const alsoOn = (await newAccount()).profileId
+      const off = (await newAccount()).profileId
+      const switchedOff = (await newAccount()).profileId
+      await newAccount()
+      await repository.upsert(on, { enabled: true, morning: '06:30', timeZone: 'Africa/Lagos' }, at(MINUTE))
+      await repository.upsert(alsoOn, { enabled: true, stepDownAlerts: false }, at(MINUTE))
+      await repository.upsert(off, { morning: '08:00', timeZone: 'Europe/London' }, at(MINUTE))
+      await repository.upsert(switchedOff, { enabled: true }, at(MINUTE))
+      await repository.upsert(switchedOff, { enabled: false }, at(2 * MINUTE))
+
+      const listed = await repository.listEnabled()
+
+      const mine = listed.filter((row) => [on, alsoOn, off, switchedOff].includes(row.profileId))
+      expect(mine.map((row) => row.profileId).sort()).toEqual([on, alsoOn].sort())
+      expect(mine.find((row) => row.profileId === on)).toMatchObject({ ...DEFAULTS, enabled: true, morning: '06:30', timeZone: 'Africa/Lagos' })
+      expect(mine.find((row) => row.profileId === alsoOn)).toMatchObject({ ...DEFAULTS, enabled: true, stepDownAlerts: false })
     })
 
     it('answers an empty patch with the stored values (or the defaults when there is no row), and does not fail', async () => {

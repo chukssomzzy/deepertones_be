@@ -13,6 +13,8 @@ const RETAKE_AT = SIGNED_IN_AT
 const SECOND_RETAKE_AT = SIGNED_IN_AT + 60 * 1000
 // The check-in-due push names the chase by its day-one scan: ids only, like every push (issue #145).
 const CHECK_IN_DUE = { kind: 'face-check-in-due', userId: 'user-1', profileId: 'profile-1', dayOneScanId: 'day-one-1' }
+// The routine reminder belongs to a profile, not an account: no user id. `day` is the profile's local day and `time` the reminder's, which is what the Done action posts to the check-in route.
+const ROUTINE_REMINDER = { kind: 'routine-reminder', profileId: 'profile-1', day: '2030-06-15', time: 'morning', title: 'Cleanser, Moisturiser, Sunscreen' }
 const FACE_RETAKE = { kind: 'face-scan-needs-retake', userId: 'user-1', profileId: 'profile-1', faceScanId: 'face-1', reason: 'too-dark', at: RETAKE_AT }
 
 describe('the send-push job', () => {
@@ -22,8 +24,8 @@ describe('the send-push job', () => {
     expect(sendPushSpec.retry).toEqual({ baseSeconds: 5, factor: 3, capSeconds: 135 })
   })
 
-  it('names the six notification kinds', () => {
-    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'scan-finished', 'scan-needs-you'])
+  it('names the seven notification kinds', () => {
+    expect([...NOTIFICATION_KINDS].sort()).toEqual(['face-check-in-due', 'face-scan-needs-retake', 'face-scan-ready', 'new-sign-in', 'routine-reminder', 'scan-finished', 'scan-needs-you'])
   })
 
   it.each([
@@ -42,6 +44,15 @@ describe('the send-push job', () => {
 
   it('accepts a face-scan-ready body', () => {
     expect(sendPushSpec.schema.safeParse(FACE_READY).success).toBe(true)
+  })
+
+  it.each(['morning', 'evening'])('accepts a routine-reminder body for the %s', (time) => {
+    expect(sendPushSpec.schema.safeParse({ ...ROUTINE_REMINDER, time }).success).toBe(true)
+  })
+
+  it('accepts a routine-reminder title of 1 and of 200 characters', () => {
+    expect(sendPushSpec.schema.safeParse({ ...ROUTINE_REMINDER, title: 'x' }).success).toBe(true)
+    expect(sendPushSpec.schema.safeParse({ ...ROUTINE_REMINDER, title: 'x'.repeat(200) }).success).toBe(true)
   })
 
   it('accepts a face-check-in-due body', () => {
@@ -73,6 +84,13 @@ describe('the send-push job', () => {
     ['a face-check-in-due body with no day-one scan id', { ...CHECK_IN_DUE, dayOneScanId: undefined }],
     ['a face-check-in-due body with no profile id', { ...CHECK_IN_DUE, profileId: undefined }],
     ['a face-check-in-due body with no user id', { ...CHECK_IN_DUE, userId: undefined }],
+    ['a routine-reminder body with a time that is not morning or evening', { ...ROUTINE_REMINDER, time: 'noon' }],
+    ['a routine-reminder body with no time', { ...ROUTINE_REMINDER, time: undefined }],
+    ['a routine-reminder body with no day', { ...ROUTINE_REMINDER, day: undefined }],
+    ['a routine-reminder body with no profile id', { ...ROUTINE_REMINDER, profileId: undefined }],
+    ['a routine-reminder body with no title', { ...ROUTINE_REMINDER, title: undefined }],
+    ['a routine-reminder body with an empty title', { ...ROUTINE_REMINDER, title: '' }],
+    ['a routine-reminder body with a title over 200 characters', { ...ROUTINE_REMINDER, title: 'x'.repeat(201) }],
     ['a kind that does not exist', { ...FINISHED, kind: 'marketing' }],
     ['a body with no kind', { userId: 'user-1' }],
   ])('rejects %s', (_name, body) => {

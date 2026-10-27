@@ -99,6 +99,16 @@ describe('ExpoPushSender.send', () => {
     ])
   })
 
+  it('passes the message\'s categoryId to Expo as categoryId, which is how the phone knows to show the category\'s actions (the reminder\'s "Done")', async () => {
+    const { sender, calls } = make(echoTickets)
+
+    await sender.send([{ ...MESSAGE, categoryId: 'routine-reminder' }])
+
+    expect(calls[0]!.body).toEqual([
+      { to: PUSH_TOKEN, title: TITLE, body: BODY, data: MESSAGE.data, sound: 'default', categoryId: 'routine-reminder' },
+    ])
+  })
+
   it('returns an ok ticket carrying the id Expo assigned', async () => {
     const { sender } = make(() => json({ data: [{ status: 'ok', id: 'abc' }] }))
 

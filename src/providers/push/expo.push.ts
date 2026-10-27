@@ -55,7 +55,7 @@ export class ExpoPushSender implements PushSender {
       try {
         reply = await this.post(
           ExpoPushSender.SEND_URL,
-          batch.map(({ to, title, body, data }) => ({ to, title, body, data, sound: 'default' })),
+          batch.map(({ to, title, body, data, categoryId }) => ({ to, title, body, data, sound: 'default', ...(categoryId === undefined ? {} : { categoryId }) })),
         )
       } catch (error) {
         if (index === 0) throw error

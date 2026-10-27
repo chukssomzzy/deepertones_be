@@ -13,6 +13,8 @@ const PROVIDED_IDS: Record<(typeof NOTIFICATION_KINDS)[number], string[]> = {
   'face-scan-ready': ['faceScanId'],
   'face-scan-needs-retake': ['faceScanId'],
   'face-check-in-due': [],
+  // The reminder opens the routine screen itself, whatever the day or time.
+  'routine-reminder': [],
 }
 
 const templates = deepLinks as Record<string, string>
@@ -43,6 +45,7 @@ describe('the deep-link table (deep-links.json)', () => {
     expect(placeholdersOf(templates['face-scan-ready']!)).toEqual(['faceScanId'])
     expect(placeholdersOf(templates['face-scan-needs-retake']!)).toEqual(['faceScanId'])
     expect(placeholdersOf(templates['face-check-in-due']!)).toEqual([])
+    expect(placeholdersOf(templates['routine-reminder']!)).toEqual([])
   })
 
   it('writes the face scan paths exactly as the app routes them', () => {
@@ -60,6 +63,14 @@ describe('the check-in-due deep link', () => {
   it('opens the new face scan screen, whatever ids it is given', () => {
     expect(deepLinkFor('face-check-in-due', {})).toBe('/scans/faces/new')
     expect(deepLinkFor('face-check-in-due', { faceScanId: 'face-1', scanId: 'scan-1' })).toBe('/scans/faces/new')
+  })
+})
+
+describe('the routine reminder deep link', () => {
+  it('opens the routine screen, whatever ids it is given', () => {
+    expect(templates['routine-reminder']).toBe('/routine')
+    expect(deepLinkFor('routine-reminder', {})).toBe('/routine')
+    expect(deepLinkFor('routine-reminder', { scanId: 'scan-1' })).toBe('/routine')
   })
 })
 

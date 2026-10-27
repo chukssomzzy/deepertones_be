@@ -101,15 +101,26 @@ const productOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewI
   }
 }
 
-const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
+const titleOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): { title: string; product: PublicProduct } => {
   const { product, form } = productOf(step, input)
   const keyIngredient = product.kind === 'recommended' ? product.keyIngredient : null
-  return { step: step.step, title: titleFor({ step: step.step, form, keyIngredient }), when: whenFor(step.frequency), reason: step.reason, changed: changedSince(step, previous, input), product }
+  return { title: titleFor({ step: step.step, form, keyIngredient }), product }
+}
+
+const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
+  const { title, product } = titleOf(step, input)
+  return { step: step.step, title, when: whenFor(step.frequency), reason: step.reason, changed: changedSince(step, previous, input), product }
 }
 
 // Morning is am and am-pm; evening is pm, am-pm and anything used less than daily, which the routine places in the evening. The sunscreen is only ever a morning step.
 const inMorning = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step === 'protect' || frequency === 'am' || frequency === 'am-pm'
 const inEvening = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step !== 'protect' && frequency !== 'am'
+
+/** An entry of the reminder plan: the routine entry's step and title, with the step's raw frequency (the body shows only the `when` label). */
+export type ReminderPlanEntry = { step: RoutineVersionRow['steps'][number]['step']; title: string; frequency: RoutineVersionRow['steps'][number]['frequency'] }
+
+/** What the reminder send job reads: day 1 and the morning and evening lists, placed, ordered and titled as the body places them. */
+export type ReminderPlan = { dayOne: string; morning: ReminderPlanEntry[]; evening: ReminderPlanEntry[] }
 
 const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
   input.version.tapers.flatMap((stopped) => {
@@ -173,4 +184,13 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
     tapers,
     summary: summaryOf(input, tapers),
   }
+}
+
+/** The plan a Started routine's reminders are made of; null while the version has no day 1. It reads only what the titles need, so `previous` and `tapers` of the input are unused. */
+export const toReminderPlan = (input: RoutineViewInput): ReminderPlan | null => {
+  const { version } = input
+  if (version.startedOn === null) return null
+  const ordered = [...version.steps].sort((a, b) => ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step))
+  const entry = (step: RoutineVersionRow['steps'][number]): ReminderPlanEntry => ({ step: step.step, title: titleOf(step, input).title, frequency: step.frequency })
+  return { dayOne: dayString(utcDay(version.startedOn)), morning: ordered.filter(inMorning).map(entry), evening: ordered.filter(inEvening).map(entry) }
 }

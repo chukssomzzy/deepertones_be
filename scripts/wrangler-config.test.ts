@@ -10,9 +10,10 @@ const config = ts.parseConfigFileTextToJson('wrangler.jsonc', readFileSync('wran
 
 // The Worker's `scheduled` handler picks the job by the cron that fired, so a cron here that the code does not know does
 // nothing, and a job whose cron is missing here never runs. Both are pinned: the daily guest cleanup at 03:17 UTC (off the
-// hour, to dodge the top-of-hour rush) and the scan reaper every 10 minutes.
+// hour, to dodge the top-of-hour rush), the scan reaper every 10 minutes and the reminder send job every 15 minutes (a reminder time is due in a 15 minute window).
 const GUEST_CLEANUP_CRON = '17 3 * * *'
 const SCAN_REAPER_CRON = '*/10 * * * *'
+const REMINDERS_CRON = '*/15 * * * *'
 
 describe('wrangler.jsonc cron triggers', () => {
   const places: [string, string[] | undefined][] = [
@@ -21,8 +22,8 @@ describe('wrangler.jsonc cron triggers', () => {
     ['env.production', config.env.production?.triggers?.crons],
   ]
 
-  it.each(places)('%s has exactly the daily guest cleanup and the 10 minute scan reaper', (_, crons) => {
-    expect([...(crons ?? [])].sort()).toEqual([GUEST_CLEANUP_CRON, SCAN_REAPER_CRON].sort())
+  it.each(places)('%s has exactly the daily guest cleanup, the 10 minute scan reaper and the 15 minute reminder send job', (_, crons) => {
+    expect([...(crons ?? [])].sort()).toEqual([GUEST_CLEANUP_CRON, SCAN_REAPER_CRON, REMINDERS_CRON].sort())
   })
 })
 

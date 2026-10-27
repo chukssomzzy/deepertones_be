@@ -16,10 +16,10 @@ import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { FakeRoutinesRepository } from './routines.repository.fake'
+import { FORBIDDEN_WORDING } from './routines.wording'
 import type { RoutineVersionRow } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
 import { RoutineViewerService } from './routines.viewer.service'
-import { FORBIDDEN_WORDING } from './routines.wording'
 
 // The session-facing routine (spec #189, PR 4b): what the routes call. Each method is the session's own (no profile id; the actor's profile is the one read) over
 // PR 2b's profile-keyed RoutineService, and adds what only a screen needs: the gates, the body a client reads, "what changed since last shown", the live stream.
@@ -1436,5 +1436,126 @@ describe('RoutineViewerService.lookFor: nothing internal is served', () => {
     expect(found).toEqual([])
     const text = JSON.stringify(response)
     for (const secret of ['internal.example', 'SECRET-INGREDIENT', 'internal-product-id', 'claude-internal', 'internal-hash', 'product-of-form']) expect(text).not.toContain(secret)
+  })
+})
+
+// --- the plan the reminder send job reads (spec #217, PR 4b) ---
+
+// THE CONTRACT THIS FILE PINS (assumed: the brief says the send job lists "that morning's entry titles" and needs each entry's frequency and day 1, which the routine body does not carry
+// (it shows the `when` label, not the frequency); reminders may not import routines, so the reader lives here and the container hands it to the reminders module as a narrow type):
+//   reminderPlanFor(profileId: string): Promise<{ dayOne: 'YYYY-MM-DD'; morning: PlanEntry[]; evening: PlanEntry[] } | null>
+//       PlanEntry = { step, title, frequency }. By profile id, no session and no gates (a job calls it). The routine in force as `current` reads it: the morning and evening lists of the
+//       body (the same placement, order and titles), each entry with its step's raw frequency. null while that routine has no day 1 (not Started), when there is none, and while it is hidden (pending).
+//       It asks for no build, marks nothing served and reads no goal.
+describe('RoutineViewerService.reminderPlanFor', () => {
+  const plan = (profileId = PROFILE) => viewer.reminderPlanFor(profileId)
+
+  it('answers day 1 and the morning and evening lists as the body places them, with each entry\'s title and raw frequency', async () => {
+    await showing(versionRow({ startedOn: START_DAY }))
+
+    // Cleanse am, treat pm, moisturise am-pm, protect am. The cleanser is Amara's own cream, the treatment a recommended serum.
+    expect(await plan()).toEqual({
+      dayOne: START_DAY.toISOString().slice(0, 10),
+      morning: [
+        { step: 'cleanse', title: 'Cream cleanser', frequency: 'am' },
+        { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+        { step: 'protect', title: 'Sunscreen', frequency: 'am' },
+      ],
+      evening: [
+        { step: 'treat', title: 'Serum', frequency: 'pm' },
+        { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+      ],
+    })
+  })
+
+  it('puts a product used less than daily in the evening with its own frequency, as-needed ones too, and the sunscreen only in the morning', async () => {
+    await showing(
+      versionRow({
+        startedOn: START_DAY,
+        steps: [
+          stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'pm'),
+          stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'alternate-days'),
+          stepOf('moisturise', { kind: 'none' }, 'as-needed'),
+          stepOf('protect', { kind: 'none' }, 'am'),
+        ],
+      }),
+    )
+
+    const read = (await plan())!
+
+    expect(read.morning.map((e) => [e.step, e.frequency])).toEqual([['protect', 'am']])
+    expect(read.evening.map((e) => [e.step, e.frequency])).toEqual([
+      ['cleanse', 'pm'],
+      ['treat', 'alternate-days'],
+      ['moisturise', 'as-needed'],
+    ])
+  })
+
+  it('carries a weekly frequency as it is', async () => {
+    await showing(
+      versionRow({
+        startedOn: START_DAY,
+        steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'pm'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'weekly'), stepOf('moisturise', { kind: 'none' }, 'am')],
+      }),
+    )
+
+    const read = (await plan())!
+
+    expect(read.evening.map((e) => [e.step, e.frequency])).toEqual([
+      ['cleanse', 'pm'],
+      ['treat', 'weekly'],
+    ])
+  })
+
+  it('titles an entry as the body does, from the forms the catalog knows and the recommended row\'s key ingredient', async () => {
+    world.recommended.set('SERUM-1', recommended('SERUM-1', 'form-serum-1', ['NG'], { keyIngredient: 'Niacinamide' }))
+    await showing(versionRow({ startedOn: START_DAY }))
+
+    const read = (await plan())!
+
+    expect(read.evening[0]).toEqual({ step: 'treat', title: 'Niacinamide serum', frequency: 'pm' })
+  })
+
+  it('titles an entry whose key ingredient trips the wording gate by its plain step noun, and every title it answers passes the gate', async () => {
+    // The catalog's words are the maker's own: "Skin whitening" must never reach a lock screen.
+    world.recommended.set('SERUM-1', recommended('SERUM-1', 'form-serum-1', ['NG'], { keyIngredient: 'Skin whitening' }))
+    world.recommended.set('MOIST-GH', recommended('MOIST-GH', 'form-moist-gh', ['GH'], { keyIngredient: 'Melasma' }))
+    await showing(versionRow({ startedOn: START_DAY }))
+
+    const read = (await plan())!
+
+    expect(read.evening.map((e) => [e.step, e.title])).toEqual([
+      ['treat', 'Serum'],
+      ['moisturise', 'Moisturiser'],
+    ])
+    for (const { title } of [...read.morning, ...read.evening]) {
+      for (const { code, pattern } of FORBIDDEN_WORDING) expect(pattern.test(title), `"${title}" trips ${code}`).toBe(false)
+    }
+  })
+
+  it('answers the routine in force while a newer one is being built', async () => {
+    await showing(versionRow({ startedOn: START_DAY }), 'updating')
+
+    expect(await plan()).toMatchObject({ dayOne: START_DAY.toISOString().slice(0, 10) })
+  })
+
+  it('answers null before the routine is Started and while a build is pending (RoutineService.current answers pending when there is no routine or it is hidden)', async () => {
+    await showing(versionRow({ startedOn: null }))
+    expect(await plan()).toBeNull()
+
+    world.routine = { status: 'pending' }
+    expect(await plan()).toBeNull()
+  })
+
+  it('asks for no build, marks nothing served and reads no goal', async () => {
+    const row = await showing(versionRow({ startedOn: START_DAY }))
+
+    await plan()
+
+    expect(routines.request).not.toHaveBeenCalled()
+    expect(routines.requestIfStale).not.toHaveBeenCalled()
+    expect(requireGoal).not.toHaveBeenCalled()
+    expect((await repository.current(PROFILE))!.servedAt).toBeNull()
+    expect(row.servedAt).toBeNull()
   })
 })

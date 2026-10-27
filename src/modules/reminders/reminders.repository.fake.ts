@@ -36,4 +36,9 @@ export class FakeRemindersRepository implements RemindersRepository {
     this.rows.set(profileId, next)
     return { ...next }
   }
+
+  /** Every row whose `enabled` is true. */
+  async listEnabled(): Promise<ReminderSettings[]> {
+    return [...this.rows.values()].filter((row) => row.enabled).map((row) => ({ ...row }))
+  }
 }

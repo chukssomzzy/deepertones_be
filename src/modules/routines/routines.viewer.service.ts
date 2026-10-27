@@ -12,12 +12,12 @@ import type { SafetyService } from '../safety/safety.service'
 import type { ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { VerdictService } from '../verdicts/verdicts.service'
-import type { RoutinesRepository } from './routines.repository'
+import type { RoutinesRepository, RoutineVersionRow } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
 import { titleFor } from './routines.copy'
 import { commonlySoldAt, LOOK_FOR_PRODUCTS, whyFor } from './routines.look-for'
 import type { LookForResponse, RoutineResponse } from './routines.schemas'
-import { isSoldIn, toRoutineResponse } from './routines.view'
+import { isSoldIn, toReminderPlan, toRoutineResponse, type ReminderPlan, type RoutineViewInput } from './routines.view'
 
 export type RoutineViewerServiceDeps = {
   routines: Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>
@@ -202,6 +202,17 @@ export class RoutineViewerService {
     if (view.status === 'ready') await this.publishDone(profileId)
   }
 
+  /**
+   * The routine in force as the reminder send job reads it: day 1 and the morning and evening lists, as the body places and titles them, each entry with its step's raw
+   * frequency. By profile id with no session or gates (a job calls it). Null while there is nothing to remind of: no routine, one hidden (pending) or one not Started.
+   * It asks for no build, marks nothing served and reads no goal.
+   */
+  async reminderPlanFor(profileId: string): Promise<ReminderPlan | null> {
+    const view = await this.routines.current(profileId)
+    if (view.status === 'pending' || view.version.startedOn === null) return null
+    return toReminderPlan(await this.inputFor(profileId, view.status, view.version, null, false))
+  }
+
   /** The caller's profile once they may see a routine: signed up, with a goal, and the verdict available. */
   private async gated(): Promise<string> {
     return (await this.gatedWithGoal()).profileId
@@ -241,14 +252,29 @@ export class RoutineViewerService {
     if (view.status === 'pending') return { status: 'pending' }
     const { version } = view
     const previous = await this.repository.lastServedBefore(profileId, version.id)
-    // The shown version's recommended products, and the previous one's: a product that has since become the user's own is compared by its formulation.
+    const body = toRoutineResponse(await this.inputFor(profileId, view.status, version, previous, true))
+    if (serve && version.servedAt === null) {
+      try {
+        await this.repository.markServed(version.id, this.now())
+      } catch (error) {
+        console.error({ outcome: 'routine-mark-served-failed', profileId, versionId: version.id, error: describeError(error) })
+      }
+    }
+    return body
+  }
+
+  /**
+   * Everything the routine screen is made of, read around a version: the shown version's recommended products, and the previous one's (a product that has since become
+   * the user's own is compared by its formulation). `withTapers` also reads the step-down templates, which only the body shows.
+   */
+  private async inputFor(profileId: string, status: 'ready' | 'updating', version: RoutineVersionRow, previous: RoutineVersionRow | null, withTapers: boolean): Promise<RoutineViewInput> {
     const codes = [...new Set([...version.steps, ...(previous?.steps ?? [])].flatMap(({ product }) => (product.kind === 'candidate' ? [product.code] : [])))]
     const [shopping, entries, recommended, countries, tapers] = await Promise.all([
       this.recommendations.shoppingFor(profileId),
       this.shelf.activeEntriesFor(profileId),
       this.workbook.recommendedByCode(codes),
       this.workbook.countries(),
-      this.workbook.tapersByCode([...new Set(version.tapers.map(({ templateId }) => templateId))]),
+      withTapers ? this.workbook.tapersByCode([...new Set(version.tapers.map(({ templateId }) => templateId))]) : new Map(),
     ])
     const facts = await this.catalog.shelfFacts(entries.flatMap((entry) => (entry.kind === 'product' ? [entry.formulationId] : [])))
     const own = new Map<string, { brand: string | null; name: string; formulationId?: string; form?: ProductForm | null }>()
@@ -260,15 +286,7 @@ export class RoutineViewerService {
       }
     }
     const summaries = await this.catalog.productSummaries([...recommended.values()].flatMap((row) => (row.formulationId ? [row.formulationId] : [])))
-    const body = toRoutineResponse({ status: view.status, version, previous, country: shopping.country, countries, own, recommended, summaries, tapers })
-    if (serve && version.servedAt === null) {
-      try {
-        await this.repository.markServed(version.id, this.now())
-      } catch (error) {
-        console.error({ outcome: 'routine-mark-served-failed', profileId, versionId: version.id, error: describeError(error) })
-      }
-    }
-    return body
+    return { status, version, previous, country: shopping.country, countries, own, recommended, summaries, tapers }
   }
 
   private static versionIdOf(view: RoutineView): string | null {
