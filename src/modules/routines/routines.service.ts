@@ -2,6 +2,7 @@ import { describeError } from '../../jobs/safe-error'
 import type { Actor } from '../../lib/context'
 import { runAs } from '../../lib/context'
 import { ConflictError, NotFoundError } from '../../lib/errors'
+import { localDate, nextLocalDay } from '../../lib/local-day'
 import { stableJson } from '../../lib/stable-json'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { RoutineRetry, RoutineWriter } from '../../providers/routine-writing/routine-writer.provider'
@@ -14,6 +15,7 @@ import type { Goal } from '../goals/goals.vocabulary'
 import type { ProfilesService } from '../profiles/profiles.service'
 import type { RecommendationService } from '../recommendations/recommendations.service'
 import type { Candidate } from '../recommendations/recommendations.types'
+import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
@@ -43,6 +45,8 @@ export type RoutineServiceDeps = {
   faceScans: Pick<FaceScanService, 'seenFor'>
   workbook: Pick<CatalogWorkbookService, 'verdictReference' | 'countries'>
   profiles: Pick<ProfilesService, 'find'>
+  /** The profile's stored time zone, which decides where its local days begin. */
+  reminders: Pick<RemindersService, 'zoneFor'>
   writer: RoutineWriter
   /** The model and prompt hash the writer runs under, recorded on every routine it writes. */
   writerIdentity: { model: string; promptHash: string }
@@ -116,6 +120,7 @@ export class RoutineService {
   private readonly faceScans: RoutineServiceDeps['faceScans']
   private readonly workbook: RoutineServiceDeps['workbook']
   private readonly profiles: RoutineServiceDeps['profiles']
+  private readonly reminders: RoutineServiceDeps['reminders']
   private readonly writer: RoutineWriter
   private readonly writerIdentity: RoutineServiceDeps['writerIdentity']
   private readonly repository: RoutinesRepository
@@ -136,6 +141,7 @@ export class RoutineService {
     this.faceScans = deps.faceScans
     this.workbook = deps.workbook
     this.profiles = deps.profiles
+    this.reminders = deps.reminders
     this.writer = deps.writer
     this.writerIdentity = deps.writerIdentity
     this.repository = deps.repository
@@ -179,13 +185,14 @@ export class RoutineService {
   }
 
   /**
-   * Makes tomorrow (the next UTC midnight) day 1 of the routine in force, and of its step-downs: the person taps Start on the evening they decide, and the plan begins with the morning after. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
+   * Makes tomorrow (the person's next local date in their stored time zone, else the next UTC date; stored as that date's UTC midnight and never moved by a later change of zone) day 1 of the routine in force, and of its step-downs: the person taps Start on the evening they decide, and the plan begins with the morning after. 409 `ROUTINE_NOT_READY` before there is one, and while a safety change hides it (`current`
    * answers pending): a routine the person cannot see is not started. Starting again changes nothing.
    */
   async start(profileId: string): Promise<void> {
     if ((await this.current(profileId)).status === 'pending') throw new ConflictError('ROUTINE_NOT_READY', 'Your routine is not ready yet')
-    const now = this.now()
-    await this.repository.markStarted(profileId, new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1)))
+    const zone = await this.reminders.zoneFor(profileId)
+    // The zone only decides which date tomorrow is; what is stored is that calendar date (its UTC midnight), so a later change of zone moves nothing.
+    await this.repository.markStarted(profileId, localDate(nextLocalDay(this.now(), zone), zone))
   }
 
   /**
@@ -431,7 +438,7 @@ export class RoutineService {
     const assemble = (answer: Routine): SplicedRoutine => (merge ? spliceFixed(merge, answer) : { steps: answer.steps.map((e) => ({ ...e, gotIt: false, fixedFrom: null })), tapers: RoutineService.stoppedOf(skeleton), expectation: answer.expectation })
 
     const at = this.now()
-    const today = new Date(Date.UTC(at.getUTCFullYear(), at.getUTCMonth(), at.getUTCDate()))
+    const today = localDate(at, await this.reminders.zoneFor(profileId))
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
     const shelfCounts = RoutineService.countsOf(skeleton.shelf)
@@ -709,7 +716,7 @@ export class RoutineService {
     return { id: row.id, goal: row.goal ?? goal, expectation: row.expectation ?? '', steps: row.steps, tapers: row.tapers }
   }
 
-  /** The step-downs with the undated ones dated `day`, when the routine is started (`startedOn` set); before Start none has a date. None begins before day 1: Start makes tomorrow day 1, so a stop added in between waits for it. */
+  /** The step-downs with the undated ones dated `day` (the person's local date at the rebuild, as its UTC midnight), when the routine is started (`startedOn` set); before Start none has a date. None begins before day 1: Start makes tomorrow day 1, so a stop added in between waits for it. */
   private static datedFrom(tapers: StoredTaper[], startedOn: Date | null, day: Date): StoredTaper[] {
     if (startedOn === null) return tapers
     const begin = startedOn.getTime() > day.getTime() ? startedOn : day

@@ -17,6 +17,7 @@ import type { ParseState, SafetyMentionRow, SafetyView } from '../safety/safety.
 import type { SafetyChoice } from '../safety/safety.vocabulary'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
 import type { ProfilesService } from '../profiles/profiles.service'
+import type { RemindersService } from '../reminders/reminders.service'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
 import type { SavedVerdictProduct } from '../verdicts/verdicts.types'
 import { checkRoutine } from './routines.gates'
@@ -58,6 +59,13 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 // It is stored, carried and refreshed exactly as `shelfCounts` is: null while pending, [] for none, carried by the "I got it" copy, rewritten by a build that writes a
 // version, refreshed (before the fingerprint) by a rebuild that finds nothing to change when the inputs moved or the version has none, and left alone otherwise.
 // Assumed repository method: setNotInRoutine(id, items), the sibling of setShelfCounts.
+//
+// PR 3 of spec #217 (local days): one more dep, `reminders: Pick<RemindersService, 'zoneFor'>`, read for the profile's stored time zone (zoneFor(profileId): Promise<string |
+// null>, null while none is stored; the world's `zone`, null by default). The zone only decides what "today" is. The dates the routine stores are CALENDAR DATES, each the UTC
+// midnight of the person's local date, fixed when set: Start makes the local date after the person's local today day 1 (a Lagos tap at 00:30 on the 16th, 23:30 UTC on the
+// 15th, stores 2030-06-17T00:00Z), and a step-down that begins after Start is dated the local date of the rebuild (still never before day 1). Nothing stored moves when the
+// zone changes later. With no zone both stay on the UTC date, exactly as before, which is what every test above the "local days" blocks relies on. The helpers are
+// src/lib/local-day.ts (pinned in its own test); here it is only what Start and the dating do with them.
 //
 // PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
 //   request(profileId, reason, requestKey): Promise<boolean>   (whether a build was queued) never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
@@ -105,6 +113,8 @@ type World = {
   seen: Awaited<ReturnType<FaceScanService['seenFor']>>
   countries: Country[]
   profiles: Map<string, string>
+  /** The IANA time zone the profile stored with its reminder settings, or null when it stored none (the UTC day applies). */
+  zone: string | null
   /** The users who have not verified: guests. Everyone else is verified (every test but the guest ones is about a signed-up account). */
   guests: Set<string>
   /** The actor in force at each call that needs a session in life (candidatesFor and shelf.add both require a user). */
@@ -189,6 +199,7 @@ const newWorld = (): World => ({
     { code: 'GH', currency: 'GHS', lowMax: 100, midMax: 300, status: 'active' },
   ],
   profiles: new Map([[AMARA_PROFILE, AMARA_USER]]),
+  zone: null,
   guests: new Set(),
   actors: [],
   shelfAdds: [],
@@ -392,6 +403,7 @@ beforeEach(() => {
         return userId === undefined ? null : { id: profileId, userId, ownerStatus: world.guests.has(userId) ? ('anonymous' as const) : ('verified' as const) }
       },
     } satisfies Pick<ProfilesService, 'find'>,
+    reminders: { zoneFor: async () => world.zone } satisfies Pick<RemindersService, 'zoneFor'>,
     writer,
     writerIdentity: { model: 'claude-test-model', promptHash: 'prompt-hash-test' },
     repository,
@@ -2144,6 +2156,255 @@ describe('RoutineService.build: a step-down that would begin before day 1', () =
     expect(await build('verdict')).toBe('built')
 
     expect((await currentRow()).tapers[1]).toEqual({ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: before.startedOn })
+  })
+})
+
+// ---- local days (spec #217, PR 3) ----
+// Dates here are offsets from T0 (2030-06-15 12:00 UTC). Lagos is UTC+1 and New York (June) UTC-4. Every stored date is the UTC midnight of a local calendar date, worked out
+// by hand. Each test (the clamp-to-day-1 pair apart, and the no-zone ones, which pin the old rule) is built so that the UTC rule would give a DIFFERENT answer.
+const LAGOS = 'Africa/Lagos'
+const NEW_YORK = 'America/New_York'
+// Europe/London goes forward to BST at 2030-03-31 01:00 UTC (the 31st is a 23-hour local day) and back to GMT at 2030-10-27 01:00 UTC.
+const LONDON_FORWARD_OFFSET = Date.UTC(2030, 2, 31, 1) - T0.getTime()
+const LONDON_BACK_OFFSET = Date.UTC(2030, 9, 27, 1) - T0.getTime()
+
+describe('RoutineService.start: with a stored time zone', () => {
+  it('makes the Lagos 16th day 1 for a tap at 23:30 Lagos time on the 15th (22:30 UTC)', async () => {
+    world.zone = LAGOS
+    await firstBuild()
+    setClock(10 * HOUR + 30 * MINUTE) // 2030-06-15 22:30 UTC = 23:30 in Lagos
+
+    await start()
+
+    const row = await currentRow()
+    expect(row.startedOn).toEqual(new Date('2030-06-16T00:00:00.000Z'))
+    expect(row.tapers[0]!.startedOn).toEqual(row.startedOn)
+  })
+
+  it('makes the Lagos 17th day 1 for a tap at 00:30 Lagos time on the 16th (23:30 UTC on the 15th), when the Lagos date is already a day ahead of UTC', async () => {
+    world.zone = LAGOS
+    await firstBuild()
+    setClock(11 * HOUR + 30 * MINUTE) // 2030-06-15 23:30 UTC = 00:30 on the 16th in Lagos
+
+    await start()
+
+    // Tomorrow in Lagos is the 17th. The UTC rule would store the 16th, which is the Lagos day it is already.
+    expect((await currentRow()).startedOn).toEqual(new Date('2030-06-17T00:00:00.000Z'))
+  })
+
+  // The edge of the Lagos midnight: one millisecond either side moves day 1 by a whole day.
+  it.each([
+    ['the last millisecond of the Lagos 15th', 11 * HOUR - 1, '2030-06-16T00:00:00.000Z'],
+    ['the first millisecond of the Lagos 16th', 11 * HOUR, '2030-06-17T00:00:00.000Z'],
+  ])('dates day 1 from %s', async (_when, offsetMs, day1) => {
+    world.zone = LAGOS
+    await firstBuild()
+    setClock(offsetMs)
+
+    await start()
+
+    expect((await currentRow()).startedOn).toEqual(new Date(day1))
+  })
+
+  it('makes the New York 16th day 1 for a tap at 22:00 New York time on the 15th (02:00 UTC on the 16th), west of UTC where the local date is behind', async () => {
+    world.zone = NEW_YORK
+    await firstBuild()
+    setClock(14 * HOUR) // 2030-06-16 02:00 UTC = 22:00 on the 15th in New York
+
+    await start()
+
+    // The UTC rule would store the 17th.
+    const row = await currentRow()
+    expect(row.startedOn).toEqual(new Date('2030-06-16T00:00:00.000Z'))
+    expect(row.tapers[0]!.startedOn).toEqual(row.startedOn)
+  })
+
+  it('goes by the local date across London\'s clock change: 00:30 BST on 1 April (23:30 UTC on 31 March) makes 2 April day 1', async () => {
+    world.zone = 'Europe/London'
+    await firstBuild()
+    setClock(LONDON_FORWARD_OFFSET + 22 * HOUR + 30 * MINUTE) // 2030-03-31 23:30 UTC
+
+    await start()
+
+    // The UTC rule would store 1 April.
+    expect((await currentRow()).startedOn).toEqual(new Date('2030-04-02T00:00:00.000Z'))
+  })
+
+  it('goes by the local date across London\'s autumn change: 00:30 BST on 27 October (23:30 UTC on the 26th) makes the 28th day 1', async () => {
+    world.zone = 'Europe/London'
+    await firstBuild()
+    setClock(LONDON_BACK_OFFSET - HOUR - 30 * MINUTE) // 2030-10-26 23:30 UTC
+
+    await start()
+
+    // The UTC rule would store the 27th.
+    expect((await currentRow()).startedOn).toEqual(new Date('2030-10-28T00:00:00.000Z'))
+  })
+
+  it('stays on the next UTC day for a profile with no stored zone, at the same instant that Lagos gives another answer', async () => {
+    world.zone = null
+    await firstBuild()
+    setClock(11 * HOUR + 30 * MINUTE) // 2030-06-15 23:30 UTC
+
+    await start()
+
+    expect((await currentRow()).startedOn).toEqual(new Date('2030-06-16T00:00:00.000Z'))
+  })
+
+  it('stays idempotent: a later tap, even after the zone changed, moves nothing', async () => {
+    world.zone = LAGOS
+    await firstBuild()
+    setClock(11 * HOUR + 30 * MINUTE)
+    await start()
+    const afterFirstStart = await currentRow()
+    world.zone = NEW_YORK
+    setClock(2 * DAY)
+
+    await start()
+
+    expect(await currentRow()).toEqual(afterFirstStart)
+  })
+})
+
+describe('RoutineService.build: a step-down that begins after Start, with a stored time zone', () => {
+  const addSecondStop = () => {
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+  }
+
+  it('dates a new stop the local date of the rebuild, not the UTC date', async () => {
+    world.zone = LAGOS
+    const before = await started()
+    // Tapped 2030-06-17 12:00 UTC (13:00 in Lagos): Lagos day 1 is the 18th.
+    expect(before.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
+    addSecondStop()
+    setClock(5 * DAY + 11 * HOUR + 30 * MINUTE) // 2030-06-20 23:30 UTC = 00:30 on the 21st in Lagos
+
+    expect(await build('verdict')).toBe('built')
+
+    // The Lagos date is the 21st. The UTC rule would date it the 20th, a whole Lagos day early.
+    expect((await currentRow()).tapers).toEqual([
+      { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
+      { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-21T00:00:00.000Z') },
+    ])
+  })
+
+  it('dates a new stop west of UTC by the New York date: a rebuild at 02:00 UTC is still the evening before in New York', async () => {
+    world.zone = NEW_YORK
+    const before = await started()
+    // Tapped 2030-06-17 12:00 UTC (08:00 in New York): day 1 is the 18th.
+    expect(before.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
+    addSecondStop()
+    setClock(5 * DAY - 10 * HOUR) // 2030-06-20 02:00 UTC = 22:00 on the 19th in New York
+
+    expect(await build('verdict')).toBe('built')
+
+    // The New York date is the 19th. The UTC rule would date it the 20th, a day late.
+    expect((await currentRow()).tapers[1]).toEqual({ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-19T00:00:00.000Z') })
+  })
+
+  // None begins before day 1 (the 18th). The clamp holds either side of the Lagos midnight that ends the 17th, since the 17th is before day 1 and the 18th is day 1 itself.
+  it.each([
+    ['the last millisecond of the Lagos 17th: it waits for day 1', 2 * DAY + 11 * HOUR - 1],
+    ['the first millisecond of the Lagos 18th (day 1): it begins on day 1 itself', 2 * DAY + 11 * HOUR],
+  ])('begins a stop added %s', async (_when, offsetMs) => {
+    world.zone = LAGOS
+    const before = await started()
+    expect(before.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
+    addSecondStop()
+    setClock(offsetMs) // 2030-06-17 22:59:59.999 UTC / 23:00:00.000 UTC
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers[1]).toEqual({ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: before.startedOn })
+  })
+
+  // Past day 1 the Lagos midnight moves the date by a day, where the UTC midnight an hour later would not have yet.
+  it.each([
+    ['the last millisecond of the Lagos 18th', 3 * DAY + 11 * HOUR - 1, '2030-06-18T00:00:00.000Z'],
+    ['the first millisecond of the Lagos 19th', 3 * DAY + 11 * HOUR, '2030-06-19T00:00:00.000Z'],
+  ])('dates a stop added %s', async (_when, offsetMs, date) => {
+    world.zone = LAGOS
+    await started()
+    addSecondStop()
+    setClock(offsetMs)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers[1]).toEqual({ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date(date) })
+  })
+
+  it('keeps the date of a step-down already under way when the zone changes before the rebuild', async () => {
+    world.zone = LAGOS
+    const before = await started()
+    addSecondStop()
+    world.zone = NEW_YORK
+    setClock(5 * DAY)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers[0]).toEqual({ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn })
+  })
+
+  it('still dates a new stop the UTC date of the rebuild for a profile with no stored zone', async () => {
+    world.zone = null
+    const before = await started()
+    addSecondStop()
+    setClock(5 * DAY + 11 * HOUR + 30 * MINUTE) // 2030-06-20 23:30 UTC
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers).toEqual([
+      { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
+      { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-20T00:00:00.000Z') },
+    ])
+  })
+})
+
+// The regression: dates are fixed when they are set. A phone that reports its zone later (a US user who started with none) or a traveller whose zone changes must not
+// move day 1 or any step-down date, which the routine response prints as stored.
+describe('RoutineService: a change of zone after Start moves no stored date', () => {
+  const addSecondStop = () => {
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+  }
+
+  it.each([
+    ['no zone at first, then New York (the phone reports it later)', null, NEW_YORK],
+    ['Lagos, then New York (a traveller)', LAGOS, NEW_YORK],
+    ['New York, then none (the zone is cleared)', NEW_YORK, null],
+  ])('keeps day 1 and the step-down date, and the version in force, through a zone that goes from %s', async (_label, first, then) => {
+    world.zone = first
+    const before = await started()
+    const days = before.tapers.map((taper) => taper.startedOn)
+    const startedOn = before.startedOn
+    world.zone = then
+
+    // Nothing writes a date, and a rebuild that finds nothing to change leaves the routine in force alone.
+    setClock(3 * DAY)
+    expect(await build('verdict')).toBe('unchanged')
+    await start()
+
+    const after = await currentRow()
+    expect(after.startedOn).toEqual(startedOn)
+    expect(after.tapers.map((taper) => taper.startedOn)).toEqual(days)
+  })
+
+  it('keeps the dates of what was set before the change, and dates what is added after it by the zone it then has', async () => {
+    world.zone = null
+    const before = await started() // 2030-06-18T00:00Z
+    world.zone = LAGOS
+    addSecondStop()
+    setClock(5 * DAY + 11 * HOUR + 30 * MINUTE) // 2030-06-20 23:30 UTC = the Lagos 21st
+
+    expect(await build('verdict')).toBe('built')
+
+    const row = await currentRow()
+    expect(row.startedOn).toEqual(before.startedOn)
+    expect(row.tapers).toEqual([
+      { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
+      { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-21T00:00:00.000Z') },
+    ])
   })
 })
 

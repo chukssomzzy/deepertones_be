@@ -22,7 +22,7 @@ const getRoutine = defineRoute({
     'no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force, as `morning` and `evening` lists of entries (a step used morning and evening is in both) and `notInRoutine`; `updating` is the same body while a newer build is under way. An entry\'s `product` is `own` (a ' +
     'product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` ("use what you have"). A recommended product ' +
     'the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last ' +
-    'shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.',
+    'shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`) are calendar days, the person\'s local dates once a time zone is stored (UTC otherwise), fixed when set and not moved by a later change of time zone; they appear once the user has started the routine.',
   security: bearer,
   responses: { 200: success(RoutineResponse, 'The routine, or pending'), ...errorResponses(401, 403, 409, 503) },
 })
@@ -53,7 +53,7 @@ const startRoutine = defineRoute({
   summary: 'Start the routine: tomorrow is day 1',
   description:
     GATES +
-    'No body. Dates the routine, and the step-downs in it, from tomorrow (the next UTC day): the first step is the morning after the tap. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.',
+    'No body. Dates the routine, and the step-downs in it, from tomorrow (the next day in the person\'s time zone once one is stored, else the next UTC day): the first step is the morning after the tap. The date is fixed when set, so a later change of time zone does not move it. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.',
   security: bearer,
   responses: { 200: success(RoutineResponse, 'The routine, started'), ...errorResponses(401, 403, 409, 503) },
 })

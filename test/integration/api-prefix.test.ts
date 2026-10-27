@@ -101,6 +101,8 @@ describe('the versioned API', () => {
     ['GET', '/api/v1/me/routine'],
     ['GET', '/api/v1/me/routine/events'],
     ['POST', '/api/v1/me/routine/start'],
+    ['GET', '/api/v1/me/reminders'],
+    ['PUT', '/api/v1/me/reminders'],
     ['POST', '/api/v1/me/routine/steps/treat/got-it'],
     ['POST', '/api/v1/me/routine/steps/treat/find-sold-here'],
   ])('answers %s %s without a token with 401 AUTH_REQUIRED', async (method, path) => {
@@ -151,6 +153,8 @@ describe('the OpenAPI document', () => {
         'DELETE /api/v1/me/push-token',
         'GET /api/v1/me/notification-settings',
         'PATCH /api/v1/me/notification-settings',
+        'GET /api/v1/me/reminders',
+        'PUT /api/v1/me/reminders',
         'PUT /api/v1/me/goal',
         'GET /api/v1/me/goal',
         'GET /api/v1/me/goal/switch-preview',
