@@ -1,7 +1,7 @@
 import { defineRoute, errorResponses, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
-import { RoutineResponse, StepParams } from './routines.schemas'
+import { LookForResponse, RoutineResponse, StepParams } from './routines.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -93,9 +93,28 @@ const findSoldHere = defineRoute({
   responses: { 202: success(RoutineResponse, 'The routine in force, updating'), ...errorResponses(401, 403, 409, 503) },
 })
 
+const lookFor = defineRoute({
+  method: 'get',
+  path: '/routine/steps/{step}/look-for',
+  operationId: 'getRoutineStepLookFor',
+  tags: ['Routine'],
+  summary: 'What to look for in a step\'s product, and the reviewed products that suit the person',
+  description:
+    GATES +
+    'Reads only: it asks for no build. Then 409 `ROUTINE_NOT_READY` before there is a routine to show (a safety change that hides it included), 409 `STEP_IS_YOURS` when the routine uses the ' +
+    'person\'s own product for the step (nothing is pushed to buy a replacement), and 503 `GUIDE_UNAVAILABLE` while no approved guide covers the step. It answers for a recommended step and for a ' +
+    '"use what you have" step. `guide.lookFor` is the guide\'s pregnancy-safe text for a person who is pregnant or breastfeeding when the guide has one. `products` are the reviewed ' +
+    'products for the step in the shopping country that pass the same safety and skin rules as the routine, the routine\'s pick first (`inYourRoutine`), then the cheapest, at most ten; `typicalPrice` ' +
+    'and `commonlySoldAt` are over all of them. No product is sold here and nothing is ranked for money.',
+  security: bearer,
+  request: { params: StepParams },
+  responses: { 200: success(LookForResponse, 'What to look for'), ...errorResponses(400, 401, 403, 409, 503) },
+})
+
 export const routinesRoutes = openapiApp()
   .openapi(getRoutine, async (c) => ok(c, await c.var.services.routineViewer.current(), 'Routine'))
   .openapi(watchRoutine, async (c) => c.var.services.routineViewer.watch())
   .openapi(startRoutine, async (c) => ok(c, await c.var.services.routineViewer.start(), 'Routine started'))
   .openapi(gotIt, async (c) => ok(c, await c.var.services.routineViewer.gotIt(c.req.valid('param').step, c.req.header('cf-connecting-ip') ?? FALLBACK_IP), 'Product marked as got'))
   .openapi(findSoldHere, async (c) => ok(c, await c.var.services.routineViewer.findSoldHere(c.req.valid('param').step), 'Looking for another product', 202))
+  .openapi(lookFor, async (c) => ok(c, await c.var.services.routineViewer.lookFor(c.req.valid('param').step), 'What to look for'))
