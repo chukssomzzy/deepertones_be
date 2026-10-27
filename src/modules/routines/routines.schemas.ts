@@ -73,8 +73,8 @@ const RoutineTaperResponse = z
           fromWeek: z.number().int().openapi({ description: 'The first week of the step, counting from 1.' }),
           toWeek: z.number().int().openapi({ description: 'The last week of the step; the same as `fromWeek` for a single week.' }),
           frequency: z.enum([...FREQUENCIES, 'stop']),
-          fromDate: z.string().optional().openapi({ description: 'The first day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started.' }),
-          toDate: z.string().optional().openapi({ description: 'The last day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started.' }),
+          fromDate: z.string().optional().openapi({ description: 'The first day of the step, as `YYYY-MM-DD`: a calendar date, the person\'s local date once a time zone is stored (UTC otherwise), fixed when the step-down began. Only once the routine is started.' }),
+          toDate: z.string().optional().openapi({ description: 'The last day of the step, as `YYYY-MM-DD`, counted from `fromDate` in calendar days. Only once the routine is started.' }),
         }),
       )
       .openapi({ description: 'The steps in order, ending with `stop`.' }),
@@ -101,7 +101,7 @@ const RoutineSummaryResponse = z
 
 const body = {
   summary: RoutineSummaryResponse.nullable().openapi({ description: 'Null for a routine built before summaries were kept; it gains one at its next rebuild.' }),
-  startedOn: z.string().nullable().openapi({ description: 'Day 1 of the routine, as `YYYY-MM-DD` (UTC): the day after the user tapped Start; null until they do. Step-down dates count from it.' }),
+  startedOn: z.string().nullable().openapi({ description: 'Day 1 of the routine, as `YYYY-MM-DD`: the day after the user tapped Start, in their local calendar once a time zone is stored (UTC otherwise); fixed when set, so a later change of time zone does not move it. Null until they tap Start. Step-down dates count from it.' }),
   expectation: z.string().openapi({ description: 'What to expect and when, in plain words.' }),
   morning: z.array(RoutineEntryResponse).openapi({ description: 'The morning list, in routine order (cleanse, treat, moisturise, protect). The sunscreen is only ever here.' }),
   evening: z.array(RoutineEntryResponse).openapi({ description: 'The evening list, in routine order. Anything used less than daily (every other day, weekly, as needed) is here.' }),

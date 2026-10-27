@@ -412,6 +412,7 @@ export const buildContainer = (env: CloudflareBindings) => {
       faceScans: faceScans(),
       workbook: catalogWorkbook(),
       profiles: profiles(),
+      reminders: reminders(),
       writer: new AnthropicRoutineWriter(client),
       writerIdentity: { model: client.modelFor(routineWriterWriteRoutinePrompt.job), promptHash: routineWriterWriteRoutinePrompt.hash },
       repository: new D1RoutinesRepository(db()),
