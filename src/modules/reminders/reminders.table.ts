@@ -16,5 +16,7 @@ export const reminderSettings = sqliteTable('reminder_settings', {
   timeZone: text('time_zone'),
   stepDownAlerts: integer('step_down_alerts', { mode: 'boolean' }).notNull().default(true),
   missedDaysNudge: integer('missed_days_nudge', { mode: 'boolean' }).notNull().default(true),
+  /** The person's local calendar day ('YYYY-MM-DD') on which reminders were last turned on; the missed-days nudge counts no day before it. Null on a row that never had them on. */
+  enabledOn: text('enabled_on'),
   updatedAt: integer('updated_at', { mode: 'timestamp_ms' }).notNull(),
 })

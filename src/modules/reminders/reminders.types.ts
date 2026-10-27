@@ -16,4 +16,4 @@ export type StepDownChange = { day: string; title: string; line: string }
  * The routine as the send job needs it: day 1 (a calendar date, 'YYYY-MM-DD'), the morning and evening lists and the days a step-down changes. This module owns the type so it never imports routines;
  * `RoutineViewerService.reminderPlanFor` answers it, and the container hands that over.
  */
-export type ReminderRoutinePlan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges?: StepDownChange[] }
+export type ReminderRoutinePlan = { dayOne: string; morning: PlanEntry[]; evening: PlanEntry[]; stepDownChanges: StepDownChange[] }

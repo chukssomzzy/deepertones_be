@@ -15,6 +15,9 @@ const PROVIDED_IDS: Record<(typeof NOTIFICATION_KINDS)[number], string[]> = {
   'face-check-in-due': [],
   // The reminder opens the routine screen itself, whatever the day or time.
   'routine-reminder': [],
+  // Both open a screen of the routine itself, whatever the day: neither carries an id (the alert's day and the nudge's run are in the payload for the app, not in the path).
+  'step-down-alert': [],
+  'missed-days-nudge': [],
 }
 
 const templates = deepLinks as Record<string, string>
@@ -46,6 +49,8 @@ describe('the deep-link table (deep-links.json)', () => {
     expect(placeholdersOf(templates['face-scan-needs-retake']!)).toEqual(['faceScanId'])
     expect(placeholdersOf(templates['face-check-in-due']!)).toEqual([])
     expect(placeholdersOf(templates['routine-reminder']!)).toEqual([])
+    expect(placeholdersOf(templates['step-down-alert']!)).toEqual([])
+    expect(placeholdersOf(templates['missed-days-nudge']!)).toEqual([])
   })
 
   it('writes the face scan paths exactly as the app routes them', () => {
@@ -71,6 +76,22 @@ describe('the routine reminder deep link', () => {
     expect(templates['routine-reminder']).toBe('/routine')
     expect(deepLinkFor('routine-reminder', {})).toBe('/routine')
     expect(deepLinkFor('routine-reminder', { scanId: 'scan-1' })).toBe('/routine')
+  })
+})
+
+// ASSUMED paths (the brief says "its own deep link" and "the step-down schedule"; the app's routes decide, and these two lines are where the backend is told): the alert opens the
+// step-down schedule, the nudge opens the routine, where the "Done" tick is.
+describe('the step-down alert and missed-days nudge deep links', () => {
+  it('opens the step-down schedule for the alert, whatever ids it is given', () => {
+    expect(templates['step-down-alert']).toBe('/routine/step-down')
+    expect(deepLinkFor('step-down-alert', {})).toBe('/routine/step-down')
+    expect(deepLinkFor('step-down-alert', { scanId: 'scan-1' })).toBe('/routine/step-down')
+  })
+
+  it('opens the routine for the nudge, whatever ids it is given', () => {
+    expect(templates['missed-days-nudge']).toBe('/routine')
+    expect(deepLinkFor('missed-days-nudge', {})).toBe('/routine')
+    expect(deepLinkFor('missed-days-nudge', { scanId: 'scan-1' })).toBe('/routine')
   })
 })
 

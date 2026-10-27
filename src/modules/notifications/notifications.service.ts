@@ -16,8 +16,8 @@ export type NotificationsServiceDeps = {
   settings: NotificationSettingsRepository
   push: PushSender
   jobs: JobQueue
-  /** Read at send time for the routine reminder, which the profile's own switch gates (the account's scan switches never do). Without it no reminder is sent. */
-  reminders?: Pick<RemindersService, 'enabledFor'>
+  /** Read at send time for the routine reminder, the step-down alert and the missed-days nudge, which the profile's own reminder switches gate (the account's scan switches never do). Without it none is sent. */
+  reminders?: Pick<RemindersService, 'enabledFor' | 'stepDownAlertsFor' | 'missedDaysNudgeFor'>
   /** Keys the HMAC of device ids. It must be the key AuthService uses, so a push token row joins to the `devices` row of the same phone. */
   deviceIdKey: string
   now?: () => Date
@@ -169,6 +169,22 @@ export class NotificationsService {
     return this.enqueue({ kind: 'routine-reminder', ...input })
   }
 
+  /**
+   * Queues the step-down alert for the profile: `day` is its local day and `changes` the step-downs whose step begins that day (each a routine title and the step's fixed
+   * line), at least one. One alert a day however many it lists. A failed enqueue is logged (without the text) and swallowed. Answers whether it was queued.
+   */
+  async stepDownAlert(input: { profileId: string; day: string; changes: { title: string; line: string }[] }): Promise<boolean> {
+    return this.enqueue({ kind: 'step-down-alert', ...input })
+  }
+
+  /**
+   * Queues the missed-days nudge for the profile: `since` is the first day of the run of missed days, which keys it, so a run is one nudge and a new run another. A failed
+   * enqueue is logged and swallowed. Answers whether it was queued.
+   */
+  async missedDaysNudge(input: { profileId: string; since: string }): Promise<boolean> {
+    return this.enqueue({ kind: 'missed-days-nudge', ...input })
+  }
+
   /** Whether any phone is registered for the profile, whatever account row it sits under. The reminder job reads it before it claims a send. */
   async hasPhone(profileId: string): Promise<boolean> {
     return (await this.pushTokens.forProfile(profileId)).length > 0
@@ -279,7 +295,7 @@ export class NotificationsService {
       return true
     } catch {
       // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
-      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}), ...(body.kind === 'routine-reminder' ? { profileId: body.profileId } : {}) })
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}), ...(body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge' ? { profileId: body.profileId } : {}) })
       return false
     }
   }
@@ -287,8 +303,11 @@ export class NotificationsService {
   /** Whether the account wants this notification. The sign-in alert has no switch. Read at send time. */
   private async wanted(body: SendPushMessage): Promise<boolean> {
     if (body.kind === 'new-sign-in') return true
-    // The profile's own reminder switch, read now: a reminder switched off since it was queued is dropped. The account's scan switches have no say.
+    // The profile's own reminder switches, read now: a push switched off since it was queued is dropped. The account's scan switches have no say. The alert and the nudge need reminders on
+    // as well as their own switch; RemindersService answers both in the one read.
     if (body.kind === 'routine-reminder') return (await this.reminders?.enabledFor(body.profileId)) ?? false
+    if (body.kind === 'step-down-alert') return (await this.reminders?.stepDownAlertsFor(body.profileId)) ?? false
+    if (body.kind === 'missed-days-nudge') return (await this.reminders?.missedDaysNudgeFor(body.profileId)) ?? false
     const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
     switch (body.kind) {
       case 'scan-finished':
@@ -301,12 +320,12 @@ export class NotificationsService {
     }
   }
 
-  /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder goes to every phone of the profile; the sign-in alert goes to every phone of the account. */
+  /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder, step-down alert and missed-days nudge go to every phone of the profile; the sign-in alert goes to every phone of the account. */
   private async phonesFor(body: SendPushMessage): Promise<PushToken[]> {
     // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
     if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
-    // A reminder belongs to the profile, whatever account row its phones sit under.
-    if (body.kind === 'routine-reminder') return this.pushTokens.forProfile(body.profileId)
+    // A reminder, alert or nudge belongs to the profile, whatever account row its phones sit under.
+    if (body.kind === 'routine-reminder' || body.kind === 'step-down-alert' || body.kind === 'missed-days-nudge') return this.pushTokens.forProfile(body.profileId)
     // The profile's phones, narrowed to the account the message names.
     return (await this.pushTokens.forProfile(body.profileId)).filter((phone) => phone.userId === body.userId)
   }
@@ -357,6 +376,20 @@ export class NotificationsService {
           body: body.time === 'morning' ? 'Time for your morning routine' : 'Time for your evening routine',
           categoryId: 'routine-reminder',
           data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day, time: body.time },
+        }
+      case 'step-down-alert':
+        // Fixed copy around the routine's own words: each change is its product's plain routine title and the step's fixed line, both past the wording gate. No "Done" action: there is nothing to tick.
+        return {
+          title: 'A change in your routine today',
+          body: body.changes.map(({ title, line }) => `${title}. ${line}`).join('\n'),
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day },
+        }
+      case 'missed-days-nudge':
+        // Kind and about nothing the person did: the same words for every run, with no date and no count.
+        return {
+          title: 'Pick up where you left off',
+          body: 'Your routine is here whenever you are ready.',
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId },
         }
       case 'new-sign-in': {
         const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''

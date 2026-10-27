@@ -5,5 +5,7 @@
   "face-scan-ready": "/scans/faces/{faceScanId}",
   "face-scan-needs-retake": "/scans/faces/{faceScanId}/retake",
   "face-check-in-due": "/scans/faces/new",
-  "routine-reminder": "/routine"
+  "routine-reminder": "/routine",
+  "step-down-alert": "/routine/step-down",
+  "missed-days-nudge": "/routine"
 }
