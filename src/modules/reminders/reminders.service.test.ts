@@ -16,6 +16,7 @@ import { RemindersService } from './reminders.service'
 //     whatsappEnabled  boolean   whether WhatsApp is an enabled OTP channel in this environment; the container derives it from OTP_CHANNELS
 //   settings(): Promise<ReminderSettingsView>                 the session profile's settings; the defaults when it never saved any
 //   update(patch): Promise<ReminderSettingsView>              writes only the fields named (enabled, morning, evening, timeZone, stepDownAlerts, missedDaysNudge), answers all of them
+//   enabledFor(profileId): Promise<boolean>                   by profile id, no session (the notification send reads it): whether the profile has reminders on; false with no row, false for an unknown profile
 //   zoneFor(profileId): Promise<string | null>                by profile id, no session (a job and the routine service call it); null while no zone is stored
 //   ReminderSettingsView = { enabled, morning, evening, timeZone, stepDownAlerts, missedDaysNudge, missedDaysChannel: 'push' | 'whatsapp' } and nothing else
 //   Gates, in order: 401 (no session, from requireUser), 403 SIGNUP_REQUIRED for a guest (the same check and code as the routine service), then validation.
@@ -67,6 +68,7 @@ const makeService = (whatsappEnabled: boolean) =>
 
 const settings = (who: Actor) => runAs(who, () => service.settings())
 const update = (who: Actor, patch: Parameters<RemindersService['update']>[0]) => runAs(who, () => service.update(patch))
+const enabledFor = (profileId: string) => runAs(SYSTEM, () => service.enabledFor(profileId))
 const zoneFor = (profileId: string) => runAs(SYSTEM, () => service.zoneFor(profileId))
 
 beforeEach(() => {
@@ -289,5 +291,35 @@ describe('RemindersService.zoneFor', () => {
 
   it('is null for a profile that does not exist', async () => {
     expect(await zoneFor('profile-nobody')).toBeNull()
+  })
+})
+
+describe('RemindersService.enabledFor', () => {
+  it('is false for a profile that never saved anything, and for one that does not exist', async () => {
+    expect(await enabledFor(AMARA)).toBe(false)
+    expect(await enabledFor('profile-guest')).toBe(false)
+  })
+
+  it('is false while the profile has saved settings but not turned reminders on', async () => {
+    await update(AMARA_ACTOR, { timeZone: 'Africa/Lagos' })
+
+    expect(await enabledFor(AMARA)).toBe(false)
+  })
+
+  it('follows the switch, by profile id and with no session', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+    expect(await enabledFor(AMARA)).toBe(true)
+
+    await update(AMARA_ACTOR, { enabled: false })
+
+    expect(await enabledFor(AMARA)).toBe(false)
+  })
+
+  it('keeps the switch per profile', async () => {
+    await update(AMARA_ACTOR, { enabled: true })
+
+    expect(await enabledFor(AMARA)).toBe(true)
+    expect(await enabledFor(AMARA_SECOND)).toBe(false)
+    expect(await enabledFor(TOLU)).toBe(false)
   })
 })

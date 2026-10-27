@@ -621,7 +621,7 @@ The send and receipt jobs are in "Sending push notifications"; the scan and sign
   documented endpoints through `requestJson$` + `firstValueFrom`, and the access token is the only thing it sends beyond them.
 - **Two calls.** `send(messages)` posts to `https://exp.host/--/api/v2/push/send` and returns one ticket per message, in order: `ok`
   with the id Expo assigned, or an error with a reason. `receipts(ids)` posts to `.../push/getReceipts` and returns receipts by ticket
-  id; an id Expo has no receipt for yet is left out. Every message is sent with the default sound.
+  id; an id Expo has no receipt for yet is left out. Every message is sent with the default sound. A message may carry a `categoryId`, which the adapter forwards as Expo's `categoryId` (it is how the phone shows the category's actions, the routine reminder's "Done"); it is left out of the request when the message has none.
 - **Batching, at-most-once.** Expo takes at most 100 messages per send and 1000 ids per receipts call, so the adapter splits a larger call
   in order and merges the answers. A push cannot be taken back, so a retry must never resend what already went out. Only the FIRST
   request's failure rejects `send()` or `receipts()`: nothing has gone out, so the job's retry resends safely. After that, a failed
@@ -694,22 +694,23 @@ Two jobs in `modules/notifications` (specs in `notifications.job-specs.ts`, hand
 `check-push-receipts` on `push-receipts`. That is four more queues per environment, in all three `wrangler.jsonc` blocks
 (env blocks do not inherit), created before the first deploy that binds them (README, "Before the first deploy").
 
-- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake`, `faceCheckInDue` and `newSignIn` queue a `send-push` job
+- **The trigger methods enqueue and never fail the caller.** `scanFinished`, `scanNeedsYou`, `faceScanReady`, `faceScanNeedsRetake`, `faceCheckInDue`, `routineReminder` and `newSignIn` queue a `send-push` job
   and, if the enqueue throws, log `{ outcome: 'push-enqueue-failed', kind, scanId?, faceScanId? }` and return: a scan step or a sign-in must not fail
   because a push could not be queued. (Who calls them, and when, is in "What triggers a push".)
 - **The body carries the kind and ids only**, never a token, text or link: those are worked out when the job runs, so a logout, a
   profile switch or a changed setting between the event and the send is respected. The body is a union on `kind`
   (`NOTIFICATION_KINDS`): `scan-finished` (user, profile, scan, `readyCount`), `scan-needs-you` (user, profile, scan, item, `need` of
   `back-photo`, `confirm` or `identify`, optional `ask`), `new-sign-in` (user, `platform` or null, `eventId`, `at`), `face-scan-ready` (user, profile, `faceScanId`) and
-  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`) and `face-check-in-due` (user, profile, `dayOneScanId`).
+  `face-scan-needs-retake` (user, profile, `faceScanId`, `reason` of `REJECTED_PHOTO_REASONS`, `at`), `face-check-in-due` (user, profile, `dayOneScanId`) and `routine-reminder` (profile, `day`, `time`, `title`; no user: it belongs to the profile).
 - **One idempotency key per notification occurrence**, so a repeated message sends nothing: `scan-finished:<scanId>`;
   `scan-needs-you:<scanId>:<need>` (ten items needing a back photo, or needing identifying, are ONE notification each, linking to the first item that asked);
   `scan-needs-you:<scanId>:<itemId>:ask-<n>` for the n-th re-ask of an item after an unreadable back photo (`ask` 0 or absent is the
   first ask); `new-sign-in:<eventId>`; `face-scan-ready:<faceScanId>` (a scan becomes ready once);
-  `face-check-in-due:<dayOneScanId>` (a chase is told once); `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
+  `face-check-in-due:<dayOneScanId>` (a chase is told once); `routine-reminder:<profileId>:<day>:<time>` (one per profile, local day and time); `face-scan-needs-retake:<faceScanId>:<at>` (`at` = the `updatedAt` written by the transition, epoch ms: retakes are unlimited, so each rejection is its own
   notification). `newSignIn` takes an optional `eventId`: without one it is a fresh id per call, so each alert is
   sent; a caller that passes the sign-in's own id (a session id, say) makes a repeated call for the same sign-in the same notification,
   deduplicated by the key. The receipt job's key is its ticket ids.
+- **The routine reminder** (`routine-reminder`, #217 PR 4b) is the one kind that is not about a scan and the one body that carries text: `title` is the entry titles the reminder lists (already past the wording gate, joined with `, `; 1 to 200 characters), since only the send job knows which entries are due. It is never logged: a failed enqueue logs `{ outcome: 'push-enqueue-failed', kind, profileId }`. `NotificationsService.routineReminder({ profileId, day, time, title })` queues it (and answers whether it was queued), and `hasPhone(profileId)` says whether any phone is registered for the profile (the send job reads it before it claims). `deliver` sends to every phone of the PROFILE (`forProfile`, whatever account row it sits under) and only when `RemindersService.enabledFor(profileId)` says reminders are on at the time of the send (an optional `reminders` dep, wired in `container.ts`; without it no reminder is sent). The account's scan switches never gate it, and it does not read them. The message is the title, a fixed body per time of day ("Time for your morning routine" / "Time for your evening routine"), `categoryId: 'routine-reminder'` (the app registers that category with its "Done" action) and `data: { kind, url: '/routine', profileId, day, time }`: the `day` and `time` are what "Done" posts to `POST /me/routine/check-ins`. Tickets, dead tokens, receipts and retries are as for every kind. Who queues it is "Reminders" → Sends.
 - **What triggers a push.** Only a guarded update that APPLIED notifies, and the call comes after the update (never inside it), so a repeated or
   late step, or a step that lost a race, says nothing. `ScanService` takes `NotificationsService` (a type-only import; the dependency runs one way) and calls:
 
@@ -2810,7 +2811,7 @@ The routine reaches the app through seven routes under `/me` (`routines.routes.t
 
 ### Reminders
 
-`modules/reminders` holds `reminder_settings` (migration 0045), `D1RemindersRepository` and `RemindersService` (#217, PR 3). It stores when a profile wants to be reminded and in which time zone; nothing is sent from it (the sends come later; check-ins are below).
+`modules/reminders` holds `reminder_settings` (migration 0045), `D1RemindersRepository` and `RemindersService` (#217, PR 3). It stores when a profile wants to be reminded and in which time zone; nothing is sent from it (the sends come later; check-ins are below). `enabledFor(profileId)` is the by-id, no-session read of the `enabled` switch (false with no row) that the notification send uses, and `listEnabled()` on the repository is every row with reminders on, the send job's one query.
 
 - **Settings are per profile**, one row each (`profile_id` PK, cascade, so profile and guest cleanup need no cleaner): `enabled`, `morning`, `evening` (24-hour `HH:MM`), `time_zone` (nullable), `step_down_alerts`, `missed_days_nudge`. No row means the defaults (`enabled` false, `07:00`, `21:00`, no zone, both alerts on); reading writes nothing, and the first change writes the row. `upsert(profileId, patch, at)` writes only the fields named, in one statement; a `timeZone` of `null` is a value (it clears the zone), `undefined` is "not named".
 - **Routes**, all bearer, under `/api/v1/me` and tagged "Reminders": `GET /reminders` and `PUT /reminders`, both `{ enabled, morning, evening, timeZone, stepDownAlerts, missedDaysNudge, missedDaysChannel }`. `PUT` takes any non-empty subset of the first six (a body of only `timeZone` is fine: the phone sends it when its zone changes). The body schema is strict, so `missedDaysChannel` (read-only) and any unknown field are 400 `VALIDATION_FAILED`, as is an empty body. `PUT` carries `signedIn()` so an unsigned caller is 401 before the body is read.

@@ -2,7 +2,7 @@ import { z } from 'zod'
 import { jobSpec } from '../../jobs/job'
 import { REJECTED_PHOTO_REASONS } from '../../providers/perfect-corp/perfect-corp.provider'
 
-export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due'] as const
+export const NOTIFICATION_KINDS = ['scan-finished', 'scan-needs-you', 'new-sign-in', 'face-scan-ready', 'face-scan-needs-retake', 'face-check-in-due', 'routine-reminder'] as const
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number]
 
 const scanFinishedBody = z.object({
@@ -60,14 +60,24 @@ const faceCheckInDueBody = z.object({
   dayOneScanId: z.string(),
 })
 
+const routineReminderBody = z.object({
+  kind: z.literal('routine-reminder'),
+  profileId: z.string(),
+  /** The profile's local day, 'YYYY-MM-DD': what the "Done" action posts to the check-in route. */
+  day: z.string(),
+  time: z.enum(['morning', 'evening']),
+  /** The entry titles the phone shows. Unlike the other kinds' text it is carried, since only the send job that queues it knows which entries are due; it is never logged. */
+  title: z.string().min(1).max(200),
+})
+
 /**
- * What the send job carries: the kind and ids only, never a token, text or link. Those are resolved when the job runs, so a
+ * What the send job carries: the kind and ids only, never a token or a link (the routine reminder's title is the one text, see its body). Those are resolved when the job runs, so a
  * logout, a profile switch or a changed setting between the event and the send is respected.
  */
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -86,6 +96,8 @@ export const sendPushSpec = jobSpec({
         return `face-scan-needs-retake:${body.faceScanId}:${body.at}`
       case 'face-check-in-due':
         return `face-check-in-due:${body.dayOneScanId}`
+      case 'routine-reminder':
+        return `routine-reminder:${body.profileId}:${body.day}:${body.time}`
     }
   },
   // A person is waiting for the notification, as with an OTP: 5 attempts finish within a couple of minutes.

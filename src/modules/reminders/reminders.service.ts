@@ -72,6 +72,11 @@ export class RemindersService {
     return (await this.repository.get(profileId))?.timeZone ?? null
   }
 
+  /** Whether the profile has reminders on, by profile id with no session (the notification send reads it); false with no row, and for an unknown profile. */
+  async enabledFor(profileId: string): Promise<boolean> {
+    return (await this.repository.get(profileId))?.enabled ?? false
+  }
+
   private static signedUp() {
     const user = requireUser()
     if (user.status !== 'verified') throw new ForbiddenError('SIGNUP_REQUIRED', 'Sign up to set reminders')

@@ -5,6 +5,7 @@ import { ValidationError } from '../../lib/errors'
 import type { JobQueue } from '../../providers/job-queue/job-queue.provider'
 import type { RejectedPhotoReason } from '../../providers/perfect-corp/perfect-corp.provider'
 import { type PushMessage, type PushSender, PushUnavailableError, isExpoPushToken } from '../../providers/push/push.provider'
+import type { RemindersService } from '../reminders/reminders.service'
 import { deepLinkFor } from './deep-links'
 import { type CheckPushReceiptsMessage, type SendPushMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
 import type { NotificationSettingsRepository, PushTokensRepository } from './notifications.repository'
@@ -15,6 +16,8 @@ export type NotificationsServiceDeps = {
   settings: NotificationSettingsRepository
   push: PushSender
   jobs: JobQueue
+  /** Read at send time for the routine reminder, which the profile's own switch gates (the account's scan switches never do). Without it no reminder is sent. */
+  reminders?: Pick<RemindersService, 'enabledFor'>
   /** Keys the HMAC of device ids. It must be the key AuthService uses, so a push token row joins to the `devices` row of the same phone. */
   deviceIdKey: string
   now?: () => Date
@@ -47,6 +50,7 @@ export class NotificationsService {
   private readonly settingsRepository: NotificationSettingsRepository
   private readonly push: PushSender
   private readonly jobs: JobQueue
+  private readonly reminders: NotificationsServiceDeps['reminders']
   private readonly now: () => Date
   private readonly newId: () => string
   // `#`, not `private`: it is the device id HMAC key, and a runtime-private field stays out of spreads and JSON.stringify.
@@ -57,6 +61,7 @@ export class NotificationsService {
     this.settingsRepository = deps.settings
     this.push = deps.push
     this.jobs = deps.jobs
+    this.reminders = deps.reminders
     this.#deviceIdKey = deps.deviceIdKey
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
@@ -153,6 +158,20 @@ export class NotificationsService {
   /** Queues "time for your check-in" for the profile whose chase reached its review point, keyed by the chase's day-one scan. A failed enqueue is logged and swallowed. */
   async faceCheckInDue(input: { userId: string; profileId: string; dayOneScanId: string }): Promise<void> {
     await this.enqueue({ kind: 'face-check-in-due', ...input })
+  }
+
+  /**
+   * Queues the daily routine reminder for the profile: `day` is its local day and `time` the reminder's, which is what the "Done" action posts to the check-in
+   * route; `title` is the entry titles, already past the wording gate. It belongs to the profile, so the body names no account. A failed enqueue is logged (without
+   * the title) and swallowed. Answers whether it was queued, so the send job counts only what went out.
+   */
+  async routineReminder(input: { profileId: string; day: string; time: 'morning' | 'evening'; title: string }): Promise<boolean> {
+    return this.enqueue({ kind: 'routine-reminder', ...input })
+  }
+
+  /** Whether any phone is registered for the profile, whatever account row it sits under. The reminder job reads it before it claims a send. */
+  async hasPhone(profileId: string): Promise<boolean> {
+    return (await this.pushTokens.forProfile(profileId)).length > 0
   }
 
   /**
@@ -253,19 +272,23 @@ export class NotificationsService {
     if (misconfigured > 0) NotificationsService.log({ job: checkPushReceiptsSpec.name, outcome: 'misconfigured', count: misconfigured })
   }
 
-  /** Never throws: the scan step or the sign-in that triggered this must not fail because a push could not be queued. */
-  private async enqueue(body: SendPushMessage): Promise<void> {
+  /** Never throws: the scan step or the sign-in that triggered this must not fail because a push could not be queued. Answers whether it was queued. */
+  private async enqueue(body: SendPushMessage): Promise<boolean> {
     try {
       await this.jobs.enqueue(sendPushSpec, body)
+      return true
     } catch {
       // Ids and outcome only, and no error text: this line must carry nothing about the account or the phone.
-      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}) })
+      console.error({ outcome: 'push-enqueue-failed', kind: body.kind, ...('scanId' in body ? { scanId: body.scanId } : {}), ...('faceScanId' in body ? { faceScanId: body.faceScanId } : {}), ...('dayOneScanId' in body ? { dayOneScanId: body.dayOneScanId } : {}), ...(body.kind === 'routine-reminder' ? { profileId: body.profileId } : {}) })
+      return false
     }
   }
 
   /** Whether the account wants this notification. The sign-in alert has no switch. Read at send time. */
   private async wanted(body: SendPushMessage): Promise<boolean> {
     if (body.kind === 'new-sign-in') return true
+    // The profile's own reminder switch, read now: a reminder switched off since it was queued is dropped. The account's scan switches have no say.
+    if (body.kind === 'routine-reminder') return (await this.reminders?.enabledFor(body.profileId)) ?? false
     const switches = NotificationsService.switchesOf(await this.settingsRepository.get(body.userId))
     switch (body.kind) {
       case 'scan-finished':
@@ -278,16 +301,18 @@ export class NotificationsService {
     }
   }
 
-  /** Scan and face scan notifications go to the phones on the scan's profile; the sign-in alert goes to every phone of the account. */
+  /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder goes to every phone of the profile; the sign-in alert goes to every phone of the account. */
   private async phonesFor(body: SendPushMessage): Promise<PushToken[]> {
     // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
     if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
+    // A reminder belongs to the profile, whatever account row its phones sit under.
+    if (body.kind === 'routine-reminder') return this.pushTokens.forProfile(body.profileId)
     // The profile's phones, narrowed to the account the message names.
     return (await this.pushTokens.forProfile(body.profileId)).filter((phone) => phone.userId === body.userId)
   }
 
   /** What the phone shows. Generic by decision: it appears on a lock screen, so no product names. */
-  private static contentOf(body: SendPushMessage): Pick<PushMessage, 'title' | 'body' | 'data'> {
+  private static contentOf(body: SendPushMessage): Pick<PushMessage, 'title' | 'body' | 'data' | 'categoryId'> {
     switch (body.kind) {
       case 'scan-finished':
         return {
@@ -324,6 +349,14 @@ export class NotificationsService {
           title: 'Time for your check-in',
           body: 'Take a face scan to see how your skin is doing on your goal.',
           data: { url: deepLinkFor(body.kind, {}), kind: body.kind, profileId: body.profileId, dayOneScanId: body.dayOneScanId },
+        }
+      case 'routine-reminder':
+        // The title lists the entries; the body is fixed, per time of day. `categoryId` is what makes the phone show the "Done" action, which posts `day` and `time` to the check-in route.
+        return {
+          title: body.title,
+          body: body.time === 'morning' ? 'Time for your morning routine' : 'Time for your evening routine',
+          categoryId: 'routine-reminder',
+          data: { kind: body.kind, url: deepLinkFor(body.kind, {}), profileId: body.profileId, day: body.day, time: body.time },
         }
       case 'new-sign-in': {
         const where = body.platform === 'ios' ? 'on an iPhone, ' : body.platform === 'android' ? 'on an Android phone, ' : ''

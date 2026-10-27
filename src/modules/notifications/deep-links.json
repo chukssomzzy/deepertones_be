@@ -4,5 +4,6 @@
   "new-sign-in": "/settings/security",
   "face-scan-ready": "/scans/faces/{faceScanId}",
   "face-scan-needs-retake": "/scans/faces/{faceScanId}/retake",
-  "face-check-in-due": "/scans/faces/new"
+  "face-check-in-due": "/scans/faces/new",
+  "routine-reminder": "/routine"
 }

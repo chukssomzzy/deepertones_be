@@ -6,6 +6,8 @@ export type PushMessage = {
   body: string
   /** Handed to the app on tap. The provider does not look inside it; its shape belongs to the notifications module. */
   data: Record<string, unknown>
+  /** The notification category the phone shows actions for (the reminder's "Done"); the app registers the category, the provider only forwards its id. */
+  categoryId?: string
 }
 
 export type PushFailure =
