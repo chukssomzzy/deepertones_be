@@ -28,6 +28,8 @@ import { D1RecommendationsRepository } from './modules/recommendations/recommend
 import { RecommendationService } from './modules/recommendations/recommendations.service'
 import { D1RemindersRepository } from './modules/reminders/reminders.repository'
 import { RemindersService } from './modules/reminders/reminders.service'
+import { D1RoutineCheckInsRepository } from './modules/routines/routines.check-ins.repository'
+import { RoutineCheckInsService } from './modules/routines/routines.check-ins.service'
 import { D1OutcomeCountsRepository } from './modules/routines/routines.outcome-counts.repository'
 import { D1RoutinesRepository } from './modules/routines/routines.repository'
 import { RoutineService } from './modules/routines/routines.service'
@@ -426,6 +428,15 @@ export const buildContainer = (env: CloudflareBindings) => {
     })
   })
 
+  const routineCheckIns = once(
+    () =>
+      new RoutineCheckInsService({
+        repository: new D1RoutineCheckInsRepository(db()),
+        versions: new D1RoutinesRepository(db()),
+        reminders: reminders(),
+      }),
+  )
+
   const routineViewer = once(
     () =>
       new RoutineViewerService({
@@ -501,6 +512,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get routines() {
       return routines()
+    },
+    get routineCheckIns() {
+      return routineCheckIns()
     },
     get routineViewer() {
       return routineViewer()
