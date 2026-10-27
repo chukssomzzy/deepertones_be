@@ -1,10 +1,10 @@
 import { stableJson } from '../../lib/stable-json'
-import type { Workbook } from './catalog.workbook.schema'
+import { guideKey, type Workbook } from './catalog.workbook.schema'
 
-/** What an upload does to one tab, as codes. Availability is keyed "<product code>:<country>", and a row that is gone is listed under `retired`. */
+/** What an upload does to one tab, as codes. Availability is keyed "<product code>:<country>", a guide by its step ("<step>:<goal>" when it has a goal), and a row that is gone is listed under `retired`. */
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 
-export type WorkbookDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff }
+export type WorkbookDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; guides: TabDiff }
 
 // Rows are compared by what they mean: both sides are parsed, so "a;b" and "a; b" are one list, and a date is a day, not a string.
 const meaning = (row: object): string => stableJson(JSON.parse(JSON.stringify(row)))
@@ -38,4 +38,5 @@ export const diffWorkbooks = (live: Workbook, next: Workbook): WorkbookDiff => (
   countries: diffTab(live.countries, next.countries, (row) => row.code, (row) => row.status === 'retired'),
   claimWords: diffTab(live.claimWords, next.claimWords, (row) => row.code, rowStatus),
   tapers: diffTab(live.tapers, next.tapers, (row) => row.code, rowStatus),
+  guides: diffTab(live.guides, next.guides, guideKey, rowStatus),
 })

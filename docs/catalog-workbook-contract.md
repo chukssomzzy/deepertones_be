@@ -1,13 +1,13 @@
 # Catalog workbook contract
 
-Version 2.1.0. Fingerprint `486bec22781b4822eb8fb379ac5e40ce7814ce3bf712fcc17f84957e94c27630`.
+Version 2.2.0. Fingerprint `426d2d5869d7e255e5f2290c3b43a919e0d9722d607c40e9ba893a466c2f21de`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
 
 ## How the workbook is read
 
-The workbook has six tabs: Products, Availability, Ingredients, Countries, Claim words and Tapers. The first row of a tab is its header: one column name for each
+The workbook has seven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides. The first row of a tab is its header: one column name for each
 column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not
 listed here is a problem. A tab with no rows is fine, but it still needs its header row.
 
@@ -165,6 +165,31 @@ Checks across cells and rows:
 
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
+### Guides
+
+What each routine step is for, what to look for on the label and what suits deeper skin: the guide a person reads before buying a product they do not own. A guide is written here and never by a model, and a qualified person approves it; in production the server refuses an approved guide whose approver is not on its list. A row is one step, and a goal when it is for one: a row with a goal is shown, whole, to people with that goal in place of the step's row with no goal, so each of the four steps needs one approved row with no goal. A row is identified by its step and goal, and is retired, never deleted. The pregnancy rule for reviewers: a row with no look_for_when_pregnant is shown to people who are pregnant or breastfeeding as it is, so its look_for must name only things that are safe in pregnancy; write look_for_when_pregnant when it cannot be.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `step` | Required | The routine step the guide is for. | One of: `cleanse`, `treat`, `moisturise`, `protect`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `goal` | Optional | The goal the guide is for. Leave it empty for the step's base guide, which people with any other goal are shown. | One of: `clear-skin`, `even-tone`, `fade-dark-marks`, `brighter`, `glow`, `calm-repair`. | `NOT_IN_VOCABULARY` |
+| `what_it_does` | Required | What this kind of product does for the person, in plain words. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `GUIDE_WORDING` |
+| `look_for` | Required | What to check on the label, in plain words. Without look_for_when_pregnant, this is shown to people who are pregnant or breastfeeding too, so name only what is safe for them. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `GUIDE_WORDING` |
+| `for_deeper_skin` | Required | What works on deeper skin: for example a finish that leaves no grey or white film. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `GUIDE_WORDING` |
+| `look_for_when_pregnant` | Optional | What to check on the label for a person who is pregnant or breastfeeding, shown instead of look_for. Leave it empty only when look_for is already safe in pregnancy. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `TOO_LONG` `HAS_LINK_OR_MARKUP` `GUIDE_WORDING` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its step and goal are never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this guide. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `GUIDE_BASE_MISSING`: Each routine step has one approved row with no goal. A draft or retired row does not count.
+- `GUIDE_DUPLICATE`: Each step and goal pair appears once, a step with no goal counting as a pair. A draft or retired row counts.
+- `GUIDE_WORDING`: No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
 ## Accepted values
 
 A value is accepted only when written exactly as here, in lower case.
@@ -193,7 +218,7 @@ Used by: `Products.skin_types`
 
 `cleanse`, `treat`, `moisturise`, `protect`
 
-Used by: `Products.steps`
+Used by: `Products.steps`, `Guides.step`
 
 ### Frequencies
 
@@ -244,7 +269,7 @@ Used by: `Products.own_cautions`, `Ingredients.kind`
 
 `draft`, `approved`, `retired`
 
-Used by: `Products.status`, `Ingredients.status`, `Tapers.status`
+Used by: `Products.status`, `Ingredients.status`, `Tapers.status`, `Guides.status`
 
 ### Country statuses
 
@@ -281,6 +306,14 @@ Used by: `Ingredients.group`, `Ingredients.clashes_with`
 The groups that are stopped with a step-down plan and not at once. Mercury is not on the list: it is stopped at once.
 
 Used by: `Tapers.kind`
+
+### Goals
+
+`clear-skin`, `even-tone`, `fade-dark-marks`, `brighter`, `glow`, `calm-repair`
+
+The goals a person can pick. A guide row with a goal is shown to people with that goal instead of the step's guide with no goal; the list is the goals the app offers, so it moves when they do.
+
+Used by: `Guides.goal`
 
 ### Schedule frequencies
 
@@ -334,4 +367,7 @@ Used by: `Tapers.schedule`
 | `SCHEDULE_MISSING_STOP` | The schedule never says stop. A step-down ends with a step whose frequency is stop. |
 | `SCHEDULE_STOP_NOT_LAST` | A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step. |
 | `SCHEDULE_FREQUENCY_INCREASES` | A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop. |
-| `UNQUALIFIED_APPROVER` | In production only: a Tapers row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file. |
+| `UNQUALIFIED_APPROVER` | In production only: a Tapers or Guides row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template and a guide are shown to people, so a qualified person has to approve them. It is raised by the server, not by the contract check on the file. |
+| `GUIDE_BASE_MISSING` | A routine step has no approved guide without a goal. Each of the four steps (cleanse, treat, moisturise, protect) needs one approved row with the goal column empty: it is what a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row of the Guides tab. |
+| `GUIDE_DUPLICATE` | Two rows of the Guides tab are for the same step and goal (or the same step with no goal). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
+| `GUIDE_WORDING` | A guide text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. The same words are refused in every part of the routine. Say what the product does for the skin in plain words, without them. |

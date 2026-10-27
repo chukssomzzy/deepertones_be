@@ -1,4 +1,4 @@
-import { CONTRACT, type AvailabilityRow, type ClaimWordRow, type CountryRow, type IngredientRule, type ProductRow, type RawRow, type RawTab, type RawWorkbook, type ScheduleStep, type TabKey, type TaperRow, type Workbook } from './catalog.workbook.schema'
+import { CONTRACT, type AvailabilityRow, type ClaimWordRow, type CountryRow, type GuideRow, type IngredientRule, type ProductRow, type RawRow, type RawTab, type RawWorkbook, type ScheduleStep, type TabKey, type TaperRow, type Workbook } from './catalog.workbook.schema'
 
 // A workbook as the export serves it and the import takes it back: lists joined with "; ", dates as YYYY-MM-DD, an empty cell null. Pure, so the
 // same rows always give the same text, and an export fed to the import changes nothing.
@@ -89,6 +89,20 @@ const taper = (row: TaperRow): RawRow => ({
   audited_on: day(row.auditedOn),
 })
 
+const guide = (row: GuideRow): RawRow => ({
+  step: row.step,
+  goal: row.goal,
+  what_it_does: row.whatItDoes,
+  look_for: row.lookFor,
+  for_deeper_skin: row.forDeeperSkin,
+  look_for_when_pregnant: row.lookForWhenPregnant,
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
 const country = (row: CountryRow): RawRow => ({ code: row.code, currency: row.currency, low_max: row.lowMax, mid_max: row.midMax, status: row.status })
 
 /** The header row of a tab, in the order the contract lists its columns. */
@@ -103,4 +117,5 @@ export const toRawWorkbook = (workbook: Workbook): RawWorkbook => ({
   countries: tab('countries', workbook.countries, country),
   claimWords: tab('claimWords', workbook.claimWords, claimWord),
   tapers: tab('tapers', workbook.tapers, taper),
+  guides: tab('guides', workbook.guides, guide),
 })

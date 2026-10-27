@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogWorkbookRepository, type WorkbookPlan } from '../../src/modules/catalog/catalog.workbook.repository'
-import { claimWordRow, country, ruleRow, sale, taperRow, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
+import { claimWordRow, country, guideRow, ruleRow, sale, taperRow, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
 
 // How applyWorkbook meets D1 itself: what its one batch is made of, and what it does with a batch that fails. The behaviour a repository must have
 // is in catalogWorkbookRepositoryContract (catalog.workbook.repository.test.ts); these need the real driver to be spied on.
@@ -29,10 +29,16 @@ const planOf = async (over: Partial<WorkbookPlan> = {}): Promise<WorkbookPlan> =
   tapers: [],
   retiredClaimWords: [],
   retiredTapers: [],
+  guides: [],
+  retiredGuides: [],
   ...over,
 })
 
 type Built = { toSQL(): { sql: string; params: unknown[] } }
+
+const GUIDE_STEPS = ['cleanse', 'treat', 'moisturise', 'protect'] as const
+const GUIDE_GOALS = [null, 'clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair'] as const
+const guideKeys = GUIDE_STEPS.flatMap((step) => GUIDE_GOALS.map((goal) => [step, goal] as const))
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -58,6 +64,10 @@ describe('the batch applyWorkbook sends', () => {
       tapers: Array.from({ length: 40 }, () => taperRow({ auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
       retiredClaimWords: Array.from({ length: 95 }, (_, i) => `CLM-NONE-${i}`),
       retiredTapers: Array.from({ length: 95 }, (_, i) => `TPR-NONE-${i}`),
+      // A guide has no code, so it is the 28 keys there are (four steps, each with a base row and one for each of six goals): half are written, which takes more than a
+      // statement's 100 parameters, and half retired.
+      guides: guideKeys.slice(0, 14).map(([step, goal]) => guideRow({ step, goal, lookForWhenPregnant: 'Fragrance-free wash.', auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      retiredGuides: guideKeys.slice(14).map(([step, goal]) => ({ step, goal })),
     })
     const count = repo.statementCount(plan)
     // After the plan is made: building it reads the rules in a batch of its own.

@@ -28,10 +28,10 @@ export const EXPORT_URL = `${ORIGIN}/api/v1/admin/catalog/export`
 export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
 
 /**
- * The contract version this checkout serves, written out: the version of the contract that adds the key_ingredient and strength Products columns. A literal, not read
+ * The contract version this checkout serves, written out: the version of the contract that adds the Guides tab. A literal, not read
  * from the code, so a bump has to be made here too.
  */
-export const CONTRACT_VERSION = '2.1.0'
+export const CONTRACT_VERSION = '2.2.0'
 
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -66,6 +66,7 @@ export const HEADERS = {
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 export const TABS = Object.keys(HEADERS) as Tab[]
 
@@ -161,6 +162,38 @@ export const taperRow = (over: RawRow = {}): RawRow => ({
   ...over,
 })
 
+/** The four routine steps, written out. */
+export const STEPS = ['cleanse', 'treat', 'moisturise', 'protect'] as const
+
+/** A Guides row: by default the approved base row (no goal) of the cleanse step. A guide has no code; it is its step and goal. */
+export const guideRow = (over: RawRow = {}): RawRow => ({
+  step: 'cleanse',
+  goal: null,
+  what_it_does: 'Lifts sweat, sunscreen and dirt off your skin so the rest of your routine can work.',
+  look_for: 'A gentle, fragrance-free wash that leaves your skin comfortable, not tight.',
+  for_deeper_skin: 'Skip harsh scrubs and hot water: rubbing hard can leave dark marks behind on deeper skin.',
+  look_for_when_pregnant: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** The four approved base rows, one for each step; each says its own step, so a test can tell which it was given. */
+export const baseGuideRows = (): RawRow[] => STEPS.map((step) => guideRow({ step, what_it_does: `What ${step} does.`, look_for: `What to look for in ${step}.`, for_deeper_skin: `Deeper skin and ${step}.` }))
+
+/**
+ * Adds the base row of each step the workbook has no approved base row for. The contract refuses a workbook without all four, and a catalog that has never
+ * had guides exports none, so an upload that is about something else starts with this, as the team fills the rows in before its first import.
+ */
+export const withBaseGuides = (workbook: RawWorkbook): void => {
+  for (const base of baseGuideRows()) {
+    if (!workbook.guides.rows.some((row) => row.step === base.step && row.goal === null && row.status === 'approved')) workbook.guides.rows.push(base)
+  }
+}
+
 export const NIGERIA: RawRow = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' }
 export const BRITAIN: RawRow = { code: 'GB', currency: 'GBP', low_max: 10, mid_max: 25, status: 'active' }
 
@@ -185,12 +218,12 @@ export const errorOf = async (res: Reply) => {
 
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 export type NewProduct = { code: string; brand: string; name: string; variant: string | null; form: string | null }
-export type ImportDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; newProducts: NewProduct[] }
+export type ImportDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; guides: TabDiff; newProducts: NewProduct[] }
 export type ImportResult = { applied: boolean; catalogVersion: number; diff: ImportDiff }
 export type ExportResult = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 
 export const NO_CHANGE: TabDiff = { added: [], updated: [], retired: [], reactivated: [] }
-export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, claimWords: NO_CHANGE, tapers: NO_CHANGE, newProducts: [] }
+export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, claimWords: NO_CHANGE, tapers: NO_CHANGE, guides: NO_CHANGE, newProducts: [] }
 /** A TabDiff with only the lists given; the lists are compared sorted, because the order of codes within a list is not part of the contract. */
 export const diffOf = (over: Partial<TabDiff>): TabDiff => ({ ...NO_CHANGE, ...over })
 /** Codes inside a diff in a fixed order, so a test compares the codes and not the order they came in. */
@@ -201,6 +234,7 @@ export const sorted = (diff: ImportDiff): ImportDiff => ({
   countries: sortTab(diff.countries),
   claimWords: sortTab(diff.claimWords),
   tapers: sortTab(diff.tapers),
+  guides: sortTab(diff.guides),
   newProducts: [...diff.newProducts].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0)),
 })
 const sortTab = (tab: TabDiff): TabDiff => ({ added: [...tab.added].sort(), updated: [...tab.updated].sort(), retired: [...tab.retired].sort(), reactivated: [...tab.reactivated].sort() })
@@ -270,14 +304,17 @@ export const without = (tab: RawTab, key: string, value: unknown) => {
   tab.rows = tab.rows.filter((row) => row[key] !== value)
 }
 
-/** Export, edit, import: the way the catalog is changed in life. Returns what was live before, and the reply. */
+/**
+ * Export, edit, import: the way the catalog is changed in life. Returns what was live before, and the reply. The base guide rows the contract needs are
+ * added for a step that has none (`withBaseGuides`), unless the test says `baseGuides: false` because it is about them.
+ */
 export const upload = async (
   edit: (workbook: RawWorkbook) => void,
-  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number } = {},
+  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number; baseGuides?: boolean } = {},
 ) => {
   const before = await exportLive()
-  const { baseVersion, ...rest } = over
-  const res = await importRaw({ workbook: edited(before.workbook, edit), baseVersion: baseVersion ? baseVersion(before.catalogVersion) : before.catalogVersion, ...rest })
+  const { baseVersion, baseGuides, ...rest } = over
+  const res = await importRaw({ workbook: edited(before.workbook, (workbook) => { edit(workbook); if (baseGuides !== false) withBaseGuides(workbook) }), baseVersion: baseVersion ? baseVersion(before.catalogVersion) : before.catalogVersion, ...rest })
   return { before, res }
 }
 

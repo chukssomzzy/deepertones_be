@@ -106,6 +106,7 @@ describe('the versioned API', () => {
     ['PUT', '/api/v1/me/reminders'],
     ['POST', '/api/v1/me/routine/steps/treat/got-it'],
     ['POST', '/api/v1/me/routine/steps/treat/find-sold-here'],
+    ['GET', '/api/v1/me/routine/steps/treat/look-for'],
   ])('answers %s %s without a token with 401 AUTH_REQUIRED', async (method, path) => {
     const res = await fetchWorker(path, { method })
 
@@ -175,6 +176,7 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/verdict/events',
         'GET /api/v1/me/routine',
         'GET /api/v1/me/routine/events',
+        'GET /api/v1/me/routine/steps/{step}/look-for',
         'POST /api/v1/me/routine/start',
         'POST /api/v1/me/routine/check-ins',
         'POST /api/v1/me/routine/steps/{step}/got-it',

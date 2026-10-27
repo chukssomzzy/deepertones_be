@@ -1,8 +1,14 @@
-import { describe, expect, it } from 'vitest'
-import { adminHeaders, counts, dataOf, errorOf, exportLive, freshIp, importRaw, latestVersionRow, xlsxBytes, type ImportResult } from './admin.catalog.support'
+import { beforeAll, describe, expect, it } from 'vitest'
+import { adminHeaders, applied, counts, dataOf, errorOf, exportLive, freshIp, importRaw, latestVersionRow, xlsxBytes, type ImportResult } from './admin.catalog.support'
 
 // What the import refuses about the request before it reads the workbook: the size of the body, of the file, what the file is, and the label of the
 // uploader. The token comes first (it is checked before the body is read), so a caller without it learns nothing about any of these.
+
+// These send the export as it is, and a fresh catalog has no guides, which the contract refuses: the team writes the four base ones before the first import, so
+// they are put in once up front and what each test sends is valid but for the request it is about.
+beforeAll(async () => {
+  await applied(() => {})
+})
 
 const MB = 1024 * 1024
 /** A file of `size` bytes that starts like a zip, so only its size is in question. */

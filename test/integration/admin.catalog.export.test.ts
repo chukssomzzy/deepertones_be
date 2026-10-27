@@ -10,10 +10,13 @@ import {
   TABS,
   applied,
   availabilityRow,
+  baseGuideRows,
   claimWordRow,
   dataOf,
+  errorOf,
   exportLive,
   exportRaw,
+  guideRow,
   importRaw,
   productRow,
   rowWith,
@@ -42,12 +45,12 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(Object.keys(body.data.workbook as object).sort()).toEqual([...TABS].sort())
   })
 
-  it('is catalog version 1, served under the current contract version 2.1.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
+  it('is catalog version 1, served under the current contract version 2.2.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
     const live = await exportLive()
 
     expect(live.catalogVersion).toBe(1)
     expect(live.contractVersion).toBe(CONTRACT_VERSION)
-    expect(CONTRACT_VERSION).toBe('2.1.0')
+    expect(CONTRACT_VERSION).toBe('2.2.0')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 
@@ -65,6 +68,7 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(workbook.countries.rows).toEqual([])
     expect(workbook.claimWords.rows).toEqual([])
     expect(workbook.tapers.rows).toEqual([])
+    expect(workbook.guides.rows).toEqual([])
     expect(workbook.ingredients.rows).toHaveLength(REFERENCE.length)
     for (const entry of REFERENCE) {
       const rows = workbook.ingredients.rows.filter((row) => row.name === entry.name && row.kind === entry.kind)
@@ -86,23 +90,18 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     }
   })
 
-  it('serves a workbook that passes the contract it declares, so an unedited export is always a valid upload', async () => {
+  it('serves a workbook that fails the contract it declares on nothing but the base guides the team has yet to write, and an import of it unedited is refused for that', async () => {
     // Loaded here, not at the top: the schema module is renamed in the change this one builds on, and a missing module should fail this test alone.
     const { validateWorkbook } = await import('../../src/modules/catalog/catalog.workbook.schema')
-
-    const { workbook } = await exportLive()
-
-    expect(validateWorkbook(workbook)).toMatchObject({ ok: true })
-  })
-
-  it('round trips: importing the export as a dry run changes nothing, adds no product, and leaves the live version where it was', async () => {
     const live = await exportLive()
+    const missing = [{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }]
 
+    expect(validateWorkbook(live.workbook)).toEqual({ ok: false, problems: missing })
     const res = await importRaw({ workbook: live.workbook, baseVersion: live.catalogVersion, dryRun: true })
-
-    expect(res.status).toBe(200)
-    const data = await dataOf<ImportResult>(res)
-    expect(data).toEqual({ applied: false, catalogVersion: live.catalogVersion, diff: EMPTY_DIFF })
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual(missing)
   })
 })
 
@@ -143,6 +142,21 @@ describe('GET /api/v1/admin/catalog/export after an upload', () => {
     expect(rowWith(live.workbook.tapers, 'code', taper.code)).toEqual({ ...taper, schedule: '1-2: alternate-days; 3-4: weekly; 5: stop' })
     expect(rowWith(live.workbook.ingredients, 'code', one.code)).toEqual(one)
     expect(rowWith(live.workbook.ingredients, 'code', other.code)).toEqual(other)
+  })
+
+  it('gives back the guides as they were uploaded: a base row for each step and a goal row, with the pregnancy text and an audit, and an empty cell as null', async () => {
+    const goalGuide = guideRow({ step: 'treat', goal: 'fade-dark-marks', what_it_does: 'Helps dark marks fade.', look_for: 'Niacinamide or azelaic acid.', for_deeper_skin: 'Go slowly.', look_for_when_pregnant: 'Azelaic acid only.', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const bases = baseGuideRows().map((row) => (row.step === 'protect' ? { ...row, look_for_when_pregnant: 'Mineral sunscreen.' } : row))
+
+    await applied((workbook) => {
+      workbook.guides.rows = [...bases, { ...goalGuide }]
+    })
+
+    const live = (await exportLive()).workbook.guides
+    const find = (step: string, goal: string | null) => live.rows.find((row) => row.step === step && row.goal === goal)
+    for (const base of bases) expect(find(base.step as string, null), `${base.step}`).toEqual(base)
+    expect(find('treat', 'fade-dark-marks')).toEqual(goalGuide)
+    expect(live.rows).toHaveLength(5)
   })
 
   it('joins lists with "; " however the upload separated them, and the dates stay YYYY-MM-DD', async () => {
