@@ -27,6 +27,8 @@ import { ProfilesService } from './modules/profiles/profiles.service'
 import { D1RecommendationsRepository } from './modules/recommendations/recommendations.repository'
 import { RecommendationService } from './modules/recommendations/recommendations.service'
 import { D1RemindersRepository } from './modules/reminders/reminders.repository'
+import { D1ReminderSendsRepository } from './modules/reminders/reminders.sends.repository'
+import { ReminderSendsService } from './modules/reminders/reminders.sends.service'
 import { RemindersService } from './modules/reminders/reminders.service'
 import { D1RoutineCheckInsRepository } from './modules/routines/routines.check-ins.repository'
 import { RoutineCheckInsService } from './modules/routines/routines.check-ins.service'
@@ -301,6 +303,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         settings: new D1NotificationSettingsRepository(db()),
         push: new ExpoPushSender({ accessToken: env.EXPO_ACCESS_TOKEN }),
         jobs: jobQueue(),
+        reminders: reminders(),
         deviceIdKey: env.DEVICE_ID_KEY,
       }),
   )
@@ -454,6 +457,16 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const reminderSends = once(
+    () =>
+      new ReminderSendsService({
+        settings: new D1RemindersRepository(db()),
+        sends: new D1ReminderSendsRepository(db()),
+        routine: routineViewer(),
+        notifications: notifications(),
+      }),
+  )
+
   const auth = once(
     () =>
       new AuthService({
@@ -506,6 +519,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get reminders() {
       return reminders()
+    },
+    get reminderSends() {
+      return reminderSends()
     },
     get safety() {
       return safety()
