@@ -204,13 +204,13 @@ export class RoutineViewerService {
 
   /**
    * The routine in force as the reminder send job reads it: day 1 and the morning and evening lists, as the body places and titles them, each entry with its step's raw
-   * frequency. By profile id with no session or gates (a job calls it). Null while there is nothing to remind of: no routine, one hidden (pending) or one not Started.
+   * frequency, and the days a step-down changes (it reads the step-down templates for them). By profile id with no session or gates (a job calls it). Null while there is nothing to remind of: no routine, one hidden (pending) or one not Started.
    * It asks for no build, marks nothing served and reads no goal.
    */
   async reminderPlanFor(profileId: string): Promise<ReminderPlan | null> {
     const view = await this.routines.current(profileId)
     if (view.status === 'pending' || view.version.startedOn === null) return null
-    return toReminderPlan(await this.inputFor(profileId, view.status, view.version, null, false))
+    return toReminderPlan(await this.inputFor(profileId, view.status, view.version, null, true))
   }
 
   /** The caller's profile once they may see a routine: signed up, with a goal, and the verdict available. */

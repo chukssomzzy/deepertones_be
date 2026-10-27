@@ -1447,13 +1447,15 @@ describe('RoutineViewerService.lookFor: nothing internal is served', () => {
 //       PlanEntry = { step, title, frequency }. By profile id, no session and no gates (a job calls it). The routine in force as `current` reads it: the morning and evening lists of the
 //       body (the same placement, order and titles), each entry with its step's raw frequency. null while that routine has no day 1 (not Started), when there is none, and while it is hidden (pending).
 //       It asks for no build, marks nothing served and reads no goal.
+// #217 PR 4c extends the SAME read with the step-down alert's days (pinned in the block at the foot of this file): `stepDownChanges`, a flat list of { day, title, line }.
 describe('RoutineViewerService.reminderPlanFor', () => {
   const plan = (profileId = PROFILE) => viewer.reminderPlanFor(profileId)
 
   it('answers day 1 and the morning and evening lists as the body places them, with each entry\'s title and raw frequency', async () => {
     await showing(versionRow({ startedOn: START_DAY }))
 
-    // Cleanse am, treat pm, moisturise am-pm, protect am. The cleanser is Amara's own cream, the treatment a recommended serum.
+    // Cleanse am, treat pm, moisturise am-pm, protect am. The cleanser is Amara's own cream, the treatment a recommended serum. The one step-down in the default version has no
+    // date yet (its `startedOn` is null), so it has no change days.
     expect(await plan()).toEqual({
       dayOne: START_DAY.toISOString().slice(0, 10),
       morning: [
@@ -1465,6 +1467,7 @@ describe('RoutineViewerService.reminderPlanFor', () => {
         { step: 'treat', title: 'Serum', frequency: 'pm' },
         { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
       ],
+      stepDownChanges: [],
     })
   })
 
@@ -1557,5 +1560,134 @@ describe('RoutineViewerService.reminderPlanFor', () => {
     expect(requireGoal).not.toHaveBeenCalled()
     expect((await repository.current(PROFILE))!.servedAt).toBeNull()
     expect(row.servedAt).toBeNull()
+  })
+})
+
+// --- the step-down alert's days, on the same plan (spec #217, PR 4c) ---
+
+// THE CONTRACT THIS FILE PINS (assumed: the brief says "feed the reminders module the taper change days and copy through a narrow plan read owned by routines, either extend that read or add a
+// sibling"; this extends reminderPlanFor, because the job already reads the plan for the same profile in the same run, and a second read would redo the routine's reads):
+//   reminderPlanFor(profileId) gains   stepDownChanges: { day: 'YYYY-MM-DD'; title: string; line: string }[]
+//       One entry for the FIRST DAY of each step of each dated step-down's schedule (the same `fromDate` the routine body prints for the step, week 1 included, the `stop` step included),
+//       in the version's step-down order and then the schedule's. A day inside a step (the second week of a two-week step) is not a change. A step-down with no date yet (`startedOn`
+//       null) has none; a step-down whose template the workbook no longer holds has none (and is logged, as the body logs it) and does not stop the others'. [] when nothing changes.
+//       `title` is the product's plain ROUTINE title (the frozen `notInRoutine` title for that shelf entry: "Cream"), never the maker's brand or name (those are the maker's own words and can
+//       trip the wording gate), and it survives the product leaving the shelf. `line` is the fixed copy of the step, owned here with the rest of the routine's words, and passes the gate:
+//         alternate-days -> 'From today: use it every other day'     weekly -> 'From today: use it once a week'     stop -> 'From today: stop using it'
+//       (the other frequencies a schedule may hold are daily or as-needed; their lines start 'From today: ' too, and are pinned only by the gate sweep below).
+//   ReminderRoutinePlan (reminders.types.ts, which this module never imports) is { dayOne, morning, evening, stepDownChanges }.
+describe('RoutineViewerService.reminderPlanFor: the step-down change days', () => {
+  const plan = () => viewer.reminderPlanFor(PROFILE)
+  /** The calendar day `n` days after day 1. */
+  const dayOne = (n: number) => new Date(START_DAY.getTime() + n * DAY).toISOString().slice(0, 10)
+  const taper = (shelfProductId: string, startedOn: Date | null, templateId = TEMPLATE.code) => ({ shelfProductId, templateId, startedOn })
+  const leftOut = (entryId: string, title: string) => ({ entryId, title, status: 'stepping-down' as const, reason: 'It is stopped slowly.' })
+
+  it('lists the first day of each step of the schedule, week one included and the stop included, with the fixed line for the step and the product\'s routine title', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', START_DAY)] }))
+
+    const read = (await plan())!
+
+    // The template: weeks 1-2 every other day, weeks 3-4 weekly, week 5 stop. Steps start on days 0, 14 and 28; day 7 (week 2) is inside the first step and is no change.
+    expect(read.stepDownChanges).toEqual([
+      { day: dayOne(0), title: 'Cream', line: 'From today: use it every other day' },
+      { day: dayOne(14), title: 'Cream', line: 'From today: use it once a week' },
+      { day: dayOne(28), title: 'Cream', line: 'From today: stop using it' },
+    ])
+    // The maker's words never reach the plan: the shelf product is "Karo Glow Cream".
+    expect(JSON.stringify(read.stepDownChanges)).not.toContain('Karo')
+  })
+
+  it('answers the same dates the routine body prints for the step-down (fromDate), so the alert and the schedule screen never disagree', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', START_DAY)] }))
+    const shown = await body(asVerified(() => viewer.current()))
+
+    const read = (await plan())!
+
+    expect(read.stepDownChanges.map((change: { day: string }) => change.day)).toEqual(shown.tapers[0].steps.map((step: { fromDate: string }) => step.fromDate))
+  })
+
+  it('counts a step-down that began after Start from its own date, not from day 1', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', new Date(START_DAY.getTime() + 10 * DAY))] }))
+
+    const read = (await plan())!
+
+    expect(read.stepDownChanges.map((change: { day: string }) => change.day)).toEqual([dayOne(10), dayOne(24), dayOne(38)])
+  })
+
+  it('answers none for a step-down that has no date yet, and none while the routine is not Started (the plan is null)', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', null)] }))
+    expect((await plan())!.stepDownChanges).toEqual([])
+
+    await showing(versionRow({ startedOn: null, tapers: [taper('entry-b', null)] }))
+    expect(await plan()).toBeNull()
+  })
+
+  it('answers none for a routine with nothing being stopped', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [], notInRoutine: [] }))
+
+    expect((await plan())!.stepDownChanges).toEqual([])
+  })
+
+  it('lists each step-down\'s changes under its own title, in the version\'s order of step-downs and then the schedule\'s', async () => {
+    await showing(
+      versionRow({
+        startedOn: START_DAY,
+        tapers: [taper('entry-b', START_DAY), taper('entry-c', new Date(START_DAY.getTime() + 14 * DAY))],
+        notInRoutine: [leftOut('entry-b', 'Cream'), leftOut('entry-c', 'Gel cleanser')],
+      }),
+    )
+
+    const read = (await plan())!
+
+    expect(read.stepDownChanges.map((change: { day: string; title: string }) => [change.day, change.title])).toEqual([
+      [dayOne(0), 'Cream'],
+      [dayOne(14), 'Cream'],
+      [dayOne(28), 'Cream'],
+      // The second step-down began on day 15, so its first step starts on the day the first one's second step does: two changes on one day.
+      [dayOne(14), 'Gel cleanser'],
+      [dayOne(28), 'Gel cleanser'],
+      [dayOne(42), 'Gel cleanser'],
+    ])
+  })
+
+  it('still titles a step-down whose shelf product has left the shelf, by the title the routine was built with', async () => {
+    world.entries = world.entries.filter((entry) => entry.id !== 'entry-b')
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', START_DAY)] }))
+
+    const read = (await plan())!
+
+    expect(read.stepDownChanges.map((change: { title: string }) => change.title)).toEqual(['Cream', 'Cream', 'Cream'])
+  })
+
+  it('drops a step-down whose template the workbook no longer holds, logs it by id, and keeps the others\' changes', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    await showing(
+      versionRow({
+        startedOn: START_DAY,
+        tapers: [taper('entry-c', START_DAY, 'TPR-GONE'), taper('entry-b', START_DAY)],
+        notInRoutine: [leftOut('entry-b', 'Cream'), leftOut('entry-c', 'Gel cleanser')],
+      }),
+    )
+
+    const read = (await plan())!
+
+    expect(read.stepDownChanges.map((change: { title: string }) => change.title)).toEqual(['Cream', 'Cream', 'Cream'])
+    expect(JSON.stringify(errors.mock.calls)).toContain('TPR-GONE')
+  })
+
+  it('passes the wording gate in every title and line, and the lines are different for different frequencies', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [taper('entry-b', START_DAY)] }))
+
+    const read = (await plan())!
+
+    for (const { title, line } of read.stepDownChanges) {
+      for (const { code, pattern } of FORBIDDEN_WORDING) {
+        expect(pattern.test(title), `"${title}" trips ${code}`).toBe(false)
+        expect(pattern.test(line), `"${line}" trips ${code}`).toBe(false)
+      }
+      expect(line).toMatch(/^From today: /)
+    }
+    expect(new Set(read.stepDownChanges.map((change: { line: string }) => change.line)).size).toBe(3)
   })
 })

@@ -43,7 +43,7 @@ const RoutineEntryResponse = z
   .object({
     step: z.enum(ROUTINE_STEPS),
     title: z.string().openapi({ description: 'The product in plain words ("Gel cleanser", "Niacinamide serum", "Sunscreen"): a capital, no full stop.' }),
-    when: z.string().openapi({ description: 'How often, in words for the card: "Every day", "3 evenings a week", "Once a week" or "When you need it".' }),
+    when: z.string().openapi({ description: 'How often, in words for the card: "Every day", "Every other evening", "Once a week" or "When you need it".' }),
     reason: z.string().openapi({ description: 'Why, in words for the user.' }),
     changed: z.boolean().openapi({ description: 'True when this step\'s product or frequency differs from the routine the user was last shown, or that routine had no such step. Always false the first time a routine is shown.' }),
     product: z.discriminatedUnion('kind', [OwnProduct, RecommendedProduct, NoProduct]),

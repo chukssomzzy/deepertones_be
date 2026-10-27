@@ -477,7 +477,7 @@ describe('toRoutineResponse: the "when" label of an entry', () => {
     ['am', 'Every day'],
     ['pm', 'Every day'],
     ['am-pm', 'Every day'],
-    ['alternate-days', '3 evenings a week'],
+    ['alternate-days', 'Every other evening'],
     ['weekly', 'Once a week'],
     ['as-needed', 'When you need it'],
   ] as const)('says "%s" as "%s"', (frequency, label) => {

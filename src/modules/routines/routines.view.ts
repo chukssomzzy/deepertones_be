@@ -1,10 +1,10 @@
 import type { z } from '@hono/zod-openapi'
 import type { ProductSummary } from '../catalog/catalog.service'
-import { ROUTINE_STEPS, type ProductForm } from '../catalog/catalog.vocabulary'
+import { ROUTINE_STEPS, type Frequency, type ProductForm } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
 import { GOAL_LABELS } from '../goals/goals.vocabulary'
-import { stepDownMessage, titleFor, whenFor } from './routines.copy'
+import { stepDownLineFor, stepDownMessage, titleFor, whenFor } from './routines.copy'
 import type { RoutineVersionRow } from './routines.repository'
 import type { ReadyRoutineResponse, UpdatingRoutineResponse } from './routines.schemas'
 
@@ -119,8 +119,14 @@ const inEvening = ({ step, frequency }: RoutineVersionRow['steps'][number]): boo
 /** An entry of the reminder plan: the routine entry's step and title, with the step's raw frequency (the body shows only the `when` label). */
 export type ReminderPlanEntry = { step: RoutineVersionRow['steps'][number]['step']; title: string; frequency: RoutineVersionRow['steps'][number]['frequency'] }
 
-/** What the reminder send job reads: day 1 and the morning and evening lists, placed, ordered and titled as the body places them. */
-export type ReminderPlan = { dayOne: string; morning: ReminderPlanEntry[]; evening: ReminderPlanEntry[] }
+/** The calendar date a step-down's week begins, counting from the day the step-down began. */
+const fromDateOf = (began: number, week: number): string => dayString(began + (week - 1) * WEEK_DAYS * DAY_MS)
+
+/** One day a step of a step-down begins, for the step-down alert: the product's routine title and the step's fixed line. */
+export type StepDownChange = { day: string; title: string; line: string }
+
+/** What the reminder send job reads: day 1, the morning and evening lists, placed, ordered and titled as the body places them, and the days a step-down changes. */
+export type ReminderPlan = { dayOne: string; morning: ReminderPlanEntry[]; evening: ReminderPlanEntry[]; stepDownChanges: StepDownChange[] }
 
 const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
   input.version.tapers.flatMap((stopped) => {
@@ -148,7 +154,7 @@ const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
           toWeek,
           // A step's frequency is typed as text, but the workbook reader refuses a schedule whose frequency is not a routine frequency or stop.
           frequency: frequency as RoutineBody['tapers'][number]['steps'][number]['frequency'],
-          ...(began === null ? {} : { fromDate: dayString(began + (fromWeek - 1) * WEEK_DAYS * DAY_MS), toDate: dayString(began + (toWeek * WEEK_DAYS - 1) * DAY_MS) }),
+          ...(began === null ? {} : { fromDate: fromDateOf(began, fromWeek), toDate: dayString(began + (toWeek * WEEK_DAYS - 1) * DAY_MS) }),
         })),
       },
     ]
@@ -186,11 +192,27 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
   }
 }
 
-/** The plan a Started routine's reminders are made of; null while the version has no day 1. It reads only what the titles need, so `previous` and `tapers` of the input are unused. */
+// One change for the first day of each step of each dated step-down's schedule (week one and the stop included), in the version's order of step-downs and then the schedule's. The title
+// is the one frozen in `notInRoutine` when the build left the product out: the maker's brand and name are its own words, and an alert on a lock screen names the routine's plain title.
+// A step-down with no start has no days yet; one whose template the workbook no longer holds has none either, and is logged as the body logs it.
+const stepDownChangesOf = (input: RoutineViewInput): StepDownChange[] =>
+  input.version.tapers.flatMap((stopped) => {
+    if (stopped.startedOn === null) return []
+    const template = input.tapers.get(stopped.templateId)
+    if (!template) {
+      console.error({ outcome: 'routine-taper-template-missing', profileId: input.version.profileId, templateId: stopped.templateId })
+      return []
+    }
+    const title = input.version.notInRoutine?.find(({ entryId }) => entryId === stopped.shelfProductId)?.title ?? GONE_PRODUCT_NAME
+    const began = utcDay(stopped.startedOn)
+    return template.schedule.map(({ fromWeek, frequency }) => ({ day: fromDateOf(began, fromWeek), title, line: stepDownLineFor(frequency as Frequency | 'stop') }))
+  })
+
+/** The plan a Started routine's reminders are made of; null while the version has no day 1. The titles need no `previous`; the step-down days need `tapers` (the viewer reads them for the plan). */
 export const toReminderPlan = (input: RoutineViewInput): ReminderPlan | null => {
   const { version } = input
   if (version.startedOn === null) return null
   const ordered = [...version.steps].sort((a, b) => ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step))
   const entry = (step: RoutineVersionRow['steps'][number]): ReminderPlanEntry => ({ step: step.step, title: titleOf(step, input).title, frequency: step.frequency })
-  return { dayOne: dayString(utcDay(version.startedOn)), morning: ordered.filter(inMorning).map(entry), evening: ordered.filter(inEvening).map(entry) }
+  return { dayOne: dayString(utcDay(version.startedOn)), morning: ordered.filter(inMorning).map(entry), evening: ordered.filter(inEvening).map(entry), stepDownChanges: stepDownChangesOf(input) }
 }
