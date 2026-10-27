@@ -1,7 +1,7 @@
-import { defineRoute, errorResponses, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
+import { defineRoute, errorResponses, jsonBody, ok, openapiApp, sseResponse, success } from '../../lib/openapi'
 import { FALLBACK_IP, rateLimit } from '../../middleware/rate-limit'
 import { signedIn } from '../../middleware/signed-in'
-import { RoutineResponse, StepParams } from './routines.schemas'
+import { CheckInBody, CheckInResponse, RoutineResponse, StepParams } from './routines.schemas'
 
 const bearer = [{ bearerAuth: [] }]
 
@@ -93,9 +93,28 @@ const findSoldHere = defineRoute({
   responses: { 202: success(RoutineResponse, 'The routine in force, updating'), ...errorResponses(401, 403, 409, 503) },
 })
 
+const checkIn = defineRoute({
+  method: 'post',
+  path: '/routine/check-ins',
+  operationId: 'checkInRoutine',
+  tags: ['Routine'],
+  summary: 'Say the morning or evening routine was done for a day',
+  description:
+    'For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `ROUTINE_NOT_STARTED` until the routine has been started, then 400 `VALIDATION_FAILED` for a `day` that is not ' +
+    'today or yesterday in the person\'s local day (their stored time zone, else UTC) or is before day 1. The body schema runs before the service, so a body of the wrong shape (a `day` that is not `YYYY-MM-DD`, a `time` ' +
+    'that is not `morning` or `evening`, a missing field) is 400 `VALIDATION_FAILED` even from a guest or an account that has not started; the 403 and 409 come first only for a well-formed body. Answers `{ day, time }`. ' +
+    'Idempotent: checking in again for the same `day` and `time` answers 200 the same and stores nothing more. There is no goal or verdict gate. A day counts as done with either `time`.',
+  security: bearer,
+  // An unsigned caller is turned away before the body is checked, so a bad body answers 401 and not 400.
+  middleware: [signedIn()],
+  request: { body: jsonBody(CheckInBody) },
+  responses: { 200: success(CheckInResponse, 'The check-in, as recorded'), ...errorResponses(401, 403, 409) },
+})
+
 export const routinesRoutes = openapiApp()
   .openapi(getRoutine, async (c) => ok(c, await c.var.services.routineViewer.current(), 'Routine'))
   .openapi(watchRoutine, async (c) => c.var.services.routineViewer.watch())
   .openapi(startRoutine, async (c) => ok(c, await c.var.services.routineViewer.start(), 'Routine started'))
   .openapi(gotIt, async (c) => ok(c, await c.var.services.routineViewer.gotIt(c.req.valid('param').step, c.req.header('cf-connecting-ip') ?? FALLBACK_IP), 'Product marked as got'))
   .openapi(findSoldHere, async (c) => ok(c, await c.var.services.routineViewer.findSoldHere(c.req.valid('param').step), 'Looking for another product', 202))
+  .openapi(checkIn, async (c) => ok(c, await c.var.services.routineCheckIns.checkIn(c.req.valid('json').day, c.req.valid('json').time), 'Check-in recorded'))

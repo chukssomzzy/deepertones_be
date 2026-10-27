@@ -1,6 +1,7 @@
 import { z } from '@hono/zod-openapi'
 import { GOALS } from '../goals/goals.vocabulary'
 import { FREQUENCIES, ROUTINE_STEPS, TAPER_KINDS } from '../catalog/catalog.vocabulary'
+import { CHECK_IN_TIMES } from './routines.check-ins.vocabulary'
 
 export const StepParams = z.object({
   step: z.enum(ROUTINE_STEPS).openapi({ param: { name: 'step', in: 'path' }, description: 'The routine step: `cleanse`, `treat`, `moisturise` or `protect`.' }),
@@ -124,3 +125,15 @@ export const RoutineResponse = z
   })
 
 export type RoutineResponse = z.infer<typeof RoutineResponse>
+
+export const CheckInBody = z
+  .object({
+    day: z
+      .string()
+      .regex(/^\d{4}-\d{2}-\d{2}$/)
+      .openapi({ description: 'The local day checked in for, `YYYY-MM-DD`: today or yesterday in the person\'s time zone (UTC with none stored), and not before day 1.', example: '2030-06-15' }),
+    time: z.enum(CHECK_IN_TIMES).openapi({ description: 'Which routine was done: `morning` or `evening`.' }),
+  })
+  .openapi('CheckInBody')
+
+export const CheckInResponse = z.object({ day: z.string().openapi({ example: '2030-06-15' }), time: z.enum(CHECK_IN_TIMES) }).openapi('CheckIn')

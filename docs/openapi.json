@@ -2102,6 +2102,49 @@
           "tapers"
         ]
       },
+      "CheckIn": {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "example": "2030-06-15"
+          },
+          "time": {
+            "type": "string",
+            "enum": [
+              "morning",
+              "evening"
+            ]
+          }
+        },
+        "required": [
+          "day",
+          "time"
+        ]
+      },
+      "CheckInBody": {
+        "type": "object",
+        "properties": {
+          "day": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "The local day checked in for, `YYYY-MM-DD`: today or yesterday in the person's time zone (UTC with none stored), and not before day 1.",
+            "example": "2030-06-15"
+          },
+          "time": {
+            "type": "string",
+            "enum": [
+              "morning",
+              "evening"
+            ],
+            "description": "Which routine was done: `morning` or `evening`."
+          }
+        },
+        "required": [
+          "day",
+          "time"
+        ]
+      },
       "Reminders": {
         "type": "object",
         "properties": {
@@ -6845,6 +6888,129 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/routine/check-ins": {
+      "post": {
+        "operationId": "checkInRoutine",
+        "tags": [
+          "Routine"
+        ],
+        "summary": "Say the morning or evening routine was done for a day",
+        "description": "For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `ROUTINE_NOT_STARTED` until the routine has been started, then 400 `VALIDATION_FAILED` for a `day` that is not today or yesterday in the person's local day (their stored time zone, else UTC) or is before day 1. The body schema runs before the service, so a body of the wrong shape (a `day` that is not `YYYY-MM-DD`, a `time` that is not `morning` or `evening`, a missing field) is 400 `VALIDATION_FAILED` even from a guest or an account that has not started; the 403 and 409 come first only for a well-formed body. Answers `{ day, time }`. Idempotent: checking in again for the same `day` and `time` answers 200 the same and stores nothing more. There is no goal or verdict gate. A day counts as done with either `time`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckInBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The check-in, as recorded",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CheckIn"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {
