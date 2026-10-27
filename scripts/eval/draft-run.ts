@@ -81,6 +81,22 @@ const COUNTRY_ROWS: RawRow[] = [
   { code: 'GB', currency: 'GBP', low_max: 10, mid_max: 30, status: 'active' },
 ]
 
+// The Guides tab the contract needs for a workbook to be accepted: an approved base row for each step. The eval does not draft guides, so these only keep the
+// drafter's "no problems" check about the products. Written out here, not read from the vocabulary, so a step added to it is a deliberate change to the eval.
+const GUIDE_ROWS: RawRow[] = ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => ({
+  step,
+  goal: null,
+  what_it_does: 'What the step does.',
+  look_for: 'What to look for.',
+  for_deeper_skin: 'What suits deeper skin.',
+  look_for_when_pregnant: null,
+  status: 'approved',
+  approved_by: 'Eval',
+  approved_on: '2026-01-01',
+  audited_by: null,
+  audited_on: null,
+}))
+
 const EVAL_COUNTRIES: DraftCountry[] = COUNTRY_ROWS.map((row) => ({ code: row.code as string, currency: row.currency as string }))
 
 // The eval measures catalog:draft as it runs by default, pinned here so a change to that default is a deliberate eval change.
@@ -97,6 +113,7 @@ const workbookOf = (products: RawRow[], availability: RawRow[]): RawWorkbook => 
   countries: { headers: headersOf('countries'), rows: structuredClone(COUNTRY_ROWS) },
   claimWords: { headers: headersOf('claimWords'), rows: [] },
   tapers: { headers: headersOf('tapers'), rows: [] },
+  guides: { headers: headersOf('guides'), rows: structuredClone(GUIDE_ROWS) },
 })
 
 const codeOf = (c: DraftCase): string => `EVAL-${c.id.toUpperCase()}`

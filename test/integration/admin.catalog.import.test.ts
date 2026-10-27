@@ -1,7 +1,8 @@
 import { env } from 'cloudflare:workers'
-import type { RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { RawRow, RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import {
+  APPROVED_ON,
   BRITAIN,
   CONTRACT_VERSION,
   NIGERIA,
@@ -12,6 +13,7 @@ import {
   archiveKeyPattern,
   archived,
   availabilityRow,
+  baseGuideRows,
   claimWordRow,
   code,
   counts,
@@ -20,6 +22,7 @@ import {
   edited,
   errorOf,
   exportLive,
+  guideRow,
   importRaw,
   latestVersionRow,
   liveRuleNames,
@@ -46,6 +49,12 @@ import {
 // bucket key is the live version plus one, and every product, rule and code is salted, because the database is shared by the whole file.
 
 const RULES_VERSION = /^rules-[0-9a-f]{16}$/
+
+// A fresh catalog has no guides, and the contract refuses a workbook without the four base ones, so the team writes them before the first import. The helpers here add
+// any a step lacks (`upload`), which would make the first upload of the file the one that carries them. Done once up front, every test's diff is only what it is about.
+beforeAll(async () => {
+  await applied(() => {})
+})
 
 /** A product with its availability in Nigeria and the country itself, as one edit. */
 const addProduct = (product = productRow(), over: { availability?: boolean } = {}) => {
@@ -85,6 +94,7 @@ describe('a dry run', () => {
       countries: diffOf({ added: ['GH'] }),
       claimWords: diffOf({}),
       tapers: diffOf({}),
+      guides: diffOf({}),
       newProducts: [{ code: product.code, brand: product.brand, name: product.name, variant: 'Night', form: 'cream' }],
     })
     expect(await exportLive()).toEqual(live)
@@ -597,6 +607,7 @@ describe('the contract version', () => {
   it.each([
     ['an older contract', '1.0.0'],
     ['the 2.0.0 contract, before key_ingredient and strength', '2.0.0'],
+    ['the 2.1.0 contract, before the Guides tab', '2.1.0'],
     ['a newer contract', '9.9.9'],
   ])('refuses a file made for %s with 409 CONTRACT_MISMATCH, as a dry run and as an apply, and writes nothing', async (_what, contractVersion) => {
     const live = await exportLive()
@@ -636,6 +647,29 @@ describe('the contract version', () => {
       expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
     }
     expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a genuine 2.1.0 workbook, which has six tabs and no guides, with 409 CONTRACT_MISMATCH and not a 400 for its shape, as a dry run and as an apply', async () => {
+    const live = await exportLive()
+    const { guides: _guides, ...sixTabs } = live.workbook
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const res = await importRaw({ workbook: sixTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun, file: dryRun ? null : xlsxBytes('six-tabs'), contractVersion: '2.1.0' })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a workbook of the current contract version that has no Guides tab, with a 400 and not a 409', async () => {
+    const live = await exportLive()
+    const { guides: _guides, ...sixTabs } = live.workbook
+
+    const res = await importRaw({ workbook: sixTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: live.contractVersion })
+
+    expect(res.status).toBe(400)
   })
 
   it('still refuses a workbook of the current contract version whose shape is wrong, with a 400 and not a 409', async () => {
@@ -898,6 +932,105 @@ describe('group and clashes_with', () => {
   })
 })
 
+describe('guides', () => {
+  const treatGlow = (over: RawRow = {}) => guideRow({ step: 'treat', goal: 'glow', what_it_does: 'Helps skin look even.', look_for: 'Niacinamide.', for_deeper_skin: 'Go slowly.', ...over })
+  const dryRun = (edit: (workbook: RawWorkbook) => void) => upload(edit, { dryRun: true })
+
+  it('reports an added guide in a dry run, keyed by step and goal, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+
+    const { res } = await dryRun((workbook) => workbook.guides.rows.push(treatGlow()))
+
+    expect(res.status).toBe(200)
+    expect(sorted((await dataOf<ImportResult>(res)).diff)).toEqual({ ...EMPTY_DIFF, guides: diffOf({ added: ['treat:glow'] }) })
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores a guide on apply: the next catalog version, the row in the export as uploaded, the rules version where it was', async () => {
+    const guide = treatGlow({ goal: 'even-tone', look_for_when_pregnant: 'Azelaic acid only.', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const version = await rulesVersion()
+
+    const { before, data } = await applied((workbook) => workbook.guides.rows.push({ ...guide }))
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff).guides).toEqual(diffOf({ added: ['treat:even-tone'] }))
+    const live = await exportLive()
+    expect(live.workbook.guides.rows.find((row) => row.step === 'treat' && row.goal === 'even-tone')).toEqual(guide)
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('reports an edit as updated, for a base guide as for a goal guide, and only the row edited; a text with other spaces is no change', async () => {
+    await applied((workbook) => workbook.guides.rows.push(treatGlow({ goal: 'brighter' })))
+
+    const edit = await dryRun((workbook) => {
+      workbook.guides.rows.find((row) => row.step === 'protect' && row.goal === null)!.for_deeper_skin = 'Choose a finish that leaves no grey film.'
+      workbook.guides.rows.find((row) => row.goal === 'brighter')!.look_for = '  Niacinamide.  '
+    })
+    const spaced = await dryRun((workbook) => {
+      workbook.guides.rows.find((row) => row.goal === 'brighter')!.look_for = '  Niacinamide.  '
+    })
+
+    expect(sorted((await dataOf<ImportResult>(edit.res)).diff)).toEqual({ ...EMPTY_DIFF, guides: diffOf({ updated: ['protect'] }) })
+    expect((await dataOf<ImportResult>(spaced.res)).diff.guides).toEqual(diffOf({}))
+  })
+
+  it('never deletes: a goal guide left out of the upload is retired in place, with its cells, and reactivated when it comes back', async () => {
+    const guide = treatGlow({ goal: 'calm-repair' })
+    await applied((workbook) => workbook.guides.rows.push({ ...guide }))
+
+    const { data: retired } = await applied((workbook) => {
+      workbook.guides.rows = workbook.guides.rows.filter((row) => row.goal !== 'calm-repair')
+    })
+
+    expect(retired.diff.guides).toEqual(diffOf({ retired: ['treat:calm-repair'] }))
+    expect((await exportLive()).workbook.guides.rows.find((row) => row.goal === 'calm-repair')).toEqual({ ...guide, status: 'retired' })
+    const { data: back } = await applied((workbook) => {
+      workbook.guides.rows = workbook.guides.rows.filter((row) => row.goal !== 'calm-repair').concat({ ...guide })
+    })
+    expect(back.diff.guides).toEqual(diffOf({ reactivated: ['treat:calm-repair'] }))
+    expect((await exportLive()).workbook.guides.rows.find((row) => row.goal === 'calm-repair')).toEqual(guide)
+  })
+
+  it('refuses a workbook without a base guide for each step, 400 CATALOG_INVALID with GUIDE_BASE_MISSING on the Guides header row, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.guides.rows = workbook.guides.rows.filter((row) => !(row.step === 'treat' && row.goal === null))
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-base-guide') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a guide that says lighter skin, with the problem on the cell, and two guides for one step and goal, naming both rows', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.guides.rows.push(treatGlow({ goal: 'clear-skin', look_for: 'A serum for lighter skin.' }), treatGlow({ goal: 'fade-dark-marks' }), treatGlow({ goal: 'fade-dark-marks' }))
+    })
+    // The three rows are the last three of the tab; the first data row is row 2.
+    const first = bad.guides.rows.length - 1
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'guides', row: first, column: 'look_for', rule: 'GUIDE_WORDING' },
+        { tab: 'guides', row: first + 1, column: 'step', rule: 'GUIDE_DUPLICATE' },
+        { tab: 'guides', row: first + 2, column: 'step', rule: 'GUIDE_DUPLICATE' },
+      ]),
+    )
+  })
+})
+
 // The server knows which environment it is. In production only, a Tapers row that is approved must have been approved by someone on the list of
 // qualified approvers; elsewhere anyone may approve, so the owner or Claude can approve on staging. It is a process control, not authentication:
 // the approver is a label in a cell. Each call here hands the Worker its own bindings.
@@ -914,6 +1047,8 @@ describe('the production approver gate', () => {
    */
   const noTapers = (workbook: RawWorkbook) => {
     workbook.tapers.rows = []
+    // The guides in force are approved too, and the gate is for them as much as for templates: theirs are approved by someone on the list, so a test is about what it adds.
+    workbook.guides.rows = baseGuideRows().map((row) => ({ ...row, approved_by: QUALIFIED }))
   }
   const dry = (edit: (workbook: RawWorkbook) => void, workerEnv: typeof env) =>
     upload(
@@ -993,7 +1128,8 @@ describe('the production approver gate', () => {
     const { res } = await dry((workbook) => workbook.tapers.rows.push(taperRow({ approved_by: QUALIFIED })), asProduction(approvers))
 
     expect(res.status).toBe(400)
-    expect((await problemsOf(res)).map((problem) => problem.rule)).toEqual(['UNQUALIFIED_APPROVER'])
+    // Nobody is qualified, so the guides in force are refused too: the tab's own tests are below.
+    expect((await problemsOf(res)).filter((problem) => problem.tab === 'tapers').map((problem) => problem.rule)).toEqual(['UNQUALIFIED_APPROVER'])
   })
 
   it('checks only a taper that is approved: a draft and a retired template may name anyone, since neither is in force', async () => {
@@ -1008,7 +1144,7 @@ describe('the production approver gate', () => {
     expect(res.status).toBe(200)
   })
 
-  it('checks only Tapers: products, rules and claim words approved by anyone are accepted in production', async () => {
+  it('checks only Tapers and Guides: products, rules and claim words approved by anyone are accepted in production', async () => {
     const { res } = await dry((workbook) => {
       withCountry(workbook, NIGERIA)
       workbook.products.rows.push(productRow({ approved_by: 'Somebody Else' }))
@@ -1034,6 +1170,55 @@ describe('the production approver gate', () => {
     expect(await exportLive()).toEqual(live)
     expect(await counts()).toEqual(before)
     expect(await archived(live.catalogVersion + 1)).toBeNull()
+  })
+
+  describe('for guides', () => {
+    /** A dry run whose Guides tab is exactly what the test gives: no template, and none of the base rows the helper would add. */
+    const dryGuides = (guides: RawRow[], workerEnv: typeof env) =>
+      upload(
+        (workbook) => {
+          workbook.tapers.rows = []
+          workbook.guides.rows = guides
+        },
+        { dryRun: true, workerEnv, baseGuides: false },
+      )
+    const bases = (approver: string) => baseGuideRows().map((row) => ({ ...row, approved_by: approver }))
+
+    it('refuses an approved guide whose approver is not on the list, 400 CATALOG_INVALID with one UNQUALIFIED_APPROVER problem for each, at its row, and never the approver\'s name', async () => {
+      const approver = word('Owner')
+
+      const { res } = await dryGuides([...bases(QUALIFIED).slice(0, 2), ...bases(approver).slice(2), guideRow({ step: 'treat', goal: 'glow', approved_by: approver })], asProduction(QUALIFIED))
+
+      expect(res.status).toBe(400)
+      const text = await res.text()
+      expect(text).not.toContain(approver)
+      const body = JSON.parse(text) as { error: { code: string; details: { problems: unknown[] } } }
+      expect(body.error.code).toBe('CATALOG_INVALID')
+      expect(body.error.details.problems).toEqual([
+        { tab: 'guides', row: 4, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+        { tab: 'guides', row: 5, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+        { tab: 'guides', row: 6, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+      ])
+    })
+
+    it('accepts guides approved by someone on the list, and a draft or retired guide by anyone', async () => {
+      const { res } = await dryGuides(
+        [
+          ...bases(QUALIFIED),
+          guideRow({ step: 'treat', goal: 'glow', status: 'draft', approved_by: 'Somebody Else' }),
+          guideRow({ step: 'treat', goal: 'even-tone', status: 'retired', approved_by: 'Somebody Else' }),
+        ],
+        asProduction(QUALIFIED),
+      )
+
+      expect(res.status).toBe(200)
+    })
+
+    it.each([['staging'], ['development']])('accepts any approver in %s', async (environment) => {
+      const { res } = await dryGuides(bases('Somebody Else'), asEnvironment(environment, QUALIFIED))
+
+      expect(res.status).toBe(200)
+    })
   })
 
   it.each([['staging'], ['development']])('accepts any approver in %s, whatever the list says', async (environment) => {

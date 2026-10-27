@@ -3,6 +3,8 @@ import { stableJson } from '../../lib/stable-json'
 import { hasLinkOrMarkup } from '../../lib/text-safety'
 import { isSafePublicHttpsUrl } from '../../lib/url-safety'
 import { SHOWN_CONCERNS, SKIN_TYPE_LABELS, type ShownConcern, type SkinTypeLabel } from '../face-scans/face-scans.tables'
+import { GOALS, type Goal } from '../goals/goals.vocabulary'
+import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { identityKey } from './catalog.identity'
 import { normaliseIngredient } from './catalog.ingredients'
 import {
@@ -25,7 +27,7 @@ import {
   type TaperKind,
 } from './catalog.vocabulary'
 
-// The workbook contract: what the recommendation catalog's spreadsheet (six tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers) may hold, as
+// The workbook contract: what the recommendation catalog's spreadsheet (seven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides) may hold, as
 // data, and the one function that checks a workbook against it. Pure: no I/O, no clock, so the same rows always give the same answer. The data
 // is plain JSON (a pattern is a string), so it can be fingerprinted, and `npm run catalog:contract-doc` writes it out for the people who fill the
 // workbook in. Change it, and the version, fingerprint and that document all have to move with it.
@@ -33,7 +35,7 @@ import {
 // The HTTP shapes that carry a workbook (the raw tabs a request and the export hold) are zod schemas in catalog.workbook.schemas.ts; a tab or cell type changed here changes those too.
 
 /** Bumped when a tab, column, accepted value or rule changes, so a file written to an older contract is known to be. */
-export const CONTRACT_VERSION = '2.1.0'
+export const CONTRACT_VERSION = '2.2.0'
 
 /** What a spreadsheet library gives for a cell. */
 export type Cell = string | number | boolean | null
@@ -41,7 +43,7 @@ export type Cell = string | number | boolean | null
 export type RawRow = Record<string, Cell | undefined>
 /** A tab as a spreadsheet library gives it: the header row, and the rows below it. The headers say what the columns are, whatever keys the rows have. */
 export type RawTab = { headers: string[]; rows: RawRow[] }
-export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab }
+export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab; guides: RawTab }
 export type TabKey = keyof RawWorkbook
 
 // --- the definitions ----------------------------------------------------------------------------------------------------------------------------
@@ -96,7 +98,12 @@ const RULES = {
   SCHEDULE_STOP_NOT_LAST: 'A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step.',
   SCHEDULE_FREQUENCY_INCREASES: 'A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop.',
   UNQUALIFIED_APPROVER:
-    'In production only: a Tapers row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file.',
+    'In production only: a Tapers or Guides row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template and a guide are shown to people, so a qualified person has to approve them. It is raised by the server, not by the contract check on the file.',
+  GUIDE_BASE_MISSING:
+    'A routine step has no approved guide without a goal. Each of the four steps (cleanse, treat, moisturise, protect) needs one approved row with the goal column empty: it is what a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row of the Guides tab.',
+  GUIDE_DUPLICATE: 'Two rows of the Guides tab are for the same step and goal (or the same step with no goal). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each.',
+  GUIDE_WORDING:
+    'A guide text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. The same words are refused in every part of the routine. Say what the product does for the skin in plain words, without them.',
 } as const
 export type RuleCode = keyof typeof RULES
 
@@ -119,6 +126,7 @@ const VOCABULARIES = {
   claims: ['lightening'],
   ingredientGroups: [...INGREDIENT_GROUPS],
   taperKinds: [...TAPER_KINDS],
+  goals: [...GOALS],
   scheduleFrequencies: [...FREQUENCIES, 'stop'],
 }
 type VocabularyName = keyof typeof VOCABULARIES
@@ -188,6 +196,8 @@ export type ColumnDefinition = {
   plainText?: true
   /** Text with no capital letter in it. */
   lowerCase?: true
+  /** Text that passes the routine's wording gate (`FORBIDDEN_WORDING`): no condition name, diagnosis, promise of lighter skin or score. */
+  routineWording?: true
   /** The cell is a code of another tab, and must match one exactly. */
   refersTo?: { tab: TabKey; column: string; rule: 'UNKNOWN_PRODUCT' | 'UNKNOWN_COUNTRY' }
   /** No two rows of the tab have the same value. */
@@ -234,6 +244,7 @@ const SCHEDULE_LENGTH = 300
 const SCHEDULE_EXAMPLE = '1-2: alternate-days; 3-4: weekly; 5: stop'
 const PHRASE_LENGTH = 60
 const TAPER_TEXT_LENGTH = 400
+const GUIDE_TEXT_LENGTH = 300
 
 // The sign-off columns are the same on every tab but Availability and Countries.
 const signOff = (what: string): ColumnDefinition[] => [
@@ -259,6 +270,7 @@ export const CONTRACT: Contract = {
     ingredientGroups:
       'What an ingredient is, for the rules that look across a shelf, as opposed to what it does. Most ingredient rules have no group. Mercury is stopped at once; steroid and lightening-agent are stopped with a step-down plan.',
     taperKinds: 'The groups that are stopped with a step-down plan and not at once. Mercury is not on the list: it is stopped at once.',
+    goals: 'The goals a person can pick. A guide row with a goal is shown to people with that goal instead of the step\'s guide with no goal; the list is the goals the app offers, so it moves when they do.',
     budgetBands:
       'Not a column of any tab. A budget band is a rough answer about how much a person can spend on one new product, and where each band ends is set per country by low_max and mid_max in the Countries tab. It is used when shopping facts are matched to products.',
   },
@@ -429,6 +441,36 @@ export const CONTRACT: Contract = {
       ],
       checks: [{ rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' }],
     },
+    {
+      key: 'guides',
+      title: 'Guides',
+      about:
+        'What each routine step is for, what to look for on the label and what suits deeper skin: the guide a person reads before buying a product they do not own. A guide is written here and never by a model, and a qualified person approves it; in production the server refuses an approved guide whose approver is not on its list. A row is one step, and a goal when it is for one: a row with a goal is shown, whole, to people with that goal in place of the step\'s row with no goal, so each of the four steps needs one approved row with no goal. A row is identified by its step and goal, and is retired, never deleted. The pregnancy rule for reviewers: a row with no look_for_when_pregnant is shown to people who are pregnant or breastfeeding as it is, so its look_for must name only things that are safe in pregnancy; write look_for_when_pregnant when it cannot be.',
+      columns: [
+        { name: 'step', type: 'vocabulary', required: 'always', vocabulary: 'steps', about: 'The routine step the guide is for.' },
+        { name: 'goal', type: 'vocabulary', required: 'optional', vocabulary: 'goals', about: 'The goal the guide is for. Leave it empty for the step\'s base guide, which people with any other goal are shown.' },
+        { name: 'what_it_does', type: 'text', required: 'always', maxLength: GUIDE_TEXT_LENGTH, plainText: true, routineWording: true, about: 'What this kind of product does for the person, in plain words.' },
+        { name: 'look_for', type: 'text', required: 'always', maxLength: GUIDE_TEXT_LENGTH, plainText: true, routineWording: true, about: 'What to check on the label, in plain words. Without look_for_when_pregnant, this is shown to people who are pregnant or breastfeeding too, so name only what is safe for them.' },
+        { name: 'for_deeper_skin', type: 'text', required: 'always', maxLength: GUIDE_TEXT_LENGTH, plainText: true, routineWording: true, about: 'What works on deeper skin: for example a finish that leaves no grey or white film.' },
+        {
+          name: 'look_for_when_pregnant',
+          type: 'text',
+          required: 'optional',
+          maxLength: GUIDE_TEXT_LENGTH,
+          plainText: true,
+          routineWording: true,
+          about: 'What to check on the label for a person who is pregnant or breastfeeding, shown instead of look_for. Leave it empty only when look_for is already safe in pregnancy.',
+        },
+        statusColumn('draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its step and goal are never reused.'),
+        ...signOff('guide'),
+      ],
+      checks: [
+        { rule: 'GUIDE_BASE_MISSING', about: 'Each routine step has one approved row with no goal. A draft or retired row does not count.' },
+        { rule: 'GUIDE_DUPLICATE', about: 'Each step and goal pair appears once, a step with no goal counting as a pair. A draft or retired row counts.' },
+        { rule: 'GUIDE_WORDING', about: 'No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.' },
+        { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
+      ],
+    },
   ],
   rules: { ...RULES },
 }
@@ -519,6 +561,21 @@ export type TaperRow = {
   auditedOn: Date | null
 }
 
+/** A guide is identified by its step and goal, not a code; a null goal is the step's base guide. */
+export type GuideRow = {
+  step: RoutineStep
+  goal: Goal | null
+  whatItDoes: string
+  lookFor: string
+  forDeeperSkin: string
+  lookForWhenPregnant: string | null
+  status: RowStatus
+  approvedBy: string | null
+  approvedOn: Date | null
+  auditedBy: string | null
+  auditedOn: Date | null
+}
+
 export type Workbook = {
   products: ProductRow[]
   availability: AvailabilityRow[]
@@ -526,6 +583,16 @@ export type Workbook = {
   countries: CountryRow[]
   claimWords: ClaimWordRow[]
   tapers: TaperRow[]
+  guides: GuideRow[]
+}
+
+/** A guide's key where one is needed (a diff, a stored row): its step, and `step:goal` when it is for a goal. No step or goal has a colon in it. */
+export const guideKey = (row: { step: string; goal: string | null }): string => (row.goal === null ? row.step : `${row.step}:${row.goal}`)
+
+/** Guides in the order the export lists them: routine step order, a step's base guide first, then its goal guides in the order the goals are offered. */
+export const compareGuides = (a: { step: RoutineStep; goal: Goal | null }, b: { step: RoutineStep; goal: Goal | null }): number => {
+  const goalAt = (goal: Goal | null) => (goal === null ? -1 : GOALS.indexOf(goal))
+  return ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step) || goalAt(a.goal) - goalAt(b.goal)
 }
 
 /** Where in the workbook, and which rule: never what the cell held. `row` is the spreadsheet row, so the header is 1 and the first data row 2. */
@@ -821,6 +888,11 @@ class Sheet {
     this.report({ tab: this.key, row: i + 2, column, rule })
   }
 
+  /** A problem of the tab as a whole, which has no row to point at: it sits on the header row, as a missing column does. */
+  failOnHeader(column: string, rule: RuleCode): void {
+    this.report({ tab: this.key, row: 1, column, rule })
+  }
+
   private cell(i: number, column: string): Cell {
     const cell = this.rows[i]![column] ?? null
     return typeof cell === 'string' ? cell.trim() : cell
@@ -848,6 +920,7 @@ class Sheet {
     else {
       if (definition.plainText && hasLinkOrMarkup(value)) this.fail(i, definition.name, 'HAS_LINK_OR_MARKUP')
       if (definition.lowerCase && value !== value.toLowerCase()) this.fail(i, definition.name, 'NOT_LOWER_CASE')
+      if (definition.routineWording && FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(value))) this.fail(i, definition.name, 'GUIDE_WORDING')
     }
   }
 
@@ -907,6 +980,7 @@ class WorkbookValidator {
   private readonly countries: Sheet
   private readonly claimWords: Sheet
   private readonly tapers: Sheet
+  private readonly guides: Sheet
 
   constructor(raw: RawWorkbook) {
     const sheet = (key: TabKey) => new Sheet(key, raw[key], (problem) => this.report(problem))
@@ -916,10 +990,11 @@ class WorkbookValidator {
     this.countries = sheet('countries')
     this.claimWords = sheet('claimWords')
     this.tapers = sheet('tapers')
+    this.guides = sheet('guides')
   }
 
   run(): WorkbookResult {
-    for (const sheet of [this.products, this.availability, this.ingredients, this.countries, this.claimWords, this.tapers]) sheet.checkHeader()
+    for (const sheet of [this.products, this.availability, this.ingredients, this.countries, this.claimWords, this.tapers, this.guides]) sheet.checkHeader()
     const workbook: Workbook = {
       products: this.products.rows.map((_, i) => this.product(i)),
       availability: this.availability.rows.map((_, i) => this.availabilityRow(i)),
@@ -927,6 +1002,7 @@ class WorkbookValidator {
       countries: this.countries.rows.map((_, i) => this.country(i)),
       claimWords: this.claimWords.rows.map((_, i) => this.claimWord(i)),
       tapers: this.tapers.rows.map((_, i) => this.taper(i)),
+      guides: this.guides.rows.map((_, i) => this.guide(i)),
     }
     this.clashes()
     return this.problems.length === 0 ? { ok: true, workbook } : { ok: false, problems: this.problems }
@@ -1050,6 +1126,24 @@ class WorkbookValidator {
     }
   }
 
+  private guide(i: number): GuideRow {
+    const s = this.guides
+    s.checkAudit(i)
+    return {
+      step: s.vocabulary<RoutineStep>(i, 'step')!,
+      goal: s.vocabulary<Goal>(i, 'goal'),
+      whatItDoes: s.text(i, 'what_it_does')!,
+      lookFor: s.text(i, 'look_for')!,
+      forDeeperSkin: s.text(i, 'for_deeper_skin')!,
+      lookForWhenPregnant: s.text(i, 'look_for_when_pregnant'),
+      status: s.vocabulary<RowStatus>(i, 'status')!,
+      approvedBy: s.text(i, 'approved_by'),
+      approvedOn: s.date(i, 'approved_on'),
+      auditedBy: s.text(i, 'audited_by'),
+      auditedOn: s.date(i, 'audited_on'),
+    }
+  }
+
   /** The Products columns a draft cell may name: every one but those that identify or sign off the row. */
   private draftableColumns(): Set<string> {
     const products = CONTRACT.tabs.find((tab) => tab.key === 'products')!
@@ -1069,7 +1163,7 @@ class WorkbookValidator {
   // --- rules between rows: every row in a clash is reported, so the author sees both sides ------------------------------------------------------
 
   private clashes(): void {
-    const { products, availability, ingredients, countries, claimWords, tapers } = this
+    const { products, availability, ingredients, countries, claimWords, tapers, guides } = this
     for (const sheet of [products, ingredients, countries, claimWords, tapers]) {
       this.reportClash(sheet, 'DUPLICATE_CODE', (i) => {
         const code = sheet.has('code') ? sheet.value(i, 'code') : null
@@ -1112,6 +1206,32 @@ class WorkbookValidator {
       return phrase === null ? [] : [{ key: phrase.toLowerCase(), column: 'phrase' }]
     })
     this.ruleClashes()
+    this.guideRules(guides)
+  }
+
+  /**
+   * The rules between Guides rows. A guide has no code: it is its step and goal, read from the cells as written (trimmed), and a cell that is not in its
+   * vocabulary is already a problem of its own and takes no part, so it is reported as that and nothing more.
+   */
+  private guideRules(s: Sheet): void {
+    if (!s.has('step')) return
+    const steps: readonly string[] = VOCABULARIES.steps
+    const goals: readonly string[] = VOCABULARIES.goals
+    const stepOf = (i: number): string | null => {
+      const step = s.value(i, 'step')
+      return step !== null && steps.includes(step) ? step : null
+    }
+    // A goal cell that is empty is a base row; one that is not a goal is no row's key.
+    const goalOf = (i: number): string | null => (s.has('goal') ? s.value(i, 'goal') : null)
+    this.reportClash(s, 'GUIDE_DUPLICATE', (i) => {
+      const step = stepOf(i)
+      const goal = goalOf(i)
+      return step === null || (goal !== null && !goals.includes(goal)) ? [] : [{ key: JSON.stringify([step, goal]), column: 'step' }]
+    })
+    // Without a status column no row can be said to be approved, and that column is already reported as missing.
+    if (!s.has('status')) return
+    const covered = new Set(s.rows.flatMap((_, i) => (goalOf(i) === null && s.value(i, 'status') === 'approved' && stepOf(i) !== null ? [stepOf(i)!] : [])))
+    if (steps.some((step) => !covered.has(step))) s.failOnHeader('step', 'GUIDE_BASE_MISSING')
   }
 
   /**

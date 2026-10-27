@@ -1,5 +1,6 @@
 import { index, integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core'
 import type { ShownConcern, SkinTypeLabel } from '../face-scans/face-scans.tables'
+import { GOALS } from '../goals/goals.vocabulary'
 import { formulations, products } from './catalog.table'
 import {
   CATEGORIES,
@@ -8,6 +9,7 @@ import {
   INGREDIENT_GROUPS,
   ORIGINS,
   PRODUCT_FORMS,
+  ROUTINE_STEPS,
   TAPER_KINDS,
   type ConcernKind,
   type Frequency,
@@ -64,6 +66,27 @@ export const tapers = sqliteTable('tapers', {
   schedule: text('schedule', { mode: 'json' }).$type<ScheduleStep[]>().notNull(),
   whatToExpect: text('what_to_expect').notNull(),
   seeAProfessionalIf: text('see_a_professional_if').notNull(),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/**
+ * A routine guide, as the workbook's Guides tab holds it: what a step is for, what to look for and what suits deeper skin, for a step and optionally a goal. A guide has
+ * no code: `key` is its step, or `step:goal` for a goal (`guideKey`), and is the primary key. It is not (step, goal), because SQLite counts a null goal as different from
+ * every other, so a step's base guide would be a new row on every upload. Retired, never deleted.
+ */
+export const guides = sqliteTable('guides', {
+  key: text('key').primaryKey(),
+  step: text('step', { enum: ROUTINE_STEPS }).notNull(),
+  goal: text('goal', { enum: GOALS }),
+  whatItDoes: text('what_it_does').notNull(),
+  lookFor: text('look_for').notNull(),
+  forDeeperSkin: text('for_deeper_skin').notNull(),
+  lookForWhenPregnant: text('look_for_when_pregnant'),
   status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
   approvedBy: text('approved_by'),
   approvedOn: text('approved_on'),

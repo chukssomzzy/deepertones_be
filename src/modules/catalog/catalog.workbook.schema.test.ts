@@ -33,6 +33,7 @@ const HEADERS = {
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 /** A tab with its full header row unless other headers are given. A row need not hold every header: a key left out is an empty cell. */
@@ -114,9 +115,28 @@ const taper = (over: Raw = {}): Raw => ({
   ...over,
 })
 
+/** A Guides row: by default the approved base row (no goal) of the cleanse step. */
+const guide = (over: Raw = {}): Raw => ({
+  step: 'cleanse',
+  goal: null,
+  what_it_does: 'Lifts sweat, sunscreen and dirt off your skin so the rest of your routine can work.',
+  look_for: 'A gentle, fragrance-free wash that leaves your skin comfortable, not tight.',
+  for_deeper_skin: 'Skip harsh scrubs and hot water: rubbing hard can leave dark marks behind on deeper skin.',
+  look_for_when_pregnant: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** The four approved base rows (no goal) every workbook needs: one for each routine step, written out here and not read from the vocabulary. */
+const baseGuides = (): Raw[] => ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step }))
+
 const country = (over: Raw = {}): Raw => ({ code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active', ...over })
 
-/** A workbook whose tabs hold one valid row each, unless the rows of a tab are given. */
+/** A workbook whose tabs hold one valid row each (the Guides tab, one approved base row for each of the four steps), unless the rows of a tab are given. */
 const workbook = (over: Partial<Record<Tab, Raw[]>> = {}): RawWorkbook => ({
   products: tab('products', over.products ?? [product()]),
   availability: tab('availability', over.availability ?? [availability()]),
@@ -124,6 +144,7 @@ const workbook = (over: Partial<Record<Tab, Raw[]>> = {}): RawWorkbook => ({
   countries: tab('countries', over.countries ?? [country()]),
   claimWords: tab('claimWords', over.claimWords ?? [claimWord()]),
   tapers: tab('tapers', over.tapers ?? [taper()]),
+  guides: tab('guides', over.guides ?? baseGuides()),
 })
 
 // A tab under test sits in a workbook where nothing else can add a problem: a product row mutated on its own has no availability to point
@@ -134,6 +155,10 @@ const inIngredients = (...ingredients: Raw[]): RawWorkbook => workbook({ product
 const inCountries = (...countries: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries })
 const inClaimWords = (...claimWords: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords })
 const inTapers = (...tapers: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], tapers })
+/** The Guides tab holds exactly these rows (so a test of the base rows decides which there are); every other tab holds nothing that could add a problem. */
+const inGuides = (...guides: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], guides })
+/** The four base rows and then these: the row a test is about is spreadsheet row 6, and the base rows cannot add a problem. */
+const withBases = (...more: Raw[]): RawWorkbook => inGuides(...baseGuides(), ...more)
 
 type Problem = { tab: Tab; row: number; column: string; rule: string }
 const problem = (tab: Tab, row: number, column: string, rule: string): Problem => ({ tab, row, column, rule })
@@ -156,8 +181,8 @@ const parsed = (raw: RawWorkbook) => {
 const text = (length: number, char = 'a') => char.repeat(length)
 
 describe('the contract', () => {
-  it('is version 2.1.0: the contract that adds the optional key_ingredient and strength columns to the Products tab', () => {
-    expect(CONTRACT_VERSION).toBe('2.1.0')
+  it('is version 2.2.0: the contract that adds the Guides tab', () => {
+    expect(CONTRACT_VERSION).toBe('2.2.0')
   })
 
   it('is plain data: it survives JSON unchanged, so nothing in it (a pattern, a limit) can be left out of the fingerprint', () => {
@@ -180,13 +205,13 @@ describe('the contract', () => {
     for (const value of values) expect(written, value).toContain(`"${value}"`)
   })
 
-  it('lists the six tabs, by the names a RawWorkbook uses', () => {
+  it('lists the seven tabs, by the names a RawWorkbook uses', () => {
     const written = JSON.stringify(CONTRACT)
 
-    for (const tab of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers']) expect(written, tab).toContain(`"${tab}"`)
+    for (const tab of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides']) expect(written, tab).toContain(`"${tab}"`)
   })
 
-  it('titles the new tabs "Claim words" and "Tapers", the names they have in the workbook file', () => {
+  it('titles the new tabs "Claim words", "Tapers" and "Guides", the names they have in the workbook file', () => {
     expect(CONTRACT.tabs.map((tab) => [tab.key, tab.title])).toEqual([
       ['products', 'Products'],
       ['availability', 'Availability'],
@@ -194,7 +219,21 @@ describe('the contract', () => {
       ['countries', 'Countries'],
       ['claimWords', 'Claim words'],
       ['tapers', 'Tapers'],
+      ['guides', 'Guides'],
     ])
+  })
+
+  it('lists the goals a Guides row may be written for, and the routine steps, so the generated document says what is allowed', () => {
+    const written = JSON.stringify(CONTRACT)
+
+    for (const goal of ['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair']) expect(written, goal).toContain(`"${goal}"`)
+  })
+
+  it('tells the people who write guides that a row without look_for_when_pregnant must be written safe for pregnancy: a review rule the document carries', () => {
+    const guides = CONTRACT.tabs.find((tab) => tab.key === 'guides')!
+    const column = guides.columns.find((candidate) => candidate.name === 'look_for_when_pregnant')!
+
+    expect(`${guides.about} ${column.about}`).toMatch(/pregnan/i)
   })
 
   it('lists the columns of every tab in the order the workbook has them, the new ones included', () => {
@@ -202,11 +241,11 @@ describe('the contract', () => {
   })
 })
 
-// The fingerprint of the contract as released at CONTRACT_VERSION 2.1.0, written out. A contract change that does not bump the version (and,
+// The fingerprint of the contract as released at CONTRACT_VERSION 2.2.0, written out. A contract change that does not bump the version (and,
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
-// The fingerprint of contract 2.1.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.1.0', fingerprint: '486bec22781b4822eb8fb379ac5e40ce7814ce3bf712fcc17f84957e94c27630' }
+// The fingerprint of contract 2.2.0 (`await contractFingerprint()`, pinned at release as this file describes).
+const RELEASED = { version: '2.2.0', fingerprint: '426d2d5869d7e255e5f2290c3b43a919e0d9722d607c40e9ba893a466c2f21de' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -380,11 +419,11 @@ describe('validateWorkbook: a valid workbook', () => {
     expect(result.ingredients[0]).toMatchObject({ strengthLimit: null, sourceUrl: null, helps: [], group: null, clashesWith: [] })
   })
 
-  it('is ok with every tab empty', () => {
-    expect(validateWorkbook(workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] }))).toEqual({
-      ok: true,
-      workbook: { products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] },
-    })
+  it('is ok with every tab empty but Guides, which needs its four base rows', () => {
+    const result = parsed(workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] }))
+
+    expect({ ...result, guides: [] }).toEqual({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [], guides: [] })
+    expect(result.guides.map((row) => [row.step, row.goal])).toEqual([['cleanse', null], ['treat', null], ['moisturise', null], ['protect', null]])
   })
 
   it('keeps rows in the order they were given', () => {
@@ -454,7 +493,7 @@ describe('validateWorkbook: cells', () => {
 })
 
 describe('validateWorkbook: columns', () => {
-  const TABS = ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers'] as const
+  const TABS = ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides'] as const
   /** The one-valid-row workbook with `name` given other headers (and, when asked, other rows). */
   const withTab = (name: Tab, headers: readonly string[], rows: Raw[] = workbook()[name].rows): RawWorkbook => ({ ...workbook(), [name]: tab(name, rows, headers) })
   const without = (name: Tab, column: string) => HEADERS[name].filter((header) => header !== column)
@@ -499,6 +538,10 @@ describe('validateWorkbook: columns', () => {
     ['ingredients', 'clashes_with'],
     ['claimWords', 'phrase'],
     ['tapers', 'schedule'],
+    ['guides', 'what_it_does'],
+    ['guides', 'look_for_when_pregnant'],
+    ['guides', 'goal'],
+    ['guides', 'step'],
   ] as const)('reports %s without a %s header once, as MISSING_COLUMN on the header row, and nothing else about that column', (name, column) => {
     expectProblems(withTab(name, without(name, column), omitting(workbook()[name].rows, column)), [problem(name, 1, column, 'MISSING_COLUMN')])
   })
@@ -523,12 +566,19 @@ describe('validateWorkbook: columns', () => {
     ])
   })
 
-  it.each(TABS)('checks the header row of %s even when the tab has no rows', (name) => {
+  it.each(TABS.filter((name) => name !== 'guides'))('checks the header row of %s even when the tab has no rows', (name) => {
     const empty = workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] })
     const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...empty, [name]: tab(name, [], headers) })
 
     expectValid(emptyWith(HEADERS[name]))
     expectProblems(emptyWith([...without(name, HEADERS[name][0]), 'colour']), [problem(name, 1, HEADERS[name][0], 'MISSING_COLUMN'), problem(name, 1, 'colour', 'UNKNOWN_COLUMN')])
+  })
+
+  it('checks the header row of Guides even when the tab has no rows: a tab with no rows is missing its base rows, and a wrong header is told as a wrong header and nothing more', () => {
+    const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...inGuides(), guides: tab('guides', [], headers) })
+
+    expectProblems(emptyWith(HEADERS.guides), [problem('guides', 1, 'step', 'GUIDE_BASE_MISSING')])
+    expectProblems(emptyWith([...without('guides', 'step'), 'colour']), [problem('guides', 1, 'step', 'MISSING_COLUMN'), problem('guides', 1, 'colour', 'UNKNOWN_COLUMN')])
   })
 
   describe('a row that leaves a key out', () => {
@@ -1642,12 +1692,292 @@ describe('validateWorkbook: Tapers', () => {
   })
 })
 
+// --- the contract bump to 2.2.0: the Guides tab ---------------------------------------------------------------------------------------------------
+// Where a problem is reported, where the spec leaves it open (pinned here):
+//   - a Guides row is identified by its step and goal, not a code (the tab has no code column), so it has no DUPLICATE_CODE;
+//   - GUIDE_BASE_MISSING: the tab has no approved row without a goal for some step. There is no row to point at, so it is on the header row, in `step`
+//     (as MISSING_COLUMN is), once however many steps are missing. A draft or retired base row does not count. A tab whose `step` header is missing
+//     says only that: with no column there are no steps to be missing;
+//   - GUIDE_DUPLICATE: every row that shares its (step, goal) with another row, in `step`, whatever the rows' statuses (a retired row keeps its place);
+//   - GUIDE_WORDING: the text cell that holds a forbidden word, one problem for the cell however many words it holds. A cell that is too long is
+//     reported for its length only, as everywhere.
+
+describe('validateWorkbook: Guides', () => {
+  const SIXTH = 6
+
+  it('reads a guide into its step, goal, three texts, the pregnancy text, status and sign-off', () => {
+    const rows = parsed(
+      withBases(
+        guide({
+          step: 'treat',
+          goal: 'fade-dark-marks',
+          what_it_does: 'Helps dark marks fade evenly over weeks.',
+          look_for: 'Niacinamide or azelaic acid.',
+          for_deeper_skin: 'Start slowly: strong acids can leave new dark marks on deeper skin.',
+          look_for_when_pregnant: 'Azelaic acid. Leave out retinoids.',
+          audited_by: 'Nneka Audit',
+          audited_on: AUDITED_ON,
+        }),
+      ),
+    ).guides
+
+    expect(rows[0]).toEqual({
+      step: 'cleanse',
+      goal: null,
+      whatItDoes: 'Lifts sweat, sunscreen and dirt off your skin so the rest of your routine can work.',
+      lookFor: 'A gentle, fragrance-free wash that leaves your skin comfortable, not tight.',
+      forDeeperSkin: 'Skip harsh scrubs and hot water: rubbing hard can leave dark marks behind on deeper skin.',
+      lookForWhenPregnant: null,
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: null,
+      auditedOn: null,
+    })
+    expect(rows[4]).toEqual({
+      step: 'treat',
+      goal: 'fade-dark-marks',
+      whatItDoes: 'Helps dark marks fade evenly over weeks.',
+      lookFor: 'Niacinamide or azelaic acid.',
+      forDeeperSkin: 'Start slowly: strong acids can leave new dark marks on deeper skin.',
+      lookForWhenPregnant: 'Azelaic acid. Leave out retinoids.',
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: 'Nneka Audit',
+      auditedOn: utcMidnight(AUDITED_ON),
+    })
+  })
+
+  it('keeps rows in the order they were given', () => {
+    const steps = ['protect', 'treat', 'cleanse', 'moisturise']
+
+    expect(parsed(inGuides(...steps.map((step) => guide({ step })))).guides.map((row) => row.step)).toEqual(steps)
+  })
+
+  describe('step', () => {
+    it('is one of the four routine steps, and is required', () => {
+      expectValid(withBases())
+      expectProblems(withBases(guide({ step: 'exfoliate', goal: 'glow' })), [problem('guides', SIXTH, 'step', 'NOT_IN_VOCABULARY')])
+      expectProblems(withBases(guide({ step: 'Cleanse', goal: 'glow' })), [problem('guides', SIXTH, 'step', 'NOT_IN_VOCABULARY')])
+      expectProblems(withBases(guide({ step: null, goal: 'glow' })), [problem('guides', SIXTH, 'step', 'REQUIRED')])
+    })
+  })
+
+  describe('goal', () => {
+    it.each(['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair'])('accepts %s, a goal a person can pick', (goal) => {
+      expectValid(withBases(guide({ step: 'treat', goal })))
+    })
+
+    it('is optional: a row with no goal is the step\'s base row', () => {
+      expect(parsed(withBases()).guides.every((row) => row.goal === null)).toBe(true)
+    })
+
+    it('refuses a value that is not one of the goals, in the case it is written in', () => {
+      expectProblems(withBases(guide({ step: 'treat', goal: 'lighter-skin' })), [problem('guides', SIXTH, 'goal', 'NOT_IN_VOCABULARY')])
+      expectProblems(withBases(guide({ step: 'treat', goal: 'Glow' })), [problem('guides', SIXTH, 'goal', 'NOT_IN_VOCABULARY')])
+    })
+  })
+
+  describe('what_it_does, look_for and for_deeper_skin', () => {
+    const TEXTS = ['what_it_does', 'look_for', 'for_deeper_skin'] as const
+    const override = (over: Raw) => withBases(guide({ step: 'treat', goal: 'glow', ...over }))
+
+    it.each(TEXTS)('holds up to 300 characters in %s, and no more', (column) => {
+      expectValid(override({ [column]: text(300) }))
+      expectProblems(override({ [column]: text(301) }), [problem('guides', SIXTH, column, 'TOO_LONG')])
+    })
+
+    it.each(TEXTS)('requires %s', (column) => {
+      expectProblems(override({ [column]: null }), [problem('guides', SIXTH, column, 'REQUIRED')])
+      expectProblems(override({ [column]: '   ' }), [problem('guides', SIXTH, column, 'REQUIRED')])
+    })
+
+    it.each(TEXTS)('is plain words in %s: no link and no markup', (column) => {
+      expectProblems(override({ [column]: 'Read more at https://example.com/sunscreen' }), [problem('guides', SIXTH, column, 'HAS_LINK_OR_MARKUP')])
+      expectProblems(override({ [column]: 'A <b>gentle</b> wash.' }), [problem('guides', SIXTH, column, 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('reports a cell that is too long for its length only, even when it also holds a link', () => {
+      expectProblems(override({ look_for: `https://example.com ${text(300)}` }), [problem('guides', SIXTH, 'look_for', 'TOO_LONG')])
+    })
+  })
+
+  describe('look_for_when_pregnant', () => {
+    const override = (over: Raw) => withBases(guide({ step: 'treat', goal: 'glow', ...over }))
+
+    it('is optional: empty reads as null, and a row with it keeps it', () => {
+      expectValid(override({ look_for_when_pregnant: null }))
+      expect(parsed(override({ look_for_when_pregnant: '  ' })).guides[4]!.lookForWhenPregnant).toBeNull()
+      expect(parsed(override({ look_for_when_pregnant: 'Azelaic acid only.' })).guides[4]!.lookForWhenPregnant).toBe('Azelaic acid only.')
+    })
+
+    it('holds up to 300 characters, and no more', () => {
+      expectValid(override({ look_for_when_pregnant: text(300) }))
+      expectProblems(override({ look_for_when_pregnant: text(301) }), [problem('guides', SIXTH, 'look_for_when_pregnant', 'TOO_LONG')])
+    })
+
+    it('is plain words: no link and no markup', () => {
+      expectProblems(override({ look_for_when_pregnant: 'See https://example.com' }), [problem('guides', SIXTH, 'look_for_when_pregnant', 'HAS_LINK_OR_MARKUP')])
+      expectProblems(override({ look_for_when_pregnant: 'Use <i>azelaic acid</i>.' }), [problem('guides', SIXTH, 'look_for_when_pregnant', 'HAS_LINK_OR_MARKUP')])
+    })
+  })
+
+  describe('the routine wording gate', () => {
+    const TEXT_COLUMNS = ['what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant'] as const
+    const override = (over: Raw) => withBases(guide({ step: 'treat', goal: 'glow', ...over }))
+
+    it.each(TEXT_COLUMNS)('refuses a promise of lighter skin in %s, on that cell: GUIDE_WORDING', (column) => {
+      expectProblems(override({ [column]: 'Helps you get lighter skin in weeks.' }), [problem('guides', SIXTH, column, 'GUIDE_WORDING')])
+    })
+
+    it.each(TEXT_COLUMNS)('refuses the name of a condition in %s', (column) => {
+      expectProblems(override({ [column]: 'Good for melasma.' }), [problem('guides', SIXTH, column, 'GUIDE_WORDING')])
+    })
+
+    it.each([
+      ['whiter', 'Makes your face look whiter.'],
+      ['you have a condition', 'If you have an infection, use this.'],
+      ['a diagnosis', 'This will diagnose the cause.'],
+    ])('refuses %s: the wording gate is the routine\'s own, not a shorter list', (_name, cell) => {
+      expectProblems(override({ look_for: cell }), [problem('guides', SIXTH, 'look_for', 'GUIDE_WORDING')])
+    })
+
+    it('reports a cell once however many forbidden words it holds, and each bad cell of a row on its own', () => {
+      expectProblems(override({ what_it_does: 'Lighter skin, fairer and whiter.', look_for: 'For melasma.' }), [
+        problem('guides', SIXTH, 'what_it_does', 'GUIDE_WORDING'),
+        problem('guides', SIXTH, 'look_for', 'GUIDE_WORDING'),
+      ])
+    })
+
+    it('also checks a base row, which every person without a goal row is shown', () => {
+      expectProblems(inGuides(guide({ step: 'cleanse', for_deeper_skin: 'Wash for lighter skin.' }), ...baseGuides().slice(1)), [problem('guides', 2, 'for_deeper_skin', 'GUIDE_WORDING')])
+    })
+
+    it.each([
+      ['a lighter product', 'Choose a lighter face cream in the heat.'],
+      ['advice with "you have"', 'Use what you have until it runs out.'],
+      ['a white film', 'Look for a finish that leaves no grey or white film on deeper skin.'],
+      ['a goal', 'Brighter, more even skin takes patience.'],
+    ])('lets %s through', (_name, cell) => {
+      expectValid(override({ what_it_does: cell, look_for: cell, for_deeper_skin: cell, look_for_when_pregnant: cell }))
+    })
+
+    it('says a cell that is too long is too long and nothing else', () => {
+      expectProblems(override({ what_it_does: `lighter skin ${text(300)}` }), [problem('guides', SIXTH, 'what_it_does', 'TOO_LONG')])
+    })
+  })
+
+  describe('a base row for every step', () => {
+    const MISSING = [problem('guides', 1, 'step', 'GUIDE_BASE_MISSING')]
+
+    it.each(['cleanse', 'treat', 'moisturise', 'protect'])('is refused when %s has none: GUIDE_BASE_MISSING on the header row', (step) => {
+      expectProblems(inGuides(...baseGuides().filter((row) => row.step !== step)), MISSING)
+    })
+
+    it('is told once however many steps have none, an empty tab included', () => {
+      expectProblems(inGuides(), MISSING)
+      expectProblems(inGuides(baseGuides()[0]!), MISSING)
+    })
+
+    it.each([
+      ['a draft', { status: 'draft', approved_by: null, approved_on: null }],
+      ['a retired row', { status: 'retired', approved_by: null, approved_on: null }],
+    ])('does not count %s as the base row', (_name, over) => {
+      expectProblems(inGuides(...baseGuides().map((row) => (row.step === 'protect' ? { ...row, ...over } : row))), MISSING)
+    })
+
+    it('is not met by a row for a goal: a step with only goal rows has no base row', () => {
+      expectProblems(inGuides(...baseGuides().map((row) => (row.step === 'treat' ? { ...row, goal: 'glow' } : row))), MISSING)
+    })
+
+    it('is met by one approved row with no goal, whatever else the step has: goal rows, drafts and retired goal rows', () => {
+      expectValid(
+        withBases(
+          guide({ step: 'treat', goal: 'glow' }),
+          guide({ step: 'treat', goal: 'even-tone', status: 'draft', approved_by: null, approved_on: null }),
+          guide({ step: 'treat', goal: 'brighter', status: 'retired', approved_by: null, approved_on: null }),
+        ),
+      )
+    })
+
+    it('is checked for a workbook that has other problems too, and adds nothing to them', () => {
+      expectProblems(
+        workbook({ products: [product({ category: 'face' })], availability: [], ingredients: [], countries: [], guides: baseGuides().slice(1) }),
+        [problem('products', 2, 'category', 'NOT_IN_VOCABULARY'), ...MISSING],
+      )
+    })
+  })
+
+  describe('one row for each step and goal', () => {
+    const base = guide({ step: 'treat', goal: null })
+    const duplicate = (problems: number[]) => problems.map((row) => problem('guides', row, 'step', 'GUIDE_DUPLICATE'))
+
+    it('refuses two base rows for one step: both are reported, in step', () => {
+      expectProblems(withBases(guide({ step: 'treat', look_for: 'Something else.' })), duplicate([3, SIXTH]))
+    })
+
+    it('refuses two rows for one step and goal: both are reported', () => {
+      expectProblems(withBases(guide({ step: 'treat', goal: 'glow' }), guide({ step: 'treat', goal: 'glow', look_for: 'Something else.' })), duplicate([SIXTH, 7]))
+    })
+
+    it('reports every row of a clash of three', () => {
+      expectProblems(withBases(base, base, base), duplicate([3, SIXTH, 7, 8]))
+    })
+
+    it('lets one step have a row for each goal, and one goal have a row for each step', () => {
+      expectValid(withBases(guide({ step: 'treat', goal: 'glow' }), guide({ step: 'treat', goal: 'even-tone' }), guide({ step: 'protect', goal: 'glow' })))
+    })
+
+    it('counts a retired row too: the row keeps its place, and two rows cannot share it', () => {
+      expectProblems(withBases(guide({ step: 'cleanse', status: 'retired', approved_by: null, approved_on: null })), duplicate([2, SIXTH]))
+    })
+
+    it('counts a draft too', () => {
+      expectProblems(withBases(guide({ step: 'treat', goal: 'glow' }), guide({ step: 'treat', goal: 'glow', status: 'draft', approved_by: null, approved_on: null })), duplicate([SIXTH, 7]))
+    })
+
+    it('reads the steps and goals as they are written once trimmed', () => {
+      expectProblems(withBases(guide({ step: ' treat ', goal: null })), duplicate([3, SIXTH]))
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    const override = (over: Raw) => withBases(guide({ step: 'treat', goal: 'glow', ...over }))
+
+    it('takes draft, approved and retired for a row, and nothing else', () => {
+      for (const status of ['draft', 'approved', 'retired']) expectValid(override({ status, ...(status === 'approved' ? {} : { approved_by: null, approved_on: null }) }))
+      expectProblems(override({ status: 'live' }), [problem('guides', SIXTH, 'status', 'NOT_IN_VOCABULARY')])
+      expectProblems(override({ status: null }), [problem('guides', SIXTH, 'status', 'REQUIRED')])
+    })
+
+    it('needs an approver and a day once the row is approved', () => {
+      expectProblems(override({ approved_by: null, approved_on: null }), [problem('guides', SIXTH, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('guides', SIXTH, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+    })
+
+    it('reads the approval day as a real calendar day', () => {
+      expectProblems(override({ approved_on: '2030-02-30' }), [problem('guides', SIXTH, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('wants both halves of an audit, or neither', () => {
+      expectProblems(override({ audited_by: 'Nneka Audit' }), [problem('guides', SIXTH, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(override({ audited_on: AUDITED_ON }), [problem('guides', SIXTH, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+
+    it('keeps a retired row whole, so what a past routine said stays on record', () => {
+      const [, , , , row] = parsed(override({ status: 'retired', look_for_when_pregnant: 'Azelaic acid only.' })).guides
+
+      expect(row).toMatchObject({ status: 'retired', goal: 'glow', lookFor: guide().look_for, lookForWhenPregnant: 'Azelaic acid only.' })
+    })
+  })
+})
+
 // A spreadsheet cell holds up to 32767 characters, so a file can be full of cells that size. Each one is refused for its length before anything
 // reads its content, so checking the whole workbook costs about the length of the cells and no more.
 describe('validateWorkbook: cells at the spreadsheet limit', () => {
   const CELL = 32767
 
-  it('refuses a 32767-character cell in every free-text column, and a 150-item list of such items, in well under a second', () => {
+  it('refuses a 32767-character cell in every free-text column (the Guides texts included), and a 150-item list of such items, in well under a second', () => {
     const huge = text(CELL)
     const raw = workbook({
       products: [product({ brand: huge, name: huge, variant: huge, approved_by: huge, ingredients: Array.from({ length: 150 }, () => huge).join(';') })],
@@ -1655,6 +1985,8 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
       ingredients: [ingredient({ name: huge, aliases: huge, statement: huge })],
       claimWords: [claimWord({ phrase: huge, approved_by: huge })],
       tapers: [taper({ schedule: huge, what_to_expect: huge, see_a_professional_if: huge, approved_by: huge })],
+      // The base rows are still all there: a row with cells that are too long still names its step.
+      guides: [guide({ step: 'cleanse', what_it_does: huge, look_for: huge, for_deeper_skin: huge, look_for_when_pregnant: huge, approved_by: huge }), ...baseGuides().slice(1)],
     })
 
     const started = performance.now()
@@ -1678,6 +2010,11 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
         problem('tapers', 2, 'what_to_expect', 'TOO_LONG'),
         problem('tapers', 2, 'see_a_professional_if', 'TOO_LONG'),
         problem('tapers', 2, 'approved_by', 'TOO_LONG'),
+        problem('guides', 2, 'what_it_does', 'TOO_LONG'),
+        problem('guides', 2, 'look_for', 'TOO_LONG'),
+        problem('guides', 2, 'for_deeper_skin', 'TOO_LONG'),
+        problem('guides', 2, 'look_for_when_pregnant', 'TOO_LONG'),
+        problem('guides', 2, 'approved_by', 'TOO_LONG'),
       ]),
     )
     expect(took).toBeLessThan(1000)
