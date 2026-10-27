@@ -1830,8 +1830,8 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
-- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: six tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers; contract 2.1.0), their columns, accepted values and
+- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: seven tabs (Products, Availability, Ingredients,
+  Countries, Claim words, Tapers, Guides; contract 2.2.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2826,8 +2826,8 @@ signed-in, never opens them: they have a door of their own.
 
 ### Catalog workbook import
 `CatalogWorkbookService` (`catalog.workbook.service.ts`, built by the container as `catalogWorkbook`) serves and changes the catalog workbook: the
-Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
-(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, `claim_words`, `tapers`, and the `ingredient_rules` and
+Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
+(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, `claim_words`, `tapers`, `guides`, and the `ingredient_rules` and
 `catalog_versions` of "Product catalog data". The routes are `GET /api/v1/admin/catalog/export` and `POST /api/v1/admin/catalog/import`
 (`catalog.workbook.routes.ts`), behind "Admin access".
 
@@ -2840,17 +2840,17 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
      upload script sends the file's own `_meta` stamp, and the file reader reads `_meta` before the tabs, so an old export is told to export again and
      not "missing the Tapers tab". The route's body schema reads `workbook` only as a JSON object (a bad JSON text is a 400 `VALIDATION_FAILED`), so a genuine
      1.0.0 file, which has four tabs, reaches this check and gets the 409 instead of a 400 about its missing tabs, also when posted without the script.
-  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all six tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
+  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all seven tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
      `{ path, message }` details under `workbook`. Only a file of the current contract version gets this far. Then `validateWorkbook` runs on the server whatever
      the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
-  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers row with status `approved` must have an `approved_by` that is
-     exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved template).
-     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
+  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers or Guides row with status `approved` must have an `approved_by` that is
+     exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved template and guide).
+     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers' | 'guides', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
      the name is never echoed or logged. It is a process control, not authentication: the approver is a label in a cell, written by whoever holds the
      admin token. Staging and development accept any approver, so the owner or Claude can approve there. The service takes `environment` and
      `qualifiedApprovers` from the container; `QUALIFIED_APPROVERS` is a plain var in all three `wrangler.jsonc` blocks, empty until a qualified approver is named.
   2. `baseVersion` must be the live catalog version: 409 `CATALOG_STALE`, for a dry run too, so a stale copy is told before anyone applies it.
-  3. The diff is per tab, by code (availability by `<product code>:<country>`): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
+  3. The diff is per tab, by code (availability by `<product code>:<country>`, a guide by its step, or `<step>:<goal>` when it is for a goal): `added`, `updated`, `retired`, `reactivated`, comparing parsed values, so
      `a;b` and `a; b` are one list. **The upload is the whole catalog**: a code it leaves out is retired in place, never deleted, so its code is never
      reused, and a retired code put back is reactivated. A product's availability that is gone is listed under `retired` and the row is removed.
   3a. **`key_ingredient` and `strength`** are two optional plain-text Products columns (at most 80 and 40 characters) after `ingredients_source_url`: the
@@ -2860,6 +2860,24 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
      `strength` cell, because a strength alone means nothing; it is not raised when the `key_ingredient` header is missing (that is `MISSING_COLUMN`, once).
      **After the 2.1.0 deploy, re-export the staging catalog sheet before its next edit and upload**, and re-export any saved eval snapshot workbook
      (`eval-data/routine/catalog-snapshot.xlsx`): a 2.0.0 file is refused as `409 CONTRACT_MISMATCH`, with no special case.
+  3b. **The Guides tab** (contract 2.2.0, spec #217) holds what each routine step is for (`what_it_does`), what to check on the label (`look_for`) and what suits
+     deeper skin (`for_deeper_skin`), each required plain text of at most 300 characters, and an optional `look_for_when_pregnant` (same limits), with the status
+     and sign-off columns of Tapers. It is written by the team and never by a model. **A guide has no code: a row is its `step` (a routine step) and its optional
+     `goal`** (a value of `GOALS`, the goals a person can pick, read from `goals.vocabulary.ts` so the two lists cannot drift: a goal added there is accepted here
+     at the next contract bump). The tab's rules: every text cell passes the routine wording gate, `FORBIDDEN_WORDING` from `routines.wording.ts`, as
+     `GUIDE_WORDING` on the cell, **drafts included** (a cell over its length cap says only that); at most one row for a step and goal, of any status, as
+     `GUIDE_DUPLICATE` on `step` for every row of the clash; and each of the four steps has one **approved** row with no goal, or the import is refused with
+     one `GUIDE_BASE_MISSING` on row 1, column `step` (a draft or retired base row does not count). **The pregnancy rule is a review rule, not code:** a row
+     with no `look_for_when_pregnant` is shown to a pregnant or breastfeeding person as it is, so its `look_for` must be safe in pregnancy (the contract document
+     says so). A guide is stored in `guides`, keyed by a text `key` (`step`, or `step:goal`), not by `(step, goal)`: SQLite treats a null goal as different from every
+     other, so a composite key would add a base row on every upload. A guide left out of an upload is retired in place by that key, never deleted. The export lists
+     guides in routine step order, a step's base row first, then its goals in the order `GOALS` has them. **There is no seed:** a fresh catalog exports an empty Guides
+     tab, which fails the contract with `GUIDE_BASE_MISSING`, so the first upload after the 2.2.0 deploy carries the four base rows.
+     `CatalogWorkbookService.guideFor(step, goal)` gives `{ whatItDoes, lookFor, forDeeperSkin, lookForWhenPregnant }` of the approved row for that step and goal, whole
+     (nothing is borrowed from the base row), else of the step's approved base row, else `null` (a catalog nobody has written guides for); a draft or retired
+     row is never given, and no status or sign-off column leaves the service.
+     **After the 2.2.0 deploy, re-export the staging catalog sheet and write the four base guide rows (approved) before its next import**: an unedited export is
+     refused until then, and a 2.1.0 file is refused as `409 CONTRACT_MISMATCH`. The same goes for a saved eval snapshot workbook.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
@@ -2887,7 +2905,7 @@ Products, Availability, Ingredients, Countries, Claim words and Tapers tabs the 
   (`readWorkbook`). The live-rules cache (per isolate) is keyed on the catalog version, which is read on every call, so an isolate re-reads the rules on its first call after an upload lands; a call already in flight at that moment can still return the previous rules. None of the three is ever deleted.
 - **A saved routine reads its recommended product by code, retired or not sold here.** `CatalogWorkbookService.recommendedByCode(codes)` (modelled on `tapersByCode`) gives a `Map` from code to `{ code, status, productId, formulationId (null for a retired row with no list), origin, keyIngredient, strength, availability: { country, priceMin, priceMax, whereSold }[] }` for every row asked for **whatever its status** (a retired row is returned) and **every country it is sold in** (country order; empty if none), where `approvedFor` only returns approved rows sold in one country. A code with no row is absent. The codes are looked up in chunks (`queryByIds`), so any number stays under D1's 100 bound parameters.
 - **Statement budget.** The three new tables are written in chunks like the others (11 claim words, 9 tapers and 6 rules to a statement, rules now binding
-  16 parameters a row), inside the same single batch.
+  16 parameters a row), inside the same single batch; so are guides, 7 to a statement (13 parameters a row), retired by 90 keys a statement.
 - **The race guard is the primary key.** The batch's FIRST statement inserts the next catalog version, `baseVersion + 1`. If another upload took that version
   since the service read it, the insert violates `catalog_versions.version` and D1 rolls the WHOLE batch back, so the loser writes nothing: no product, no
   formulation, no row, no version. The repository then sees that the live version moved past `baseVersion` and reports it, and the service answers
