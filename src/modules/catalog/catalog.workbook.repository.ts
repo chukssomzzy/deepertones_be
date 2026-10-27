@@ -7,8 +7,8 @@ import { formulations, productAliases, products } from './catalog.table'
 import type { NewProduct } from './catalog.types'
 import type { ReferenceEntry } from './catalog.reference'
 import type { ConcernKind, Frequency, Origin, RoutineStep } from './catalog.vocabulary'
-import type { AvailabilityRow, ClaimWordRow, CountryRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
-import { catalogVersions, claimWords, countries, ingredientRules, productAvailability, recommendedProducts, tapers } from './catalog.workbook.table'
+import { compareGuides, guideKey, type AvailabilityRow, type ClaimWordRow, type CountryRow, type GuideRow, type IngredientRule, type ProductRow, type TaperRow, type Workbook } from './catalog.workbook.schema'
+import { catalogVersions, claimWords, countries, guides, ingredientRules, productAvailability, recommendedProducts, tapers } from './catalog.workbook.table'
 
 /** The approved ingredient rules in the shape the matcher reads, and the rules version they are under. */
 export type LiveRules = { version: string; entries: ReferenceEntry[] }
@@ -77,6 +77,9 @@ export type WorkbookChanges = {
   tapers: TaperRow[]
   retiredClaimWords: string[]
   retiredTapers: string[]
+  guides: GuideRow[]
+  /** Guides the upload leaves out, by step and goal: a guide has no code. */
+  retiredGuides: { step: GuideRow['step']; goal: GuideRow['goal'] }[]
 }
 
 /**
@@ -106,6 +109,7 @@ export const STATEMENT_ROWS = {
   rules: 6, // 16
   claimWords: 11, // 9
   tapers: 9, // 11
+  guides: 7, // 13
   codes: 90, // one parameter a code, and two more for the values set
 } as const
 
@@ -157,7 +161,7 @@ export class D1CatalogWorkbookRepository {
    * that same catalog version. Read in one batch, so the rows and both versions belong together.
    */
   async readWorkbook(): Promise<{ catalogVersion: number; rulesVersion: string; workbook: Workbook }> {
-    const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows] = await this.db.batch([
+    const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows, guideRows] = await this.db.batch([
       this.latestRulesVersion(),
       this.db.select().from(recommendedProducts).orderBy(asc(recommendedProducts.code)),
       this.db.select().from(productAvailability).orderBy(asc(productAvailability.productCode), asc(productAvailability.country)),
@@ -165,6 +169,7 @@ export class D1CatalogWorkbookRepository {
       this.db.select().from(countries).orderBy(asc(countries.code)),
       this.db.select().from(claimWords).orderBy(asc(claimWords.code)),
       this.db.select().from(tapers).orderBy(asc(tapers.code)),
+      this.db.select().from(guides),
     ])
     const [latest] = versions
     if (!latest) throw new Error('no catalog version')
@@ -204,6 +209,7 @@ export class D1CatalogWorkbookRepository {
         countries: countryRows.map((row): CountryRow => ({ code: row.code, currency: row.currency, lowMax: row.lowMax, midMax: row.midMax, status: row.status })),
         claimWords: claimWordRows.map((row) => D1CatalogWorkbookRepository.claimWordOf(row)),
         tapers: taperRows.map((row) => D1CatalogWorkbookRepository.taperOf(row)),
+        guides: guideRows.map((row) => D1CatalogWorkbookRepository.guideOf(row)).sort(compareGuides),
       },
     }
   }
@@ -229,6 +235,12 @@ export class D1CatalogWorkbookRepository {
       claimWords: claimWordRows.map((row) => D1CatalogWorkbookRepository.claimWordOf(row)),
       tapers: taperRows.map((row) => D1CatalogWorkbookRepository.taperOf(row)),
     }
+  }
+
+  /** The approved guides of a step, its base guide and its goal guides: the rows `guideFor` chooses from. A draft or retired guide is never returned. */
+  async approvedGuides(step: GuideRow['step']): Promise<GuideRow[]> {
+    const rows = await this.db.select().from(guides).where(and(eq(guides.step, step), eq(guides.status, 'approved')))
+    return rows.map((row) => D1CatalogWorkbookRepository.guideOf(row)).sort(compareGuides)
   }
 
   /** The step-down templates with these codes, retired ones included, in code order. A code that names none is absent. */
@@ -508,6 +520,34 @@ export class D1CatalogWorkbookRepository {
     for (const rows of chunked(plan.retiredTapers, STATEMENT_ROWS.codes)) {
       statements.push(this.db.update(tapers).set({ status: 'retired', updatedInVersion: version }).where(inArray(tapers.code, rows)))
     }
+
+    for (const rows of chunked(plan.guides, STATEMENT_ROWS.guides)) {
+      statements.push(
+        this.db
+          .insert(guides)
+          .values(rows.map((guide) => ({ ...guide, key: guideKey(guide), approvedOn: dayOf(guide.approvedOn), auditedOn: dayOf(guide.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: guides.key,
+            set: {
+              step: sql`excluded.step`,
+              goal: sql`excluded.goal`,
+              whatItDoes: sql`excluded.what_it_does`,
+              lookFor: sql`excluded.look_for`,
+              forDeeperSkin: sql`excluded.for_deeper_skin`,
+              lookForWhenPregnant: sql`excluded.look_for_when_pregnant`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredGuides.map(guideKey), STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(guides).set({ status: 'retired', updatedInVersion: version }).where(inArray(guides.key, rows)))
+    }
     return statements
   }
 
@@ -650,6 +690,22 @@ export class D1CatalogWorkbookRepository {
       schedule: row.schedule,
       whatToExpect: row.whatToExpect,
       seeAProfessionalIf: row.seeAProfessionalIf,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static guideOf(row: typeof guides.$inferSelect): GuideRow {
+    return {
+      step: row.step,
+      goal: row.goal,
+      whatItDoes: row.whatItDoes,
+      lookFor: row.lookFor,
+      forDeeperSkin: row.forDeeperSkin,
+      lookForWhenPregnant: row.lookForWhenPregnant,
       status: row.status,
       approvedBy: row.approvedBy,
       approvedOn: dateOf(row.approvedOn),

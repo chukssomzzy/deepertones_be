@@ -2,6 +2,7 @@ import { ConflictError, UnavailableError, ValidationError } from '../../lib/erro
 import { MAX_WORKBOOK_BYTES, type WorkbookArchive } from '../../providers/workbook-archive/workbook-archive.provider'
 import { brandKey, identityKey, normaliseText } from './catalog.identity'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
+import type { Goal } from '../goals/goals.vocabulary'
 import { ingredientsKey } from './catalog.ingredients'
 import type { ReferenceEntry } from './catalog.reference'
 import type { NewProduct } from './catalog.types'
@@ -10,7 +11,7 @@ import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbo
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, RecommendedByCode, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, validateWorkbook, type IngredientRule, type ProductRow, type RawWorkbook, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, guideKey, validateWorkbook, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
@@ -74,6 +75,11 @@ export const approvedTapersOf = (tapers: readonly TaperRow[]): Partial<Record<Ta
   return Object.fromEntries([...chosen].map(([kind, taper]) => [kind, taper.code]))
 }
 
+/** A routine guide as a screen reads it: the four texts and nothing else (a guide's status and sign-off never leave the service). */
+export type Guide = { whatItDoes: string; lookFor: string; forDeeperSkin: string; lookForWhenPregnant: string | null }
+
+const guideOf = (row: GuideRow): Guide => ({ whatItDoes: row.whatItDoes, lookFor: row.lookFor, forDeeperSkin: row.forDeeperSkin, lookForWhenPregnant: row.lookForWhenPregnant })
+
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
 /** The workbook is whatever JSON object was uploaded: its shape is checked by the import, after the contract version. */
@@ -93,7 +99,7 @@ type Deps = {
 }
 
 /**
- * The catalog workbook: what the Products, Availability, Ingredients, Countries, Claim words and Tapers tabs hold, served as an export, changed by an import, and read
+ * The catalog workbook: what the Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides tabs hold, served as an export, changed by an import, and read
  * by the modules that need the live rules, the countries or the approved products. No actor is needed: the admin routes are guarded by a token
  * before this is called, and a user never reaches it. Nothing here asks a model or a web page anything: a row's product is found by exact
  * identity key or alias, else made.
@@ -157,7 +163,7 @@ export class CatalogWorkbookService {
     const unqualified = this.unqualifiedApprovals(next)
     if (unqualified.length > 0) {
       console.info({ outcome: 'catalog-import-unqualified-approver', problems: unqualified.length })
-      throw new ValidationError('CATALOG_INVALID', 'A step-down template is approved by someone who may not approve it', { problems: unqualified })
+      throw new ValidationError('CATALOG_INVALID', 'A step-down template or a guide is approved by someone who may not approve it', { problems: unqualified })
     }
     const live = await this.repository.readWorkbook()
     if (input.baseVersion !== live.catalogVersion) {
@@ -244,6 +250,16 @@ export class CatalogWorkbookService {
   }
 
   /**
+   * The guide for a step and a goal: the approved row for that step and goal as it is, else the step's approved row with no goal, else null (the team has not
+   * written one yet). A goal's row is given whole: nothing is borrowed from the base row, so a goal row with no pregnancy text has none.
+   */
+  async guideFor(step: RoutineStep, goal: Goal): Promise<Guide | null> {
+    const approved = await this.repository.approvedGuides(step)
+    const row = approved.find((candidate) => candidate.goal === goal) ?? approved.find((candidate) => candidate.goal === null)
+    return row === undefined ? null : guideOf(row)
+  }
+
+  /**
    * The recommended rows with these codes, whatever their status and in whatever country they are sold, by code: a saved routine shows its product by code even
    * when it has since been retired or is not sold where the person is now (the screen compares `availability` to their country). A code that names no row is absent.
    */
@@ -262,14 +278,16 @@ export class CatalogWorkbookService {
   }
 
   /**
-   * In production only, the approved Tapers rows whose approver is not on the list: a template is shown to people, so a qualified person has to
-   * have approved it. The approver is a label in a cell, so this is a process control and not authentication. The problem never holds the name.
+   * In production only, the approved Tapers and Guides rows whose approver is not on the list: a template and a guide are shown to people, so a qualified person
+   * has to have approved them. The approver is a label in a cell, so this is a process control and not authentication. The problem never holds the name.
    */
   private unqualifiedApprovals(workbook: Workbook): WorkbookProblem[] {
     if (this.environment !== 'production') return []
-    return workbook.tapers.flatMap((taper, i): WorkbookProblem[] =>
-      taper.status === 'approved' && !this.qualifiedApprovers.has(taper.approvedBy ?? '') ? [{ tab: 'tapers', row: i + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] : [],
-    )
+    const unqualified = (tab: 'tapers' | 'guides', rows: readonly { status: string; approvedBy: string | null }[]) =>
+      rows.flatMap((row, i): WorkbookProblem[] =>
+        row.status === 'approved' && !this.qualifiedApprovers.has(row.approvedBy ?? '') ? [{ tab, row: i + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] : [],
+      )
+    return [...unqualified('tapers', workbook.tapers), ...unqualified('guides', workbook.guides)]
   }
 
   private stale(): ConflictError {
@@ -309,6 +327,8 @@ export class CatalogWorkbookService {
     const countryCodes = written(changes.countries)
     const claimCodes = written(changes.claimWords)
     const taperCodes = written(changes.tapers)
+    const guideKeys = written(changes.guides)
+    const keptGuides = new Set(next.guides.map(guideKey))
     const availabilityChanged = Object.values(changes.availability).some((codes) => codes.length > 0)
     return {
       plan: {
@@ -324,6 +344,14 @@ export class CatalogWorkbookService {
         tapers: next.tapers.filter((taper) => taperCodes.has(taper.code)),
         retiredClaimWords: gone(changes.claimWords, next.claimWords),
         retiredTapers: gone(changes.tapers, next.tapers),
+        guides: next.guides.filter((guide) => guideKeys.has(guideKey(guide))),
+        // A guide has no code, so the key the diff names it by is split back into its step and goal.
+        retiredGuides: changes.guides.retired
+          .filter((key) => !keptGuides.has(key))
+          .map((key) => {
+            const [step, goal = null] = key.split(':')
+            return { step: step as RoutineStep, goal: goal as Goal | null }
+          }),
       },
       newProducts,
     }
@@ -360,6 +388,7 @@ export class CatalogWorkbookService {
       countries: of(changes.countries),
       claimWords: of(changes.claimWords),
       tapers: of(changes.tapers),
+      guides: of(changes.guides),
     }
   }
 }

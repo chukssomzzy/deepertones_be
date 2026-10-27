@@ -7,6 +7,9 @@ import { validateWorkbook } from '../../src/modules/catalog/catalog.workbook.sch
 // the same rules apply, and no formulation analysed at `seed-2026-10` is analysed again. This file reads the tables a freshly migrated
 // database holds (setup.ts applies every migration) and never writes to them.
 
+/** The one day the guides this file stands in for were approved on. */
+const BASE = new Date('2030-06-15T00:00:00.000Z')
+
 type RuleRow = {
   code: string
   name: string
@@ -126,6 +129,23 @@ describe('the seeded ingredient rules', () => {
         countries: tab(['code', 'currency', 'low_max', 'mid_max', 'status']),
         claimWords: tab(['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
         tapers: tab(['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on']),
+        // The contract needs a base guide for each step, which the seed does not have: the team writes them, so this stands in for those four rows.
+        guides: tab(
+          ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => ({
+            step,
+            goal: null,
+            what_it_does: 'What the step does.',
+            look_for: 'What to look for.',
+            for_deeper_skin: 'What suits deeper skin.',
+            look_for_when_pregnant: null,
+            status: 'approved',
+            approved_by: 'Dr A. Reviewer',
+            approved_on: BASE.toISOString().slice(0, 10),
+            audited_by: null,
+            audited_on: null,
+          })),
+        ),
       }),
     ).toMatchObject({ ok: true })
   })

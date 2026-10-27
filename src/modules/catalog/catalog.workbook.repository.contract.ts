@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import type { CatalogWorkbookRepository, PlannedProduct, WorkbookPlan } from './catalog.workbook.repository'
-import type { ConcernKind, IngredientGroup } from './catalog.vocabulary'
+import type { ConcernKind, IngredientGroup, RoutineStep } from './catalog.vocabulary'
 import type { ProductRow } from './catalog.workbook.schema'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
+import type { Goal } from '../goals/goals.vocabulary'
 
 // One ingredient rule as the workbook's Ingredients tab holds it and `ingredient_rules` stores it. The dates are the workbook's own
 // `YYYY-MM-DD` text (a date, not an instant), because `approved_on` is a calendar day somebody signed on.
@@ -164,6 +165,42 @@ export const taperRow = (
   ...over,
 })
 
+type GuideStep = RoutineStep
+type GuideGoal = Goal
+
+/**
+ * A Guides row as an upload parses it: a guide is identified by its step and goal (null for the step's base guide), not by a code, so a test chooses the
+ * key it writes. The texts are different on every call, so a test can tell its own write from another's.
+ */
+export const guideRow = (
+  over: Partial<{
+    step: GuideStep
+    goal: GuideGoal | null
+    whatItDoes: string
+    lookFor: string
+    forDeeperSkin: string
+    lookForWhenPregnant: string | null
+    status: 'draft' | 'approved' | 'retired'
+    approvedBy: string | null
+    approvedOn: Date | null
+    auditedBy: string | null
+    auditedOn: Date | null
+  }> = {},
+) => ({
+  step: 'cleanse' as GuideStep,
+  goal: null as GuideGoal | null,
+  whatItDoes: fresh('What it does'),
+  lookFor: fresh('Look for'),
+  forDeeperSkin: fresh('For deeper skin'),
+  lookForWhenPregnant: null as string | null,
+  status: 'approved' as 'draft' | 'approved' | 'retired',
+  approvedBy: 'Dr A. Reviewer' as string | null,
+  approvedOn: DAY as Date | null,
+  auditedBy: null as string | null,
+  auditedOn: null as Date | null,
+  ...over,
+})
+
 /** Behaviour every CatalogWorkbookRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier). */
 export const catalogWorkbookRepositoryContract = (name: string, make: () => RulesHarness | Promise<RulesHarness>) => {
   describe(`CatalogWorkbookRepository contract: ${name}`, () => {
@@ -278,6 +315,8 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         tapers: [],
         retiredClaimWords: [],
         retiredTapers: [],
+        guides: [],
+        retiredGuides: [],
         ...over,
       })
       const stored = async (repo: CatalogWorkbookRepository, code: string) => (await repo.readWorkbook()).workbook.products.find((row) => row.code === code)
@@ -570,6 +609,119 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
 
           const withRows = repo.statementCount(await planOf(repo, { claimWords: [claimWordRow()], tapers: [taperRow()] }))
           const withRetire = repo.statementCount(await planOf(repo, { retiredClaimWords: ['CLM-GONE'], retiredTapers: ['TPR-GONE'] }))
+
+          expect(withRows).toBeGreaterThan(none)
+          expect(withRetire).toBeGreaterThan(none)
+        })
+      })
+
+      // A guide is keyed by its step and goal, and a step's base guide has no goal. The database is shared by the whole run and there are only so many keys,
+      // so each test writes its own key (the goal it uses is the one named) and looks at that key alone; the texts are new on every call.
+      describe('guides', () => {
+        const key = (row: { step: string; goal: string | null }) => `${row.step}:${row.goal ?? ''}`
+        const guidesOf = async (repo: CatalogWorkbookRepository, ...rows: { step: string; goal: string | null }[]) =>
+          (await repo.readWorkbook()).workbook.guides.filter((row) => rows.some((wanted) => key(wanted) === key(row)))
+
+        it('stores the guides of a plan and reads them back whole, with their days as dates, and moves to the next version', async () => {
+          const { repo } = await make()
+          const base = guideRow({ step: 'moisturise', lookForWhenPregnant: 'Ceramides, glycerin.', auditedBy: 'Dr B. Auditor', auditedOn: DAY })
+          const goalOne = guideRow({ step: 'moisturise', goal: 'calm-repair', lookForWhenPregnant: null })
+          const version = await repo.catalogVersion()
+
+          expect(await repo.applyWorkbook(await planOf(repo, { guides: [base, goalOne] }))).toBe(true)
+
+          expect(await repo.catalogVersion()).toBe(version + 1)
+          expect(await guidesOf(repo, base)).toEqual([base])
+          expect(await guidesOf(repo, goalOne)).toEqual([goalOne])
+        })
+
+        it('keeps a step\'s base guide and its goal guide apart: both exist, and neither is the other', async () => {
+          const { repo } = await make()
+          const base = guideRow({ step: 'protect' })
+          const goalOne = guideRow({ step: 'protect', goal: 'even-tone' })
+          const goalTwo = guideRow({ step: 'protect', goal: 'brighter' })
+
+          await repo.applyWorkbook(await planOf(repo, { guides: [base, goalOne, goalTwo] }))
+
+          expect(await guidesOf(repo, base, goalOne, goalTwo)).toHaveLength(3)
+          expect(await guidesOf(repo, base)).toEqual([base])
+          expect(await guidesOf(repo, goalTwo)).toEqual([goalTwo])
+        })
+
+        it('leaves them alone when the plan names none: a plan that writes products does not touch the guides', async () => {
+          const { repo } = await make()
+          const goalOne = guideRow({ step: 'treat', goal: 'clear-skin' })
+          await repo.applyWorkbook(await planOf(repo, { guides: [goalOne] }))
+          const before = (await repo.readWorkbook()).workbook.guides
+          const one = workbookProduct()
+
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [one.newProduct], products: [one.planned] }))
+
+          expect((await repo.readWorkbook()).workbook.guides).toEqual(before)
+        })
+
+        it('updates a guide by its step and goal, in place, without adding a second row: for a goal guide, and for a base guide, which has no goal to match on', async () => {
+          const { repo } = await make()
+          const goalOne = guideRow({ step: 'treat', goal: 'glow' })
+          const base = guideRow({ step: 'treat' })
+          await repo.applyWorkbook(await planOf(repo, { guides: [goalOne, base] }))
+          const rows = (await repo.readWorkbook()).workbook.guides.length
+
+          const newerGoal = { ...goalOne, lookFor: fresh('Newer'), lookForWhenPregnant: 'Azelaic acid only.' }
+          const newerBase = { ...base, forDeeperSkin: fresh('Newer') }
+          await repo.applyWorkbook(await planOf(repo, { guides: [newerGoal, newerBase] }))
+          const newestBase = { ...newerBase, whatItDoes: fresh('Newest') }
+          await repo.applyWorkbook(await planOf(repo, { guides: [newestBase] }))
+
+          expect((await repo.readWorkbook()).workbook.guides).toHaveLength(rows)
+          expect(await guidesOf(repo, goalOne)).toEqual([newerGoal])
+          expect(await guidesOf(repo, base)).toEqual([newestBase])
+        })
+
+        it('clears a pregnancy text and an audit that a later write leaves empty', async () => {
+          const { repo } = await make()
+          const full = guideRow({ step: 'treat', goal: 'even-tone', lookForWhenPregnant: 'Azelaic acid only.', auditedBy: 'Dr B. Auditor', auditedOn: DAY })
+          await repo.applyWorkbook(await planOf(repo, { guides: [full] }))
+
+          const emptied = { ...full, lookForWhenPregnant: null, auditedBy: null, auditedOn: null }
+          await repo.applyWorkbook(await planOf(repo, { guides: [emptied] }))
+
+          expect(await guidesOf(repo, full)).toEqual([emptied])
+        })
+
+        it('retires the guides it is told to by step and goal, keeping the rows and every cell but the status, and never deletes', async () => {
+          const { repo } = await make()
+          const goalOne = guideRow({ step: 'cleanse', goal: 'brighter', lookForWhenPregnant: 'Fragrance-free wash.' })
+          const other = guideRow({ step: 'cleanse', goal: 'glow' })
+          await repo.applyWorkbook(await planOf(repo, { guides: [goalOne, other] }))
+          const rows = (await repo.readWorkbook()).workbook.guides.length
+
+          await repo.applyWorkbook(await planOf(repo, { retiredGuides: [{ step: 'cleanse', goal: 'brighter' }] }))
+
+          expect(await guidesOf(repo, goalOne)).toEqual([{ ...goalOne, status: 'retired' }])
+          expect(await guidesOf(repo, other)).toEqual([other])
+          expect((await repo.readWorkbook()).workbook.guides).toHaveLength(rows)
+        })
+
+        it('writes none of them for a plan that lost the race', async () => {
+          const { repo } = await make()
+          const [first, second] = [guideRow({ step: 'protect', goal: 'clear-skin' }), guideRow({ step: 'protect', goal: 'calm-repair' })]
+          const winner = await planOf(repo, { guides: [first] })
+          const loser = await planOf(repo, { guides: [second] })
+
+          expect(await repo.applyWorkbook(winner)).toBe(true)
+          expect(await repo.applyWorkbook(loser)).toBe(false)
+
+          expect(await guidesOf(repo, second)).toEqual([])
+          expect(await guidesOf(repo, first)).toEqual([first])
+        })
+
+        it('counts their statements in the batch: more rows to write or to retire, more statements', async () => {
+          const { repo } = await make()
+          const none = repo.statementCount(await planOf(repo))
+
+          const withRows = repo.statementCount(await planOf(repo, { guides: [guideRow()] }))
+          const withRetire = repo.statementCount(await planOf(repo, { retiredGuides: [{ step: 'cleanse', goal: 'glow' }] }))
 
           expect(withRows).toBeGreaterThan(none)
           expect(withRetire).toBeGreaterThan(none)

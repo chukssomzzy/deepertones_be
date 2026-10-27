@@ -27,6 +27,13 @@ const taper = (over: RawRow = {}): RawRow => ({
   code: 'TPR-STEROID-1', kind: 'steroid', schedule: '1-2: alternate-days; 3-4: weekly; 5: stop', what_to_expect: 'Skin may flare for a few days after each step down. This is expected.',
   see_a_professional_if: 'The redness spreads, or the skin weeps or blisters.', status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
 })
+const guide = (over: RawRow = {}): RawRow => ({
+  step: 'cleanse', goal: null, what_it_does: 'Lifts dirt off your skin.', look_for: 'A gentle, fragrance-free wash.', for_deeper_skin: 'Skip harsh scrubs: they can leave dark marks.',
+  look_for_when_pregnant: null, status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null, ...over,
+})
+/** The four approved base rows, each saying its own step so a test can tell which one it was given. */
+const baseGuides = (): RawRow[] =>
+  ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step, what_it_does: `What ${step} does.`, look_for: `What to look for in ${step}.`, for_deeper_skin: `Deeper skin and ${step}.` }))
 const ng: RawRow = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' }
 const sold = (code = 'PRD-ONE'): RawRow => ({ product_code: code, country: 'NG', price_min: 3000, price_max: 4500, where_sold: null, source_url: null })
 
@@ -38,10 +45,18 @@ const build = () => {
   return { repository, archive, service }
 }
 
-/** The live workbook as the export gives it, with `edit` applied. */
-const edited = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void): Promise<{ workbook: RawWorkbook; baseVersion: number }> => {
+/**
+ * The live workbook as the export gives it, with `edit` applied. A catalog that has never had guides exports an empty Guides tab, which the contract refuses, so
+ * unless the test is about guides (`guides: false`) the base row of each step the edit leaves without one is added, as the team fills them in before an import.
+ */
+const edited = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void, options: { guides?: boolean } = {}): Promise<{ workbook: RawWorkbook; baseVersion: number }> => {
   const live = await service.exportWorkbook()
   edit(live.workbook)
+  if (options.guides !== false) {
+    for (const base of baseGuides()) {
+      if (!live.workbook.guides.rows.some((row) => row.step === base.step && row.goal === null && row.status === 'approved')) live.workbook.guides.rows.push(base)
+    }
+  }
   return { workbook: live.workbook, baseVersion: live.catalogVersion }
 }
 const addProduct = (workbook: RawWorkbook, ...rows: RawRow[]) => {
@@ -56,10 +71,29 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const live = await service.exportWorkbook()
 
-    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.1.0' })
+    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.2.0' })
     expect(live.workbook.products).toEqual({ headers: expect.arrayContaining(['code', 'status', 'draft_cells']), rows: [] })
     expect(live.workbook.ingredients.rows.length).toBeGreaterThan(0)
-    expect(validateWorkbook(live.workbook)).toMatchObject({ ok: true })
+  })
+
+  it('has no guides until the team writes them, so a fresh export fails the contract on nothing but the base rows of the Guides tab', async () => {
+    const { service } = build()
+
+    const { workbook } = await service.exportWorkbook()
+
+    expect(workbook.guides.rows).toEqual([])
+    expect(validateWorkbook(workbook)).toEqual({ ok: false, problems: [{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }] })
+  })
+
+  it('gives the Guides tab with its headers, empty', async () => {
+    const { service } = build()
+
+    const { workbook } = await service.exportWorkbook()
+
+    expect(workbook.guides).toEqual({
+      headers: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+      rows: [],
+    })
   })
 
   it('gives the two new tabs with their headers, empty, and the two new Ingredients columns on every seeded rule, empty', async () => {
@@ -80,14 +114,16 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 describe('CatalogWorkbookService.importWorkbook', () => {
   it('reports an unchanged export as an empty diff, applied nothing, and writes no file', async () => {
     const { service, archive } = build()
+    await service.importWorkbook({ ...(await edited(service, () => {})), file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+    archive.stored.clear()
     const { workbook, baseVersion } = await edited(service, () => {})
 
     const result = await service.importWorkbook({ workbook, file: null, baseVersion, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
 
     expect(result).toEqual({
       applied: false,
-      catalogVersion: 1,
-      diff: { ...Object.fromEntries(['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers'].map((tab) => [tab, { added: [], updated: [], retired: [], reactivated: [] }])), newProducts: [] },
+      catalogVersion: 2,
+      diff: { ...Object.fromEntries(['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides'].map((tab) => [tab, { added: [], updated: [], retired: [], reactivated: [] }])), newProducts: [] },
     })
     expect(archive.stored.size).toBe(0)
   })
@@ -251,6 +287,7 @@ describe('CatalogWorkbookService.importWorkbook: the contract version', () => {
   it.each([
     ['an older contract', '1.0.0'],
     ['the 2.0.0 contract (before key_ingredient and strength)', '2.0.0'],
+    ['the 2.1.0 contract (before the Guides tab)', '2.1.0'],
     ['a newer contract', '9.9.9'],
     ['no version at all', ''],
   ])('refuses a file made for %s with a ConflictError CONTRACT_MISMATCH, for a dry run and an apply alike, and writes nothing', async (_what, contractVersion) => {
@@ -905,5 +942,298 @@ describe('CatalogWorkbookService: key_ingredient and strength', () => {
 
     expect(rows.find((row) => row.code === 'PRD-WITH')).toMatchObject({ keyIngredient: 'Azelaic acid', strength: '10%' })
     expect(rows.find((row) => row.code === 'PRD-BARE')).toMatchObject({ keyIngredient: null, strength: null })
+  })
+})
+
+// ---- the Guides tab (spec #217, PR 1): what a step is for, what to look for and what suits deeper skin, written by the team and never by a model ----
+
+describe('CatalogWorkbookService: the Guides tab', () => {
+  const emptyTab = { added: [], updated: [], retired: [], reactivated: [] }
+  const dry = (service: CatalogWorkbookService, edit: { workbook: RawWorkbook; baseVersion: number }) => service.importWorkbook({ ...edit, file: null, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+  const apply = (service: CatalogWorkbookService, edit: { workbook: RawWorkbook; baseVersion: number }) => service.importWorkbook({ ...edit, file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+  /** The rows of the Guides tab as the export gives them, in a fixed order (the order the export lists them in is not part of the contract). */
+  const exportedGuides = async (service: CatalogWorkbookService) => {
+    const rows = (await service.exportWorkbook()).workbook.guides.rows
+    return [...rows].sort((a, b) => `${a.step}:${a.goal ?? ''}`.localeCompare(`${b.step}:${b.goal ?? ''}`))
+  }
+  const sortedByKey = (rows: RawRow[]) => [...rows].sort((a, b) => `${a.step}:${a.goal ?? ''}`.localeCompare(`${b.step}:${b.goal ?? ''}`))
+  const override = (over: RawRow = {}): RawRow => guide({ step: 'treat', goal: 'fade-dark-marks', what_it_does: 'Helps dark marks fade.', look_for: 'Niacinamide or azelaic acid.', for_deeper_skin: 'Go slowly.', look_for_when_pregnant: 'Azelaic acid only.', ...over })
+
+  describe('importing', () => {
+    it('refuses a workbook with no approved base row for a step as CATALOG_INVALID, naming the Guides tab, and applies nothing', async () => {
+      const { service, repository } = build()
+      const edit = await edited(service, (w) => w.guides.rows.push(...baseGuides().filter((row) => row.step !== 'protect')), { guides: false })
+
+      await expect(apply(service, edit)).rejects.toMatchObject({
+        name: 'ValidationError',
+        code: 'CATALOG_INVALID',
+        details: { problems: [{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }] },
+      })
+      expect(await repository.catalogVersion()).toBe(1)
+      expect(await exportedGuides(service)).toEqual([])
+    })
+
+    it('refuses a guide that breaks the routine wording gate, with the problem on the cell, and applies nothing', async () => {
+      const { service, repository } = build()
+      const edit = await edited(service, (w) => w.guides.rows.push(...baseGuides(), guide({ step: 'treat', goal: 'glow', look_for: 'Something for lighter skin.' })), { guides: false })
+
+      await expect(apply(service, edit)).rejects.toMatchObject({
+        name: 'ValidationError',
+        code: 'CATALOG_INVALID',
+        details: { problems: [{ tab: 'guides', row: 6, column: 'look_for', rule: 'GUIDE_WORDING' }] },
+      })
+      expect(await repository.catalogVersion()).toBe(1)
+    })
+
+    it('reports new guides as added in a dry run, keyed by step for a base row and by step and goal for a goal row, and writes nothing', async () => {
+      const { service, repository, archive } = build()
+      const edit = await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false })
+
+      const result = await dry(service, edit)
+
+      expect(result.applied).toBe(false)
+      expect([...result.diff.guides.added].sort()).toEqual(['cleanse', 'moisturise', 'protect', 'treat', 'treat:fade-dark-marks'])
+      expect({ ...result.diff.guides, added: [] }).toEqual(emptyTab)
+      expect(await repository.catalogVersion()).toBe(1)
+      expect(archive.stored.size).toBe(0)
+      expect(await exportedGuides(service)).toEqual([])
+    })
+
+    it('stores the guides it applies, and the export gives them back exactly as the upload had them, for the next edit to start from', async () => {
+      const { service } = build()
+      const rows = [...baseGuides(), override(), override({ goal: 'glow', look_for_when_pregnant: null, audited_by: 'Nneka Audit', audited_on: '2030-02-03' })]
+
+      const result = await apply(service, await edited(service, (w) => w.guides.rows.push(...rows), { guides: false }))
+
+      expect(result).toMatchObject({ applied: true, catalogVersion: 2 })
+      expect(await exportedGuides(service)).toEqual(sortedByKey(rows))
+    })
+
+    it('reads a guide cell as the contract reads it, so the export holds it trimmed and an empty pregnancy cell as null', async () => {
+      const { service } = build()
+      const messy = guide({ step: 'treat', goal: 'glow', look_for: '  Niacinamide.  ', look_for_when_pregnant: '   ' })
+
+      await apply(service, await edited(service, (w) => w.guides.rows.push(messy)))
+
+      expect((await exportedGuides(service)).find((row) => row.goal === 'glow')).toEqual({ ...messy, look_for: 'Niacinamide.', look_for_when_pregnant: null })
+    })
+
+    it('reports an unchanged export as an empty diff for Guides, and a text spelt with other spaces as the same guide', async () => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      const same = await dry(service, await edited(service, () => {}, { guides: false }))
+      const spaced = await dry(service, await edited(service, (w) => Object.assign(w.guides.rows.find((row) => row.goal === 'fade-dark-marks')!, { look_for: ' Niacinamide or azelaic acid. ' })))
+
+      expect(same.diff.guides).toEqual(emptyTab)
+      expect(spaced.diff.guides).toEqual(emptyTab)
+    })
+
+    it('reports a changed base guide and a changed goal guide as updated, and only those', async () => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      const result = await dry(
+        service,
+        await edited(service, (w) => {
+          Object.assign(w.guides.rows.find((row) => row.step === 'cleanse' && row.goal === null)!, { for_deeper_skin: 'Use lukewarm water.' })
+          Object.assign(w.guides.rows.find((row) => row.goal === 'fade-dark-marks')!, { look_for_when_pregnant: null })
+        }),
+      )
+
+      expect([...result.diff.guides.updated].sort()).toEqual(['cleanse', 'treat:fade-dark-marks'])
+      expect({ ...result.diff.guides, updated: [] }).toEqual(emptyTab)
+    })
+
+    it('changes the stored guide when a changed one is applied, in place, with no second row for the step and goal', async () => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      await apply(service, await edited(service, (w) => Object.assign(w.guides.rows.find((row) => row.goal === 'fade-dark-marks')!, { look_for: 'Azelaic acid.' })))
+
+      const rows = await exportedGuides(service)
+      expect(rows).toHaveLength(5)
+      expect(rows.find((row) => row.goal === 'fade-dark-marks')).toMatchObject({ look_for: 'Azelaic acid.' })
+    })
+
+    it('never deletes: a goal guide the upload leaves out is retired in place, stays in the export, and comes back as reactivated', async () => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      const gone = await edited(service, (w) => (w.guides.rows = w.guides.rows.filter((row) => row.goal !== 'fade-dark-marks')))
+      const retired = await apply(service, gone)
+
+      expect(retired.diff.guides).toEqual({ ...emptyTab, retired: ['treat:fade-dark-marks'] })
+      expect((await exportedGuides(service)).find((row) => row.goal === 'fade-dark-marks')).toEqual({ ...override(), status: 'retired' })
+
+      const back = await edited(service, (w) => (w.guides.rows = w.guides.rows.filter((row) => row.goal !== 'fade-dark-marks').concat(override())))
+      expect((await apply(service, back)).diff.guides).toEqual({ ...emptyTab, reactivated: ['treat:fade-dark-marks'] })
+      expect((await exportedGuides(service)).find((row) => row.goal === 'fade-dark-marks')).toEqual(override())
+    })
+
+    it('reports a goal guide set to retired as retired, once, and not again when it is uploaded retired again', async () => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      const result = await apply(service, await edited(service, (w) => Object.assign(w.guides.rows.find((row) => row.goal === 'fade-dark-marks')!, { status: 'retired' })))
+      const again = await dry(service, await edited(service, () => {}))
+
+      expect(result.diff.guides).toEqual({ ...emptyTab, retired: ['treat:fade-dark-marks'] })
+      expect(again.diff.guides).toEqual(emptyTab)
+    })
+
+    it('does not move the rules version: a guide is not an ingredient rule', async () => {
+      const { service, repository } = build()
+
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), override()), { guides: false }))
+
+      expect((await repository.liveRules()).version).toBe(REFERENCE_VERSION)
+    })
+  })
+
+  describe('the approver gate in production', () => {
+    const QUALIFIED = 'Dr Q. Approver'
+    const inProduction = (qualifiedApprovers: string | undefined) =>
+      new CatalogWorkbookService({
+        repository: new FakeCatalogWorkbookRepository(),
+        archive: new MemoryWorkbookArchive({ environment: 'production' }),
+        now: () => new Date('2030-06-15T10:00:00Z'),
+        newId: () => 'id',
+        environment: 'production',
+        qualifiedApprovers,
+      })
+    const bases = (approver: string): RawRow[] => baseGuides().map((row) => ({ ...row, approved_by: approver }))
+
+    it('refuses an approved guide whose approver is not on the list, row by row, naming the approved_by cell and never the name', async () => {
+      const service = inProduction(QUALIFIED)
+      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED).slice(0, 2), ...bases('Somebody Else').slice(2), override({ approved_by: 'Somebody Else' })), { guides: false })
+
+      const error = await dry(service, edit).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({
+        name: 'ValidationError',
+        code: 'CATALOG_INVALID',
+        details: {
+          problems: [
+            { tab: 'guides', row: 4, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+            { tab: 'guides', row: 5, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+            { tab: 'guides', row: 6, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' },
+          ],
+        },
+      })
+      expect(JSON.stringify(error)).not.toContain('Somebody Else')
+    })
+
+    it('takes guides approved by someone on the list, and a draft or retired guide by anyone', async () => {
+      const service = inProduction(`${QUALIFIED}, Dr Other`)
+      const edit = await edited(
+        service,
+        (w) =>
+          w.guides.rows.push(
+            ...bases(QUALIFIED),
+            override({ approved_by: 'Dr Other' }),
+            override({ goal: 'glow', status: 'draft', approved_by: 'Somebody Else' }),
+            override({ goal: 'even-tone', status: 'retired', approved_by: 'Somebody Else' }),
+          ),
+        { guides: false },
+      )
+
+      await expect(dry(service, edit)).resolves.toMatchObject({ applied: false })
+    })
+
+    it('lets nobody approve a guide when no list is held', async () => {
+      const service = inProduction(undefined)
+      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED)), { guides: false })
+
+      await expect(dry(service, edit)).rejects.toMatchObject({ code: 'CATALOG_INVALID', details: { problems: expect.arrayContaining([{ tab: 'guides', row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }]) } })
+    })
+
+    it('is not asked for outside production, where any approver does', async () => {
+      const { service } = build()
+      const edit = await edited(service, (w) => w.guides.rows.push(...bases('Somebody Else')), { guides: false })
+
+      await expect(dry(service, edit)).resolves.toMatchObject({ applied: false })
+    })
+  })
+
+  describe('guideFor', () => {
+    const live = async (...extra: RawRow[]) => {
+      const { service } = build()
+      await apply(service, await edited(service, (w) => w.guides.rows.push(...baseGuides(), ...extra), { guides: false }))
+      return service
+    }
+
+    it('gives the step and goal guide when there is an approved one, as exactly the four texts and nothing else', async () => {
+      const service = await live(override())
+
+      expect(await service.guideFor('treat', 'fade-dark-marks')).toEqual({
+        whatItDoes: 'Helps dark marks fade.',
+        lookFor: 'Niacinamide or azelaic acid.',
+        forDeeperSkin: 'Go slowly.',
+        lookForWhenPregnant: 'Azelaic acid only.',
+      })
+    })
+
+    it('falls back to the step\'s base guide for a goal that has no guide of its own', async () => {
+      const service = await live(override())
+
+      expect(await service.guideFor('treat', 'glow')).toEqual({
+        whatItDoes: 'What treat does.',
+        lookFor: 'What to look for in treat.',
+        forDeeperSkin: 'Deeper skin and treat.',
+        lookForWhenPregnant: null,
+      })
+    })
+
+    it('gives each step its own base guide', async () => {
+      const service = await live()
+
+      for (const step of ['cleanse', 'treat', 'moisturise', 'protect'] as const) expect(await service.guideFor(step, 'even-tone')).toMatchObject({ whatItDoes: `What ${step} does.` })
+    })
+
+    it('gives a goal guide only for its own step: the same goal on another step gets that step\'s base', async () => {
+      const service = await live(override())
+
+      expect(await service.guideFor('protect', 'fade-dark-marks')).toMatchObject({ whatItDoes: 'What protect does.' })
+    })
+
+    it('ignores a goal guide that is still a draft, and one that has been retired, and gives the base guide', async () => {
+      const service = await live(override({ goal: 'glow', status: 'draft', approved_by: null, approved_on: null }), override({ goal: 'even-tone' }))
+      await apply(service, await edited(service, (w) => (w.guides.rows = w.guides.rows.filter((row) => row.goal !== 'even-tone'))))
+
+      expect(await service.guideFor('treat', 'glow')).toMatchObject({ whatItDoes: 'What treat does.' })
+      expect(await service.guideFor('treat', 'even-tone')).toMatchObject({ whatItDoes: 'What treat does.' })
+    })
+
+    it('gives a goal guide whole, with no pregnancy text borrowed from the base guide', async () => {
+      const { service } = build()
+      await apply(
+        service,
+        await edited(
+          service,
+          (w) => w.guides.rows.push(...baseGuides().map((row) => (row.step === 'treat' ? { ...row, look_for_when_pregnant: 'Azelaic acid only.' } : row)), override({ look_for_when_pregnant: null })),
+          { guides: false },
+        ),
+      )
+
+      expect(await service.guideFor('treat', 'fade-dark-marks')).toMatchObject({ lookForWhenPregnant: null })
+      expect(await service.guideFor('treat', 'glow')).toMatchObject({ lookForWhenPregnant: 'Azelaic acid only.' })
+    })
+
+    it('gives null when the catalog has no guide at all, as it has before the team fills the Guides tab in', async () => {
+      const { service } = build()
+
+      expect(await service.guideFor('cleanse', 'glow')).toBeNull()
+      expect(await service.guideFor('protect', 'fade-dark-marks')).toBeNull()
+    })
+
+    it('reads what is live now: a changed guide is given as changed after the upload that changed it', async () => {
+      const service = await live(override())
+      expect(await service.guideFor('treat', 'fade-dark-marks')).toMatchObject({ lookFor: 'Niacinamide or azelaic acid.' })
+
+      await apply(service, await edited(service, (w) => Object.assign(w.guides.rows.find((row) => row.goal === 'fade-dark-marks')!, { look_for: 'Azelaic acid.' })))
+
+      expect(await service.guideFor('treat', 'fade-dark-marks')).toMatchObject({ lookFor: 'Azelaic acid.' })
+    })
   })
 })

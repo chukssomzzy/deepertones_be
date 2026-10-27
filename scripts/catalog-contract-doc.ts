@@ -84,6 +84,7 @@ const holds = (column: ColumnDefinition): string => {
   if (column.itemMaxLength !== undefined) parts.push(`Each item up to ${column.itemMaxLength} characters`)
   if (column.plainText) parts.push('No links or markup')
   if (column.lowerCase) parts.push('Lower case only')
+  if (column.routineWording) parts.push('No condition names, diagnoses, or promises of lighter, fairer or whiter skin')
   if (column.unique) parts.push('Unique in the tab')
   if (column.draftable === false) parts.push('Cannot be a draft cell')
   return `${parts.join('. ')}.`
@@ -99,6 +100,7 @@ const rulesOf = (column: ColumnDefinition): RuleCode[] => {
       if (column.maxLength !== undefined) rules.push('TOO_LONG')
       if (column.plainText) rules.push('HAS_LINK_OR_MARKUP')
       if (column.lowerCase) rules.push('NOT_LOWER_CASE')
+      if (column.routineWording) rules.push('GUIDE_WORDING')
       break
     case 'list':
       if (column.maxItems !== undefined) rules.push('TOO_MANY_ITEMS')
@@ -200,7 +202,7 @@ export const renderContractDoc = async (): Promise<string> =>
     '',
     '## How the workbook is read',
     '',
-    'The workbook has six tabs: Products, Availability, Ingredients, Countries, Claim words and Tapers. The first row of a tab is its header: one column name for each',
+    'The workbook has seven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides. The first row of a tab is its header: one column name for each',
     'column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not',
     'listed here is a problem. A tab with no rows is fine, but it still needs its header row.',
     '',

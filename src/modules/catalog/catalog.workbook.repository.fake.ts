@@ -2,7 +2,7 @@ import { REFERENCE, REFERENCE_VERSION } from './catalog.reference'
 import { seedRuleCode } from './catalog.workbook.seed'
 import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type LiveRules, type Recommendation, type RecommendedByCode, type WorkbookPlan } from './catalog.workbook.repository'
 import type { RuleRow } from './catalog.workbook.repository.contract'
-import type { AvailabilityRow, ClaimWordRow, IngredientRule, ProductRow, TaperRow, Workbook } from './catalog.workbook.schema'
+import { compareGuides, guideKey, type AvailabilityRow, type ClaimWordRow, type GuideRow, type IngredientRule, type ProductRow, type TaperRow, type Workbook } from './catalog.workbook.schema'
 import type { RoutineStep } from './catalog.vocabulary'
 import { SHOWN_CONCERNS, type ShownConcern } from '../face-scans/face-scans.tables'
 
@@ -38,6 +38,7 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
   private countryRows: Country[] = []
   private claimWordRows: ClaimWordRow[] = []
   private taperRows: TaperRow[] = []
+  private guideRows: GuideRow[] = []
   /** The catalog products a row can join: identity key to product id. A product an upload makes is added. */
   private readonly productIds = new Map<string, string>()
   /** Other spellings of a product: alias key to the product's identity key. */
@@ -71,6 +72,7 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
         countries: structuredClone([...this.countryRows].sort(byCode)),
         claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
         tapers: structuredClone([...this.taperRows].sort(byCode)),
+        guides: structuredClone([...this.guideRows].sort(compareGuides)),
       },
     }
   }
@@ -83,6 +85,10 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
       tapers: structuredClone([...this.taperRows].sort(byCode)),
     }
+  }
+
+  async approvedGuides(step: GuideRow['step']): Promise<GuideRow[]> {
+    return structuredClone(this.guideRows.filter((row) => row.step === step && row.status === 'approved').sort(compareGuides))
   }
 
   async tapersByCode(codes: string[]): Promise<TaperRow[]> {
@@ -200,7 +206,9 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       batches(plan.claimWords.length, rows.claimWords) +
       batches(plan.retiredClaimWords.length, rows.codes) +
       batches(plan.tapers.length, rows.tapers) +
-      batches(plan.retiredTapers.length, rows.codes)
+      batches(plan.retiredTapers.length, rows.codes) +
+      batches(plan.guides.length, rows.guides) +
+      batches(plan.retiredGuides.length, rows.codes)
     )
   }
 
@@ -242,6 +250,9 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     for (const code of plan.retiredClaimWords) this.claimWordRows = this.claimWordRows.map((word) => (word.code === code ? { ...word, status: 'retired' } : word))
     for (const taper of plan.tapers) this.taperRows = [...this.taperRows.filter((existing) => existing.code !== taper.code), structuredClone(taper)]
     for (const code of plan.retiredTapers) this.taperRows = this.taperRows.map((taper) => (taper.code === code ? { ...taper, status: 'retired' } : taper))
+    for (const guide of plan.guides) this.guideRows = [...this.guideRows.filter((existing) => guideKey(existing) !== guideKey(guide)), structuredClone(guide)]
+    const retiredGuides = new Set(plan.retiredGuides.map(guideKey))
+    this.guideRows = this.guideRows.map((guide) => (retiredGuides.has(guideKey(guide)) ? { ...guide, status: 'retired' } : guide))
     this.catalogNumber = plan.baseVersion + 1
     this.version = plan.rulesVersion
     return true

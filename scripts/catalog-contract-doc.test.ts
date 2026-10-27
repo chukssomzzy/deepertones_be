@@ -25,15 +25,16 @@ describe('docs/catalog-workbook-contract.md', () => {
     expect(doc).toContain(await contractFingerprint())
   })
 
-  it('names the six tabs and every column the contract checks', async () => {
+  it('names the seven tabs and every column the contract checks', async () => {
     const doc = await renderContractDoc()
 
-    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers']) expect(doc, tab).toContain(tab)
+    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides']) expect(doc, tab).toContain(tab)
     for (const column of [
       'code', 'brand', 'variant', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin',
       'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells', 'product_code', 'price_min', 'price_max', 'where_sold', 'aliases',
       'strength_limit', 'statement', 'source_url', 'helps', 'currency', 'low_max', 'mid_max',
       'group', 'clashes_with', 'phrase', 'claim', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if',
+      'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant',
     ]) {
       expect(doc, column).toContain(column)
     }
@@ -51,6 +52,14 @@ describe('docs/catalog-workbook-contract.md', () => {
     for (const value of ['mercury', 'steroid', 'lightening-agent', 'retinoid', 'exfoliating-acid', 'benzoyl-peroxide', 'lightening']) expect(doc, value).toContain(value)
   })
 
+  it('lists the goals a guide may be written for, and tells the people who write guides what the pregnancy column asks of them', async () => {
+    const doc = await renderContractDoc()
+
+    for (const goal of ['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair']) expect(doc, goal).toContain(goal)
+    const guides = doc.slice(doc.indexOf('Guides'))
+    expect(guides).toMatch(/pregnan/i)
+  })
+
   it('explains the schedule format with an example that is valid, so a person can copy its shape', async () => {
     expect(await renderContractDoc()).toContain('1-2: alternate-days; 3-4: weekly; 5: stop')
   })
@@ -65,6 +74,7 @@ describe('docs/catalog-workbook-contract.md', () => {
       'DUPLICATE_CODE', 'DUPLICATE_IDENTITY', 'DUPLICATE_AVAILABILITY', 'DUPLICATE_RULE',
       'CLASH_NOT_SYMMETRIC', 'CLASH_WITHOUT_GROUP', 'SELF_CLASH', 'STRENGTH_WITHOUT_INGREDIENT', 'DUPLICATE_PHRASE', 'NOT_LOWER_CASE', 'NOT_A_LIGHTENING_CLAIM',
       'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'SCHEDULE_MISSING_STOP', 'SCHEDULE_STOP_NOT_LAST', 'SCHEDULE_FREQUENCY_INCREASES',
+      'UNQUALIFIED_APPROVER', 'GUIDE_BASE_MISSING', 'GUIDE_DUPLICATE', 'GUIDE_WORDING',
     ]) {
       expect(doc, rule).toContain(rule)
     }

@@ -19,10 +19,11 @@ export const HEADERS = {
   countries: ['code', 'currency', 'low_max', 'mid_max', 'status'],
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 /** The tab names a workbook file has, in order. */
-export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers' } as const satisfies Record<Tab, string>
+export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides' } as const satisfies Record<Tab, string>
 
 export const product = (over: Row = {}): Row => ({
   code: 'PRD-CERAVE-CLEANSER',
@@ -98,9 +99,28 @@ export const taper = (over: Row = {}): Row => ({
   ...over,
 })
 
+/** A Guides row: by default the approved base row (no goal) of the cleanse step. A guide has no code; it is its step and goal. */
+export const guide = (over: Row = {}): Row => ({
+  step: 'cleanse',
+  goal: null,
+  what_it_does: 'Lifts sweat, sunscreen and dirt off your skin so the rest of your routine can work.',
+  look_for: 'A gentle, fragrance-free wash that leaves your skin comfortable, not tight.',
+  for_deeper_skin: 'Skip harsh scrubs and hot water: rubbing hard can leave dark marks behind on deeper skin.',
+  look_for_when_pregnant: null,
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** The four approved base rows the contract needs, one for each routine step, written out here and not read from the vocabulary. */
+export const baseGuides = (): Row[] => ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step }))
+
 export const country = (over: Row = {}): Row => ({ code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active', ...over })
 
-/** A workbook the real contract accepts: one valid row in each tab, unless the rows of a tab are given. Every header is present. */
+/** A workbook the real contract accepts: one valid row in each tab (four in Guides, the base row of each step), unless the rows of a tab are given. Every header is present. */
 export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbook => ({
   products: { headers: [...HEADERS.products], rows: over.products ?? [product()] },
   availability: { headers: [...HEADERS.availability], rows: over.availability ?? [availability()] },
@@ -108,4 +128,5 @@ export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbo
   countries: { headers: [...HEADERS.countries], rows: over.countries ?? [country()] },
   claimWords: { headers: [...HEADERS.claimWords], rows: over.claimWords ?? [claimWord()] },
   tapers: { headers: [...HEADERS.tapers], rows: over.tapers ?? [taper()] },
+  guides: { headers: [...HEADERS.guides], rows: over.guides ?? baseGuides() },
 })

@@ -134,14 +134,15 @@ describe('runExport: what the file is stamped with', () => {
     expect(written[0]!.stamp?.environment).toBe(env)
   })
 
-  it('writes all six tabs, the Claim words and Tapers rows among them, exactly as the server gave them', async () => {
+  it('writes all seven tabs, the Claim words, Tapers and Guides rows among them, exactly as the server gave them', async () => {
     const { deps, written } = setup()
 
     await runExport({ env: 'staging', out: undefined }, deps)
 
-    expect(Object.keys(written[0]!.workbook).sort()).toEqual(['availability', 'claimWords', 'countries', 'ingredients', 'products', 'tapers'])
+    expect(Object.keys(written[0]!.workbook).sort()).toEqual(['availability', 'claimWords', 'countries', 'guides', 'ingredients', 'products', 'tapers'])
     expect(written[0]!.workbook.claimWords).toEqual(validWorkbook().claimWords)
     expect(written[0]!.workbook.tapers).toEqual(validWorkbook().tapers)
+    expect(written[0]!.workbook.guides).toEqual(validWorkbook().guides)
   })
 
   it('stamps the contract version the SERVER answered with, not this checkout\'s', async () => {
@@ -157,6 +158,7 @@ describe('runExport: what the file is stamped with', () => {
     ['a contract version that is not text', { catalogVersion: 12, contractVersion: 1, workbook: validWorkbook() }],
     ['a workbook that is a list', { catalogVersion: 12, contractVersion: '1.0.0', workbook: [] }],
     ['a workbook with no Tapers tab, which is what a server older than the contract bump sends', { catalogVersion: 12, contractVersion: '1.0.0', workbook: Object.fromEntries(Object.entries(validWorkbook()).filter(([key]) => key !== 'tapers')) }],
+    ['a workbook with no Guides tab, which is what a server older than the Guides contract sends', { catalogVersion: 12, contractVersion: '2.1.0', workbook: Object.fromEntries(Object.entries(validWorkbook()).filter(([key]) => key !== 'guides')) }],
     ['a workbook with no Claim words tab', { catalogVersion: 12, contractVersion: '1.0.0', workbook: Object.fromEntries(Object.entries(validWorkbook()).filter(([key]) => key !== 'claimWords')) }],
     ['a tab whose rows are lists, not objects', { catalogVersion: 12, contractVersion: '1.0.0', workbook: { ...validWorkbook(), products: { headers: ['code'], rows: [['PRD-A']] } } }],
   ])('refuses a 200 with %s', async (_label, data) => {
