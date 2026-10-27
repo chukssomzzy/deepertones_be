@@ -1,0 +1,31 @@
+import { eq } from 'drizzle-orm'
+import type { Db } from '../../lib/db'
+import type { PublicOf } from '../../lib/types'
+import { reminderSettings } from './reminders.table'
+import type { ReminderSettings, ReminderSettingsPatch } from './reminders.types'
+
+export class D1RemindersRepository {
+  constructor(private readonly db: Db) {}
+
+  async get(profileId: string): Promise<ReminderSettings | null> {
+    const [row] = await this.db.select().from(reminderSettings).where(eq(reminderSettings.profileId, profileId))
+    return row ?? null
+  }
+
+  /**
+   * Writes only the fields `patch` names (a new row starts from the defaults) and returns the whole row. One statement, so a second change made at the
+   * same time cannot be lost by reading the row first.
+   */
+  async upsert(profileId: string, patch: ReminderSettingsPatch, at: Date): Promise<ReminderSettings> {
+    const changes = Object.fromEntries(Object.entries(patch).filter(([, value]) => value !== undefined)) as ReminderSettingsPatch
+    const [row] = await this.db
+      .insert(reminderSettings)
+      .values({ profileId, ...changes, updatedAt: at })
+      .onConflictDoUpdate({ target: reminderSettings.profileId, set: { ...changes, updatedAt: at } })
+      .returning()
+    return row!
+  }
+}
+
+// The D1 class is the source of truth; services and fakes use this type.
+export type RemindersRepository = PublicOf<D1RemindersRepository>

@@ -26,6 +26,8 @@ import { D1ProfilesRepository } from './modules/profiles/profiles.repository'
 import { ProfilesService } from './modules/profiles/profiles.service'
 import { D1RecommendationsRepository } from './modules/recommendations/recommendations.repository'
 import { RecommendationService } from './modules/recommendations/recommendations.service'
+import { D1RemindersRepository } from './modules/reminders/reminders.repository'
+import { RemindersService } from './modules/reminders/reminders.service'
 import { D1OutcomeCountsRepository } from './modules/routines/routines.outcome-counts.repository'
 import { D1RoutinesRepository } from './modules/routines/routines.repository'
 import { RoutineService } from './modules/routines/routines.service'
@@ -301,6 +303,15 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const reminders = once(
+    () =>
+      new RemindersService({
+        repository: new D1RemindersRepository(db()),
+        users: users(),
+        whatsappEnabled: parseOtpChannels(env.OTP_CHANNELS).includes('whatsapp'),
+      }),
+  )
+
   const safety = once(
     () =>
       new SafetyService({
@@ -479,6 +490,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get recommendations() {
       return recommendations()
+    },
+    get reminders() {
+      return reminders()
     },
     get safety() {
       return safety()
