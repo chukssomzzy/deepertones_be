@@ -1,0 +1,1 @@
+ALTER TABLE `routine_versions` ADD `shelf_counts` text;

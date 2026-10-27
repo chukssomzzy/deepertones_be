@@ -18,9 +18,14 @@ import type { CautionState } from './routines.types'
 //                                  `cautions` is the skeleton's CautionState[] (order kept, [] is not null) or null while pending. `goal` is the goal the
 //                                  version was built for, or null while pending (and on a row written before the column). `readyAt` is when the version became ready:
 //                                  the caller gives it for a row appended already ready, and null for a pending one.
+//                                  `shelfCounts` (PR 5) is how the build sorted the shelf: { keep, reduce, drop, stop } whole numbers, or null while pending and on a row
+//                                  written before the column. Fixed at build time, it comes back exactly as given and is changed by nothing but `complete`.
 
+//                                  `notInRoutine` (PR 6) is what the build left out: { entryId, title, status: 'stepping-down' | 'left-out', reason }[] in the order given ([] is not null),
+//                                  or null while pending and on a row written before the column. Fixed at build time, it comes back exactly as given and is changed by nothing
+//                                  but `complete` and `setNotInRoutine`.
 //   complete(id, built)            fills that one pending row with the finished build (steps, tapers, expectation, model, promptHash, catalogVersion,
-//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal, readyAt) and makes it 'ready', resolving to true. It does so
+//                                  routineFingerprint, source, hintsShown, writerRetryDueAt, writerCalls, cautions, goal, shelfCounts, notInRoutine, readyAt) and makes it 'ready', resolving to true. It does so
 //                                  once: an unknown id, or a row that is already ready, resolves to false and changes nothing.
 //   latest(profileId)              the row with the newest createdAt, whatever its status, or null.
 //   current(profileId)             the `ready` row that became ready last (readyAt, then the larger id; a row with no readyAt counts from its createdAt),
@@ -28,6 +33,8 @@ import type { CautionState } from './routines.types'
 //   clearWriterRetry(id)           sets writerRetryDueAt to null on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   setRoutineFingerprint(id, fingerprint)   sets routineFingerprint on that one row (a rebuild that found nothing to change records the inputs it checked), changing
 //                                  nothing else of it; a row nobody has is ignored. Resolves to undefined.
+//   setShelfCounts(id, counts)     sets shelfCounts on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
+//   setNotInRoutine(id, items)     sets notInRoutine on that one row, changing nothing else of it; a row nobody has is ignored. Resolves to undefined.
 //   markServed(id, at)             sets servedAt on that one row, replacing an earlier value; a row nobody has is ignored. Resolves to undefined.
 //   markStarted(profileId, on)     sets startedOn to `on` on every row of that profile whose startedOn is null, a pending row included, and on no other row:
 //                                  an earlier start is never moved, so calling it again is a no-op. Resolves to undefined; a profile with no rows is ignored.
@@ -111,6 +118,15 @@ const cautionsOf = (): CautionState[] => ['tapering', 'recent-reaction']
 
 const GOAL: Goal = 'fade-dark-marks'
 
+// Four different numbers, so a column that swaps two of them, or keeps only a total, cannot pass.
+const COUNTS = { keep: 4, reduce: 1, drop: 3, stop: 2 }
+
+// One of each status, so a column that drops a field or swaps two items cannot pass; the order is the one the build gave.
+const LEFT_OUT: NonNullable<Appended['notInRoutine']> = [
+  { entryId: 'entry-3', title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' },
+  { entryId: 'entry-5', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+]
+
 /** A pending row: a build requested and not yet done. The routine and what only the build knows are empty. */
 const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partial<Appended> = {}): Appended => ({
   id,
@@ -122,6 +138,8 @@ const pendingRow = (profileId: string, id: string, createdAt: Date, over: Partia
   expectation: null,
   cautions: null,
   goal: null,
+  shelfCounts: null,
+  notInRoutine: null,
   readyAt: null,
   startedOn: null,
   servedAt: null,
@@ -150,6 +168,8 @@ const readyRow = (profileId: string, id: string, createdAt: Date, over: Partial<
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  shelfCounts: COUNTS,
+  notInRoutine: LEFT_OUT,
   readyAt: createdAt,
   startedOn: at(-DAY),
   servedAt: null,
@@ -174,6 +194,8 @@ const builtOf = (over: Partial<Completed> = {}): Completed => ({
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: cautionsOf(),
   goal: GOAL,
+  shelfCounts: COUNTS,
+  notInRoutine: LEFT_OUT,
   readyAt: at(DAY),
   model: 'claude-sonnet-5-5',
   promptHash: 'prompt-hash-1',
@@ -648,6 +670,125 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
       })
     })
 
+    describe('shelf counts', () => {
+      it('keeps the four counts of a version as given, each in its own place', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { shelfCounts: { keep: 7, reduce: 0, drop: 5, stop: 1 } }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
+        expect((await repository.current(profileId))!.shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
+      })
+
+      it('has none recorded on a version appended without them: null, which is not the same as four zeros', async () => {
+        const { repository, newAccount } = await make()
+        const withNone = await newAccount()
+        const withZeros = await newAccount()
+        await repository.append(readyRow(withNone.profileId, crypto.randomUUID(), BASE, { shelfCounts: null }))
+        await repository.append(readyRow(withZeros.profileId, crypto.randomUUID(), BASE, { shelfCounts: { keep: 0, reduce: 0, drop: 0, stop: 0 } }))
+
+        expect((await latestOf(repository, withNone.profileId)).shelfCounts).toBeNull()
+        expect((await latestOf(repository, withZeros.profileId)).shelfCounts).toEqual({ keep: 0, reduce: 0, drop: 0, stop: 0 })
+      })
+
+      it('is null while a version is pending, and is filled in with the build\'s counts when it completes', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        expect((await latestOf(repository, profileId)).shelfCounts).toBeNull()
+
+        await repository.complete(pending.id, builtOf({ shelfCounts: { keep: 2, reduce: 6, drop: 0, stop: 3 } }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 2, reduce: 6, drop: 0, stop: 3 })
+      })
+
+      it('completes with no counts as null, when the build has none to give', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+
+        await repository.complete(pending.id, builtOf({ shelfCounts: null }))
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toBeNull()
+      })
+
+      it('is changed by nothing that marks the version later: serving it, starting it, clearing its writer retry or recording its fingerprint', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, writerRetryDueAt: at(DAY), shelfCounts: { keep: 7, reduce: 0, drop: 5, stop: 1 } })
+        await repository.append(row)
+
+        await repository.markServed(row.id, at(HOUR))
+        await repository.markStarted(profileId, at(2 * HOUR))
+        await repository.clearWriterRetry(row.id)
+        await repository.setRoutineFingerprint(row.id, 'routine-fp-2')
+
+        expect((await latestOf(repository, profileId)).shelfCounts).toEqual({ keep: 7, reduce: 0, drop: 5, stop: 1 })
+      })
+    })
+
+    describe('not in the routine', () => {
+      it('keeps the list of a version as given, each item whole and in the order given', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.append(readyRow(profileId, crypto.randomUUID(), BASE, { notInRoutine: [...LEFT_OUT].reverse() }))
+
+        expect((await latestOf(repository, profileId)).notInRoutine).toEqual([...LEFT_OUT].reverse())
+        expect((await repository.current(profileId))!.notInRoutine).toEqual([...LEFT_OUT].reverse())
+      })
+
+      it('keeps an empty list and no list apart: none left out is [], a version built before the column is null', async () => {
+        const { repository, newAccount } = await make()
+        const withNone = await newAccount()
+        const withEmpty = await newAccount()
+        await repository.append(readyRow(withNone.profileId, crypto.randomUUID(), BASE, { notInRoutine: null }))
+        await repository.append(readyRow(withEmpty.profileId, crypto.randomUUID(), BASE, { notInRoutine: [] }))
+
+        expect((await latestOf(repository, withNone.profileId)).notInRoutine).toBeNull()
+        expect((await latestOf(repository, withEmpty.profileId)).notInRoutine).toEqual([])
+      })
+
+      it('is null while a version is pending, and is filled in with the build\'s list when it completes', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+        expect((await latestOf(repository, profileId)).notInRoutine).toBeNull()
+
+        await repository.complete(pending.id, builtOf({ notInRoutine: [LEFT_OUT[1]!] }))
+
+        expect((await latestOf(repository, profileId)).notInRoutine).toEqual([LEFT_OUT[1]])
+      })
+
+      it('completes with no list as null, when the build has none to give', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const pending = pendingRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(pending)
+
+        await repository.complete(pending.id, builtOf({ notInRoutine: null }))
+
+        expect((await latestOf(repository, profileId)).notInRoutine).toBeNull()
+      })
+
+      it('is changed by nothing that marks the version later: serving it, starting it, clearing its writer retry, recording its fingerprint or its counts', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { startedOn: null, writerRetryDueAt: at(DAY) })
+        await repository.append(row)
+
+        await repository.markServed(row.id, at(HOUR))
+        await repository.markStarted(profileId, at(2 * HOUR))
+        await repository.clearWriterRetry(row.id)
+        await repository.setRoutineFingerprint(row.id, 'routine-fp-2')
+        await repository.setShelfCounts(row.id, { keep: 1, reduce: 1, drop: 1, stop: 1 })
+
+        expect((await latestOf(repository, profileId)).notInRoutine).toEqual(LEFT_OUT)
+      })
+    })
+
     describe('step-downs as stored', () => {
       it('gives each start date back as a Date to the millisecond, and a step-down not started as null, from an appended version', async () => {
         const { repository, newAccount } = await make()
@@ -854,6 +995,75 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await repository.setRoutineFingerprint(row.id, 'routine-fp-1')
 
         expect((await repository.current(profileId))!.routineFingerprint).toBe('routine-fp-1')
+      })
+    })
+
+    describe('setShelfCounts', () => {
+      it('sets the shelf counts of that version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { shelfCounts: null, routineFingerprint: 'routine-fp-1' })
+        await repository.append(row)
+
+        await expect(repository.setShelfCounts(row.id, { keep: 6, reduce: 1, drop: 2, stop: 3 })).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, shelfCounts: { keep: 6, reduce: 1, drop: 2, stop: 3 } })
+      })
+
+      it('leaves the profile\'s other versions, and a version nobody has, alone', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE)
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR))
+        await repository.append(first)
+        await repository.append(second)
+
+        await repository.setShelfCounts(first.id, { keep: 9, reduce: 9, drop: 9, stop: 9 })
+        await expect(repository.setShelfCounts(crypto.randomUUID(), { keep: 8, reduce: 8, drop: 8, stop: 8 })).resolves.toBeUndefined()
+
+        expect((await repository.current(profileId))!.shelfCounts).toEqual(COUNTS)
+        expect((await repository.latest(profileId))!.shelfCounts).toEqual(COUNTS)
+      })
+    })
+
+    describe('setNotInRoutine', () => {
+      it('sets the list of that version and changes nothing else of it', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE, { notInRoutine: null, routineFingerprint: 'routine-fp-1' })
+        await repository.append(row)
+
+        await expect(repository.setNotInRoutine(row.id, LEFT_OUT)).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toEqual({ ...row, notInRoutine: LEFT_OUT })
+      })
+
+      it('replaces a list already there, and can set an empty one', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = readyRow(profileId, crypto.randomUUID(), BASE)
+        await repository.append(row)
+
+        await repository.setNotInRoutine(row.id, [LEFT_OUT[1]!])
+        expect((await repository.current(profileId))!.notInRoutine).toEqual([LEFT_OUT[1]])
+
+        await repository.setNotInRoutine(row.id, [])
+        expect((await repository.current(profileId))!.notInRoutine).toEqual([])
+      })
+
+      it('leaves the profile\'s other versions, and a version nobody has, alone', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const first = readyRow(profileId, crypto.randomUUID(), BASE)
+        const second = readyRow(profileId, crypto.randomUUID(), at(HOUR))
+        await repository.append(first)
+        await repository.append(second)
+
+        await repository.setNotInRoutine(first.id, [])
+        await expect(repository.setNotInRoutine(crypto.randomUUID(), [])).resolves.toBeUndefined()
+
+        expect((await repository.current(profileId))!.notInRoutine).toEqual(LEFT_OUT)
+        expect((await repository.latest(profileId))!.notInRoutine).toEqual(LEFT_OUT)
       })
     })
 

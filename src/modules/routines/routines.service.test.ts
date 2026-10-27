@@ -46,6 +46,19 @@ import type { Routine, RoutineEntry, RoutineSkeleton, ShelfVerdict } from './rou
 //   start(profileId): Promise<void>    ConflictError ROUTINE_NOT_READY without a ready version
 //   gotIt(profileId, step, clientIp): Promise<void>    ConflictError STEP_NOT_RECOMMENDED unless the step's product is a recommended one; calls shelf.add(product id, clientIp)
 //
+// PR 5 (the plan summary): every version a build writes records how it sorted the shelf, `shelfCounts: { keep, reduce, drop, stop }`, from the skeleton's shelf
+// (so a reduced sunscreen, which the skeleton keeps as it is, counts as keep, and a verdict entry the build leaves out counts nowhere); a pending version has null.
+// The counts are the version's own: a copy ("I got it") carries them unchanged, a rebuild counts the shelf it was built from, and a rebuild that finds nothing
+// to change appends nothing and so leaves them. And Start makes TOMORROW (the next UTC midnight) day 1, a step-down never beginning before day 1.
+//
+// PR 6 (the "Your routine" screen): every version a build writes also records what the routine was built without, `notInRoutine: { entryId, title, status, reason }[]`,
+// frozen at build. One item for each product of the skeleton's shelf (the products the build used, in the shelf's order, not the verdict's) whose verdict is `stop`
+// (status 'stepping-down') or `drop` ('left-out'), with `reason` the verdict item's own one-line reason (SavedVerdictProduct.reason, which the skeleton does not carry:
+// the service reads it from the saved verdict) and `title` from the title rule (routines.view.test.ts) using the product's form (shelfFacts) and the verdict's step.
+// It is stored, carried and refreshed exactly as `shelfCounts` is: null while pending, [] for none, carried by the "I got it" copy, rewritten by a build that writes a
+// version, refreshed (before the fingerprint) by a rebuild that finds nothing to change when the inputs moved or the version has none, and left alone otherwise.
+// Assumed repository method: setNotInRoutine(id, items), the sibling of setShelfCounts.
+//
 // PR 3b adds two deps, `jobs: JobQueue` (here the MemoryJobQueue, which records each enqueue and its delay) and `enabled: boolean`, and three methods (spec #189):
 //   request(profileId, reason, requestKey): Promise<boolean>   (whether a build was queued) never throws. Disabled: does nothing at all (no claim either). Otherwise claims the build with
 //       repository.claim(profileId, requestKey, now, now - a stale cut-off) and, when it wins, enqueues the job `build-routine` with
@@ -500,7 +513,7 @@ describe('RoutineService.build: the first build', () => {
 
     await build('first')
 
-    expect(during).toMatchObject({ status: 'pending', id: 'version-1', reason: 'first', steps: [], tapers: [], expectation: null, source: null, verdictFingerprint: 'verdict-fp-1' })
+    expect(during).toMatchObject({ status: 'pending', id: 'version-1', reason: 'first', steps: [], tapers: [], expectation: null, source: null, shelfCounts: null, notInRoutine: null, verdictFingerprint: 'verdict-fp-1' })
     expect(viewDuring).toEqual({ status: 'pending' })
     expect((await latestRow()).id).toBe('version-1')
     expect(ids).toBe(1)
@@ -577,6 +590,413 @@ describe('RoutineService.build: the first build', () => {
       ['moisturise', 1],
       ['protect', 1],
     ])
+  })
+})
+
+describe('RoutineService.build: how the shelf was sorted (the plan summary counts)', () => {
+  // Amara's shelf is a cleanser the rules keep and a steroid cream they stop: one of each.
+  const FIRST_COUNTS = { keep: 1, reduce: 0, drop: 0, stop: 1 }
+
+  /** More products on the shelf, each with the verdict the rules gave it. */
+  const shelve = (...products: [id: string, verdict: ShelfVerdict, step: RoutineStep | null][]) => {
+    for (const [id] of products) addProduct(id, CLEAN)
+    saveVerdict([...productsOfVerdict(), ...products.map(([id, verdict, step]) => verdictProduct(id, verdict, step))])
+  }
+
+  it('records one count for each product of the shelf the routine was built from: the cleanser kept and the steroid cream stopped', async () => {
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual(FIRST_COUNTS)
+  })
+
+  it('puts every product in exactly one count: kept, reduced, dropped and stopped products each in their own', async () => {
+    shelve(
+      ['entry-c', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'moisturise'],
+      ['entry-d', { kind: 'drop' }, null],
+      ['entry-e', { kind: 'drop' }, 'treat'],
+      ['entry-f', { kind: 'keep' }, null],
+    )
+
+    await build('first')
+
+    // entry-a and entry-f kept; entry-c reduced; entry-d and entry-e dropped; entry-b stopped.
+    expect((await latestRow()).shelfCounts).toEqual({ keep: 2, reduce: 1, drop: 2, stop: 1 })
+  })
+
+  it('counts a product kept for a step and one kept for none (a spare) alike as kept', async () => {
+    shelve(['entry-g', { kind: 'keep' }, null])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual({ ...FIRST_COUNTS, keep: 2 })
+  })
+
+  it('counts a reduced sunscreen as kept, the way the routine keeps it: sun protection is never used less', async () => {
+    shelve(['entry-spf', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'protect'])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual({ keep: 2, reduce: 0, drop: 0, stop: 1 })
+    expect(shapeOf(await latestRow()).find((s) => s.step === 'protect')).toMatchObject({ product: { kind: 'shelf', id: 'entry-spf' } })
+  })
+
+  it('counts a reduced product that is not a sunscreen as reduced, not kept', async () => {
+    shelve(['entry-m', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'moisturise'])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual({ ...FIRST_COUNTS, reduce: 1 })
+  })
+
+  it('counts nothing for a verdict entry whose product is no longer on the shelf: the build leaves it out', async () => {
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-ghost', { kind: 'drop' }, null)])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual(FIRST_COUNTS)
+  })
+
+  it('counts a shelf entry with no label from the verdict like any other', async () => {
+    world.entries.push({ id: 'entry-nl', kind: 'no-label', addedAt: at(10 * MINUTE), itemId: 'item-nl' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-nl', { kind: 'drop' }, null)])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual({ ...FIRST_COUNTS, drop: 1 })
+  })
+
+  it('records an empty shelf as four zeros, not as no counts', async () => {
+    world.entries = []
+    saveVerdict([])
+
+    await build('first')
+
+    expect((await latestRow()).shelfCounts).toEqual({ keep: 0, reduce: 0, drop: 0, stop: 0 })
+  })
+
+  it('records the same counts when the rules wrote the routine because the writer failed three times', async () => {
+    script(throws(), throws(), throws())
+
+    await build('first')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', shelfCounts: FIRST_COUNTS })
+  })
+
+  it('records the same counts when the rules wrote the routine because the day\'s writer limit was spent', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    setClock(10 * MINUTE)
+
+    await build('shelf')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0, shelfCounts: FIRST_COUNTS })
+  })
+
+  it('counts the shelf as it is when the build is made, not as an earlier version had it, while the routine is not started yet', async () => {
+    await build('first')
+    shelve(['entry-d', { kind: 'drop' }, null])
+    setClock(HOUR)
+
+    await build('shelf')
+
+    expect((await latestRow()).shelfCounts).toEqual({ ...FIRST_COUNTS, drop: 1 })
+  })
+
+  it('recounts the shelf in a rebuild after Start that changes the routine: a second product stopped', async () => {
+    await started()
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    setClock(3 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).shelfCounts).toEqual({ keep: 1, reduce: 0, drop: 0, stop: 2 })
+  })
+
+  it('recounts the shelf in a rebuild after Start that refills a broken step: the cleanser gone leaves one product stopped and none kept', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect((await currentRow()).shelfCounts).toEqual({ keep: 0, reduce: 0, drop: 0, stop: 1 })
+  })
+
+  it('recounts it too in a rebuild after Start that only keeps the routine under new cautions: the version is counted from the shelf it was built from, not copied', async () => {
+    await started()
+    addProduct('entry-c', CLEAN, { name: 'Spare Toner' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'keep' }, null)])
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    setClock(3 * DAY)
+
+    expect(await build('safety')).toBe('built')
+
+    expect((await currentRow()).shelfCounts).toEqual({ keep: 2, reduce: 0, drop: 0, stop: 1 })
+  })
+
+  it('is carried unchanged into the copy that "I got it" appends, and by a rebuild that finds nothing to change (no new version)', async () => {
+    const before = await started()
+    expect(before.shelfCounts).toEqual(FIRST_COUNTS)
+
+    reverdict()
+    setClock(2 * DAY + HOUR)
+    expect(await build('verdict')).toBe('unchanged')
+    expect((await currentRow()).shelfCounts).toEqual(FIRST_COUNTS)
+
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', shelfCounts: FIRST_COUNTS })
+  })
+
+  it('is carried into the got-it copy as the version had it, even when the shelf has changed since (the copy is not a rebuild)', async () => {
+    await started()
+    shelve(['entry-d', { kind: 'drop' }, null])
+
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', shelfCounts: FIRST_COUNTS })
+  })
+})
+
+describe('RoutineService.build: what is left out of the routine (the "Not in your routine" list)', () => {
+  // Amara's shelf: a cleanser the rules keep, and a steroid cream (a cream, treat step) they stop. The default reason of a verdict product is 'A test reason.'.
+  const STEROID_REASON = 'It has a steroid in it, so we stop it slowly.'
+  const STOPPED = { entryId: 'entry-b', title: 'Cream', status: 'stepping-down' as const, reason: 'A test reason.' }
+
+  /** More products on the shelf, each with the verdict the rules gave it and the reason the verdict screen shows. */
+  const shelve = (...products: [id: string, verdict: ShelfVerdict, step: RoutineStep | null, reason: string, facts?: Partial<ShelfFacts>][]) => {
+    for (const [id, , , , facts] of products) addProduct(id, CLEAN, facts)
+    saveVerdict([...productsOfVerdict(), ...products.map(([id, verdict, step, reason]) => verdictProduct(id, verdict, step, { reason }))])
+  }
+  /** The verdict saved again, the reason of one product changed. */
+  const rewordVerdict = (entryId: string, reason: string) => saveVerdict(productsOfVerdict().map((p) => (p.entryId === entryId ? { ...p, reason } : p)))
+  const listOf = async () => (await latestRow()).notInRoutine
+
+  it('records the steroid cream, which the rules stop, as stepping down with the verdict\'s own reason and a plain title, and leaves the kept cleanser out', async () => {
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('takes each reason from the verdict item of that product, not from the routine\'s words', async () => {
+    saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, reason: STEROID_REASON } : p)))
+
+    await build('first')
+
+    expect(await listOf()).toEqual([{ ...STOPPED, reason: STEROID_REASON }])
+    expect((await latestRow()).steps.map((s) => s.reason).join(' ')).not.toContain(STEROID_REASON)
+  })
+
+  it('lists a stopped product as stepping-down and a dropped one as left-out, titled by form and step, in the order of the shelf and not of the verdict', async () => {
+    shelve(
+      ['entry-c', { kind: 'drop' }, 'cleanse', 'It does the same job as your cleanser.', { form: 'gel' }],
+      ['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.', { form: 'serum' }],
+    )
+    // The verdict names them in the opposite order to the shelf.
+    saveVerdict([...productsOfVerdict()].reverse())
+
+    await build('first')
+
+    expect(await listOf()).toEqual([
+      STOPPED,
+      { entryId: 'entry-c', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+      { entryId: 'entry-d', title: 'Serum', status: 'left-out', reason: 'It holds back the goal you chose.' },
+    ])
+  })
+
+  it('lists a dropped product that fills no step, and titles one with no label by its step', async () => {
+    world.entries.push({ id: 'entry-nl', kind: 'no-label', addedAt: at(10 * MINUTE), itemId: 'item-nl' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-nl', { kind: 'drop' }, 'treat', { reason: 'We could not tell what is in it.' })])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED, { entryId: 'entry-nl', title: 'Treatment', status: 'left-out', reason: 'We could not tell what is in it.' }])
+  })
+
+  it('keeps reduced products out of the list (they stay in the routine), a reduced sunscreen too, and kept spares', async () => {
+    shelve(
+      ['entry-m', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'moisturise', 'Better used less often.'],
+      ['entry-spf', { kind: 'reduce', maxFrequency: 'alternate-days' }, 'protect', 'Better used less often.'],
+      ['entry-k', { kind: 'keep' }, null, 'It suits you.'],
+    )
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('leaves out a verdict entry whose product is no longer on the shelf, and one whose product cannot be found: the routine was not built from them', async () => {
+    addProduct('entry-lost', CLEAN)
+    world.facts.delete('form-entry-lost')
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-lost', { kind: 'drop' }, null), verdictProduct('entry-ghost', { kind: 'drop' }, null)])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('records an empty list, not null, when nothing was left out', async () => {
+    world.entries = []
+    saveVerdict([])
+
+    await build('first')
+
+    expect(await listOf()).toEqual([])
+  })
+
+  it('has none recorded (null) while the version is pending, and the very version it is filled in to has the list', async () => {
+    let during: Row | null = null
+    writer.hook = async () => {
+      during = await repository.latest(AMARA_PROFILE)
+    }
+
+    await build('first')
+
+    expect(during).toMatchObject({ status: 'pending', notInRoutine: null })
+    expect(await listOf()).toEqual([STOPPED])
+  })
+
+  it('records the same list when the rules wrote the routine because the writer failed three times', async () => {
+    script(throws(), throws(), throws())
+
+    await build('first')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', notInRoutine: [STOPPED] })
+  })
+
+  it('records the same list when the rules wrote the routine because the day\'s writer limit was spent', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    setClock(10 * MINUTE)
+
+    await build('shelf')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0, notInRoutine: [STOPPED] })
+  })
+
+  it('lists the shelf as it is when the build is made, with the verdict\'s words of that time, while the routine is not started yet', async () => {
+    await build('first')
+    shelve(['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(HOUR)
+
+    await build('shelf')
+
+    expect(await listOf()).toEqual([{ ...STOPPED, reason: STEROID_REASON }, { entryId: 'entry-d', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+  })
+
+  it('lists it again in a rebuild after Start that changes the routine: the cleanser gone, and what the verdict now says about the cream', async () => {
+    await started()
+    removeShelfProduct('entry-a')
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect((await currentRow()).notInRoutine).toEqual([{ ...STOPPED, reason: STEROID_REASON }])
+  })
+
+  it('lists it again in a rebuild after Start that only keeps the routine under new cautions: it is written from the shelf it was built from, not copied', async () => {
+    await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    setClock(3 * DAY)
+
+    expect(await build('safety')).toBe('built')
+
+    expect((await currentRow()).notInRoutine).toEqual([STOPPED, { entryId: 'entry-c', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+  })
+
+  it('keeps the words of the build when the verdict is reworded and nothing else moved: the rebuild finds nothing to change and writes nothing', async () => {
+    const before = await started()
+    rewordVerdict('entry-b', STEROID_REASON)
+    const setList = vi.spyOn(repository, 'setNotInRoutine')
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(setList).not.toHaveBeenCalled()
+    expect(await currentRow()).toEqual(before)
+    expect((await currentRow()).notInRoutine).toEqual([STOPPED])
+  })
+
+  it('refreshes the list with the counts on a rebuild that finds nothing to change but whose inputs moved: the shelf as it sorts now, in the verdict\'s words now', async () => {
+    const before = await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+    setClock(3 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    const now = await currentRow()
+    expect(now.id).toBe(before.id)
+    expect(now.notInRoutine).toEqual([{ ...STOPPED, reason: STEROID_REASON }, { entryId: 'entry-c', title: 'Cream', status: 'left-out', reason: 'It holds back the goal you chose.' }])
+    expect(now.shelfCounts).toEqual({ keep: 1, reduce: 0, drop: 1, stop: 1 })
+  })
+
+  it('gives a routine built before the column its list on an unchanged rebuild, though its counts and fingerprint are the build\'s already', async () => {
+    const before = await started()
+    await repository.append({ ...structuredClone(before), id: 'version-old', notInRoutine: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+    expect((await currentRow()).notInRoutine).toBeNull()
+    const setFingerprint = vi.spyOn(repository, 'setRoutineFingerprint')
+    setClock(4 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ id: 'version-old', notInRoutine: [STOPPED], routineFingerprint: before.routineFingerprint })
+    expect(setFingerprint).not.toHaveBeenCalled()
+  })
+
+  it('writes the list before the fingerprint, so a failure between them leaves the fingerprint unrecorded and the next attempt records both', async () => {
+    const before = await started()
+    shelve(['entry-c', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    setClock(3 * DAY)
+    vi.spyOn(repository, 'setNotInRoutine').mockRejectedValueOnce(new Error('d1 down'))
+
+    await expect(build('verdict')).rejects.toThrow('d1 down')
+
+    expect((await currentRow()).routineFingerprint).toBe(before.routineFingerprint)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect((await currentRow()).notInRoutine).toHaveLength(2)
+    expect((await currentRow()).routineFingerprint).not.toBe(before.routineFingerprint)
+  })
+
+  it('writes no list when the fingerprint is already the build\'s and the version has one', async () => {
+    const before = await started()
+    const setList = vi.spyOn(repository, 'setNotInRoutine')
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(setList).not.toHaveBeenCalled()
+    expect(await currentRow()).toEqual(before)
+  })
+
+  it('is carried unchanged into the copy that "I got it" appends, even when the shelf and the verdict\'s words have changed since (the copy is not a rebuild)', async () => {
+    const before = await started()
+    expect(before.notInRoutine).toEqual([STOPPED])
+    shelve(['entry-d', { kind: 'drop' }, null, 'It holds back the goal you chose.'])
+    rewordVerdict('entry-b', STEROID_REASON)
+
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', notInRoutine: [STOPPED] })
+  })
+
+  it('carries null into the copy of a routine built before the column: the copy does not invent a list', async () => {
+    const before = await started()
+    await repository.append({ ...structuredClone(before), id: 'version-old', notInRoutine: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+
+    setClock(3 * DAY + HOUR)
+    await gotIt('treat')
+
+    expect(await currentRow()).toMatchObject({ reason: 'got-it', notInRoutine: null })
   })
 })
 
@@ -852,14 +1272,15 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
   it('completes a version with no writer call when only the step-down changed, taking the new template, dated the day of the rebuild, and keeping the steps', async () => {
     const before = await started()
     saveVerdict(productsOfVerdict().map((p) => (p.entryId === 'entry-b' ? { ...p, verdict: { kind: 'stop' as const, taperTemplateId: 'TPR-STEROID-2' } } : p)))
-    setClock(2 * DAY + HOUR)
+    // Two days after day 1 (started() taps on 2030-06-17, so day 1 is the 18th): the rebuild's day is well past the start, and is what dates the new step-down.
+    setClock(4 * DAY + HOUR)
 
     expect(await build('verdict')).toBe('built')
 
     expect(attempts).toBe(1)
     const row = await latestRow()
     expect(row).toMatchObject({ id: 'version-2', writerCalls: 0, reason: 'verdict', startedOn: before.startedOn })
-    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-2', startedOn: new Date('2030-06-17T00:00:00.000Z') }])
+    expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-2', startedOn: new Date('2030-06-19T00:00:00.000Z') }])
     expect(plain(row)).toEqual(plain(before))
     expect(row.expectation).toBe(before.expectation)
   })
@@ -911,7 +1332,7 @@ describe('RoutineService.start', () => {
     expect((await currentRow()).startedOn).toBeNull()
   })
 
-  it('makes today day 1, on the routine in force and its step-downs', async () => {
+  it('makes tomorrow day 1, on the routine in force and its step-downs: the next UTC midnight, not the moment of the tap', async () => {
     await firstBuild()
     setClock(2 * DAY + 3 * HOUR)
 
@@ -920,10 +1341,24 @@ describe('RoutineService.start', () => {
     const view = await current()
     expect(view.status).toBe('ready')
     const version = (view as { version: Row }).version
-    expect(version.startedOn).toBeInstanceOf(Date)
-    expect(utcDay(version.startedOn!)).toBe(utcDay(clock))
+    // Tapped on 2030-06-17 at 15:00 UTC: day 1 is 2030-06-18 at 00:00 UTC.
+    expect(version.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
+    expect(utcDay(version.startedOn!)).toBe(utcDay(at(3 * DAY)))
     expect(version.tapers).toHaveLength(1)
     expect(version.tapers[0]!.startedOn).toEqual(version.startedOn)
+  })
+
+  // Tomorrow is the next UTC calendar day, whatever the hour: the last millisecond of a day and the first of the next are one day apart in their answers.
+  it.each([
+    ['the last millisecond of a UTC day', 12 * HOUR - 1, '2030-06-16T00:00:00.000Z'],
+    ['the first millisecond of the next UTC day', 12 * HOUR, '2030-06-17T00:00:00.000Z'],
+  ])('dates day 1 from %s as the following UTC midnight', async (_when, offsetMs, day1) => {
+    await firstBuild()
+    setClock(offsetMs)
+
+    await start()
+
+    expect((await currentRow()).startedOn).toEqual(new Date(day1))
   })
 
   it('is idempotent: starting again on a later day moves nothing and appends no version', async () => {
@@ -931,12 +1366,25 @@ describe('RoutineService.start', () => {
     setClock(2 * DAY)
     await start()
     const afterFirstStart = await currentRow()
+    expect(afterFirstStart.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
     setClock(5 * DAY)
 
     await expect(start()).resolves.toBeUndefined()
 
     expect(await repository.latest(AMARA_PROFILE)).toEqual(afterFirstStart)
     expect(ids).toBe(1)
+  })
+
+  it('is idempotent on the same day too: a second tap before day 1 has begun does not move day 1 nor date the step-downs again', async () => {
+    await firstBuild()
+    setClock(2 * DAY)
+    await start()
+    const afterFirstStart = await currentRow()
+    setClock(2 * DAY + HOUR)
+
+    await start()
+
+    expect(await currentRow()).toEqual(afterFirstStart)
   })
 
   it('reaches a build that is under way, so the version it completes already has the start date', async () => {
@@ -952,7 +1400,7 @@ describe('RoutineService.start', () => {
     const row = await currentRow()
     expect(row.id).toBe('version-2')
     expect(row.startedOn).not.toBeNull()
-    expect(utcDay(row.startedOn!)).toBe(utcDay(at(DAY)))
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(2 * DAY)))
   })
 })
 
@@ -1624,7 +2072,7 @@ describe('RoutineService.build: a Start that lands during a build', () => {
 
     const row = await currentRow()
     expect(row.id).toBe('version-2')
-    expect(utcDay(row.startedOn!)).toBe(utcDay(at(DAY)))
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(2 * DAY)))
     expect(row.tapers).toEqual([{ shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: row.startedOn }])
   })
 
@@ -1645,8 +2093,8 @@ describe('RoutineService.build: a Start that lands during a build', () => {
 
     const row = await latestRow()
     expect(row).toMatchObject({ source: 'rules', writerCalls: 0 })
-    expect(utcDay(row.startedOn!)).toBe(utcDay(at(10 * MINUTE)))
-    expect(row.tapers.every((taper) => taper.startedOn !== null)).toBe(true)
+    expect(utcDay(row.startedOn!)).toBe(utcDay(at(10 * MINUTE + DAY)))
+    expect(row.tapers.every((taper) => taper.startedOn !== null && taper.startedOn.getTime() === row.startedOn!.getTime())).toBe(true)
   })
 })
 
@@ -1664,6 +2112,38 @@ describe('RoutineService.build: a step-down that begins after Start', () => {
       { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
       { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-18T00:00:00.000Z') },
     ])
+  })
+})
+
+describe('RoutineService.build: a step-down that would begin before day 1', () => {
+  // ASSUMED, not in the brief's words: "taper dates count from [day 1]". Start taps on the 17th make the 18th day 1; a stop the rules add the same evening must not
+  // begin on the 17th, a day before the routine it belongs to has begun.
+  it('begins a new stop that a rebuild adds between the tap and day 1 on day 1, not on the day of the rebuild', async () => {
+    const before = await started()
+    expect(before.startedOn).toEqual(new Date('2030-06-18T00:00:00.000Z'))
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    // 2030-06-17 at 13:00 UTC: after the tap, a day before day 1.
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers).toEqual([
+      { shelfProductId: 'entry-b', templateId: 'TPR-STEROID-1', startedOn: before.startedOn },
+      { shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: new Date('2030-06-18T00:00:00.000Z') },
+    ])
+  })
+
+  it('begins a stop that a rebuild adds on day 1 itself that very day (the boundary: day 1 is the first day it may begin)', async () => {
+    const before = await started()
+    addProduct('entry-c', STEROID, { name: 'Second Cream' })
+    saveVerdict([...productsOfVerdict(), verdictProduct('entry-c', { kind: 'stop', taperTemplateId: 'TPR-STEROID-1' }, null, { sourceUrls: [STEROID_SOURCE] })])
+    // 2030-06-18 at 00:00:00.000 UTC, the first millisecond of day 1.
+    setClock(2 * DAY + 12 * HOUR)
+
+    expect(await build('verdict')).toBe('built')
+
+    expect((await currentRow()).tapers[1]).toEqual({ shelfProductId: 'entry-c', templateId: 'TPR-STEROID-1', startedOn: before.startedOn })
   })
 })
 
@@ -2483,7 +2963,8 @@ describe('RoutineService.requestIfStale: after a build that found nothing to cha
     await run(queuedBody())
 
     expect(attempts).toBe(1)
-    expect(await currentRow()).toEqual({ ...before, routineFingerprint: key })
+    // Only the fingerprint and the shelf counts under it change: the spare toner now on the shelf is one more product kept.
+    expect(await currentRow()).toEqual({ ...before, routineFingerprint: key, shelfCounts: { ...before.shelfCounts!, keep: before.shelfCounts!.keep + 1 } })
     await requestIfStale()
     expect(queued()).toHaveLength(1)
   })
@@ -2508,13 +2989,56 @@ describe('RoutineService.requestIfStale: after a build that found nothing to cha
     }))
   })
 
+  it('records the counts of the shelf as it is now with the fingerprint, so the summary counts the product that joined it', async () => {
+    const before = await started()
+    expect(before.shelfCounts).toEqual({ keep: 1, reduce: 0, drop: 0, stop: 1 })
+    droppedProduct()
+    setClock(3 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect((await currentRow()).shelfCounts).toEqual({ keep: 2, reduce: 0, drop: 0, stop: 1 })
+  })
+
+  it('writes the counts before the fingerprint, so a failure between them leaves the fingerprint unrecorded and the next attempt records both', async () => {
+    const before = await started()
+    droppedProduct()
+    setClock(3 * DAY)
+    vi.spyOn(repository, 'setShelfCounts').mockRejectedValueOnce(new Error('d1 down'))
+
+    await expect(build('verdict')).rejects.toThrow('d1 down')
+
+    expect(await currentRow()).toEqual(before)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ shelfCounts: { keep: 2, reduce: 0, drop: 0, stop: 1 } })
+    expect((await currentRow()).routineFingerprint).not.toBe(before.routineFingerprint)
+  })
+
+  it('gives a routine built before the column its counts on an unchanged rebuild, though its fingerprint is the build\'s already', async () => {
+    const before = await started()
+    // An old routine in force: the same routine and fingerprint, no counts.
+    await repository.append({ ...structuredClone(before), id: 'version-old', shelfCounts: null, createdAt: at(3 * DAY), readyAt: at(3 * DAY) })
+    expect((await currentRow()).shelfCounts).toBeNull()
+    const set = vi.spyOn(repository, 'setRoutineFingerprint')
+    setClock(4 * DAY)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(await currentRow()).toMatchObject({ id: 'version-old', shelfCounts: { keep: 1, reduce: 0, drop: 0, stop: 1 }, routineFingerprint: before.routineFingerprint })
+    expect(set).not.toHaveBeenCalled()
+  })
+
   it('leaves the fingerprint alone when it is already the build\'s', async () => {
     const before = await started()
     const set = vi.spyOn(repository, 'setRoutineFingerprint')
+    const setCounts = vi.spyOn(repository, 'setShelfCounts')
 
     expect(await build('verdict')).toBe('unchanged')
 
     expect(set).not.toHaveBeenCalled()
+    expect(setCounts).not.toHaveBeenCalled()
     expect(await currentRow()).toEqual(before)
   })
 })

@@ -30,8 +30,11 @@ import { parseFrame, sseReader, type SseReader } from './sse'
 //
 // THE PUBLIC SHAPE PINNED HERE (pr4-plan.md):
 //   { status: 'pending' }
-//   { status: 'ready' | 'updating', startedOn: 'YYYY-MM-DD' | null, expectation, steps: Step[], tapers: Taper[] }
-//   Step  = { step, frequency, reason, changed, product }
+//   { status: 'ready' | 'updating', startedOn: 'YYYY-MM-DD' | null, expectation, morning: Entry[], evening: Entry[], notInRoutine: NotInRoutine[] | null, tapers: Taper[], summary: Summary | null }
+//   (PR 6: `steps` is gone. Placement and the words are pinned in routines.view.test.ts; this file pins that they reach the wire.)
+//   NotInRoutine = { entryId, title, status: 'stepping-down' | 'left-out', reason }   (null for a version built before the column)
+//   Summary = { goal: { id, label }, keepUsing, useLessOrChange, stepDown: { products: { brand, name }[], message } | null }   (PR 5; null for a version with no stored counts)
+//   Entry = { step, title, when, reason, changed, product }
 //   product = { kind: 'own', entryId, brand, name } | { kind: 'recommended', code, brand, name, imageUrl, origin?, price: { min, max, currency } | null, whereSold,
 //             soldInCurrentCountry, soldElsewhere, keyIngredient, strength, notYetGot } | { kind: 'none' }
 //   Taper = { entryId, brand, name, code, kind, whatToExpect, seeAProfessionalIf, steps: { fromWeek, toWeek, frequency, fromDate?, toDate? }[] }
@@ -120,10 +123,18 @@ const errorCodeOf = async (res: Reply) => {
   throw new Error(`expected an error, got ${res.status}`)
 }
 
-type Step = { step: string; frequency: string; reason: string; changed: boolean; product: Record<string, any> }
+type Step = { step: string; title: string; when: string; reason: string; changed: boolean; product: Record<string, any> }
+type NotInRoutine = { entryId: string; title: string; status: string; reason: string }
 type Taper = { entryId: string; brand: string | null; name: string; code: string; kind: string; whatToExpect: string; seeAProfessionalIf: string; steps: Record<string, any>[] }
-type ReadyBody = { status: 'ready' | 'updating'; startedOn: string | null; expectation: string; steps: Step[]; tapers: Taper[] }
+type Summary = { goal: { id: string; label: string }; keepUsing: number; useLessOrChange: number; stepDown: { products: { brand: string | null; name: string }[]; message: string } | null }
+type ReadyBody = { status: 'ready' | 'updating'; startedOn: string | null; expectation: string; morning: Step[]; evening: Step[]; notInRoutine: NotInRoutine[] | null; tapers: Taper[]; summary: Summary | null }
 type RoutineBody = { status: 'pending' } | ReadyBody
+/** The entries of a body once each, in routine order: a step in both lists is one entry. */
+const stepsOf = (body: ReadyBody): Step[] => {
+  const byStep = new Map<string, Step>()
+  for (const entry of [...body.morning, ...body.evening]) if (!byStep.has(entry.step)) byStep.set(entry.step, entry)
+  return ['cleanse', 'treat', 'moisturise', 'protect'].flatMap((step) => byStep.get(step) ?? [])
+}
 
 // --- people: a guest of one install, and the sign-in that makes the guest an account ---
 
@@ -321,6 +332,9 @@ const appendVersion = async (guest: Guest, over: Partial<RoutineVersionRow> = {}
     expectation: 'Give it 8 to 12 weeks before judging.',
     cautions: [],
     goal: 'glow',
+    // As the build sorted the seeded shelf (see withRoutine): one product kept, two to use less, three to leave out, and the steroid cream stopped.
+    shelfCounts: { keep: 1, reduce: 2, drop: 3, stop: 1 },
+    notInRoutine: [],
     readyAt: at(-age + versionCount),
     startedOn: null,
     servedAt: null,
@@ -342,7 +356,7 @@ const appendVersion = async (guest: Guest, over: Partial<RoutineVersionRow> = {}
 }
 /** A build under way: a pending version, created a minute ago. */
 const appendPending = (guest: Guest) =>
-  appendVersion(guest, { status: 'pending', createdAt: at(-MINUTE), steps: [], tapers: [], expectation: null, cautions: null, goal: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 })
+  appendVersion(guest, { status: 'pending', createdAt: at(-MINUTE), steps: [], tapers: [], expectation: null, cautions: null, goal: null, shelfCounts: null, notInRoutine: null, readyAt: null, model: null, promptHash: null, catalogVersion: null, routineFingerprint: null, source: null, writerCalls: 0 })
 
 type Seeded = { guest: Guest; own: string; stopped: string; version: RoutineVersionRow }
 /** An account whose routine is: cleanse its own cleanser, treat a Ghana-only serum, moisturise a Nigerian cream, protect nothing; a steroid cream being stepped down. */
@@ -358,6 +372,11 @@ const withRoutine = async (over: Partial<RoutineVersionRow> = {}): Promise<Seede
       stored('protect', { kind: 'none' }, 'am'),
     ],
     tapers: [{ shelfProductId: stopped, templateId: STEROID_TAPER, startedOn: null }],
+    // As the build froze it: the steroid cream stepping down, and a product left out that has since gone from the shelf.
+    notInRoutine: [
+      { entryId: stopped, title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' },
+      { entryId: 'entry-since-removed', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+    ],
     ...over,
   })
   return { guest, own, stopped, version }
@@ -474,7 +493,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const body = await readyOf(guest)
 
       expect(body.status).toBe('updating')
-      expect(body.steps.map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
+      expect(stepsOf(body).map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
     })
 
     it('answers pending, not the routine, once the safety answers state a caution it was not built under, and shows it again when they no longer do', async () => {
@@ -490,21 +509,21 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
   })
 
   describe('the body of a ready routine', () => {
-    it('shows each step with its frequency and reason, an own product as the shelf entry, a recommended one with its price, place, key ingredient and strength, and "use what you have" as none', async () => {
+    it('shows each step with its plain title, when-label and reason, an own product as the shelf entry, a recommended one with its price, place, key ingredient and strength, and "use what you have" as none', async () => {
       const { guest, own, version } = await withRoutine()
       const shown = await shelfProduct(guest, own)
 
       const body = await readyOf(guest)
 
       expect(body).toMatchObject({ status: 'ready', startedOn: null, expectation: 'Give it 8 to 12 weeks before judging.' })
-      expect(body.steps.map((s) => [s.step, s.frequency, s.reason, s.changed])).toEqual([
-        ['cleanse', 'am', 'Reason for cleanse.', false],
-        ['treat', 'pm', 'Reason for treat.', false],
-        ['moisturise', 'am-pm', 'Reason for moisturise.', false],
-        ['protect', 'am', 'Reason for protect.', false],
+      expect(stepsOf(body).map((s) => [s.step, s.when, s.reason, s.changed])).toEqual([
+        ['cleanse', 'Every day', 'Reason for cleanse.', false],
+        ['treat', 'Every day', 'Reason for treat.', false],
+        ['moisturise', 'Every day', 'Reason for moisturise.', false],
+        ['protect', 'Every day', 'Reason for protect.', false],
       ])
-      expect(body.steps[0]!.product).toEqual({ kind: 'own', entryId: own, brand: shown.brand, name: shown.name })
-      expect(body.steps[2]!.product).toEqual({
+      expect(stepsOf(body)[0]!.product).toEqual({ kind: 'own', entryId: own, brand: shown.brand, name: shown.name })
+      expect(stepsOf(body)[2]!.product).toEqual({
         kind: 'recommended',
         code: MOIST_NG.code,
         brand: MOIST_NG.brand,
@@ -519,14 +538,107 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
         strength: '15%',
         notYetGot: true,
       })
-      expect(body.steps[3]!.product).toEqual({ kind: 'none' })
+      expect(stepsOf(body)[3]!.product).toEqual({ kind: 'none' })
       expect(version.steps).toHaveLength(4)
+    })
+
+    it('lists the steps by when they are used: morning and evening lists in routine order, a step used morning and evening in both, and no list of steps', async () => {
+      const { guest } = await withRoutine()
+
+      const body = await readyOf(guest)
+
+      expect(body).not.toHaveProperty('steps')
+      // Cleanse am, treat pm, moisturise am-pm, protect am.
+      expect(body.morning.map((s) => s.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+      expect(body.evening.map((s) => s.step)).toEqual(['treat', 'moisturise'])
+      expect(body.morning.find((s) => s.step === 'moisturise')).toEqual(body.evening.find((s) => s.step === 'moisturise'))
+      for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'step', 'title', 'when'])
+    })
+
+    it('titles each step in plain words: the shelf product and the recommended product with no key ingredient by their step, a recommended one with a key ingredient by it, and "use what you have" by its step', async () => {
+      const { guest } = await withRoutine()
+
+      const body = await readyOf(guest)
+
+      // The catalog has no form for any of these products (a workbook row with a blank form, a product found by name).
+      expect(stepsOf(body).map((s) => [s.step, s.title])).toEqual([
+        ['cleanse', 'Cleanser'],
+        ['treat', 'Treatment'],
+        ['moisturise', 'Shea butter moisturiser'],
+        ['protect', 'Sunscreen'],
+      ])
+    })
+
+    it('shows what the build left out as it froze it: each with its entry id, title, status and the verdict\'s reason, even for a product that has gone from the shelf', async () => {
+      const { guest, stopped } = await withRoutine()
+
+      const body = await readyOf(guest)
+
+      expect(body.notInRoutine).toEqual([
+        { entryId: stopped, title: 'Cream', status: 'stepping-down', reason: 'It has a steroid in it, so we stop it slowly.' },
+        { entryId: 'entry-since-removed', title: 'Gel cleanser', status: 'left-out', reason: 'It does the same job as your cleanser.' },
+      ])
+    })
+
+    it('shows an empty list when nothing was left out, and null for a routine built before the list was kept', async () => {
+      const none = await withRoutine({ notInRoutine: [] })
+      const old = await withRoutine({ notInRoutine: null })
+
+      expect((await readyOf(none.guest)).notInRoutine).toEqual([])
+      expect((await readyOf(old.guest)).notInRoutine).toBeNull()
+      expect(stepsOf(await readyOf(old.guest))).toHaveLength(4)
+    })
+
+    it('shows the plan summary: the goal with its chip label, the stored counts, and the step-down of the stopped product with the sentence about it', async () => {
+      const { guest, stopped } = await withRoutine()
+      const shown = await shelfProduct(guest, stopped)
+
+      const { summary } = await readyOf(guest)
+
+      expect(summary).toEqual({
+        goal: { id: 'glow', label: 'A glow' },
+        keepUsing: 1,
+        useLessOrChange: 5,
+        stepDown: {
+          products: [{ brand: shown.brand, name: shown.name }],
+          message: `Stopping ${shown.brand} ${shown.name} suddenly can make your skin flare. We'll take it step by step, so the rough days are expected, not a surprise.`,
+        },
+      })
+    })
+
+    it('has no step-down in the summary when nothing is stopped', async () => {
+      const { guest } = await withRoutine({ tapers: [], shelfCounts: { keep: 2, reduce: 0, drop: 1, stop: 0 } })
+
+      const { summary } = await readyOf(guest)
+
+      expect(summary).toEqual({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 2, useLessOrChange: 1, stepDown: null })
+    })
+
+    it('has summary null for a routine with no stored counts, one built before the counts existed, and still shows its steps', async () => {
+      const { guest } = await withRoutine({ shelfCounts: null })
+
+      const body = await readyOf(guest)
+
+      expect(body.summary).toBeNull()
+      expect(stepsOf(body)).toHaveLength(4)
+    })
+
+    it('carries the same summary on an updating routine', async () => {
+      const { guest } = await withRoutine()
+      const ready = await readyOf(guest)
+      await appendPending(guest)
+
+      const updating = await readyOf(guest)
+
+      expect(updating.status).toBe('updating')
+      expect(updating.summary).toMatchObject({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 1, useLessOrChange: 5 })
+      expect(updating.summary).toEqual(ready.summary)
     })
 
     it('shows a product sold only in another country as not sold here, with the country that sells it and no price', async () => {
       const { guest } = await withRoutine()
 
-      const treat = (await readyOf(guest)).steps[1]!.product
+      const treat = stepsOf(await readyOf(guest))[1]!.product
 
       expect(treat).toMatchObject({ kind: 'recommended', code: TREAT_GH.code, brand: TREAT_GH.brand, name: TREAT_GH.name, soldInCurrentCountry: false, price: null, whereSold: null, soldElsewhere: ['GH'] })
       expect(treat).not.toHaveProperty('origin')
@@ -538,7 +650,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       })
       await putShopping(guest, 'GH')
 
-      const [moisturise] = (await readyOf(guest)).steps
+      const [moisturise] = stepsOf(await readyOf(guest))
 
       expect(moisturise!.product).toMatchObject({ code: MOIST_GH_TOO.code, soldInCurrentCountry: true, price: { min: 30, max: 45, currency: 'GHS' }, soldElsewhere: ['NG'] })
     })
@@ -546,7 +658,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
     it('keeps a retired recommended product on the screen, as sold nowhere', async () => {
       const { guest } = await withRoutine({ steps: [stored('protect', { kind: 'candidate', code: PROTECT_RETIRED.code }, 'am')] })
 
-      const [protect] = (await readyOf(guest)).steps
+      const [protect] = stepsOf(await readyOf(guest))
 
       expect(protect!.product).toMatchObject({ kind: 'recommended', code: PROTECT_RETIRED.code, brand: PROTECT_RETIRED.brand, name: PROTECT_RETIRED.name, soldInCurrentCountry: false, price: null, soldElsewhere: [] })
     })
@@ -593,7 +705,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
 
       const first = await readyOf(guest)
 
-      expect(first.steps.map((s) => s.changed)).toEqual([true, false, true, false])
+      expect(stepsOf(first).map((s) => s.changed)).toEqual([true, false, true, false])
     })
 
     it('serves a routine once: the version read is the one the next version is compared with', async () => {
@@ -605,15 +717,15 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
         stored('protect', { kind: 'none' }, 'am'),
       ]
       // The routine in force was served to nobody before: nothing is marked changed, and reading it makes it the one the next is compared with.
-      expect((await readyOf(guest)).steps.every((s) => !s.changed)).toBe(true)
+      expect(stepsOf(await readyOf(guest)).every((s) => !s.changed)).toBe(true)
       // A newer routine whose treat step differs from the one just shown.
       await appendVersion(guest, { steps: treatIs(MOIST_GH_TOO.code) }, 0)
 
       const next = await readyOf(guest)
 
-      expect(next.steps.map((s) => s.changed)).toEqual([false, true, false, false])
+      expect(stepsOf(next).map((s) => s.changed)).toEqual([false, true, false, false])
       // Reading it again changes nothing about what it is compared with.
-      expect((await readyOf(guest)).steps.map((s) => s.changed)).toEqual([false, true, false, false])
+      expect(stepsOf(await readyOf(guest)).map((s) => s.changed)).toEqual([false, true, false, false])
     })
   })
 
@@ -635,6 +747,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       'hintsShown',
       'source',
       'cautions',
+      'shelfCounts',
+      'shelf_counts',
       'gotIt',
       'approvedBy',
       'approvedOn',
@@ -701,7 +815,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(await res.json()).toMatchObject({ success: false, status: 409, error: { code: 'ROUTINE_NOT_READY' } })
     })
 
-    it('answers 200 with the routine started today, its step-downs dated from today, week by week', async () => {
+    it('answers 200 with the routine started tomorrow (day 1 is the day after the tap), its step-downs dated from then, week by week', async () => {
       const { guest } = await withRoutine()
       const today = new Date()
 
@@ -712,12 +826,12 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const day = (offset: number) => utcDay(new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + offset)))
       expect(body.status).toBe('ready')
       // A test that runs across UTC midnight would be wrong by a day; the read of the clock is a moment before the call.
-      expect(body.startedOn).toBe(day(0))
-      // Weeks 1-2 are days 0-13, weeks 3-4 days 14-27, week 5 days 28-34.
+      expect(body.startedOn).toBe(day(1))
+      // From day 1 (tomorrow): weeks 1-2 are days 1-14, weeks 3-4 days 15-28, week 5 days 29-35.
       expect(body.tapers[0]!.steps).toEqual([
-        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days', fromDate: day(0), toDate: day(13) },
-        { fromWeek: 3, toWeek: 4, frequency: 'weekly', fromDate: day(14), toDate: day(27) },
-        { fromWeek: 5, toWeek: 5, frequency: 'stop', fromDate: day(28), toDate: day(34) },
+        { fromWeek: 1, toWeek: 2, frequency: 'alternate-days', fromDate: day(1), toDate: day(14) },
+        { fromWeek: 3, toWeek: 4, frequency: 'weekly', fromDate: day(15), toDate: day(28) },
+        { fromWeek: 5, toWeek: 5, frequency: 'stop', fromDate: day(29), toDate: day(35) },
       ])
     })
 
@@ -797,11 +911,11 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(res.status).toBe(200)
       const body = await dataOf<ReadyBody>(res)
       expect(body.status).toBe('ready')
-      expect(body.steps[2]!.product).toMatchObject({ code: MOIST_NG.code, notYetGot: false })
-      expect(body.steps.map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
-      expect(body.steps[1]!.product).toMatchObject({ code: TREAT_GH.code, notYetGot: true })
+      expect(stepsOf(body)[2]!.product).toMatchObject({ code: MOIST_NG.code, notYetGot: false })
+      expect(stepsOf(body).map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
+      expect(stepsOf(body)[1]!.product).toMatchObject({ code: TREAT_GH.code, notYetGot: true })
       // The routine read afterwards says so too.
-      expect((await readyOf(guest)).steps[2]!.product).toMatchObject({ notYetGot: false })
+      expect(stepsOf(await readyOf(guest))[2]!.product).toMatchObject({ notYetGot: false })
     })
 
     it('answers 409 ROUTINE_NOT_READY, and appends no version, while a safety change hides the routine', async () => {
@@ -824,7 +938,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       const third = await gotIt('moisturise', guest)
 
       expect([second.status, third.status]).toEqual([200, 200])
-      expect((await dataOf<ReadyBody>(third)).steps[2]!.product).toMatchObject({ notYetGot: false })
+      expect(stepsOf(await dataOf<ReadyBody>(third))[2]!.product).toMatchObject({ notYetGot: false })
       expect((await routines.latest(guest.profileId))!.id).toBe(afterFirst.id)
       expect(afterFirst.reason).toBe('got-it')
     })
@@ -894,8 +1008,8 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(res.status).toBe(202)
       const body = await dataOf<ReadyBody>(res)
       expect(body.status).toBe('updating')
-      expect(body.steps.map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
-      expect(body.steps[1]!.product).toMatchObject({ code: TREAT_GH.code })
+      expect(stepsOf(body).map((s) => s.step)).toEqual(['cleanse', 'treat', 'moisturise', 'protect'])
+      expect(stepsOf(body)[1]!.product).toMatchObject({ code: TREAT_GH.code })
       expect(queuedFor(guest)).toEqual([
         {
           profileId: guest.profileId,
@@ -959,6 +1073,32 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(ended).toBe(true)
     })
 
+    it('carries the morning and evening lists and what was left out in the snapshot frame, the very ones the read answers, and no steps', async () => {
+      const { guest } = await withRoutine()
+      const { stream } = await watch(guest)
+
+      const { frames } = await stream.read(3)
+
+      const snapshot = parseFrame(frames[0]!).data as ReadyBody
+      const read = await readyOf(guest)
+      expect(snapshot).not.toHaveProperty('steps')
+      expect(snapshot.morning.map((s) => s.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+      expect(snapshot.evening.map((s) => s.step)).toEqual(['treat', 'moisturise'])
+      expect(snapshot.notInRoutine).toHaveLength(2)
+      expect([snapshot.morning, snapshot.evening, snapshot.notInRoutine]).toEqual([read.morning, read.evening, read.notInRoutine])
+    })
+
+    it('carries the plan summary in the snapshot frame, the one the read answers', async () => {
+      const { guest } = await withRoutine()
+      const { stream } = await watch(guest)
+
+      const { frames } = await stream.read(3)
+
+      const snapshot = parseFrame(frames[0]!).data as ReadyBody
+      expect(snapshot.summary).toMatchObject({ goal: { id: 'glow', label: 'A glow' }, keepUsing: 1, useLessOrChange: 5, stepDown: { products: [expect.objectContaining({ name: expect.any(String) })] } })
+      expect(snapshot.summary).toEqual((await readyOf(guest)).summary)
+    })
+
     it('starts with a pending snapshot and stays open for an account with no routine yet', async () => {
       const guest = await account()
       const { stream } = await watch(guest)
@@ -1008,7 +1148,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
 
       const body = await readyOf(guest)
       expect(body.status).toBe('ready')
-      expect(body.steps.map((s) => s.step)).toEqual(['cleanse'])
+      expect(stepsOf(body).map((s) => s.step)).toEqual(['cleanse'])
     })
   })
 })

@@ -35,6 +35,8 @@ const rowFor = (profileId: string, createdAt: Date, over: Partial<Appended> = {}
   expectation: 'Give it 8 to 12 weeks before judging.',
   cautions: [],
   goal: 'fade-dark-marks',
+  shelfCounts: { keep: 1, reduce: 0, drop: 0, stop: 0 },
+  notInRoutine: [],
   readyAt: createdAt,
   startedOn: null,
   servedAt: null,

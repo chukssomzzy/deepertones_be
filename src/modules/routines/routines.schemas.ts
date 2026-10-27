@@ -1,4 +1,5 @@
 import { z } from '@hono/zod-openapi'
+import { GOALS } from '../goals/goals.vocabulary'
 import { FREQUENCIES, ROUTINE_STEPS, TAPER_KINDS } from '../catalog/catalog.vocabulary'
 
 export const StepParams = z.object({
@@ -37,15 +38,25 @@ const RecommendedProduct = z
 
 const NoProduct = z.object({ kind: z.literal('none') }).openapi('RoutineNoProduct', { description: '"Use what you have": nothing to recommend for this step.' })
 
-const RoutineStepResponse = z
+const RoutineEntryResponse = z
   .object({
     step: z.enum(ROUTINE_STEPS),
-    frequency: z.enum(FREQUENCIES),
+    title: z.string().openapi({ description: 'The product in plain words ("Gel cleanser", "Niacinamide serum", "Sunscreen"): a capital, no full stop.' }),
+    when: z.string().openapi({ description: 'How often, in words for the card: "Every day", "3 evenings a week", "Once a week" or "When you need it".' }),
     reason: z.string().openapi({ description: 'Why, in words for the user.' }),
     changed: z.boolean().openapi({ description: 'True when this step\'s product or frequency differs from the routine the user was last shown, or that routine had no such step. Always false the first time a routine is shown.' }),
     product: z.discriminatedUnion('kind', [OwnProduct, RecommendedProduct, NoProduct]),
   })
-  .openapi('RoutineStep')
+  .openapi('RoutineEntry', { description: 'One card of the Morning or Evening list. A step used morning and evening is the same entry in both lists.' })
+
+const NotInRoutineResponse = z
+  .object({
+    entryId: z.string().openapi({ description: 'The shelf entry: its `id` from `GET /api/v1/me/shelf`. It may have left the shelf since the routine was built.' }),
+    title: z.string().openapi({ description: 'The product in plain words, as the routine titles one.' }),
+    status: z.enum(['stepping-down', 'left-out']).openapi({ description: '`stepping-down`: being stopped step by step (see `tapers`). `left-out`: not part of the routine.' }),
+    reason: z.string().openapi({ description: 'The verdict\'s own one-line reason for the product, as it was when the routine was built.' }),
+  })
+  .openapi('RoutineNotInRoutine')
 
 const RoutineTaperResponse = z
   .object({
@@ -70,10 +81,34 @@ const RoutineTaperResponse = z
   })
   .openapi('RoutineTaper')
 
+const RoutineSummaryResponse = z
+  .object({
+    goal: z.object({ id: z.enum(GOALS), label: z.string().openapi({ description: 'The goal as the goal chips name it.' }) }).openapi({ description: 'The goal the routine was built for.' }),
+    keepUsing: z.number().int().openapi({ description: 'Shelf products used as they are. A sunscreen the rules would reduce counts here too: sun protection is never used less.' }),
+    useLessOrChange: z.number().int().openapi({ description: 'Shelf products to use less often, or to leave out (redundant, in the way of the goal, or not clear enough to keep).' }),
+    stepDown: z
+      .object({
+        products: z.array(z.object({ brand: z.string().nullable(), name: z.string() })).openapi({ description: 'The products being stopped step by step, as in `tapers`.' }),
+        message: z.string().openapi({ description: 'The fixed sentence for the card, naming the products.' }),
+      })
+      .nullable()
+      .openapi({ description: 'Null when nothing is being stopped.' }),
+  })
+  .openapi('RoutineSummary', {
+    description:
+      'The "Your plan is ready" screen. The counts were fixed when the routine was built, so they always match it: every shelf product the routine was built from is in exactly one of `keepUsing`, `useLessOrChange` and the step-down.',
+  })
+
 const body = {
-  startedOn: z.string().nullable().openapi({ description: 'The day the user tapped Start, as `YYYY-MM-DD` (UTC); null until they do.' }),
+  summary: RoutineSummaryResponse.nullable().openapi({ description: 'Null for a routine built before summaries were kept; it gains one at its next rebuild.' }),
+  startedOn: z.string().nullable().openapi({ description: 'Day 1 of the routine, as `YYYY-MM-DD` (UTC): the day after the user tapped Start; null until they do. Step-down dates count from it.' }),
   expectation: z.string().openapi({ description: 'What to expect and when, in plain words.' }),
-  steps: z.array(RoutineStepResponse).openapi({ description: 'In routine order.' }),
+  morning: z.array(RoutineEntryResponse).openapi({ description: 'The morning list, in routine order (cleanse, treat, moisturise, protect). The sunscreen is only ever here.' }),
+  evening: z.array(RoutineEntryResponse).openapi({ description: 'The evening list, in routine order. Anything used less than daily (every other day, weekly, as needed) is here.' }),
+  notInRoutine: z.array(NotInRoutineResponse).nullable().openapi({
+    description:
+      'The shelf products the routine was built without, in the shelf\'s order: stopped ones (`stepping-down`) and dropped ones (`left-out`). Products used less often stay in the lists. Fixed when the routine was built. Null for a routine built before the list was kept (unknown, not none); it gains one at its next rebuild.',
+  }),
   tapers: z.array(RoutineTaperResponse).openapi({ description: 'One per product being stopped.' }),
 }
 

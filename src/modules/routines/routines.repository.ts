@@ -2,7 +2,7 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lte, ne, sql } f
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
-import { routineRequests, routineVersions } from './routines.table'
+import { routineRequests, routineVersions, type NotInRoutineItem, type ShelfCounts } from './routines.table'
 
 export type RoutineVersionRow = typeof routineVersions.$inferSelect
 
@@ -14,7 +14,7 @@ export type RoutineRequestRetry = Pick<RoutineRequestRow, 'retried' | 'retryDueA
 /** What a build fills a pending row with: everything the pending row did not know yet. `source` is always set once a build is done. */
 export type CompletedRoutineBuild = Pick<
   RoutineVersionRow,
-  'steps' | 'tapers' | 'expectation' | 'cautions' | 'goal' | 'model' | 'promptHash' | 'catalogVersion' | 'routineFingerprint' | 'hintsShown' | 'writerRetryDueAt' | 'writerCalls'
+  'steps' | 'tapers' | 'expectation' | 'cautions' | 'goal' | 'shelfCounts' | 'notInRoutine' | 'model' | 'promptHash' | 'catalogVersion' | 'routineFingerprint' | 'hintsShown' | 'writerRetryDueAt' | 'writerCalls'
 > & { source: NonNullable<RoutineVersionRow['source']>; readyAt: Date }
 
 // A JSON column keeps a step-down's start date as text, so every row read turns it back into a Date.
@@ -83,6 +83,16 @@ export class D1RoutinesRepository {
   /** Sets the fingerprint of the inputs the version stands for, changing nothing else of it: a rebuild that found nothing to change records the inputs it checked. A version nobody has is ignored. */
   async setRoutineFingerprint(id: string, fingerprint: string): Promise<void> {
     await this.db.update(routineVersions).set({ routineFingerprint: fingerprint }).where(eq(routineVersions.id, id))
+  }
+
+  /** Sets how the shelf sorts under the inputs the version stands for, changing nothing else of it: the sibling of `setRoutineFingerprint`, so the plan summary matches the shelf the routine was last checked against. A version nobody has is ignored. */
+  async setShelfCounts(id: string, shelfCounts: ShelfCounts): Promise<void> {
+    await this.db.update(routineVersions).set({ shelfCounts }).where(eq(routineVersions.id, id))
+  }
+
+  /** Sets what the routine was built without, changing nothing else of the version: the sibling of `setShelfCounts`, written before `setRoutineFingerprint` for the same reason. A version nobody has is ignored. */
+  async setNotInRoutine(id: string, items: NotInRoutineItem[]): Promise<void> {
+    await this.db.update(routineVersions).set({ notInRoutine: items }).where(eq(routineVersions.id, id))
   }
 
   /** Sets when the version was last returned to the user, changing nothing else of it. A version nobody has is ignored. */
