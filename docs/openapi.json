@@ -1568,7 +1568,7 @@
               "string",
               "null"
             ],
-            "description": "Day 1 of the routine, as `YYYY-MM-DD` (UTC): the day after the user tapped Start; null until they do. Step-down dates count from it."
+            "description": "Day 1 of the routine, as `YYYY-MM-DD`: the day after the user tapped Start, in their local calendar once a time zone is stored (UTC otherwise); fixed when set, so a later change of time zone does not move it. Null until they tap Start. Step-down dates count from it."
           },
           "expectation": {
             "type": "string",
@@ -2009,11 +2009,11 @@
                 },
                 "fromDate": {
                   "type": "string",
-                  "description": "The first day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started."
+                  "description": "The first day of the step, as `YYYY-MM-DD`: a calendar date, the person's local date once a time zone is stored (UTC otherwise), fixed when the step-down began. Only once the routine is started."
                 },
                 "toDate": {
                   "type": "string",
-                  "description": "The last day of the step, as `YYYY-MM-DD` (UTC). Only once the routine is started."
+                  "description": "The last day of the step, as `YYYY-MM-DD`, counted from `fromDate` in calendar days. Only once the routine is started."
                 }
               },
               "required": [
@@ -2053,7 +2053,7 @@
               "string",
               "null"
             ],
-            "description": "Day 1 of the routine, as `YYYY-MM-DD` (UTC): the day after the user tapped Start; null until they do. Step-down dates count from it."
+            "description": "Day 1 of the routine, as `YYYY-MM-DD`: the day after the user tapped Start, in their local calendar once a time zone is stored (UTC otherwise); fixed when set, so a later change of time zone does not move it. Null until they tap Start. Step-down dates count from it."
           },
           "expectation": {
             "type": "string",
@@ -2258,6 +2258,92 @@
           "strength",
           "inYourRoutine"
         ]
+      },
+      "Reminders": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "morning": {
+            "type": "string",
+            "example": "07:00"
+          },
+          "evening": {
+            "type": "string",
+            "example": "21:00"
+          },
+          "timeZone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The IANA time zone, or null until the phone reports one.",
+            "example": "Africa/Lagos"
+          },
+          "stepDownAlerts": {
+            "type": "boolean"
+          },
+          "missedDaysNudge": {
+            "type": "boolean"
+          },
+          "missedDaysChannel": {
+            "type": "string",
+            "enum": [
+              "push",
+              "whatsapp"
+            ],
+            "description": "Where the missed-days nudge goes. Read-only: `whatsapp` only when WhatsApp is an enabled channel here and the account has a verified phone, otherwise `push`."
+          }
+        },
+        "required": [
+          "enabled",
+          "morning",
+          "evening",
+          "timeZone",
+          "stepDownAlerts",
+          "missedDaysNudge",
+          "missedDaysChannel"
+        ]
+      },
+      "UpdateRemindersBody": {
+        "type": "object",
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Remind me at the times below."
+          },
+          "morning": {
+            "type": "string",
+            "maxLength": 16,
+            "description": "When to be reminded in the morning as a 24-hour time, `HH:MM`. Anything else is 400 `VALIDATION_FAILED`.",
+            "example": "07:00"
+          },
+          "evening": {
+            "type": "string",
+            "maxLength": 16,
+            "description": "When to be reminded in the evening as a 24-hour time, `HH:MM`. Anything else is 400 `VALIDATION_FAILED`.",
+            "example": "07:00"
+          },
+          "timeZone": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 64,
+            "description": "The phone's IANA time zone. Anything Intl does not know, and a fixed offset such as `+01:00`, is 400 `VALIDATION_FAILED`. The canonical name is stored (`africa/lagos` becomes `Africa/Lagos`). `null` clears it, and local days fall back to UTC.",
+            "example": "Africa/Lagos"
+          },
+          "stepDownAlerts": {
+            "type": "boolean",
+            "description": "Tell me when a step-down changes what I do."
+          },
+          "missedDaysNudge": {
+            "type": "boolean",
+            "description": "Nudge me when I have missed some days."
+          }
+        },
+        "additionalProperties": false
       },
       "FaceConsentGivenResponse": {
         "type": "object",
@@ -6386,7 +6472,7 @@
           "Routine"
         ],
         "summary": "The routine as Morning and Evening lists, what is not in it, and a dated step-down for each product being stopped",
-        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. The routine is built in the background, never in this request. `{ status: 'pending' }`: nothing to show yet (a build is on its way, which this ask requests when none is fresh), or the routine no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force, as `morning` and `evening` lists of entries (a step used morning and evening is in both) and `notInRoutine`; `updating` is the same body while a newer build is under way. An entry's `product` is `own` (a product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` (\"use what you have\"). A recommended product the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`, UTC days) appear once the user has started the routine.",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. The routine is built in the background, never in this request. `{ status: 'pending' }`: nothing to show yet (a build is on its way, which this ask requests when none is fresh), or the routine no longer fits the safety answers and is being rebuilt. `ready` carries the routine in force, as `morning` and `evening` lists of entries (a step used morning and evening is in both) and `notInRoutine`; `updating` is the same body while a newer build is under way. An entry's `product` is `own` (a product on the shelf), `recommended` (from the catalog, with its price range and where it is sold in the country the profile shops in) or `none` (\"use what you have\"). A recommended product the shopping country does not sell, or that has been retired, stays on the screen with `soldInCurrentCountry: false`. `changed` marks the steps that differ from the routine the user was last shown; reading the routine marks it shown. Step-down dates (`fromDate`, `toDate`) are calendar days, the person's local dates once a time zone is stored (UTC otherwise), fixed when set and not moved by a later change of time zone; they appear once the user has started the routine.",
         "security": [
           {
             "bearerAuth": []
@@ -6567,7 +6653,7 @@
           "Routine"
         ],
         "summary": "Start the routine: tomorrow is day 1",
-        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Dates the routine, and the step-downs in it, from tomorrow (the next UTC day): the first step is the morning after the tap. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.",
+        "description": "For a signed-up account only: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest, 409 `GOAL_REQUIRED` for a profile with no goal, then 503 `VERDICT_UNAVAILABLE` while the steroid or the lightening-agent step-down is not approved yet (the routine is built from the verdict). Note the order against the verdict's own, which answers 503 before 409. No body. Dates the routine, and the step-downs in it, from tomorrow (the next day in the person's time zone once one is stored, else the next UTC day): the first step is the morning after the tap. The date is fixed when set, so a later change of time zone does not move it. Starting again changes nothing and answers the same body. 409 `ROUTINE_NOT_READY` before there is a routine, and while a safety change hides it (`GET` answers pending): a routine you cannot see is not started.",
         "security": [
           {
             "bearerAuth": []
@@ -7055,6 +7141,200 @@
           },
           "503": {
             "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/reminders": {
+      "get": {
+        "operationId": "getReminders",
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "When and how the profile wants to be reminded",
+        "description": "For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. Reminders are off until turned on; the defaults are 07:00 and 21:00 with no time zone, and both alerts on. Each profile has its own settings.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The profile's reminder settings",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Reminders"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "operationId": "updateReminders",
+        "tags": [
+          "Reminders"
+        ],
+        "summary": "Change the reminder settings",
+        "description": "Name the settings to change; the rest keep their value. At least one is required, and `missedDaysChannel` is read-only, so sending it is 400 `VALIDATION_FAILED`. A body of only `timeZone` is fine: the phone sends it whenever its zone changes. The time zone also decides where the profile's local days begin (routine start and step-down dates).",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRemindersBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "All of the profile's settings, after the change",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Reminders"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
             "content": {
               "application/json": {
                 "schema": {

@@ -4,6 +4,7 @@ import { hc } from 'hono/client'
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import worker, { type AppType } from '../../src/index'
 import { createDb } from '../../src/lib/db'
+import { localDate } from '../../src/lib/local-day'
 import { D1CatalogRepository } from '../../src/modules/catalog/catalog.repository'
 import { ProductCatalogService } from '../../src/modules/catalog/catalog.service'
 import { D1CatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository'
@@ -849,6 +850,40 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       expect(again.startedOn).toBe(first.startedOn)
       expect(again.tapers).toEqual(first.tapers)
       expect(await readyOf(guest)).toMatchObject({ startedOn: first.startedOn })
+    })
+
+    // Dates are calendar dates fixed when set (spec #217): the zone only decides which date "tomorrow" is at the tap. Pacific/Kiritimati (UTC+14) and Pacific/Pago_Pago
+    // (UTC-11) are 25 hours apart, so for any moment their local dates differ, and a date derived from the stored zone at read time would move between them.
+    const putZone = async (guest: Guest, timeZone: string) => expect((await v1.me.reminders.$put({ json: { timeZone } }, { headers: guest.headers() })).status).toBe(200)
+
+    it('starts the day after the tap in the stored time zone, and a later change of zone moves neither day 1 nor the step-down dates', async () => {
+      const { guest } = await withRoutine()
+      await putZone(guest, 'Pacific/Kiritimati')
+      const tapped = new Date()
+
+      const started = await dataOf<ReadyBody>(await startRoutine(guest))
+
+      // A test that runs across a Kiritimati midnight would be wrong by a day; the read of the clock is a moment before the call.
+      const tomorrow = utcDay(new Date(localDate(tapped, 'Pacific/Kiritimati').getTime() + DAY))
+      expect(started.startedOn).toBe(tomorrow)
+      expect(started.tapers[0]!.steps[0]).toMatchObject({ fromDate: tomorrow })
+
+      await putZone(guest, 'Pacific/Pago_Pago')
+      const after = await readyOf(guest)
+
+      expect(after.startedOn).toBe(tomorrow)
+      expect(after.tapers).toEqual(started.tapers)
+    })
+
+    it('leaves the dates of a routine started with no zone where they were when the phone reports its zone later', async () => {
+      const { guest } = await withRoutine()
+      const started = await dataOf<ReadyBody>(await startRoutine(guest))
+
+      await putZone(guest, 'Pacific/Kiritimati')
+      const after = await readyOf(guest)
+
+      expect(after.startedOn).toBe(started.startedOn)
+      expect(after.tapers).toEqual(started.tapers)
     })
 
     it('answers 409 ROUTINE_NOT_READY, and does not start it, while a safety change hides the routine; it starts once the change is undone', async () => {
