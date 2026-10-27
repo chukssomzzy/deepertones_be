@@ -793,9 +793,23 @@ describe('the Worker scheduled handler: routines sweeps', () => {
 // cron was SCHEDULED for (controller.scheduledTime), not the moment the Worker happened to start. What is sent is pinned in reminders.sends.service.test.ts; here only the wiring.
 describe('the Worker scheduled handler: the reminder send job', () => {
   const SLOT = Date.UTC(2030, 5, 15, 6, 45)
+  // The tests that fire the daily and the reaper crons here run those jobs for real, over the rows the describes above left behind, and they queue work for it (verdict retries, safety
+  // parses, pushes). Into the real queues that work is consumed by this Worker after the file has finished, while vitest is closing, which prints an EnvironmentTeardownError. So every
+  // queue binding is a recorder, as the describes above do for the queues they read: what is queued here is caught and dropped with the test.
+  const sinks = {
+    OTP_DELIVERY_QUEUE: queueRecorder().queue,
+    SCAN_ITEMS_QUEUE: queueRecorder().queue,
+    PUSH_DELIVERY_QUEUE: queueRecorder().queue,
+    PUSH_RECEIPTS_QUEUE: queueRecorder().queue,
+    PARSE_SAFETY_QUEUE: queueRecorder().queue,
+    EMAIL_QUEUE: queueRecorder().queue,
+    FACE_SCANS_QUEUE: queueRecorder().queue,
+    VERDICTS_QUEUE: queueRecorder().queue,
+    ROUTINES_QUEUE: queueRecorder().queue,
+  }
   const fireReminders = async (cron: string, scheduledTime = SLOT) => {
     const ctx = createExecutionContext()
-    await worker.scheduled!(createScheduledController({ scheduledTime, cron }), env, ctx)
+    await worker.scheduled!(createScheduledController({ scheduledTime, cron }), { ...env, ...sinks } as typeof env, ctx)
     await waitOnExecutionContext(ctx)
   }
 
