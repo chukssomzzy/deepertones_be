@@ -1,5 +1,5 @@
 import { describeError } from '../../jobs/safe-error'
-import type { Frequency } from '../catalog/catalog.vocabulary'
+import { dueOnDay } from '../catalog/catalog.frequency'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { RemindersRepository } from './reminders.repository'
 import type { ReminderSendsRepository } from './reminders.sends.repository'
@@ -165,24 +165,8 @@ export class ReminderSendsService {
 
   /** The entry titles the reminder lists. The morning lists every entry; the evening only those due on `day`. Empty when nothing is. */
   private static titleFor(plan: ReminderRoutinePlan, time: ReminderTime, day: string): string {
-    const entries = time === 'morning' ? plan.morning : plan.evening.filter(({ frequency }) => ReminderSendsService.dueOnDay(frequency, ReminderSendsService.daysBetween(plan.dayOne, day)))
+    const entries = time === 'morning' ? plan.morning : plan.evening.filter(({ frequency, anchor }) => dueOnDay(frequency, anchor ?? plan.dayOne, day))
     return entries.map(({ title }) => title).join(', ')
-  }
-
-  /** Whether an evening entry of this frequency is due `sinceDayOne` days after day 1 (0 on day 1 itself). */
-  private static dueOnDay(frequency: Frequency, sinceDayOne: number): boolean {
-    switch (frequency) {
-      case 'pm':
-      case 'am-pm':
-        return true
-      case 'alternate-days':
-        return sinceDayOne % 2 === 0
-      case 'weekly':
-        return sinceDayOne % 7 === 0
-      case 'am':
-      case 'as-needed':
-        return false
-    }
   }
 
   private static daysBetween(from: string, to: string): number {

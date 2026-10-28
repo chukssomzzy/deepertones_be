@@ -7,7 +7,7 @@ export type ReminderSettings = typeof reminderSettings.$inferSelect
 export type ReminderSettingsPatch = Partial<Omit<ReminderSettings, 'profileId' | 'updatedAt'>>
 
 /** One entry of a routine list as the send job reads it: the routine's title for the step, and the step's raw frequency. */
-export type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency }
+export type PlanEntry = { step: RoutineStep; title: string; frequency: Frequency; anchor?: string }
 
 /** One day a step of a step-down begins: the product's routine title and the step's fixed line ("From today: use it every other day"), already past the wording gate. */
 export type StepDownChange = { day: string; title: string; line: string }

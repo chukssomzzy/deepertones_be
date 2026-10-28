@@ -3,14 +3,15 @@ import { type Actor, runAs } from '../../lib/context'
 import { ConflictError } from '../../lib/errors'
 import { MemoryScanEvents } from '../../providers/scan-events/memory.scan-events'
 import type { ProductCatalogService, ProductSummary, ShelfFacts } from '../catalog/catalog.service'
-import type { RoutineStep } from '../catalog/catalog.vocabulary'
+import type { Frequency, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
-import type { CatalogWorkbookService, Guide } from '../catalog/catalog.workbook.service'
+import type { CatalogWorkbookService, Guide, VerdictRule } from '../catalog/catalog.workbook.service'
 import { SHOWN_CONCERNS, concernsForGoal, type ShownConcern } from '../face-scans/face-scans.tables'
 import type { GoalsService } from '../goals/goals.service'
 import { GOALS, type Goal } from '../goals/goals.vocabulary'
 import type { RecommendationService } from '../recommendations/recommendations.service'
+import type { RemindersService } from '../reminders/reminders.service'
 import type { Candidate } from '../recommendations/recommendations.types'
 import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
@@ -19,6 +20,7 @@ import { FakeRoutinesRepository } from './routines.repository.fake'
 import { FORBIDDEN_WORDING } from './routines.wording'
 import type { RoutineVersionRow } from './routines.repository'
 import type { RoutineService, RoutineView } from './routines.service'
+import type { RoutineProduct } from './routines.types'
 import { RoutineViewerService } from './routines.viewer.service'
 
 // The session-facing routine (spec #189, PR 4b): what the routes call. Each method is the session's own (no profile id; the actor's profile is the one read) over
@@ -154,6 +156,18 @@ const TEMPLATE: TaperRow = {
   auditedOn: null,
 }
 
+// Spec #233, PR 4a: the shapes the skin-care module's narrow reads are assumed to have (the brief gives them; src/modules/skin-care/skin-care.types.ts is production code, so they are
+// restated here). The viewer answers a SkinCareRoutine by profile id and is given a SkinCareState by the module's `stateFor(profileId, today)`, `today` being the local day 'YYYY-MM-DD'.
+type SkinCareRoutine = {
+  dayOne: string | null
+  steps: { step: RoutineStep; title: string; productRef: RoutineProduct; productId: string | null; changedOn: string; activeGroups: IngredientGroup[] }[]
+  stepDownRunning: boolean
+}
+type SkinCareState = {
+  pauses: { step: RoutineStep; productId: string; state: 'paused' | 'bringing-back'; frequency?: Frequency; anchor?: string }[]
+  held: boolean
+}
+
 type World = {
   goal: string | null
   /** The step-down templates the verdict needs: both approved, or one missing. */
@@ -172,6 +186,12 @@ type World = {
   candidates: Partial<Record<RoutineStep, Candidate[]>>
   /** The ticked boxes of the person's current safety answer. */
   safetyChoices: string[]
+  /** The approved ingredient rules, with the group each belongs to (the Ingredients tab): what a product's active groups are read from. None until a test sets them. */
+  rules: VerdictRule[]
+  /** What the skin-care module says about the profile today; the stub the container wires says no pauses and no hold. */
+  skinCare: SkinCareState
+  /** The time zone stored with the profile's reminder settings; null is UTC. */
+  zone: string | null
 }
 
 const newWorld = (): World => ({
@@ -204,6 +224,9 @@ const newWorld = (): World => ({
   guides: new Map(ROUTINE_ORDER.map((step): [string, Guide] => [`${step}|`, { whatItDoes: `What ${step} does.`, lookFor: `What to look for in ${step}.`, forDeeperSkin: `Deeper skin and ${step}.`, lookForWhenPregnant: null }])),
   candidates: {},
   safetyChoices: ['none'],
+  rules: [],
+  skinCare: { pauses: [], held: false },
+  zone: null,
 })
 
 let world: World
@@ -214,6 +237,7 @@ let viewer: RoutineViewerService
 let routinesEnabled: boolean
 let routines: { [K in 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale']: ReturnType<typeof vi.fn> }
 let requireGoal: ReturnType<typeof vi.fn>
+let stateFor: ReturnType<typeof vi.fn<(profileId: string, today: string) => Promise<SkinCareState>>>
 
 const setClock = (offsetMs: number) => {
   clock = at(offsetMs)
@@ -232,11 +256,13 @@ const makeViewer = () =>
     goals: { requireGoal } as unknown as Pick<GoalsService, 'requireGoal'>,
     workbook: {
       guideFor: async (step: RoutineStep, goal: Goal) => structuredClone(world.guides.get(`${step}|${goal}`) ?? world.guides.get(`${step}|`) ?? null),
-      verdictReference: async () => ({ rulesVersion: 'r', catalogVersion: 42, rules: [], claimPhrases: [], tapers: { ...world.tapers } }),
+      verdictReference: async () => ({ rulesVersion: 'r', catalogVersion: 42, rules: structuredClone(world.rules), claimPhrases: [], tapers: { ...world.tapers } }),
+      // The same approved rules, for a viewer that reads them as the live rules (they carry their group either way).
+      liveRules: async () => ({ version: 'r', entries: structuredClone(world.rules) }),
       recommendedByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, RecommendedByCode][] => (world.recommended.has(code) ? [[code, structuredClone(world.recommended.get(code)!)]] : []))),
       tapersByCode: async (codes: string[]) => new Map(codes.flatMap((code): [string, TaperRow][] => (code === TEMPLATE.code ? [[code, structuredClone(TEMPLATE)]] : []))),
       countries: async () => structuredClone(world.countries),
-    } as unknown as Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor'>,
+    } as unknown as Pick<CatalogWorkbookService, 'verdictReference' | 'recommendedByCode' | 'tapersByCode' | 'countries' | 'guideFor' | 'liveRules'>,
     catalog: {
       shelfFacts: async (ids: string[]) => new Map(ids.flatMap((id): [string, ShelfFacts][] => (world.facts.has(id) ? [[id, structuredClone(world.facts.get(id)!)]] : []))),
       productSummaries: async (ids: string[]) => new Map(ids.flatMap((id): [string, ProductSummary][] => (world.summaries.has(id) ? [[id, structuredClone(world.summaries.get(id)!)]] : []))),
@@ -252,6 +278,8 @@ const makeViewer = () =>
       // As SafetyService.view has it: pregnant or breastfeeding ticked is excludesPregnancyCaution.
       currentOrNull: async () => ({ choices: [...world.safetyChoices], excludesPregnancyCaution: world.safetyChoices.includes('pregnant') || world.safetyChoices.includes('breastfeeding') }),
     } as unknown as Pick<SafetyService, 'currentOrNull'>,
+    skinCare: { stateFor },
+    reminders: { zoneFor: async () => world.zone } as unknown as Pick<RemindersService, 'zoneFor'>,
     repository,
     events,
     enabled: routinesEnabled,
@@ -287,6 +315,7 @@ beforeEach(() => {
     if (world.goal === null) throw new ConflictError('GOAL_REQUIRED', 'Pick a goal first')
     return { goal: world.goal }
   })
+  stateFor = vi.fn(async (_profileId: string, _today: string) => structuredClone(world.skinCare))
   viewer = makeViewer()
 })
 
@@ -1689,5 +1718,413 @@ describe('RoutineViewerService.reminderPlanFor: the step-down change days', () =
       expect(line).toMatch(/^From today: /)
     }
     expect(new Set(read.stepDownChanges.map((change: { line: string }) => change.line)).size).toBe(3)
+  })
+})
+
+// ---- the routine facts the skin-care module reads, and the overlay its state puts on the reads (spec #233, PR 4a) ----
+//
+// THE CONTRACT THIS FILE PINS (assumed where the brief leaves it open; see the report):
+//   new RoutineViewerService({ ..., skinCare })       skinCare: { stateFor(profileId, today): Promise<SkinCareState> } is REQUIRED. `today` is the local day 'YYYY-MM-DD'; the viewer reads the
+//                                                      stored zone (`reminders.zoneFor`), and with none it is the injected clock's UTC day (T0's, here). The container wires a stub that answers { pauses: [], held: false }.
+//   skinCareRoutineFor(profileId): Promise<SkinCareRoutine | null>     by profile id with no session, no gates, no build asked for, nothing marked served, no goal read, and NO call to
+//                                                      skinCare.stateFor (the skin-care module's stateFor reads this, so asking it back would never end). Null while there is no routine in force
+//                                                      (none, or one a safety change hides); the routine in force while a newer build is under way.
+//     dayOne        'YYYY-MM-DD' of startedOn, or null before Start.
+//     steps         one per stored step in routine order: { step, title (the routine title the screen shows), productRef (the stored product), productId (the CATALOG product id: the shelf
+//                   entry's product, or the recommended row's product; null for a no-label entry and a "none" step), changedOn ('YYYY-MM-DD' of the step's own date, else day 1), activeGroups }.
+//     activeGroups  retinoid, exfoliating-acid and benzoyl-peroxide only, from the product's ingredient list (catalog.shelfFacts of the shelf entry's formulation, or of the recommended row's
+//                   formulationId) matched against the approved ingredient rules (rulesMatching over rules that carry their `group`, the mapping heldGroups uses). The rules come from the workbook
+//                   with their group (`verdictReference().rules`; `liveRules()` as typed carries none, so the fake answers both with the same grouped rules). Order is not pinned.
+//     stepDownRunning   true while a dated step-down is still running (stepDownProgressOf, as of today).
+//   The overlay: GET /me/routine entries (and the stream's frames) gain status 'active' | 'paused' | 'held' | 'bringing-back'. A pause names (step, catalog productId); it applies to the entry at that
+//   step whose product has that id. `held: true` marks the entries whose product holds an active group 'held'. reminderPlanFor leaves out paused and held entries, and a bringing-back entry has the
+//   pause's frequency (instead of the routine's) and its anchor day (`anchor`, 'YYYY-MM-DD').
+const T0_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate()))
+const dayText = (date: Date) => date.toISOString().slice(0, 10)
+const dayAt = (days: number) => new Date(T0_DAY.getTime() + days * DAY)
+
+const ruleOf = (name: string, group: IngredientGroup | null, over: Partial<VerdictRule> = {}): VerdictRule => ({ name, aliases: [], kind: 'irritation', rule: `The rule for ${name}.`, source: null, group, clashesWith: [], helps: [], ...over })
+const INGREDIENT_RULES: VerdictRule[] = [
+  ruleOf('retinol', 'retinoid', { aliases: ['vitamin a'], kind: 'pregnancy-caution' }),
+  ruleOf('glycolic acid', 'exfoliating-acid'),
+  ruleOf('benzoyl peroxide', 'benzoyl-peroxide'),
+  ruleOf('clobetasol propionate', 'steroid', { kind: 'banned-substance' }),
+  ruleOf('hydroquinone', 'lightening-agent', { kind: 'restricted-substance' }),
+  ruleOf('fragrance', null, { kind: 'allergen' }),
+]
+const setIngredients = (formulationId: string, ingredients: string[]) => {
+  world.facts.set(formulationId, { ...world.facts.get(formulationId)!, ingredients })
+}
+
+describe('RoutineViewerService.skinCareRoutineFor', () => {
+  const skinCareRoutine = (profileId = PROFILE): Promise<SkinCareRoutine | null> => (viewer as unknown as { skinCareRoutineFor(profileId: string): Promise<SkinCareRoutine | null> }).skinCareRoutineFor(profileId)
+  const started = (over: Partial<RoutineVersionRow> = {}) => showing(versionRow({ startedOn: START_DAY, ...over }))
+  const activeOf = async (step: RoutineStep) => [...(await skinCareRoutine())!.steps.find((entry) => entry.step === step)!.activeGroups].sort()
+
+  beforeEach(() => {
+    world.rules = structuredClone(INGREDIENT_RULES)
+    world.facts.set('form-serum-1', { productId: 'product-SERUM-1', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua', 'Glycerin'] })
+    world.facts.set('form-moist-gh', { productId: 'product-MOIST-GH', brand: 'Accra Skin', name: 'Shea Moisturiser', variant: null, form: 'cream', category: 'skin', ingredients: ['Aqua', 'Shea Butter'] })
+  })
+
+  it('answers null while there is no routine in force: none built, or one a safety change hides', async () => {
+    world.routine = { status: 'pending' }
+
+    expect(await skinCareRoutine()).toBeNull()
+  })
+
+  it('answers day 1, then each step in routine order with its title, its stored product, the catalog product it is and the day it last changed (day 1 when it has no date of its own)', async () => {
+    await started({ steps: [
+      stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'),
+      stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'pm', dayAt(5)),
+      stepOf('moisturise', { kind: 'candidate', code: 'MOIST-GH' }, 'am-pm'),
+      stepOf('protect', { kind: 'none' }, 'am'),
+    ] })
+
+    expect(await skinCareRoutine()).toEqual({
+      dayOne: dayText(START_DAY),
+      steps: [
+        { step: 'cleanse', title: 'Cream cleanser', productRef: { kind: 'shelf', id: 'entry-a' }, productId: 'prod-a', changedOn: dayText(START_DAY), activeGroups: [] },
+        { step: 'treat', title: 'Serum', productRef: { kind: 'candidate', code: 'SERUM-1' }, productId: 'product-SERUM-1', changedOn: dayText(dayAt(5)), activeGroups: [] },
+        { step: 'moisturise', title: 'Moisturiser', productRef: { kind: 'candidate', code: 'MOIST-GH' }, productId: 'product-MOIST-GH', changedOn: dayText(START_DAY), activeGroups: [] },
+        { step: 'protect', title: 'Sunscreen', productRef: { kind: 'none' }, productId: null, changedOn: dayText(START_DAY), activeGroups: [] },
+      ],
+      stepDownRunning: false,
+    })
+  })
+
+  it('titles each step as the routine screen does', async () => {
+    await started()
+
+    const read = (await skinCareRoutine())!
+    const shown = await body(asVerified(() => viewer.current()))
+
+    expect(read.steps.map((entry) => [entry.step, entry.title])).toEqual(entriesOf(shown).map((entry: any) => [entry.step, entry.title]))
+  })
+
+  it('answers a null day 1 before the routine is started, and still answers the steps', async () => {
+    await showing(versionRow({ startedOn: null }))
+
+    const read = (await skinCareRoutine())!
+
+    expect(read.dayOne).toBeNull()
+    expect(read.steps.map((entry) => entry.step)).toEqual(ROUTINE_ORDER)
+    expect(read.stepDownRunning).toBe(false)
+  })
+
+  it('answers the routine in force while a newer build is under way', async () => {
+    await showing(versionRow({ startedOn: START_DAY }), 'updating')
+
+    expect((await skinCareRoutine())!.steps).toHaveLength(4)
+  })
+
+  describe('the active groups of a shelf product, from its ingredient list and the ingredient rules', () => {
+    it.each([
+      ['a retinoid', ['Aqua', 'Retinol'], ['retinoid']],
+      ['a retinoid written with its strength', ['Aqua', 'Retinol 0.3%'], ['retinoid']],
+      ['a retinoid under an alias', ['Aqua', 'Vitamin A'], ['retinoid']],
+      ['an exfoliating acid', ['Aqua', 'Glycolic Acid'], ['exfoliating-acid']],
+      ['benzoyl peroxide', ['Benzoyl Peroxide 2.5%'], ['benzoyl-peroxide']],
+      ['all three', ['Aqua', 'Retinol', 'Glycolic Acid', 'Benzoyl Peroxide'], ['benzoyl-peroxide', 'exfoliating-acid', 'retinoid']],
+      ['a steroid, which is not an active group', ['Aqua', 'Clobetasol Propionate'], []],
+      ['a retinoid and a steroid, only the retinoid counting', ['Retinol', 'Clobetasol Propionate'], ['retinoid']],
+      ['a lightening agent, which is not an active group', ['Aqua', 'Hydroquinone 2%'], []],
+      ['an ingredient with a rule but no group', ['Aqua', 'Fragrance'], []],
+      ['nothing the rules know', ['Aqua', 'Glycerin'], []],
+    ])('has %s: %j gives %j', async (_what, ingredients, expected) => {
+      setIngredients('form-a', ingredients)
+      await started()
+
+      expect(await activeOf('cleanse')).toEqual(expected)
+    })
+
+    it('holds a group once, however many of its ingredients the product has', async () => {
+      setIngredients('form-a', ['Retinol', 'Vitamin A'])
+      await started()
+
+      expect(await activeOf('cleanse')).toEqual(['retinoid'])
+    })
+
+    it('reads the rules as they stand: with none approved a product has no active group', async () => {
+      world.rules = []
+      setIngredients('form-a', ['Retinol'])
+      await started()
+
+      expect(await activeOf('cleanse')).toEqual([])
+    })
+  })
+
+  it('reads a recommended step from the formulation of its recommended row, its product id from the same row', async () => {
+    setIngredients('form-serum-1', ['Aqua', 'Retinol'])
+    setIngredients('form-moist-gh', ['Aqua', 'Glycolic Acid'])
+    await started()
+
+    const read = (await skinCareRoutine())!
+
+    // The shelf's cleanser holds nothing active; the serum and the moisturiser are the recommended rows' formulations.
+    expect(read.steps.map((entry) => [entry.step, entry.productId, [...entry.activeGroups]])).toEqual([
+      ['cleanse', 'prod-a', []],
+      ['treat', 'product-SERUM-1', ['retinoid']],
+      ['moisturise', 'product-MOIST-GH', ['exfoliating-acid']],
+      ['protect', null, []],
+    ])
+  })
+
+  it('has no product id and no active group for a shelf entry with no label, whatever the rest of the shelf holds, and none for "use what you have"', async () => {
+    world.entries.push({ id: 'entry-n', kind: 'no-label', addedAt: T0, itemId: 'item-n' })
+    setIngredients('form-a', ['Retinol'])
+    await started({ steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-n' }, 'am'), stepOf('treat', { kind: 'none' }, 'pm')] })
+
+    const read = (await skinCareRoutine())!
+
+    expect(read.steps).toMatchObject([
+      { step: 'cleanse', productRef: { kind: 'shelf', id: 'entry-n' }, productId: null, activeGroups: [] },
+      { step: 'treat', productRef: { kind: 'none' }, productId: null, activeGroups: [] },
+    ])
+  })
+
+  describe('whether a step-down is still running', () => {
+    // The template runs 5 weeks: from its first day (day 0) the last day is day 34, and it is no longer running on day 35. Today is T0's day.
+    const taper = (startedOn: Date | null) => ({ shelfProductId: 'entry-b', templateId: TEMPLATE.code, startedOn })
+
+    it.each([
+      ['began today', dayAt(0), true],
+      ['began 34 days ago: today is its last day', dayAt(-34), true],
+      ['began 35 days ago: it ended yesterday', dayAt(-35), false],
+      ['begins tomorrow (Start was tapped and day 1 has not come)', dayAt(1), true],
+    ])('is %s: running %s', async (_when, startedOn, running) => {
+      await started({ tapers: [taper(startedOn)] })
+
+      expect((await skinCareRoutine())!.stepDownRunning).toBe(running)
+    })
+
+    it('is false for a step-down with no start date', async () => {
+      await started({ tapers: [taper(null)] })
+
+      expect((await skinCareRoutine())!.stepDownRunning).toBe(false)
+    })
+
+    it('is false for a routine that stops nothing', async () => {
+      await started({ tapers: [] })
+
+      expect((await skinCareRoutine())!.stepDownRunning).toBe(false)
+    })
+
+    it('is true while any one of several step-downs is running', async () => {
+      await started({ tapers: [taper(dayAt(-100)), { shelfProductId: 'entry-c', templateId: TEMPLATE.code, startedOn: dayAt(-3) }] })
+
+      expect((await skinCareRoutine())!.stepDownRunning).toBe(true)
+    })
+  })
+
+  it('needs no session and no goal, asks for no build, marks nothing served, and never asks the skin-care state (which reads this)', async () => {
+    const row = await started()
+    world.goal = null
+
+    await skinCareRoutine()
+
+    expect(requireGoal).not.toHaveBeenCalled()
+    expect(routines.request).not.toHaveBeenCalled()
+    expect(routines.requestIfStale).not.toHaveBeenCalled()
+    expect(stateFor).not.toHaveBeenCalled()
+    expect((await repository.current(PROFILE))!.servedAt).toBeNull()
+    expect(row.servedAt).toBeNull()
+  })
+})
+
+describe('RoutineViewerService.current: what each entry is doing (the skin-care overlay)', () => {
+  /** Every entry of both lists. */
+  const allEntries = (routine: any): any[] => [...routine.morning, ...routine.evening]
+  const statusOf = (routine: any, step: RoutineStep) => allEntries(routine).filter((entry) => entry.step === step).map((entry) => entry.status)
+  const read = () => body(asVerified(() => viewer.current()))
+  const pause = (step: RoutineStep, productId: string, state: 'paused' | 'bringing-back' = 'paused', over: Partial<SkinCareState['pauses'][number]> = {}) => ({ step, productId, state, ...over })
+
+  beforeEach(async () => {
+    world.rules = structuredClone(INGREDIENT_RULES)
+    world.facts.set('form-serum-1', { productId: 'product-SERUM-1', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua', 'Retinol'] })
+    await showing(versionRow({ startedOn: START_DAY }))
+  })
+
+  it('marks every entry active when the skin-care state says nothing (the stub the container wires): the routine is as it was', async () => {
+    const routine = await read()
+
+    expect(allEntries(routine)).toHaveLength(5)
+    expect(allEntries(routine).map((entry) => entry.status)).toEqual(Array(5).fill('active'))
+  })
+
+  it('asks for the state of the caller\'s profile on the profile\'s local day: here the day of the clock', async () => {
+    await read()
+
+    expect(stateFor).toHaveBeenCalledWith(PROFILE, dayText(T0_DAY))
+  })
+
+  it('asks for the state on the local day of the stored zone, which can be the next UTC day: 23:30 UTC is 00:30 the next day in Lagos', async () => {
+    world.zone = 'Africa/Lagos'
+    setClock(11 * HOUR + 30 * MINUTE)
+
+    await read()
+
+    expect(stateFor).toHaveBeenCalledWith(PROFILE, dayText(dayAt(1)))
+  })
+
+  it('marks the entry whose step and product a pause names as paused, in each list it appears in, and every other entry active', async () => {
+    world.skinCare = { pauses: [pause('moisturise', 'product-MOIST-GH')], held: false }
+
+    const routine = await read()
+
+    // The moisturiser is am-pm: in the morning and the evening.
+    expect(statusOf(routine, 'moisturise')).toEqual(['paused', 'paused'])
+    expect(['cleanse', 'treat', 'protect'].map((step) => statusOf(routine, step as RoutineStep))).toEqual([['active'], ['active'], ['active']])
+  })
+
+  it('marks a bringing-back entry bringing-back', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'alternate-days', anchor: dayText(START_DAY) })], held: false }
+
+    expect(statusOf(await read(), 'treat')).toEqual(['bringing-back'])
+  })
+
+  it('knows the product by its catalog product id: a pause for another product at the same step leaves the entry active', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-2')], held: false }
+
+    expect(statusOf(await read(), 'treat')).toEqual(['active'])
+  })
+
+  it('knows the step too: a pause for this product at another step leaves the entry active', async () => {
+    world.skinCare = { pauses: [pause('cleanse', 'product-SERUM-1')], held: false }
+
+    const routine = await read()
+
+    expect(statusOf(routine, 'treat')).toEqual(['active'])
+    expect(statusOf(routine, 'cleanse')).toEqual(['active'])
+  })
+
+  it('marks a shelf product paused by its catalog product id too', async () => {
+    world.skinCare = { pauses: [pause('cleanse', 'prod-a')], held: false }
+
+    expect(statusOf(await read(), 'cleanse')).toEqual(['paused'])
+  })
+
+  it('marks the entries with an active ingredient held while a hold is open, and leaves the others active', async () => {
+    world.skinCare = { pauses: [], held: true }
+
+    const routine = await read()
+
+    // The serum has retinol in it; the shelf cleanser, the moisturiser and the sunscreen hold nothing active.
+    expect(statusOf(routine, 'treat')).toEqual(['held'])
+    expect(['cleanse', 'moisturise', 'protect'].flatMap((step) => statusOf(routine, step as RoutineStep))).toEqual(['active', 'active', 'active', 'active'])
+  })
+
+  it('holds nothing when a hold is open and no entry has an active ingredient', async () => {
+    setIngredients('form-serum-1', ['Aqua'])
+    world.skinCare = { pauses: [], held: true }
+
+    expect(allEntries(await read()).map((entry) => entry.status)).toEqual(Array(5).fill('active'))
+  })
+
+  it('carries the status on the live stream\'s frame, the very body a read answers', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1')], held: false }
+
+    await runAs(SYSTEM, () => viewer.announce(PROFILE))
+
+    const frame = (events.eventsFor(`routine:${PROFILE}`)[0] as any).routine
+    expect(statusOf(JSON.parse(JSON.stringify(frame)), 'treat')).toEqual(['paused'])
+    expect(JSON.parse(JSON.stringify(frame))).toEqual(await read())
+  })
+})
+
+describe('RoutineViewerService.reminderPlanFor: the skin-care overlay', () => {
+  const plan = () => viewer.reminderPlanFor(PROFILE)
+  const pause = (step: RoutineStep, productId: string, state: 'paused' | 'bringing-back' = 'paused', over: Partial<SkinCareState['pauses'][number]> = {}) => ({ step, productId, state, ...over })
+  const ANCHOR = dayText(dayAt(2))
+
+  beforeEach(async () => {
+    world.rules = structuredClone(INGREDIENT_RULES)
+    world.facts.set('form-serum-1', { productId: 'product-SERUM-1', brand: 'Lumina', name: 'Bright Serum', variant: null, form: 'serum', category: 'skin', ingredients: ['Aqua', 'Retinol'] })
+    await showing(versionRow({ startedOn: START_DAY }))
+  })
+
+  it('is the plan it always was while the skin-care state says nothing', async () => {
+    expect(await plan()).toEqual({
+      dayOne: dayText(START_DAY),
+      morning: [
+        { step: 'cleanse', title: 'Cream cleanser', frequency: 'am' },
+        { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+        { step: 'protect', title: 'Sunscreen', frequency: 'am' },
+      ],
+      evening: [
+        { step: 'treat', title: 'Serum', frequency: 'pm' },
+        { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+      ],
+      stepDownChanges: [],
+    })
+    expect(stateFor).toHaveBeenCalledWith(PROFILE, dayText(T0_DAY))
+  })
+
+  it('leaves a paused entry out of every list it was in', async () => {
+    world.skinCare = { pauses: [pause('moisturise', 'product-MOIST-GH'), pause('treat', 'product-SERUM-1')], held: false }
+
+    const read = (await plan())!
+
+    expect(read.morning.map((entry) => entry.step)).toEqual(['cleanse', 'protect'])
+    expect(read.evening).toEqual([])
+  })
+
+  it('does not leave an entry out for a pause that names another product', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-2')], held: false }
+
+    expect((await plan())!.evening.map((entry) => entry.step)).toEqual(['treat', 'moisturise'])
+  })
+
+  it('leaves out the entries with an active ingredient while a hold is open, and keeps the rest', async () => {
+    world.skinCare = { pauses: [], held: true }
+
+    const read = (await plan())!
+
+    expect(read.morning.map((entry) => entry.step)).toEqual(['cleanse', 'moisturise', 'protect'])
+    expect(read.evening.map((entry) => entry.step)).toEqual(['moisturise'])
+  })
+
+  it('gives a bringing-back entry the frequency of its rung and the day the rung\'s count starts from', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'alternate-days', anchor: ANCHOR })], held: false }
+
+    const read = (await plan())!
+
+    expect(read.evening).toEqual([
+      { step: 'treat', title: 'Serum', frequency: 'alternate-days', anchor: ANCHOR },
+      { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+    ])
+    expect(read.morning).toEqual([
+      { step: 'cleanse', title: 'Cream cleanser', frequency: 'am' },
+      { step: 'moisturise', title: 'Moisturiser', frequency: 'am-pm' },
+      { step: 'protect', title: 'Sunscreen', frequency: 'am' },
+    ])
+  })
+
+  // ASSUMED, not in the brief: the rung's frequency also decides which list the entry is in, as the routine's own frequency does (am and am-pm are morning, anything else but as-needed is evening).
+  it('places a bringing-back entry by its rung: an am-pm moisturiser brought back every other day leaves the morning and stays in the evening with the rung\'s frequency and anchor', async () => {
+    world.skinCare = { pauses: [pause('moisturise', 'product-MOIST-GH', 'bringing-back', { frequency: 'alternate-days', anchor: ANCHOR })], held: false }
+
+    const read = (await plan())!
+
+    expect(read.morning.map((entry) => entry.step)).toEqual(['cleanse', 'protect'])
+    expect(read.evening).toEqual([
+      { step: 'treat', title: 'Serum', frequency: 'pm' },
+      { step: 'moisturise', title: 'Moisturiser', frequency: 'alternate-days', anchor: ANCHOR },
+    ])
+  })
+
+  it('counts a weekly rung in the evening too, with its anchor', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'weekly', anchor: ANCHOR })], held: false }
+
+    expect((await plan())!.evening[0]).toEqual({ step: 'treat', title: 'Serum', frequency: 'weekly', anchor: ANCHOR })
+  })
+
+  it('does not touch the step-down days', async () => {
+    await showing(versionRow({ startedOn: START_DAY, tapers: [{ shelfProductId: 'entry-b', templateId: TEMPLATE.code, startedOn: START_DAY }] }))
+    const without = (await plan())!.stepDownChanges
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1')], held: true }
+
+    expect((await plan())!.stepDownChanges).toEqual(without)
+    expect(without).toHaveLength(3)
   })
 })

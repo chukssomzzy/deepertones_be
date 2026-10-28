@@ -1,15 +1,19 @@
 import { describeError } from '../../jobs/safe-error'
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, UnavailableError } from '../../lib/errors'
+import { localDay } from '../../lib/local-day'
 import type { ScanEvents } from '../../providers/scan-events/scan-events.provider'
 import type { ProductCatalogService } from '../catalog/catalog.service'
-import type { ProductForm, RoutineStep } from '../catalog/catalog.vocabulary'
+import { rulesMatching } from '../catalog/catalog.rules'
+import { ROUTINE_STEPS, type IngredientGroup, type ProductForm, type RoutineStep } from '../catalog/catalog.vocabulary'
 import type { CatalogWorkbookService } from '../catalog/catalog.workbook.service'
 import type { GoalsService } from '../goals/goals.service'
 import type { Goal } from '../goals/goals.vocabulary'
 import type { RecommendationService } from '../recommendations/recommendations.service'
+import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
-import type { ShelfService } from '../shelf/shelf.service'
+import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { SkinCareRoutine, SkinCareState } from '../skin-care/skin-care.types'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import { VerdictService } from '../verdicts/verdicts.service'
 import type { RoutinesRepository, RoutineVersionRow } from './routines.repository'
@@ -17,7 +21,8 @@ import type { RoutineService, RoutineView } from './routines.service'
 import { titleFor } from './routines.copy'
 import { commonlySoldAt, LOOK_FOR_PRODUCTS, whyFor } from './routines.look-for'
 import type { LookForResponse, RoutineResponse } from './routines.schemas'
-import { isSoldIn, toReminderPlan, toRoutineResponse, type ReminderPlan, type RoutineViewInput } from './routines.view'
+import type { StoredRoutineStep } from './routines.types'
+import { isSoldIn, stepDownsOf, stepTitleOf, toReminderPlan, toRoutineResponse, type ReminderPlan, type RoutineViewInput, type StepOverlay } from './routines.view'
 
 export type RoutineViewerServiceDeps = {
   routines: Pick<RoutineService, 'current' | 'start' | 'gotIt' | 'request' | 'requestIfStale'>
@@ -29,6 +34,10 @@ export type RoutineViewerServiceDeps = {
   /** Whether the person is pregnant or breastfeeding, for the guide's pregnancy text. */
   safety: Pick<SafetyService, 'currentOrNull'>
   repository: Pick<RoutinesRepository, 'lastServedBefore' | 'markServed'>
+  /** What the skin-care module says about a profile on its local day: the pauses and the hold that change what the routine shows. Required: a viewer without it would show every entry as active. */
+  skinCare: { stateFor(profileId: string, today: string): Promise<SkinCareState> }
+  /** Where the person's day begins: the state is asked for their local day. */
+  reminders: Pick<RemindersService, 'zoneFor'>
   /** Tells whoever follows a profile's routine that it changed (`routine:<profileId>`). */
   events: ScanEvents
   /** Whether routines are switched on in this environment (the routine service's own switch): off, a build is never queued, and "find one sold here" answers as if it were. */
@@ -45,6 +54,9 @@ export type RoutineViewerServiceDeps = {
  * template of the verdict is not approved, since the routine is built from the verdict and would stay pending for ever.
  */
 export class RoutineViewerService {
+  /** The ingredient groups that make a product an active: the ones a pause is for. In vocabulary order, which is the order the ladder group is chosen in. */
+  private static readonly ACTIVE_GROUPS = ['retinoid', 'exfoliating-acid', 'benzoyl-peroxide'] as const satisfies readonly IngredientGroup[]
+
   private readonly routines: RoutineViewerServiceDeps['routines']
   private readonly goals: RoutineViewerServiceDeps['goals']
   private readonly workbook: RoutineViewerServiceDeps['workbook']
@@ -53,6 +65,8 @@ export class RoutineViewerService {
   private readonly recommendations: RoutineViewerServiceDeps['recommendations']
   private readonly safety: RoutineViewerServiceDeps['safety']
   private readonly repository: RoutineViewerServiceDeps['repository']
+  private readonly skinCare: RoutineViewerServiceDeps['skinCare']
+  private readonly reminders: RoutineViewerServiceDeps['reminders']
   private readonly events: ScanEvents
   private readonly enabled: boolean
   private readonly now: () => Date
@@ -66,6 +80,8 @@ export class RoutineViewerService {
     this.recommendations = deps.recommendations
     this.safety = deps.safety
     this.repository = deps.repository
+    this.skinCare = deps.skinCare
+    this.reminders = deps.reminders
     this.events = deps.events
     this.enabled = deps.enabled
     this.now = deps.now ?? (() => new Date())
@@ -213,6 +229,34 @@ export class RoutineViewerService {
     return toReminderPlan(await this.inputFor(profileId, view.status, view.version, null, true))
   }
 
+  /**
+   * The routine in force as the skin-care module reads it: day 1, and for each step its title, stored product, the catalog product it is, the day it last changed and the active
+   * groups its ingredients hold (read against the approved ingredient rules, as the verdict's floor reads them). By profile id with no session or gates. Null while there is no
+   * routine to read (none, or one a safety change hides). It asks for no build, marks nothing served and reads no goal, and it never asks `skinCare.stateFor`, which reads this.
+   */
+  async skinCareRoutineFor(profileId: string): Promise<SkinCareRoutine | null> {
+    const view = await this.routines.current(profileId)
+    if (view.status === 'pending') return null
+    const { version } = view
+    const { input, entries } = await this.aroundVersion(profileId, view.status, version, null, true)
+    const identities = version.steps.map((step) => RoutineViewerService.identityOf(step, entries, input.recommended))
+    const groups = await this.activeGroupsOf(identities)
+    const dayOne = version.startedOn === null ? null : version.startedOn.toISOString().slice(0, 10)
+    const ordered = version.steps.map((step, at) => ({ step, at })).sort((a, b) => ROUTINE_STEPS.indexOf(a.step.step) - ROUTINE_STEPS.indexOf(b.step.step))
+    return {
+      dayOne,
+      steps: ordered.map(({ step, at }) => ({
+        step: step.step,
+        title: stepTitleOf(step, input),
+        productRef: step.product,
+        productId: identities[at]!.productId,
+        changedOn: step.changedOn === null ? dayOne : step.changedOn.toISOString().slice(0, 10),
+        activeGroups: groups[at]!,
+      })),
+      stepDownRunning: stepDownsOf(input, await this.todayOf(profileId)).some(({ running }) => running),
+    }
+  }
+
   /** The caller's profile once they may see a routine: signed up, with a goal, and the verdict available. */
   private async gated(): Promise<string> {
     return (await this.gatedWithGoal()).profileId
@@ -268,6 +312,18 @@ export class RoutineViewerService {
    * the user's own is compared by its formulation). `withTapers` also reads the step-down templates, which only the body shows.
    */
   private async inputFor(profileId: string, status: 'ready' | 'updating', version: RoutineVersionRow, previous: RoutineVersionRow | null, withTapers: boolean): Promise<RoutineViewInput> {
+    const { input, entries } = await this.aroundVersion(profileId, status, version, previous, withTapers)
+    return this.overlaid(profileId, input, entries)
+  }
+
+  /** `inputFor` without what the skin-care state does to the steps, and the shelf entries it read. */
+  private async aroundVersion(
+    profileId: string,
+    status: 'ready' | 'updating',
+    version: RoutineVersionRow,
+    previous: RoutineVersionRow | null,
+    withTapers: boolean,
+  ): Promise<{ input: RoutineViewInput; entries: ShelfActiveEntry[] }> {
     const codes = [...new Set([...version.steps, ...(previous?.steps ?? [])].flatMap(({ product }) => (product.kind === 'candidate' ? [product.code] : [])))]
     const [shopping, entries, recommended, countries, tapers] = await Promise.all([
       this.recommendations.shoppingFor(profileId),
@@ -286,7 +342,57 @@ export class RoutineViewerService {
       }
     }
     const summaries = await this.catalog.productSummaries([...recommended.values()].flatMap((row) => (row.formulationId ? [row.formulationId] : [])))
-    return { status, version, previous, country: shopping.country, countries, own, recommended, summaries, tapers }
+    return { input: { status, version, previous, country: shopping.country, countries, own, recommended, summaries, tapers }, entries }
+  }
+
+  /**
+   * The input with what the skin-care state does to each step: a pause names a step and the catalog product it is for, so a product that has become the person's own entry of the
+   * same formulation is still the paused one. An open hold marks the steps whose product holds an active group. With no pause and no hold the input is returned as it is.
+   */
+  private async overlaid(profileId: string, input: RoutineViewInput, entries: ShelfActiveEntry[]): Promise<RoutineViewInput> {
+    const state = await this.skinCare.stateFor(profileId, await this.todayOf(profileId))
+    if (state.pauses.length === 0 && !state.held) return input
+    const { steps } = input.version
+    const identities = steps.map((step) => RoutineViewerService.identityOf(step, entries, input.recommended))
+    const groups = state.held ? await this.activeGroupsOf(identities) : null
+    const overlay = new Map<StoredRoutineStep, StepOverlay>()
+    steps.forEach((step, at) => {
+      const { productId } = identities[at]!
+      const pause = productId === null ? undefined : state.pauses.find((paused) => paused.step === step.step && paused.productId === productId)
+      if (pause) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }) })
+      else if (groups?.[at]!.length) overlay.set(step, { status: 'held' })
+    })
+    return { ...input, overlay }
+  }
+
+  /** The person's local day, 'YYYY-MM-DD': the stored zone's, or UTC with none. */
+  private async todayOf(profileId: string): Promise<string> {
+    return localDay(this.now(), await this.reminders.zoneFor(profileId))
+  }
+
+  /** The catalog product a step's product is, and the formulation its ingredients are read from. Both null for an entry with no label, "use what you have", and a product that has left the shelf or the catalog. */
+  private static identityOf(step: StoredRoutineStep, entries: readonly ShelfActiveEntry[], recommended: RoutineViewInput['recommended']): { productId: string | null; formulationId: string | null } {
+    const { product } = step
+    if (product.kind === 'shelf') {
+      const entry = entries.find(({ id }) => id === product.id)
+      return entry?.kind === 'product' ? { productId: entry.productId, formulationId: entry.formulationId } : { productId: null, formulationId: null }
+    }
+    const row = product.kind === 'candidate' ? recommended.get(product.code) : undefined
+    return row ? { productId: row.productId, formulationId: row.formulationId } : { productId: null, formulationId: null }
+  }
+
+  /** For each identity, the active groups its formulation's ingredients hold, matched against the approved ingredient rules (which carry their group, as the verdict's floor reads them). */
+  private async activeGroupsOf(identities: readonly { formulationId: string | null }[]): Promise<IngredientGroup[][]> {
+    const ids = [...new Set(identities.flatMap(({ formulationId }) => (formulationId === null ? [] : [formulationId])))]
+    if (ids.length === 0) return identities.map(() => [])
+    const [facts, { rules }] = await Promise.all([this.catalog.shelfFacts(ids), this.workbook.verdictReference()])
+    return identities.map(({ formulationId }) => {
+      const held = new Set<IngredientGroup>()
+      for (const ingredient of (formulationId === null ? undefined : facts.get(formulationId))?.ingredients ?? []) {
+        for (const { group } of rulesMatching(ingredient, rules)) if (group !== null) held.add(group)
+      }
+      return RoutineViewerService.ACTIVE_GROUPS.filter((group) => held.has(group))
+    })
   }
 
   private static versionIdOf(view: RoutineView): string | null {

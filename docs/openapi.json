@@ -1728,6 +1728,16 @@
             "type": "string",
             "description": "Why, in words for the user."
           },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "paused",
+              "held",
+              "bringing-back"
+            ],
+            "description": "`active` for a step in the routine as written. `paused`: left out for now. `held`: left out while a hold is open. `bringing-back`: used again at a gentler pace."
+          },
           "changed": {
             "type": "boolean",
             "description": "True when this step's product or frequency differs from the routine the user was last shown, or that routine had no such step. Always false the first time a routine is shown."
@@ -1759,6 +1769,7 @@
           "title",
           "when",
           "reason",
+          "status",
           "changed",
           "product"
         ],
