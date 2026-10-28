@@ -81,17 +81,36 @@ describe('docs/catalog-workbook-contract.md', () => {
   })
 
   it.each([
-    ['Escalations', 'Responses', 'ESCALATION_WORDING'],
-    ['Responses', 'Weeks', 'RESPONSE_WORDING'],
-    ['Weeks', 'Accepted values', 'WEEK_WORDING'],
-  ])('names the wording rule of the %s tab on its own text columns, and not the Guides rule', async (tab, next, rule) => {
+    ['Escalations', 'ESCALATION_WORDING'],
+    ['Responses', 'RESPONSE_WORDING'],
+    ['Weeks', 'WEEK_WORDING'],
+  ])('names the wording rule of the %s tab on its own text columns, and not the Guides rule', async (tab, rule) => {
     const doc = await renderContractDoc()
-    const start = doc.indexOf(`### ${tab}`)
-    const section = doc.slice(start, doc.indexOf(next, start + 1))
+    // A tab's section runs to the next "### " heading, so the tab's own text may mention another tab by name.
+    const start = doc.indexOf(`### ${tab}\n`)
+    const section = doc.slice(start, doc.indexOf('\n### ', start + 1))
 
     expect(start).toBeGreaterThan(-1)
     expect(section).toContain(`\`${rule}\``)
     expect(section).not.toContain('GUIDE_WORDING')
+  })
+
+  it('tells the people who write responses how {step} is shown, and that every other brace is refused', async () => {
+    const doc = await renderContractDoc()
+    const start = doc.indexOf('### Responses\n')
+    const section = doc.slice(start, doc.indexOf('\n### ', start + 1))
+
+    for (const noun of ['Cleanser', 'Treatment', 'Moisturiser', 'Sunscreen', 'your routine']) expect(section, noun).toContain(noun)
+    expect(section).toContain('never a product title')
+    expect(section).toContain('{step}}')
+  })
+
+  it('tells the people who fill in the Weeks tab to keep the band column text, and the Reintroductions tab that a step comes before back', async () => {
+    const doc = await renderContractDoc()
+    const section = (tab: string) => doc.slice(doc.indexOf(`### ${tab}\n`), doc.indexOf('\n### ', doc.indexOf(`### ${tab}\n`) + 1))
+
+    expect(section('Weeks')).toMatch(/formatted as text/)
+    expect(section('Reintroductions')).toContain('REINTRO_BACK_ONLY')
   })
 
   it('explains the schedule format with an example that is valid, so a person can copy its shape', async () => {

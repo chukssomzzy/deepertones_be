@@ -1,6 +1,6 @@
 # Catalog workbook contract
 
-Version 2.3.0. Fingerprint `e7dac0f7b0facd74446e8ed6dc566c3501fefca23c450e65fc1e9c82868fc8b7`.
+Version 2.3.0. Fingerprint `e18f5eb3b236fc158535faf3621f7d6d72fbf5527ad1f9c8939629cba1de3423`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
@@ -192,12 +192,12 @@ Checks across cells and rows:
 
 ### Reintroductions
 
-How a person brings a paused product back slowly: a ladder that climbs from rare use to the routine's own frequency and ends with back. The ladder of a group is used for that group, and the ladder with no group for every group without one of its own. Mercury, steroid and lightening-agent have no ladder: they are only ever stopped, never brought back. A ladder is shown to people, so a qualified person approves it; in production the server refuses an approved ladder whose approver is not on its list. A row is identified by its group, and is retired, never deleted.
+How a person brings a paused product back slowly: a ladder that climbs from rare use to the routine's own frequency and ends with back, after at least one step before it. The ladder of a group is used for that group, and the ladder with no group for every group without one of its own. Mercury, steroid and lightening-agent have no ladder: they are only ever stopped, never brought back. A ladder is shown to people, so a qualified person approves it; in production the server refuses an approved ladder whose approver is not on its list. A row is identified by its group, and is retired, never deleted.
 
 | Column | Needed | What it holds | Format and accepted values | Problems it can raise |
 | --- | --- | --- | --- | --- |
 | `group` | Optional | The ingredient group the ladder is for. Leave it empty for the default ladder, which every group without a ladder of its own is brought back on. | One of: `mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`. | `NOT_IN_VOCABULARY` |
-| `schedule` | Required | The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week 12. The frequency never goes down, and the last step is back, the routine's own frequency from there on. For example: 1: weekly; 2: alternate-days; 3: back | Steps separated by semicolons, each `<weeks>: <frequency>`, the frequency one of: `am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `back`. Up to 300 characters. | `REQUIRED` `TOO_LONG` `BAD_SCHEDULE` `SCHEDULE_NOT_CONTIGUOUS` `REINTRO_MISSING_BACK` `REINTRO_BACK_NOT_LAST` `REINTRO_FREQUENCY_DECREASES` |
+| `schedule` | Required | The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week 12. The frequency never goes down, the last step is back, the routine's own frequency from there on, and at least one step comes before back. For example: 1: weekly; 2: alternate-days; 3: back | Steps separated by semicolons, each `<weeks>: <frequency>`, the frequency one of: `am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `back`. Up to 300 characters. | `REQUIRED` `TOO_LONG` `BAD_SCHEDULE` `SCHEDULE_NOT_CONTIGUOUS` `REINTRO_MISSING_BACK` `REINTRO_BACK_ONLY` `REINTRO_BACK_NOT_LAST` `REINTRO_FREQUENCY_DECREASES` |
 | `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its group is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `approved_by` | Required when approved | Who approved this ladder. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
 | `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
@@ -236,7 +236,7 @@ Checks across cells and rows:
 
 ### Responses
 
-The text that answers a skin log or a check-in after a pause. Each outcome needs exactly one approved row. {step} is the one placeholder a text may hold: it is replaced with the plain name of the routine step the answer is about, and any other word in braces is refused. A qualified person approves a response; in production the server refuses an approved row whose approver is not on its list. A row is identified by its outcome, and is retired, never deleted.
+The text that answers a skin log or a check-in after a pause. Each outcome needs exactly one approved row. {step} is the one placeholder a text may hold. The app always shows it as the plain noun of the routine step the answer is about (Cleanser, Treatment, Moisturiser or Sunscreen, never a product title), and as "your routine" when the answer is about no step (the check-in when there is nothing to pause). Any other brace is refused: {product}, {step or step} and {step}} are all problems. The wording rules are checked once for each of those five readings, and every one must pass, so a text must still read well as "your Sunscreen" and as "your routine". A qualified person approves a response; in production the server refuses an approved row whose approver is not on its list. A row is identified by its outcome, and is retired, never deleted.
 
 | Column | Needed | What it holds | Format and accepted values | Problems it can raise |
 | --- | --- | --- | --- | --- |
@@ -254,8 +254,8 @@ Checks across cells and rows:
 
 - `RESPONSE_MISSING`: Each outcome has one approved row. A draft or retired row does not count.
 - `RESPONSE_DUPLICATE`: Each outcome appears once. A draft or retired row counts.
-- `RESPONSE_PLACEHOLDER`: No text holds a placeholder in braces other than {step}.
-- `RESPONSE_WORDING`: No text, with {step} replaced by a plain noun, holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
+- `RESPONSE_PLACEHOLDER`: No text holds a brace that is not part of an exact {step}.
+- `RESPONSE_WORDING`: No text, read with {step} as each of Cleanser, Treatment, Moisturiser, Sunscreen and "your routine", holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
 ### Weeks
@@ -264,7 +264,7 @@ The week card on the Today screen: a short heading and a few plain words for the
 
 | Column | Needed | What it holds | Format and accepted values | Problems it can raise |
 | --- | --- | --- | --- | --- |
-| `band` | Required | The weeks the card is for. A person in week 13 or later is shown the 9-12 card. | One of: `1`, `2`, `3-4`, `5-8`, `9-12`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `band` | Required | The weeks the card is for. A person in week 13 or later is shown the 9-12 card. Keep the column formatted as text: a spreadsheet turns 3-4 into a date otherwise. | One of: `1`, `2`, `3-4`, `5-8`, `9-12`. | `REQUIRED` `NOT_IN_VOCABULARY` |
 | `goal` | Optional | The goal the card is for. Leave it empty for the band's base card, which people with any other goal are shown. | One of: `clear-skin`, `even-tone`, `fade-dark-marks`, `brighter`, `glow`, `calm-repair`. | `NOT_IN_VOCABULARY` |
 | `step_down` | Optional | yes for a card shown to a person who is stepping down a product, no for any other. Empty means no. | One of: `yes`, `no`. | `NOT_IN_VOCABULARY` |
 | `title` | Required | A short heading, in plain words. Do not write "Week 1": the server adds that. | Text. Up to 60 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `WEEK_WORDING` |
@@ -279,6 +279,7 @@ Checks across cells and rows:
 
 - `WEEK_BASE_MISSING`: Each band has one approved row with no goal and step_down no (or empty). A draft or retired row does not count.
 - `WEEK_DUPLICATE`: Each band, goal and step_down appears once, no goal counting as a goal and an empty step_down as no. A draft or retired row counts.
+- `WEEK_BAND_DATE`: No band cell holds a date that a spreadsheet made of a band (3-4 turned into 4 March, 5-8, 9-12).
 - `WEEK_WORDING`: No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
@@ -443,7 +444,7 @@ Used by: `Responses.outcome`
 
 `1`, `2`, `3-4`, `5-8`, `9-12`
 
-The stretches of weeks a week card is written for. A person in week 13 or later is shown the 9-12 card. Each band needs one approved base card.
+The stretches of weeks a week card is written for. A person in week 13 or later is shown the 9-12 card. Each band needs one approved base card. A band such as 3-4 looks like a date to a spreadsheet: the exported file has the band column formatted as text, so keep that format, and write a band you add as text.
 
 Used by: `Weeks.band`
 
@@ -507,6 +508,7 @@ Used by: `Weeks.step_down`
 | `REINTRO_DUPLICATE` | Two rows of the Reintroductions tab are for the same group (or both have no group). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
 | `REINTRO_GROUP_NEVER_BACK` | A ladder is written for mercury, steroid or lightening-agent. Those are only ever stopped and never brought back, so they have no ladder. It is reported whatever the status of the row. |
 | `REINTRO_MISSING_BACK` | The ladder never ends with back. A ladder climbs to back, which means the routine's own frequency from there on, and back is its last step. |
+| `REINTRO_BACK_ONLY` | The ladder has no step before back. A ladder needs at least one step before back, since a product is never brought back at full strength at once: start with a rarer step such as weekly. |
 | `REINTRO_BACK_NOT_LAST` | A step whose frequency is back is followed by another step. Back ends the ladder, so it is the last step. |
 | `REINTRO_FREQUENCY_DECREASES` | A step uses the product less often than the step before it. A ladder only ever goes up: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm, then back. The same frequency twice is fine. |
 | `ESCALATION_MISSING` | A reason has no approved escalation. Each of the reasons (pus-or-hot-patch, swelling, near-eyes, worse-after-pause, unchanged-after-checks, harm-while-two-paused, hard-to-ignore-during-step-down) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
@@ -514,8 +516,9 @@ Used by: `Weeks.step_down`
 | `ESCALATION_WORDING` | An escalation text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say what to do in plain words, without them. |
 | `RESPONSE_MISSING` | An outcome has no approved response. Each of the outcomes (paused, advice-tightness, advice-itching, advice-breakouts, expected-flare, check-calmer, check-same, check-worse, nothing-to-pause) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
 | `RESPONSE_DUPLICATE` | Two rows of the Responses tab are for the same outcome. Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
-| `RESPONSE_PLACEHOLDER` | A response text holds a placeholder in braces other than {step}. {step} is the only one there is: it is replaced with the plain name of the routine step. Write anything else as plain words. |
-| `RESPONSE_WORDING` | A response text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. It is checked with {step} replaced by a plain noun. Say it in plain words, without them. |
+| `RESPONSE_PLACEHOLDER` | A response text holds a brace that is not part of an exact {step}: another placeholder such as {product}, an unfinished {step or step}, or a doubled {step}}. {step} is the only placeholder there is: the app replaces it with the plain name of the routine step. Write anything else as plain words. |
+| `RESPONSE_WORDING` | A response text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. It is checked once for each way {step} is shown (Cleanser, Treatment, Moisturiser, Sunscreen, or "your routine"), and every one must pass. Say it in plain words, without them. |
+| `WEEK_BAND_DATE` | A band cell holds a date. A spreadsheet turned a band such as 3-4 into a day (4 March) when it was typed. Format the band column as text and write the band again. A file made by the export has the column formatted as text already. |
 | `WEEK_BASE_MISSING` | A band has no approved base week card. Each of the bands (1, 2, 3-4, 5-8, 9-12) needs one approved row with the goal column empty and step_down no (or empty): it is the card a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row. |
 | `WEEK_DUPLICATE` | Two rows of the Weeks tab are for the same band, goal and step_down (an empty goal, and an empty step_down meaning no, count as values). Every such row is reported, whatever its status. Keep one row for each. |
 | `WEEK_WORDING` | A week card text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say it in plain words, without them. |

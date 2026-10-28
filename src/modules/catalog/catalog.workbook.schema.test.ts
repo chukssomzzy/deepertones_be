@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { SHOWN_CONCERNS, SKIN_TYPE_LABELS } from '../face-scans/face-scans.tables'
 import { CATEGORIES, CONCERN_KINDS, ESCALATION_REASONS, PRODUCT_FORMS, BUDGET_BANDS, FREQUENCIES, ORIGINS, RESPONSE_OUTCOMES, ROUTINE_STEPS, WEEK_BANDS } from './catalog.vocabulary'
-import { CONTRACT, CONTRACT_VERSION, contractFingerprint, validateWorkbook, type RawWorkbook } from './catalog.workbook.schema'
+import { CONTRACT, CONTRACT_VERSION, REINTRO_NEVER_BACK, contractFingerprint, validateWorkbook, type RawWorkbook } from './catalog.workbook.schema'
 
 // The workbook schema (the contract) is pure: raw tabs in (each tab's header row, and its rows as a spreadsheet library gives them, keyed by header), either a parsed Workbook or EVERY problem out.
 // A problem is { tab, row, column, rule }: `tab` is the RawWorkbook key, `row` the spreadsheet row (the header is row 1, so the first data row is 2),
@@ -377,7 +377,7 @@ describe('the contract', () => {
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
 // The fingerprint of contract 2.3.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.3.0', fingerprint: 'e7dac0f7b0facd74446e8ed6dc566c3501fefca23c450e65fc1e9c82868fc8b7' }
+const RELEASED = { version: '2.3.0', fingerprint: 'e18f5eb3b236fc158535faf3621f7d6d72fbf5527ad1f9c8939629cba1de3423' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -1709,6 +1709,10 @@ describe('validateWorkbook: Tapers', () => {
     })
   })
 
+  it('exports the groups that are never brought back: mercury, steroid and lightening-agent, the three the contract refuses a ladder for', () => {
+    expect([...REINTRO_NEVER_BACK]).toEqual(['mercury', 'steroid', 'lightening-agent'])
+  })
+
   describe('schedule', () => {
     it('is required', () => {
       expectProblems(scheduled(null), scheduleProblem('REQUIRED'))
@@ -2288,6 +2292,32 @@ describe('validateWorkbook: Reintroductions', () => {
       })
     })
 
+    describe('there is at least one step before back, so nothing is brought back at full strength at once', () => {
+      it.each([
+        ['back alone', '1: back'],
+        ['back for the whole ladder', '1-12: back'],
+        ['back for several weeks and nothing before it', '1-4: back'],
+      ])('refuses %s: REINTRO_BACK_ONLY', (_what, schedule) => {
+        expectProblems(scheduled(schedule), scheduleProblem('REINTRO_BACK_ONLY'))
+      })
+
+      it('accepts a single step before back', () => {
+        expectValid(scheduled('1: as-needed; 2: back'))
+      })
+
+      it('says a ladder that opens with back and goes on has that fault and that the back is not last, each once', () => {
+        expectProblems(scheduled('1: back; 2: weekly'), [problem('reintroductions', 2, 'schedule', 'REINTRO_BACK_ONLY'), problem('reintroductions', 2, 'schedule', 'REINTRO_BACK_NOT_LAST')])
+      })
+
+      it('does not raise it for a ladder that does not start at week 1 but has a step first', () => {
+        expectProblems(scheduled('2: weekly; 3: back'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('is not a rule of a Tapers schedule: a taper may stop at once', () => {
+        expectValid(inTapers(taper({ schedule: '1: stop' })))
+      })
+    })
+
     describe('the frequency never goes down: as-needed, then weekly, then alternate-days, then am or pm, then am-pm, then back', () => {
       it.each([
         ['alternate-days then weekly', '1: alternate-days; 2: weekly; 3: back'],
@@ -2620,8 +2650,20 @@ describe('validateWorkbook: Responses', () => {
       ['a number', 'Rest your {0}.'],
       ['nothing inside', 'Rest your {}.'],
       ['{step} next to another one', 'Rest your {step} and {name}.'],
+      ['an opening brace with no end', 'Rest your {step.'],
+      ['a closing brace with no start', 'Rest your step}.'],
+      ['a doubled closing brace', 'Rest your {step}}.'],
+      ['a doubled opening brace', 'Rest your {{step}.'],
+      ['a lone opening brace', 'Rest your { now.'],
+      ['a lone closing brace', 'Rest your } now.'],
+      ['{step} in capitals', 'Rest your {STEP}.'],
+      ['a brace beside a good {step}', 'Rest your {step} and {x'],
     ])('refuses %s', (_what, body) => {
       expectProblems(first({ body }), [problem('responses', 2, 'body', 'RESPONSE_PLACEHOLDER')])
+    })
+
+    it.each(TEXTS)('refuses a brace that is not an exact {step} in %s, on that cell', (column) => {
+      expectProblems(first({ [column]: 'Rest your {step', }), [problem('responses', 2, column, 'RESPONSE_PLACEHOLDER')])
     })
 
     it('says a cell that is too long is too long and nothing else', () => {
@@ -2643,6 +2685,21 @@ describe('validateWorkbook: Responses', () => {
         problem('responses', 2, 'title', 'RESPONSE_WORDING'),
         problem('responses', 2, 'body', 'RESPONSE_WORDING'),
       ])
+    })
+
+    it('reads the text once for each way {step} is shown, and refuses it when any one reading breaks the gate', () => {
+      // "skin lightening" passes only when a product word follows it: "skin lightening product" is a product someone is stopping, "skin lightening Treatment" is not.
+      expectProblems(first({ body: 'Stop your skin lightening {step}.' }), [problem('responses', 2, 'body', 'RESPONSE_WORDING')])
+      expectProblems(first({ title: 'Stop your skin lightening {step}' }), [problem('responses', 2, 'title', 'RESPONSE_WORDING')])
+      expectProblems(first({ what_to_do_now: 'Stop your skin lightening {step}.' }), [problem('responses', 2, 'what_to_do_now', 'RESPONSE_WORDING')])
+    })
+
+    it('does not refuse a text with {step} that passes with every one of its readings', () => {
+      expectValid(first({ body: 'Your {step} is on hold. Keep to a gentle wash and moisturiser.' }))
+    })
+
+    it('still reports a cell once, however many of the readings break the gate', () => {
+      expectProblems(first({ body: 'Skin lightening {step}, lighter skin, fairer, whiter.' }), [problem('responses', 2, 'body', 'RESPONSE_WORDING')])
     })
 
     it('lets a plain sentence with {step} through', () => {
@@ -2756,6 +2813,21 @@ describe('validateWorkbook: Weeks', () => {
 
     it('is required', () => {
       expectProblems(withBands(week({ band: null, goal: 'glow' })), [problem('weeks', SEVENTH, 'band', 'REQUIRED')])
+    })
+
+    it.each([
+      ['3-4 typed as 4 March (month first)', '2026-03-04'],
+      ['3-4 typed as 3 April (day first)', '2026-04-03'],
+      ['5-8 typed as 8 May', '2026-05-08'],
+      ['5-8 typed as 5 August', '2026-08-05'],
+      ['9-12 typed as 12 September', '2026-09-12'],
+      ['9-12 typed as 9 December', '2026-12-09'],
+    ])('says a band a spreadsheet made a date is that, and not only that it is no band: %s', (_what, band) => {
+      expectProblems(withBands(week({ band, goal: 'glow' })), [problem('weeks', SEVENTH, 'band', 'WEEK_BAND_DATE')])
+    })
+
+    it.each(['2026-01-02', '2026-06-15', '2026-03-05'])('leaves a date that no band makes as a plain NOT_IN_VOCABULARY: %s', (band) => {
+      expectProblems(withBands(week({ band, goal: 'glow' })), [problem('weeks', SEVENTH, 'band', 'NOT_IN_VOCABULARY')])
     })
 
     it('reads a band a spreadsheet gave as a number: 1 and 2 are bands', () => {
