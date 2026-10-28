@@ -1832,8 +1832,8 @@ described in "Product catalog service"; its one route, `GET /api/v1/products/sea
   it: `analyse` once (the facts the analyst is given and the version the analysis is stored under are the same rules), and `research` only when a stale
   formulation could be the fallback. `flagFacts(ingredients, rules)` takes the rules as an argument, so the eval calls it with `REFERENCE`, and the facts of
   one name that has several kinds come out in a fixed order (banned first, then the commonly cited concerns), never in the order the rows were read.
-- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: seven tabs (Products, Availability, Ingredients,
-  Countries, Claim words, Tapers, Guides; contract 2.2.0), their columns, accepted values and
+- **The workbook schema** (`catalog.workbook.schema.ts`) is what a catalog workbook may hold, as data: eleven tabs (Products, Availability, Ingredients,
+  Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks; contract 2.3.0), their columns, accepted values and
   length caps, and `validateWorkbook(raw)`, which returns the parsed workbook or EVERY problem as `{ tab, row, column, rule }` (a fixed code, never a cell
   value). A tab is `{ headers, rows }`: the header row decides which columns exist, a key a row has that is no header is ignored, and a key it lacks is an
   empty cell. A cell is measured before it is read, so a cell over its cap says only that, and a 32767-character cell costs about its length. The module is
@@ -2859,8 +2859,8 @@ signed-in, never opens them: they have a door of their own.
 
 ### Catalog workbook import
 `CatalogWorkbookService` (`catalog.workbook.service.ts`, built by the container as `catalogWorkbook`) serves and changes the catalog workbook: the
-Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
-(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, `claim_words`, `tapers`, `guides`, and the `ingredient_rules` and
+Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks tabs the team edits in a spreadsheet. Its tables, all in the catalog module, are `recommended_products`
+(a Products row, its `product_id` and the `formulation_id` it pins), `product_availability`, `countries`, `claim_words`, `tapers`, `guides`, `reintroductions`, `escalations`, `responses`, `weeks`, and the `ingredient_rules` and
 `catalog_versions` of "Product catalog data". The routes are `GET /api/v1/admin/catalog/export` and `POST /api/v1/admin/catalog/import`
 (`catalog.workbook.routes.ts`), behind "Admin access".
 
@@ -2873,12 +2873,12 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides t
      upload script sends the file's own `_meta` stamp, and the file reader reads `_meta` before the tabs, so an old export is told to export again and
      not "missing the Tapers tab". The route's body schema reads `workbook` only as a JSON object (a bad JSON text is a 400 `VALIDATION_FAILED`), so a genuine
      1.0.0 file, which has four tabs, reaches this check and gets the 409 instead of a 400 about its missing tabs, also when posted without the script.
-  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all seven tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
+  1. The tabs are read in the shape the contract is written in (`RawWorkbookSchema`: all eleven tabs, each a header row and rows): 400 `VALIDATION_FAILED` with
      `{ path, message }` details under `workbook`. Only a file of the current contract version gets this far. Then `validateWorkbook` runs on the server whatever
      the script did: 400 `CATALOG_INVALID` with every problem in `error.details.problems`.
-  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers or Guides row with status `approved` must have an `approved_by` that is
-     exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved template and guide).
-     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers' | 'guides', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
+  1a. **The production approver gate.** In `production` only (`ENVIRONMENT`), every Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row with status `approved` must have an `approved_by` that is
+     exactly one of the comma-separated labels in the `QUALIFIED_APPROVERS` var (each trimmed; an empty or absent var refuses every approved row of those tabs).
+     Otherwise it is 400 `CATALOG_INVALID` with one `{ tab: 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }` for each such row, and
      the name is never echoed or logged. It is a process control, not authentication: the approver is a label in a cell, written by whoever holds the
      admin token. Staging and development accept any approver, so the owner or Claude can approve there. The service takes `environment` and
      `qualifiedApprovers` from the container; `QUALIFIED_APPROVERS` is a plain var in all three `wrangler.jsonc` blocks, empty until a qualified approver is named.
@@ -2911,6 +2911,33 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides t
      row is never given, and no status or sign-off column leaves the service.
      **After the 2.2.0 deploy, re-export the staging catalog sheet and write the four base guide rows (approved) before its next import**: an unedited export is
      refused until then, and a 2.1.0 file is refused as `409 CONTRACT_MISMATCH`. The same goes for a saved eval snapshot workbook.
+  3c. **The Reintroductions, Escalations, Responses and Weeks tabs** (contract 2.3.0, spec #233) are the reviewed text of the daily loop, with the status and sign-off
+     columns of Tapers and the same production approver gate. They have no code: each row is its key, and each is stored in a table of its own keyed by a text `key`
+     (a null group or goal cannot be part of a composite key, as for `guides`), retired in place and never deleted. A row left out of an upload is retired by
+     that key. Every text cell is plain text and passes `FORBIDDEN_WORDING` as the tab's own `*_WORDING` rule on the cell, drafts included; a cell over its
+     length cap says only that. A duplicate key is reported on every clashing row of any status; a tab that lacks a row it needs is refused once on row 1 in its
+     key column.
+     - **Reintroductions** (`group`, `schedule`): how a paused product is brought back slowly. The schedule is written like a Tapers one (`1: weekly; 2: alternate-days; 3: back`)
+       but climbs (as-needed, weekly, alternate-days, am or pm, am-pm; equal steps are fine) and ends with `back`, the routine's own frequency from there on. There is
+       no `stop`, weeks run on from 1 with no gap, and it is at most 12 weeks: `BAD_SCHEDULE` (a `stop` or week 13), `SCHEDULE_NOT_CONTIGUOUS`,
+       `REINTRO_MISSING_BACK`, `REINTRO_BACK_NOT_LAST`, `REINTRO_FREQUENCY_DECREASES`. An empty `group` is the default ladder, and one approved default is needed
+       (`REINTRO_DEFAULT_MISSING`); one row a group (`REINTRO_DUPLICATE`); `mercury`, `steroid` and `lightening-agent` have no ladder, whatever the status
+       (`REINTRO_GROUP_NEVER_BACK`). Key: `default` or the group.
+     - **Escalations** (`reason` from `ESCALATION_REASONS`, `who_to_see`, `how_soon`, `what_to_tell_them`, each up to 300 characters): what the app shows when it sends a
+       person to a professional. Each reason needs one approved row (`ESCALATION_MISSING`, `ESCALATION_DUPLICATE`, `ESCALATION_WORDING`). Key: the reason.
+     - **Responses** (`outcome` from `RESPONSE_OUTCOMES`, `title` up to 120, `body` and optional `what_to_do_now` up to 300): the text that answers a skin log or a check-in
+       after a pause. `{step}` is the one placeholder; any other `{...}` is `RESPONSE_PLACEHOLDER`, and the wording gate (`RESPONSE_WORDING`) reads the text with `{step}`
+       replaced by a plain noun. Each outcome needs one approved row (`RESPONSE_MISSING`, `RESPONSE_DUPLICATE`). Key: the outcome.
+     - **Weeks** (`band` from `WEEK_BANDS`, optional `goal`, `step_down` yes or no with empty meaning no, `title` up to 60, `text` up to 300): the week card on Today. Each
+       band needs one approved base card with no goal and no step-down (`WEEK_BASE_MISSING`); one row for a band, goal and step-down (`WEEK_DUPLICATE`, `WEEK_WORDING`).
+       Key: the band, then `:<goal>`, then `:step-down`. A spreadsheet number 1 or 2 is read as the band.
+     The service reads them: `reintroductionFor(group | null)` (the approved ladder of the group, else the approved default, else `[]`), `escalationFor(reason)`,
+     `responseFor(outcome)` (`{step}` left as written) and `weekCardFor(week, goal, stepDown)` (week 13 and later use `9-12`; the first approved match of
+     (band, goal, step-down), (band, no goal, step-down), (band, goal, no step-down), (band) wins), each `null` when the catalog has nothing approved. A draft or
+     retired row is never given. Statement budget: 11 ladders, 9 escalations, 9 responses and 8 week cards to a statement.
+     **After the 2.3.0 deploy, re-export the staging catalog sheet and fill the required rows (the default ladder, a row for each reason and each outcome, a base card for
+     each band) before its next import**: an unedited export is refused until then, and a 2.2.0 file is refused as `409 CONTRACT_MISMATCH`. The same goes for a saved
+     eval snapshot workbook.
   4. **The join is exact.** A Products row finds its catalog product by identity key, then by alias; otherwise it is a new product (listed in
      `newProducts`, which a dry run shows too). There is **no near-miss search and no model call**, so an import makes no outbound request; a different
      spelling of a product the catalog knows becomes a second product, which the diff makes visible. The workbook's list is stored as a formulation of
