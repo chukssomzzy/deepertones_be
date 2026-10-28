@@ -1,5 +1,5 @@
 import type { Frequency, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
-import type { skinLogs, stepPauses } from './skin-care.table'
+import type { escalationHolds, skinLogs, stepPauses } from './skin-care.table'
 import type { SkinCareProductRef } from './skin-care.vocabulary'
 
 export type { SkinCareProductRef }
@@ -45,3 +45,8 @@ export type StepPause = typeof stepPauses.$inferSelect
 
 /** A pause as the service makes it: the caller makes the id and the time, and every column is given. */
 export type NewStepPause = StepPause
+
+export type EscalationHold = typeof escalationHolds.$inferSelect
+
+/** A hold as the service makes it: the caller makes the id and the times, and a new hold is open. */
+export type NewEscalationHold = Omit<EscalationHold, 'closedAt' | 'closedHow'>

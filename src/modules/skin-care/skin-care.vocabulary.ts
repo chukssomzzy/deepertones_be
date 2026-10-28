@@ -16,3 +16,7 @@ export type SkinCareProductRef = { kind: 'shelf'; id: string } | { kind: 'candid
 /** Where a pause is. `paused` and `bringing-back` are open (they hold their step); `ended`, `replaced` (the step's product changed) and `undone` are closed. */
 export const PAUSE_STATES = ['paused', 'bringing-back', 'ended', 'replaced', 'undone'] as const
 export type PauseState = (typeof PAUSE_STATES)[number]
+
+/** How an escalation hold ends: `seen` (the person says they saw a professional) or `settled` (the skin has settled). */
+export const HOLD_CLOSE_HOW = ['seen', 'settled'] as const
+export type HoldCloseHow = (typeof HOLD_CLOSE_HOW)[number]
