@@ -2489,6 +2489,559 @@
           "upTo"
         ]
       },
+      "LogSkinResult": {
+        "type": "object",
+        "properties": {
+          "log": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "day": {
+                "type": "string",
+                "description": "The local calendar day of the log, `YYYY-MM-DD`.",
+                "example": "2030-06-15"
+              },
+              "noticing": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "stinging-or-burning",
+                    "new-redness",
+                    "tightness-or-dryness",
+                    "new-breakouts",
+                    "itching",
+                    "swelling",
+                    "nothing-unusual",
+                    "pus-or-hot-patch"
+                  ],
+                  "description": "What the person is noticing: `stinging-or-burning`, `new-redness`, `tightness-or-dryness`, `new-breakouts`, `itching`, `swelling`, `pus-or-hot-patch` or `nothing-unusual`. `nothing-unusual` only ever stands alone."
+                }
+              },
+              "where": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "cheeks",
+                    "nose",
+                    "forehead",
+                    "neck",
+                    "chin-and-jaw",
+                    "near-eyes",
+                    "everywhere"
+                  ],
+                  "description": "Where on the face: `cheeks`, `nose`, `forehead`, `neck`, `chin-and-jaw`, `near-eyes` or `everywhere`."
+                }
+              },
+              "howBad": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "mild",
+                  "noticeable",
+                  "hard-to-ignore",
+                  null
+                ],
+                "description": "How bad it is, one choice: `mild`, `noticeable` or `hard-to-ignore`."
+              },
+              "outcome": {
+                "type": "string",
+                "enum": [
+                  "professional",
+                  "pause",
+                  "nothing-to-pause",
+                  "expected-flare",
+                  "advice",
+                  "logged"
+                ],
+                "description": "What the log came to, as it was decided (a `pause` the rules came to may end as `professional` or `nothing-to-pause`)."
+              }
+            },
+            "required": [
+              "id",
+              "day",
+              "noticing",
+              "where",
+              "howBad",
+              "outcome"
+            ]
+          },
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "pause"
+                    ]
+                  },
+                  "duringStepDown": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "duringStepDown"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "professional"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "pus-or-hot-patch",
+                      "swelling",
+                      "near-eyes",
+                      "harm-while-two-paused",
+                      "hard-to-ignore-during-step-down"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "reason"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "nothing-to-pause"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "expected-flare"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "advice"
+                    ]
+                  },
+                  "codes": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "advice-tightness",
+                        "advice-itching",
+                        "advice-breakouts"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "codes"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "logged"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ],
+            "description": "The final action. Branch on `kind`."
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "body": {
+                      "type": "string"
+                    },
+                    "whatToDoNow": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "title",
+                    "body",
+                    "whatToDoNow"
+                  ]
+                }
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "whatToDoNow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "body",
+                  "whatToDoNow"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "whoToSee": {
+                    "type": "string"
+                  },
+                  "howSoon": {
+                    "type": "string"
+                  },
+                  "whatToTellThem": {
+                    "type": "string"
+                  },
+                  "facts": {
+                    "type": "object",
+                    "properties": {
+                      "noticing": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "stinging-or-burning",
+                            "new-redness",
+                            "tightness-or-dryness",
+                            "new-breakouts",
+                            "itching",
+                            "swelling",
+                            "nothing-unusual",
+                            "pus-or-hot-patch"
+                          ],
+                          "description": "What the person is noticing: `stinging-or-burning`, `new-redness`, `tightness-or-dryness`, `new-breakouts`, `itching`, `swelling`, `pus-or-hot-patch` or `nothing-unusual`. `nothing-unusual` only ever stands alone."
+                        }
+                      },
+                      "where": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "cheeks",
+                            "nose",
+                            "forehead",
+                            "neck",
+                            "chin-and-jaw",
+                            "near-eyes",
+                            "everywhere"
+                          ],
+                          "description": "Where on the face: `cheeks`, `nose`, `forehead`, `neck`, `chin-and-jaw`, `near-eyes` or `everywhere`."
+                        }
+                      },
+                      "howBad": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "enum": [
+                          "mild",
+                          "noticeable",
+                          "hard-to-ignore",
+                          null
+                        ],
+                        "description": "How bad it is, one choice: `mild`, `noticeable` or `hard-to-ignore`."
+                      },
+                      "note": {
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "noticing",
+                      "where",
+                      "howBad",
+                      "note"
+                    ],
+                    "description": "What the person logged, repeated back on the professional screen."
+                  }
+                },
+                "required": [
+                  "whoToSee",
+                  "howSoon",
+                  "whatToTellThem",
+                  "facts"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reviewed text, with `{step}` already filled: a list for `advice` (one for each thing noticed), one text for `pause`, `nothing-to-pause` and `expected-flare`, the professional text for `professional`, and null for `logged`."
+          },
+          "paused": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "step": {
+                "type": "string",
+                "enum": [
+                  "cleanse",
+                  "treat",
+                  "moisturise",
+                  "protect"
+                ]
+              },
+              "title": {
+                "type": "string",
+                "description": "The routine's own title for the paused step."
+              },
+              "checkDay": {
+                "type": "string",
+                "description": "The local day the person is asked how it feels, `YYYY-MM-DD`: three days on.",
+                "example": "2030-06-18"
+              }
+            },
+            "required": [
+              "id",
+              "step",
+              "title",
+              "checkDay"
+            ],
+            "description": "The pause this log made; null for every outcome but `pause`."
+          }
+        },
+        "required": [
+          "log",
+          "outcome",
+          "response",
+          "paused"
+        ]
+      },
+      "LogSkinBody": {
+        "type": "object",
+        "properties": {
+          "noticing": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "stinging-or-burning",
+                "new-redness",
+                "tightness-or-dryness",
+                "new-breakouts",
+                "itching",
+                "swelling",
+                "nothing-unusual",
+                "pus-or-hot-patch"
+              ],
+              "description": "What the person is noticing: `stinging-or-burning`, `new-redness`, `tightness-or-dryness`, `new-breakouts`, `itching`, `swelling`, `pus-or-hot-patch` or `nothing-unusual`. `nothing-unusual` only ever stands alone."
+            },
+            "description": "At least one. A symptom named twice counts once."
+          },
+          "where": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "cheeks",
+                "nose",
+                "forehead",
+                "neck",
+                "chin-and-jaw",
+                "near-eyes",
+                "everywhere"
+              ],
+              "description": "Where on the face: `cheeks`, `nose`, `forehead`, `neck`, `chin-and-jaw`, `near-eyes` or `everywhere`."
+            },
+            "description": "Choose any. Not with `nothing-unusual`."
+          },
+          "howBad": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "mild",
+              "noticeable",
+              "hard-to-ignore",
+              null
+            ],
+            "description": "Required for anything but `nothing-unusual`."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional, at most 500 characters (counted as characters, not bytes). It is stored and shown back only on the professional screen; no rule reads it."
+          }
+        },
+        "required": [
+          "noticing"
+        ]
+      },
+      "SkinLogs": {
+        "type": "object",
+        "properties": {
+          "logs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "day": {
+                  "type": "string",
+                  "description": "The local calendar day of the log, `YYYY-MM-DD`.",
+                  "example": "2030-06-15"
+                },
+                "noticing": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "stinging-or-burning",
+                      "new-redness",
+                      "tightness-or-dryness",
+                      "new-breakouts",
+                      "itching",
+                      "swelling",
+                      "nothing-unusual",
+                      "pus-or-hot-patch"
+                    ],
+                    "description": "What the person is noticing: `stinging-or-burning`, `new-redness`, `tightness-or-dryness`, `new-breakouts`, `itching`, `swelling`, `pus-or-hot-patch` or `nothing-unusual`. `nothing-unusual` only ever stands alone."
+                  }
+                },
+                "where": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "cheeks",
+                      "nose",
+                      "forehead",
+                      "neck",
+                      "chin-and-jaw",
+                      "near-eyes",
+                      "everywhere"
+                    ],
+                    "description": "Where on the face: `cheeks`, `nose`, `forehead`, `neck`, `chin-and-jaw`, `near-eyes` or `everywhere`."
+                  }
+                },
+                "howBad": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "mild",
+                    "noticeable",
+                    "hard-to-ignore",
+                    null
+                  ],
+                  "description": "How bad it is, one choice: `mild`, `noticeable` or `hard-to-ignore`."
+                },
+                "outcome": {
+                  "type": "string",
+                  "enum": [
+                    "professional",
+                    "pause",
+                    "nothing-to-pause",
+                    "expected-flare",
+                    "advice",
+                    "logged"
+                  ],
+                  "description": "What the log came to, as it was decided (a `pause` the rules came to may end as `professional` or `nothing-to-pause`)."
+                }
+              },
+              "required": [
+                "id",
+                "day",
+                "noticing",
+                "where",
+                "howBad",
+                "outcome"
+              ]
+            },
+            "description": "The last 20, newest first. Never the note."
+          }
+        },
+        "required": [
+          "logs"
+        ]
+      },
+      "UndoPauseResult": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string",
+            "enum": [
+              "undone"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "state"
+        ]
+      },
       "FaceConsentGivenResponse": {
         "type": "object",
         "properties": {
@@ -7876,6 +8429,336 @@
           },
           "415": {
             "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/skin-logs": {
+      "post": {
+        "operationId": "logSkin",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "Log how the skin feels",
+        "description": "For a signed-up account: 401 without a session (before the body is read), 403 `SIGNUP_REQUIRED` for a guest. Allowed before Start and with no routine. Fixed rules decide the outcome (no AI): a red flag (pus or a hot patch, swelling, near the eyes) goes to a professional; stinging, burning or new redness at any level, or any symptom that is hard to ignore, pauses a step; tightness, itching and breakouts get advice; nothing unusual is just logged. A pause outcome is acted on: the newest changed active step is paused (never the sunscreen) and `paused` says which; two steps already paused, or a hard-to-ignore symptom during a step-down with no other active step, goes to a professional instead; with no routine, a routine not started or no step to pause the outcome is `nothing-to-pause`, with a check-in in three days. `response` is the reviewed text with `{step}` filled. A reviewed text the team has not written is 503 `CONTENT_UNAVAILABLE`: the log and any pause are kept. 400 `VALIDATION_FAILED` stores nothing: at least one symptom, `nothing-unusual` only alone and with no place, a level for anything else, a note of at most 500 characters.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogSkinBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The log, its outcome, the reviewed text and the pause it made",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/LogSkinResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "get": {
+        "operationId": "listSkinLogs",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "The last skin logs, newest first",
+        "description": "The caller's last 20 logs, newest first, without the note. 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The logs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/SkinLogs"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/skin-care/pauses/{id}/undo": {
+      "post": {
+        "operationId": "undoPause",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "Undo a pause",
+        "description": "Brings the paused step back at once. Only on the local day of the pause (409 `UNDO_EXPIRED` after it). The log that caused the pause is kept and marked overridden. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is no longer paused (undone already, or replaced when the step's product changed). 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The pause's id (`paused.id` of a log)."
+            },
+            "required": true,
+            "description": "The pause's id (`paused.id` of a log).",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The pause, undone",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/UndoPauseResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
             "content": {
               "application/json": {
                 "schema": {

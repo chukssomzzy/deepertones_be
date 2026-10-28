@@ -435,13 +435,14 @@ export const buildContainer = (env: CloudflareBindings) => {
       enabled: env.ROUTINES_ENABLED === 'true',
       // Lazy: the viewer reads this service, so wiring it here is deferred to the first announcement.
       announce: async (profileId: string): Promise<void> => routineViewer().announce(profileId),
+      skinCare: skinCare(),
       now: () => new Date(),
       newId: () => crypto.randomUUID(),
     })
   })
 
-  // Skin care reads the routine through the viewer: the viewer is reached lazily so neither needs the other to exist first, and the lambdas name their return types so the cycle
-  // does not make them infer from each other. (The viewer shows a pause and the routine service reconciles pauses from the next PR, 4b-ii.)
+  // Skin care reads the routine through the viewer, which reads skin care's pauses (`stateFor`) and the routine service, which asks it to reconcile: the viewer is reached lazily
+  // so none of the three needs another to exist first, and the lambdas name their return types so the cycle does not make them infer from each other.
   const skinCare = once(
     () =>
       new SkinCareService({
@@ -479,8 +480,7 @@ export const buildContainer = (env: CloudflareBindings) => {
         recommendations: recommendations(),
         safety: safety(),
         repository: new D1RoutinesRepository(db()),
-        // The skin-care module is not wired yet: no pause and no hold, so every entry is as the routine wrote it.
-        skinCare: { stateFor: async () => ({ pauses: [], held: false }) },
+        skinCare: skinCare(),
         reminders: reminders(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         enabled: env.ROUTINES_ENABLED === 'true',

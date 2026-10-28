@@ -18,6 +18,7 @@ import type { Candidate } from '../recommendations/recommendations.types'
 import type { RemindersService } from '../reminders/reminders.service'
 import type { SafetyService } from '../safety/safety.service'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { SkinCareService } from '../skin-care/skin-care.service'
 import { NO_LABEL_NAME } from '../verdicts/verdicts.inputs'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
 import { expectationFor, titleFor } from './routines.copy'
@@ -58,6 +59,8 @@ export type RoutineServiceDeps = {
   enabled: boolean
   /** Tells whoever follows the profile's routine that it changed (the viewer's, which publishes it on `routine:<profileId>`); a lazy callback because the viewer reads this service. */
   announce: (profileId: string) => Promise<void>
+  /** Keeps or ends the profile's skin-care pauses against a version just written (the module reads the routine back); lazy in the container because skin care reads the routine through the viewer. */
+  skinCare: Pick<SkinCareService, 'reconcile'>
   now?: () => Date
   newId?: () => string
 }
@@ -128,6 +131,7 @@ export class RoutineService {
   private readonly jobs: JobQueue
   private readonly enabled: boolean
   private readonly announce: RoutineServiceDeps['announce']
+  private readonly skinCare: RoutineServiceDeps['skinCare']
   private readonly now: () => Date
   private readonly newId: () => string
 
@@ -149,6 +153,7 @@ export class RoutineService {
     this.jobs = deps.jobs
     this.enabled = deps.enabled
     this.announce = deps.announce
+    this.skinCare = deps.skinCare
     this.now = deps.now ?? (() => new Date())
     this.newId = deps.newId ?? (() => crypto.randomUUID())
   }
@@ -230,6 +235,7 @@ export class RoutineService {
     const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true, changedOn } : entry))
     await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, hintsShown: false, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
+    await this.reconcilePauses(profileId)
     await this.tell(profileId)
   }
 
@@ -557,6 +563,7 @@ export class RoutineService {
     }
     if (!(await this.repository.complete(pending.id, done))) console.error({ outcome: 'routine-complete-skipped', profileId, versionId: pending.id })
     console.log({ outcome: 'routine-built', profileId, versionId: pending.id, source: done.source, writerCalls: calls })
+    await this.reconcilePauses(profileId)
     await this.tell(profileId)
     return 'built'
   }
@@ -566,7 +573,17 @@ export class RoutineService {
     const startedOn = row.startedOn ?? (await this.repository.current(row.profileId))?.startedOn ?? null
     const tapers = row.startedOn === null && startedOn !== null ? RoutineService.datedFrom(row.tapers, startedOn, startedOn) : row.tapers
     await this.repository.append({ ...row, readyAt: this.now(), startedOn, tapers })
+    await this.reconcilePauses(row.profileId)
     await this.tell(row.profileId)
+  }
+
+  /** Asks skin care to keep or end the profile's pauses against the version just written. A failure is logged by id and never fails the build: the version is stored, and a pause whose product changed is not shown as paused (the routine matches by product) until the next version reconciles it. */
+  private async reconcilePauses(profileId: string): Promise<void> {
+    try {
+      await this.skinCare.reconcile(profileId)
+    } catch (error) {
+      console.error({ outcome: 'routine-reconcile-failed', profileId, error: describeError(error) })
+    }
   }
 
   /** Tells the live stream the routine changed. A failure is logged by id and never fails the build: the version is stored, and a client sees it on its next read. */
