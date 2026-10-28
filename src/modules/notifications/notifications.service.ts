@@ -7,7 +7,7 @@ import type { RejectedPhotoReason } from '../../providers/perfect-corp/perfect-c
 import { type PushMessage, type PushSender, PushUnavailableError, isExpoPushToken } from '../../providers/push/push.provider'
 import type { RemindersService } from '../reminders/reminders.service'
 import { deepLinkFor } from './deep-links'
-import { type CheckPushReceiptsMessage, type SendPushMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
+import { type CheckPushReceiptsMessage, type PushNotificationMessage, checkPushReceiptsSpec, sendPushSpec } from './notifications.job-specs'
 import type { NotificationSettingsRepository, PushTokensRepository } from './notifications.repository'
 import type { NotificationSettings, NotificationSettingsPatch, PushToken } from './notifications.types'
 
@@ -211,7 +211,7 @@ export class NotificationsService {
    * message per phone. At most once: a rate-limited or failed message is not tried again, since a retry would resend the others.
    * Only a failure of the whole call is retried (PushUnavailableError, rethrown); one that cannot pass fails the job for good.
    */
-  async deliver(body: SendPushMessage): Promise<void> {
+  async deliver(body: PushNotificationMessage): Promise<void> {
     if (!(await this.wanted(body))) return
     const phones = await this.phonesFor(body)
     if (phones.length === 0) return
@@ -289,7 +289,7 @@ export class NotificationsService {
   }
 
   /** Never throws: the scan step or the sign-in that triggered this must not fail because a push could not be queued. Answers whether it was queued. */
-  private async enqueue(body: SendPushMessage): Promise<boolean> {
+  private async enqueue(body: PushNotificationMessage): Promise<boolean> {
     try {
       await this.jobs.enqueue(sendPushSpec, body)
       return true
@@ -301,7 +301,7 @@ export class NotificationsService {
   }
 
   /** Whether the account wants this notification. The sign-in alert has no switch. Read at send time. */
-  private async wanted(body: SendPushMessage): Promise<boolean> {
+  private async wanted(body: PushNotificationMessage): Promise<boolean> {
     if (body.kind === 'new-sign-in') return true
     // The profile's own reminder switches, read now: a push switched off since it was queued is dropped. The account's scan switches have no say. The alert and the nudge need reminders on
     // as well as their own switch; RemindersService answers both in the one read.
@@ -321,7 +321,7 @@ export class NotificationsService {
   }
 
   /** Scan and face scan notifications go to the phones on the scan's profile, narrowed to the account; a routine reminder, step-down alert and missed-days nudge go to every phone of the profile; the sign-in alert goes to every phone of the account. */
-  private async phonesFor(body: SendPushMessage): Promise<PushToken[]> {
+  private async phonesFor(body: PushNotificationMessage): Promise<PushToken[]> {
     // A row created at or after the sign-in belongs to the phone that signed in (it registers once it has a session), so it is not alerted.
     if (body.kind === 'new-sign-in') return (await this.pushTokens.forUser(body.userId)).filter((phone) => phone.createdAt.getTime() < body.at)
     // A reminder, alert or nudge belongs to the profile, whatever account row its phones sit under.
@@ -331,7 +331,7 @@ export class NotificationsService {
   }
 
   /** What the phone shows. Generic by decision: it appears on a lock screen, so no product names. */
-  private static contentOf(body: SendPushMessage): Pick<PushMessage, 'title' | 'body' | 'data' | 'categoryId'> {
+  private static contentOf(body: PushNotificationMessage): Pick<PushMessage, 'title' | 'body' | 'data' | 'categoryId'> {
     switch (body.kind) {
       case 'scan-finished':
         return {

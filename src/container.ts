@@ -31,6 +31,7 @@ import { RecommendationService } from './modules/recommendations/recommendations
 import { D1RemindersRepository } from './modules/reminders/reminders.repository'
 import { D1ReminderSendsRepository } from './modules/reminders/reminders.sends.repository'
 import { ReminderSendsService } from './modules/reminders/reminders.sends.service'
+import { ReminderFanOutService } from './modules/reminders/reminders.fan-out.service'
 import { RemindersService } from './modules/reminders/reminders.service'
 import { D1RoutineCheckInsRepository } from './modules/routines/routines.check-ins.repository'
 import { RoutineCheckInsService } from './modules/routines/routines.check-ins.service'
@@ -500,6 +501,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const reminderFanOut = once(() => new ReminderFanOutService({ profiles: routines(), jobs: jobQueue() }))
+
   const auth = once(
     () =>
       new AuthService({
@@ -555,6 +558,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get reminders() {
       return reminders()
+    },
+    get reminderFanOut() {
+      return reminderFanOut()
     },
     get reminderSends() {
       return reminderSends()

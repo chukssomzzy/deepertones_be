@@ -4,11 +4,12 @@ import type { NotificationsService } from '../notifications/notifications.servic
 import type { RemindersRepository } from './reminders.repository'
 import type { ReminderSendsRepository } from './reminders.sends.repository'
 import type { RemindersService } from './reminders.service'
+import { dayBefore, dueReminders, type DueReminder, type SlotReadings } from './reminders.slot'
 import type { ReminderRoutinePlan, ReminderSettings } from './reminders.types'
 
 export type ReminderSendsServiceDeps = {
-  /** The send job's one query: every profile with reminders on. */
-  settings: Pick<RemindersRepository, 'listEnabled'>
+  /** The send job's one query: every profile with reminders on; and one profile's row, for the consumer of the cron's profile message. */
+  settings: Pick<RemindersRepository, 'listEnabled' | 'get'>
   sends: ReminderSendsRepository
   /** The routine as the job reads it, by profile id (RoutineViewerService.reminderPlanFor); null while the routine is not Started. */
   routine: { reminderPlanFor(profileId: string): Promise<ReminderRoutinePlan | null> }
@@ -21,20 +22,15 @@ export type ReminderSendsServiceDeps = {
 
 type ReminderTime = 'morning' | 'evening'
 
-/** A wall-clock reading as 'YYYY-MM-DDTHH:MM', which sorts as text. */
-type Wall = string
-
 /**
- * The 15-minute reminder send job (spec #217): finds the profiles whose morning or evening time was reached in the last quarter hour, in their own zone, and queues one
+ * The reminder send (spec #217), run per profile by the queue consumer since the fan-out (`sendForProfile`, PR 8a; `sendDue` is the loop over every profile the cron ran before): finds the profiles whose morning or evening time was reached in the last quarter hour, in their own zone, and queues one
  * push for each through NotificationsService (which sends it, with the retries, dead tokens and receipts every push has). It reads no request context, so it needs no actor.
  */
 export class ReminderSendsService {
   /** A run of this many missed days or more is nudged. */
   private static readonly NUDGE_AFTER_DAYS = 2
-  private static readonly WINDOW_MS = 15 * 60 * 1000
-  private static readonly DAY_MS = 24 * 60 * 60 * 1000
-
-  private static readonly formatters = new Map<string, Intl.DateTimeFormat>()
+  /** A message for a slot older than this is dropped (see `sendForProfile`). */
+  private static readonly STALE_AFTER_MS = 30 * 60 * 1000
 
   private readonly settings: ReminderSendsServiceDeps['settings']
   private readonly sends: ReminderSendsRepository
@@ -69,11 +65,11 @@ export class ReminderSendsService {
    * One profile's failure is logged by id and does not stop the others.
    */
   async sendDue(now: Date): Promise<number> {
-    const walls = new Map<string, { now: Wall; before: Wall }>()
+    const readings: SlotReadings = new Map()
     let queued = 0
     for (const settings of await this.settings.listEnabled()) {
       try {
-        queued += await this.sendFor(settings, now, walls)
+        queued += await this.sendFor(settings, now, dueReminders(settings, now, readings))
       } catch (error) {
         // The profile's id, the outcome and the error's class (describeError names an unexpected error and says no more): never its text, which can carry a title, a token or a zone.
         console.error({ job: 'reminder-send', outcome: 'profile-failed', profileId: settings.profileId, error: describeError(error) })
@@ -82,17 +78,34 @@ export class ReminderSendsService {
     return queued
   }
 
-  private async sendFor(settings: ReminderSettings, now: Date, walls: Map<string, { now: Wall; before: Wall }>): Promise<number> {
-    const zone = settings.timeZone ?? 'UTC'
-    let reading = walls.get(zone)
-    if (!reading) {
-      reading = { now: ReminderSendsService.wallOf(now, zone), before: ReminderSendsService.wallOf(new Date(now.getTime() - ReminderSendsService.WINDOW_MS), zone) }
-      walls.set(zone, reading)
+  /**
+   * One profile's reminder work for the slot the cron was scheduled for: what `sendDue` does for that profile, by the same code (`dueReminders`, `sendFor`), with the same gating,
+   * claims and order. The row is read now, so a profile that turned reminders off since the cron listed it is sent nothing. Unlike `sendDue` it does not swallow a failure: it
+   * throws, so the queue retries the message. Nothing is claimed before the reads that can fail (the phone and the routine), and a claim made before a later failure is kept, so
+   * the retry sends what is left and never a push twice. Answers how many pushes were queued.
+   *
+   * A slot more than 30 minutes before `now` is dropped (logged `stale-slot`, 0): a message that waited that long in a backed-up queue would send a reminder for a time long
+   * gone, and a skipped slot is not made up. A zone that is not one is the profile's stored data, which a retry cannot mend: it is logged and answers 0, as the cron does.
+   */
+  async sendForProfile(profileId: string, slot: Date, now: Date = new Date()): Promise<number> {
+    if (now.getTime() - slot.getTime() > ReminderSendsService.STALE_AFTER_MS) {
+      console.log({ job: 'reminder-send', outcome: 'stale-slot', profileId })
+      return 0
     }
-    const due = (['morning', 'evening'] as const).flatMap((time) => {
-      const day = ReminderSendsService.dueDay(reading, settings[time])
-      return day === null ? [] : [{ time, day }]
-    })
+    const settings = await this.settings.get(profileId)
+    if (settings === null || !settings.enabled) return 0
+    let due: DueReminder[]
+    try {
+      due = dueReminders(settings, slot)
+    } catch (error) {
+      if (!(error instanceof RangeError)) throw error
+      console.error({ job: 'reminder-send', outcome: 'profile-skipped', profileId })
+      return 0
+    }
+    return this.sendFor(settings, slot, due)
+  }
+
+  private async sendFor(settings: ReminderSettings, now: Date, due: DueReminder[]): Promise<number> {
     if (due.length === 0) return 0
     // The phone first: a profile with none (it declined notifications, say) must not cost a routine read, and a window with no phone claims nothing.
     if (!(await this.notifications.hasPhone(settings.profileId))) {
@@ -140,7 +153,7 @@ export class ReminderSendsService {
     const streak = await this.checkIns.missedStreak(profileId, today)
     if (streak.since === null) return false
     const since = enabledOn !== null && enabledOn > streak.since ? enabledOn : streak.since
-    const days = daysBetween(since, ReminderSendsService.dayBefore(today)) + 1
+    const days = daysBetween(since, dayBefore(today)) + 1
     if (days < ReminderSendsService.NUDGE_AFTER_DAYS) return false
     if ((await this.channel.missedDaysChannelFor(profileId)) === 'whatsapp') {
       console.log({ job: 'reminder-send', outcome: 'nudge-whatsapp-not-sent', profileId, channel: 'whatsapp' })
@@ -150,38 +163,9 @@ export class ReminderSendsService {
     return this.notifications.missedDaysNudge({ profileId, since })
   }
 
-  /**
-   * The local day whose `time` ('HH:MM') was reached within the last 15 minutes, or null. The wall clock is compared on both ends of the window, so a time the clocks skip
-   * is caught by the first reading past it, and one just before midnight is still due on the day it belongs to.
-   */
-  private static dueDay(reading: { now: Wall; before: Wall }, time: string): string | null {
-    const today = reading.now.slice(0, 10)
-    for (const day of [today, ReminderSendsService.dayBefore(today)]) {
-      const target = `${day}T${time}`
-      if (reading.now >= target && reading.before < target) return day
-    }
-    return null
-  }
-
   /** The entry titles the reminder lists. The morning lists every entry; the evening only those due on `day`. Empty when nothing is. */
   private static titleFor(plan: ReminderRoutinePlan, time: ReminderTime, day: string): string {
     const entries = time === 'morning' ? plan.morning : plan.evening.filter(({ frequency, anchor }) => dueOnDay(frequency, anchor ?? plan.dayOne, day))
     return entries.map(({ title }) => title).join(', ')
-  }
-
-  private static dayBefore(day: string): string {
-    return new Date(Date.parse(`${day}T00:00:00.000Z`) - ReminderSendsService.DAY_MS).toISOString().slice(0, 10)
-  }
-
-  /** The wall clock in `zone` at `at`, to the minute. Throws a RangeError for a zone Intl does not know. */
-  private static wallOf(at: Date, zone: string): Wall {
-    let formatter = ReminderSendsService.formatters.get(zone)
-    if (!formatter) {
-      formatter = new Intl.DateTimeFormat('en-US', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
-      ReminderSendsService.formatters.set(zone, formatter)
-    }
-    const parts = formatter.formatToParts(at)
-    const part = (type: string) => parts.find((p) => p.type === type)!.value
-    return `${part('year')}-${part('month')}-${part('day')}T${part('hour')}:${part('minute')}`
   }
 }

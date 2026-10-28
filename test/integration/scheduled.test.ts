@@ -15,17 +15,16 @@ import { D1ScansRepository } from '../../src/modules/scans/scans.repository'
 import { ScanService } from '../../src/modules/scans/scans.service'
 import { D1UsersRepository } from '../../src/modules/users/users.repository'
 import { UsersService } from '../../src/modules/users/users.service'
-import { ReminderSendsService } from '../../src/modules/reminders/reminders.sends.service'
 import { D1RoutinesRepository } from '../../src/modules/routines/routines.repository'
 import { D1VerdictsRepository } from '../../src/modules/verdicts/verdicts.repository'
 import { queueRecorder, stubPerfectCorp } from './perfect-corp.stub'
+import { fireCron, queueSinks, workerEnv } from './reminders.fan-out.support'
 
 // The Worker's scheduled handler is one export for every cron in wrangler.jsonc. Each cron runs its own job and no other:
 // the daily guest cleanup must not run every 10 minutes, nor the reaper once a day. The crons are pinned to the config in
 // scripts/wrangler-config.test.ts.
 const GUEST_CLEANUP_CRON = '17 3 * * *'
 const SCAN_REAPER_CRON = '*/10 * * * *'
-const REMINDERS_CRON = '*/15 * * * *'
 
 const NOW = Date.now()
 const HOUR = 60 * 60 * 1000
@@ -787,68 +786,17 @@ describe('the Worker scheduled handler: routines sweeps', () => {
   })
 })
 
-// --- the reminder send job ---
-
-// Every 15 minutes the Worker asks ReminderSendsService.sendDue which reminders are due. The window is a slot on the quarter hour, so the job is given the time the
-// cron was SCHEDULED for (controller.scheduledTime), not the moment the Worker happened to start. What is sent is pinned in reminders.sends.service.test.ts; here only the wiring.
-describe('the Worker scheduled handler: the reminder send job', () => {
-  const SLOT = Date.UTC(2030, 5, 15, 6, 45)
-  // The tests that fire the daily and the reaper crons here run those jobs for real, over the rows the describes above left behind, and they queue work for it (verdict retries, safety
-  // parses, pushes). Into the real queues that work is consumed by this Worker after the file has finished, while vitest is closing, which prints an EnvironmentTeardownError. So every
-  // queue binding is a recorder, as the describes above do for the queues they read: what is queued here is caught and dropped with the test.
-  const sinks = {
-    OTP_DELIVERY_QUEUE: queueRecorder().queue,
-    SCAN_ITEMS_QUEUE: queueRecorder().queue,
-    PUSH_DELIVERY_QUEUE: queueRecorder().queue,
-    PUSH_RECEIPTS_QUEUE: queueRecorder().queue,
-    PARSE_SAFETY_QUEUE: queueRecorder().queue,
-    EMAIL_QUEUE: queueRecorder().queue,
-    FACE_SCANS_QUEUE: queueRecorder().queue,
-    VERDICTS_QUEUE: queueRecorder().queue,
-    ROUTINES_QUEUE: queueRecorder().queue,
-  }
-  const fireReminders = async (cron: string, scheduledTime = SLOT) => {
-    const ctx = createExecutionContext()
-    await worker.scheduled!(createScheduledController({ scheduledTime, cron }), { ...env, ...sinks } as typeof env, ctx)
-    await waitOnExecutionContext(ctx)
-  }
-
-  it('on the 15 minute cron, sends the due reminders once, for the time the cron was scheduled for', async () => {
-    const sweep = vi.spyOn(ReminderSendsService.prototype, 'sendDue').mockResolvedValue(0)
-
-    await fireReminders(REMINDERS_CRON)
-
-    expect(sweep).toHaveBeenCalledTimes(1)
-    expect(sweep.mock.calls[0]![0]).toEqual(new Date(SLOT))
-  })
-
-  it('on the daily and the 10 minute crons, sends no reminders', async () => {
-    const sweep = vi.spyOn(ReminderSendsService.prototype, 'sendDue').mockResolvedValue(0)
-
-    await fireReminders(GUEST_CLEANUP_CRON)
-    await fireReminders(SCAN_REAPER_CRON)
-
-    expect(sweep).not.toHaveBeenCalled()
-  })
-
-  it('on the 15 minute cron, runs neither the guest cleanup nor the scan reaper', async () => {
-    vi.spyOn(ReminderSendsService.prototype, 'sendDue').mockResolvedValue(0)
+// The 15-minute reminder cron (it queues one message per started profile) and the consumer of those messages are in reminders.fan-out.test.ts; here only that it is
+// its own cron. Every queue binding is a recorder, as in the describes above: the messages it queues are caught and dropped with the test.
+describe('the Worker scheduled handler: the 15 minute cron', () => {
+  it('runs neither the guest cleanup nor the scan reaper', async () => {
     const stuck = await stuckItem(3 * HOUR)
     const guest = await abandonedGuest()
+    const sinks = queueSinks()
 
-    await fireReminders(REMINDERS_CRON)
+    await fireCron(workerEnv(sinks))
 
     expect(await scans.findItem(stuck)).toMatchObject({ state: 'recognising' })
     expect(await users.findById(guest)).not.toBeNull()
-  })
-
-  it('fails the run when the send job throws, and logs it as { job, outcome: failed } with a scrubbed error', async () => {
-    const logged = vi.spyOn(console, 'error').mockImplementation(() => undefined)
-    vi.spyOn(ReminderSendsService.prototype, 'sendDue').mockRejectedValue(new Error('the send job exploded with ExponentPushToken[abc]'))
-
-    await expect(fireReminders(REMINDERS_CRON)).rejects.toThrow('the send job exploded')
-
-    expect(logged).toHaveBeenCalledWith(expect.objectContaining({ job: 'reminder-send', outcome: 'failed' }))
-    expect(logged.mock.calls.map((call) => JSON.stringify(call)).join('\n')).not.toContain('ExponentPushToken[abc]')
   })
 })

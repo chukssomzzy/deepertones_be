@@ -87,13 +87,23 @@ const missedDaysNudgeBody = z.object({
 })
 
 /**
+ * Not a push: the 15-minute reminder cron's message for one started profile (PR 8a). It rides the push queue because the push consumer is the one already deployed for reminder work;
+ * the consumer does that profile's reminder work (ReminderSendsService.sendForProfile) for the quarter hour the cron was scheduled for, `slot` (epoch ms), never for the moment it runs.
+ */
+const reminderProfileBody = z.object({
+  kind: z.literal('reminder-profile'),
+  profileId: z.string(),
+  slot: z.number().int(),
+})
+
+/**
  * What the send job carries: the kind and ids only, never a token or a link (the routine reminder's title and the step-down alert's changes are the only text, see their bodies). Those are resolved when the job runs, so a
  * logout, a profile switch or a changed setting between the event and the send is respected.
  */
 export const sendPushSpec = jobSpec({
   name: 'send-push',
   queue: 'push-delivery',
-  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody, stepDownAlertBody, missedDaysNudgeBody]),
+  schema: z.discriminatedUnion('kind', [scanFinishedBody, scanNeedsYouBody, newSignInBody, faceScanReadyBody, faceScanNeedsRetakeBody, faceCheckInDueBody, routineReminderBody, stepDownAlertBody, missedDaysNudgeBody, reminderProfileBody]),
   // One key per notification occurrence, so a repeated message sends nothing. A person scanning ten products gets one
   // needs-you push per scan and need; an item that asks again after an unreadable back photo is one more.
   key: (body) => {
@@ -118,6 +128,8 @@ export const sendPushSpec = jobSpec({
         return `step-down-alert:${body.profileId}:${body.day}`
       case 'missed-days-nudge':
         return `missed-days-nudge:${body.profileId}:${body.since}`
+      case 'reminder-profile':
+        return `reminder-profile:${body.profileId}:${body.slot}`
     }
   },
   // A person is waiting for the notification, as with an OTP: 5 attempts finish within a couple of minutes.
@@ -138,4 +150,6 @@ export const checkPushReceiptsSpec = jobSpec({
 })
 
 export type SendPushMessage = z.infer<typeof sendPushSpec.schema>
+/** A message of the send job that is a notification: every kind but the reminder cron's profile message. */
+export type PushNotificationMessage = Exclude<SendPushMessage, { kind: 'reminder-profile' }>
 export type CheckPushReceiptsMessage = z.infer<typeof checkPushReceiptsSpec.schema>
