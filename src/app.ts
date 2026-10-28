@@ -17,6 +17,7 @@ import { adminCatalogRoutes } from './modules/catalog/catalog.workbook.routes'
 import { faceConsentRoutes, faceScanRoutes, webhookRoutes } from './modules/face-scans/face-scans.routes'
 import { goalsRoutes } from './modules/goals/goals.routes'
 import { healthRoutes } from './modules/health/health.routes'
+import { inboxRoutes } from './modules/inbox/inbox.routes'
 import { notificationsRoutes } from './modules/notifications/notifications.routes'
 import { onboardingRoutes } from './modules/onboarding/onboarding.routes'
 import { recommendationsRoutes } from './modules/recommendations/recommendations.routes'
@@ -51,6 +52,7 @@ const v1 = openapiApp()
   .route('/me', verdictsRoutes)
   .route('/me', routinesRoutes)
   .route('/me', remindersRoutes)
+  .route('/me', inboxRoutes)
   .route('/me', faceConsentRoutes)
   .route('/products', productRoutes)
   .route('/onboarding', onboardingRoutes)
