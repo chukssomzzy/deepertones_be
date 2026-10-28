@@ -3033,8 +3033,10 @@
           "state": {
             "type": "string",
             "enum": [
-              "undone"
-            ]
+              "undone",
+              "bringing-back"
+            ],
+            "description": "`undone` for a first pause. `bringing-back` for a pause made again while the step was being brought back: the step goes back on its ladder, never straight to full strength."
           }
         },
         "required": [

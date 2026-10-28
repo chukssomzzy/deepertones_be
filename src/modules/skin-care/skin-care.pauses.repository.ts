@@ -23,12 +23,12 @@ export class D1StepPausesRepository {
     return row ?? null
   }
 
-  /** The profile's open pauses (`paused` and `bringing-back`), oldest first (made in the same millisecond by id, so the order is stable), whole. */
+  /** The profile's open pauses (`paused`, `bringing-back` and `escalated`), oldest first (made in the same millisecond by id, so the order is stable), whole. */
   async openFor(profileId: string): Promise<StepPause[]> {
     return this.db
       .select()
       .from(stepPauses)
-      .where(and(eq(stepPauses.profileId, profileId), inArray(stepPauses.state, ['paused', 'bringing-back'])))
+      .where(and(eq(stepPauses.profileId, profileId), inArray(stepPauses.state, ['paused', 'bringing-back', 'escalated'])))
       .orderBy(asc(stepPauses.createdAt), asc(stepPauses.id))
   }
 
@@ -43,6 +43,19 @@ export class D1StepPausesRepository {
       return row !== null && (onlyIfState === undefined || row.state === onlyIfState)
     }
     const rows = await this.db.update(stepPauses).set(patch).where(where).returning({ id: stepPauses.id })
+    return rows.length > 0
+  }
+
+  /**
+   * A harm signal on a step being brought back: flips that row to `paused` in place (a second open row for the step is refused by the table), with the new day, check day and log and no
+   * "same" answers, and keeps the ladder columns. A compare-and-set on `bringing-back`: false, changing nothing, for a row in any other state, another profile's row and an id nobody holds.
+   */
+  async rePause(profileId: string, id: string, to: { pausedOn: string; checkDay: string; sourceLogId: string | null }): Promise<boolean> {
+    const rows = await this.db
+      .update(stepPauses)
+      .set({ state: 'paused', sameCount: 0, pausedOn: to.pausedOn, checkDay: to.checkDay, sourceLogId: to.sourceLogId })
+      .where(and(eq(stepPauses.id, id), eq(stepPauses.profileId, profileId), eq(stepPauses.state, 'bringing-back')))
+      .returning({ id: stepPauses.id })
     return rows.length > 0
   }
 }

@@ -13,6 +13,7 @@ import {
   CONCERN_KINDS,
   ESCALATION_REASONS,
   FREQUENCIES,
+  FREQUENCY_STRENGTH,
   INGREDIENT_GROUPS,
   ORIGINS,
   PRODUCT_FORMS,
@@ -856,7 +857,7 @@ type ScheduleKind = {
 
 /** A step-down only ever goes down, strongest first, and ends with stop. */
 const TAPER_SCHEDULE: ScheduleKind = {
-  strength: { 'am-pm': 5, am: 4, pm: 4, 'alternate-days': 3, weekly: 2, 'as-needed': 1, stop: 0 },
+  strength: { ...FREQUENCY_STRENGTH, stop: 0 },
   maxWeeks: SCHEDULE_MAX_WEEKS,
   end: 'stop',
   missingEnd: 'SCHEDULE_MISSING_STOP',
@@ -868,7 +869,7 @@ const TAPER_SCHEDULE: ScheduleKind = {
 
 /** A reintroduction ladder only ever goes up, weakest first, and ends with back. There is no stop in it. */
 const LADDER_SCHEDULE: ScheduleKind = {
-  strength: { 'as-needed': 1, weekly: 2, 'alternate-days': 3, am: 4, pm: 4, 'am-pm': 5, back: 6 },
+  strength: { ...FREQUENCY_STRENGTH, back: 6 },
   maxWeeks: LADDER_MAX_WEEKS,
   end: 'back',
   missingEnd: 'REINTRO_MISSING_BACK',

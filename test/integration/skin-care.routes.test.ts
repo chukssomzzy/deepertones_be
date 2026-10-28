@@ -579,7 +579,7 @@ describe('POST /api/v1/me/skin-care/pauses/{id}/undo', () => {
       pausedOn: utcDay(at(-DAY)),
       checkDay: utcDay(at(2 * DAY)),
       sameCount: 0,
-      sourceLogId: null,
+      sourceLogId: `log-${yesterday}`,
       ladderCode: null,
       ladderStartedOn: null,
       versionId: null,

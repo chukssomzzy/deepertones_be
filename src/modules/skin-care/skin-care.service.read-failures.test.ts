@@ -48,6 +48,11 @@ const makeService = (store: FakeStepPausesRepository = pauses) =>
     workbook: {
       responseFor: async (outcome) => (outcome === 'paused' ? PAUSED : outcome === 'nothing-to-pause' ? NOTHING : outcome === 'advice-itching' ? ADVICE : null),
       escalationFor: async (reason) => (reason === 'swelling' ? SWELLING : reason === 'harm-while-two-paused' ? TWO_PAUSED : null),
+      // PR 5: a replaced product is brought back on a ladder, so a reconcile reads one.
+      reintroductionFor: async () => [
+        { fromWeek: 1, toWeek: 1, frequency: 'weekly' },
+        { fromWeek: 2, toWeek: 2, frequency: 'back' },
+      ],
     },
     reminders: { zoneFor: async () => null },
     routine: {
@@ -349,11 +354,12 @@ describe('SkinCareService.log, a pause the routine no longer has', () => {
 })
 
 describe('SkinCareService.stateFor, healing a rebuild whose hook was missed', () => {
-  it('sets a pause to replaced when the step\'s product has changed, and does not list it', async () => {
+  it('sets a pause to replaced when the step\'s product has changed, and does not list the old product', async () => {
     const result = await log(STING)
     current.steps.find(({ step }) => step === 'treat')!.productId = 'prod-better-treat'
 
-    expect(await service.stateFor(AMARA, '2030-06-15')).toEqual({ pauses: [], held: false })
+    // The old product is not listed. (From PR 5 the new product is brought back on a ladder: skin-care.service.check-ins.test.ts says whether and when it is listed.)
+    expect((await service.stateFor(AMARA, '2030-06-15')).pauses).not.toContainEqual(expect.objectContaining({ productId: 'prod-treat' }))
 
     expect(await pauses.find(AMARA, result.paused!.id)).toMatchObject({ state: 'replaced' })
   })
