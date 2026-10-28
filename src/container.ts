@@ -46,6 +46,8 @@ import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
 import { D1ShelfRepository } from './modules/shelf/shelf.repository'
 import { ShelfService } from './modules/shelf/shelf.service'
+import { D1SkinCareRepository } from './modules/skin-care/skin-care.repository'
+import { SkinCareService } from './modules/skin-care/skin-care.service'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
@@ -436,6 +438,17 @@ export const buildContainer = (env: CloudflareBindings) => {
     })
   })
 
+  // Skin logs have no route yet. The step-down answer is a stub until the routine can say whether one is running (PRs 4a and 4b replace it).
+  const skinCare = once(
+    () =>
+      new SkinCareService({
+        repository: new D1SkinCareRepository(db()),
+        workbook: catalogWorkbook(),
+        reminders: reminders(),
+        routine: { stepDownRunning: async () => false },
+      }),
+  )
+
   const routineCheckIns = once(
     () =>
       new RoutineCheckInsService({
@@ -538,6 +551,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get safety() {
       return safety()
+    },
+    get skinCare() {
+      return skinCare()
     },
     get routines() {
       return routines()
