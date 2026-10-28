@@ -851,6 +851,69 @@ describe('RecommendationService.candidatesFor: what the user said reacted, or th
   })
 })
 
+describe('RecommendationService.candidatesFor: a product the skin log marked as one the person keeps reacting to', () => {
+  const MARKED = { productId: 'product-Night Cream', brand: 'Orbis', name: 'Night Cream', category: 'skin' } as const
+  const mark = (ctx: Ctx) => ctx.safety.markReactionProduct('profile-amara-1', MARKED)
+
+  it('leaves out the recommended row that is the same product, by its product id, as it does for a product named in the reaction words', async () => {
+    const ctx = setup()
+    stock(ctx, [row('NIGHT-CREAM', { productId: 'product-Night Cream' }), row('PLAIN')])
+    await ready(ctx)
+    expect(await codesOf(ctx)).toEqual(['NIGHT-CREAM', 'PLAIN'])
+
+    expect(await mark(ctx)).toEqual({ marked: true })
+
+    expect(await codesOf(ctx)).toEqual(['PLAIN'])
+  })
+
+  it('keeps leaving it out after the safety answers are saved again (the mark is carried onto the new answer)', async () => {
+    const ctx = setup()
+    stock(ctx, [row('NIGHT-CREAM', { productId: 'product-Night Cream' }), row('PLAIN')])
+    await ready(ctx)
+    await mark(ctx)
+    ctx.tick()
+
+    await setSafety(ctx, ['pregnant'])
+
+    expect(await codesOf(ctx)).toEqual(['PLAIN'])
+  })
+
+  it('leaves out a row that lists exactly the ingredients of the marked product\'s latest list (the same product under another spelling)', async () => {
+    const ctx = setup()
+    ctx.products.knowProduct('product-Night Cream', ['Aqua', 'Glycerin'])
+    stock(ctx, [row('RESPELLED', { productId: 'product-other', ingredients: ['AQUA', 'glycerin'] }), row('PLAIN', { ingredients: ['Squalane'] })])
+    await ready(ctx)
+
+    await mark(ctx)
+
+    expect(await codesOf(ctx)).toEqual(['PLAIN'])
+  })
+
+  it('counts as a reaction for the information the candidate carries: sharedWithReaction lists the ingredients it shares with the marked product', async () => {
+    const ctx = setup()
+    ctx.products.knowProduct('product-Night Cream', ['Aqua', 'Glycerin', 'Niacinamide'])
+    stock(ctx, [row('SHARES-TWO', { ingredients: ['Aqua', 'Squalane', 'NIACINAMIDE'] })])
+    await ready(ctx)
+    await mark(ctx)
+
+    const [candidate] = await candidates(ctx)
+
+    expect(candidate!.sharedWithReaction).toEqual([{ productId: 'product-Night Cream', ingredients: ['Aqua', 'NIACINAMIDE'] }])
+    expect(candidate!.passed).toContain('reactions')
+  })
+
+  it('leaves the other candidates alone, with nothing shared', async () => {
+    const ctx = setup()
+    stock(ctx, [row('NIGHT-CREAM', { productId: 'product-Night Cream' }), row('PLAIN', { ingredients: ['Squalane'] })])
+    await ready(ctx)
+    await mark(ctx)
+
+    const [candidate] = await candidates(ctx)
+
+    expect(candidate).toMatchObject({ code: 'PLAIN', sharedWithReaction: [] })
+  })
+})
+
 describe('RecommendationService.candidatesFor: sharedWithReaction', () => {
   it('lists, for each product the user said gave a reaction, the candidate\'s ingredients that are also in that product\'s latest formulation, spelled as the candidate has them', async () => {
     const ctx = setup()

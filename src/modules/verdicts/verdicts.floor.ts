@@ -106,7 +106,8 @@ const contextOf = (input: FloorInput): Context => ({
   byGroup: groupRules(input.rules),
   strayBanned: input.rules.filter((rule) => rule.kind === 'banned-substance' && (rule.group === null || !OUTCOME_GROUPS.includes(rule.group))),
   prescribed: input.safety.mentions.filter((mention) => mention.source === 'prescription' && mention.kind === 'product'),
-  reactedProducts: input.safety.mentions.filter((mention) => mention.source === 'reaction' && mention.kind === 'product'),
+  // A product the person marked as one they reacted to (`skin-log`) is as good as one they typed; only typed ingredients are reactions to an ingredient.
+  reactedProducts: input.safety.mentions.filter((mention) => (mention.source === 'reaction' || mention.source === 'skin-log') && mention.kind === 'product'),
   reactedIngredients: input.safety.mentions.filter((mention) => mention.source === 'reaction' && mention.kind === 'ingredient'),
 })
 
