@@ -20,4 +20,14 @@ export class MemoryJobQueue implements JobQueue {
     }
     this.enqueued.push({ job: job.name, body, ...(options.delaySeconds === undefined ? {} : { delaySeconds: options.delaySeconds }) })
   }
+
+  async enqueueBatch<S extends z.ZodType>(job: JobSpec<S>, bodies: z.input<S>[]): Promise<void> {
+    if (bodies.length === 0) return
+    if (this.failure) {
+      const failure = this.failure
+      this.failure = undefined
+      throw failure
+    }
+    for (const body of bodies) this.enqueued.push({ job: job.name, body })
+  }
 }

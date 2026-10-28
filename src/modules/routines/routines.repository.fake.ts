@@ -1,3 +1,4 @@
+import type { StartedProfile } from '../reminders/reminders.types'
 import type { NotInRoutineItem, ShelfCounts } from './routines.table'
 import type { CompletedRoutineBuild, RoutineRequestRetry, RoutineRequestRow, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 
@@ -54,6 +55,15 @@ export class FakeRoutinesRepository implements RoutinesRepository {
       if (row.profileId !== profileId || row.startedOn !== null) continue
       this.rows.set(id, { ...row, startedOn: new Date(on), tapers: row.tapers.map((taper) => ({ ...taper, startedOn: new Date(taper.startedOn ?? on) })) })
     }
+  }
+
+  async startedProfileIds(): Promise<string[]> {
+    return [...new Set([...this.rows.values()].filter((row) => row.startedOn !== null).map((row) => row.profileId))]
+  }
+
+  /** The fake knows no reminder settings (another module's table): every profile comes back with none. */
+  async startedProfiles(): Promise<StartedProfile[]> {
+    return (await this.startedProfileIds()).map((profileId) => ({ profileId, enabled: null, morning: null, evening: null, timeZone: null }))
   }
 
   async lastServedBefore(profileId: string, excludeId: string): Promise<RoutineVersionRow | null> {

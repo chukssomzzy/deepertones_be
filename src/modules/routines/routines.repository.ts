@@ -2,6 +2,8 @@ import { and, asc, count, desc, eq, gt, gte, isNotNull, isNull, lte, ne, sql } f
 import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
+import { reminderSettings } from '../reminders/reminders.table'
+import type { StartedProfile } from '../reminders/reminders.types'
 import { routineRequests, routineVersions, type NotInRoutineItem, type ShelfCounts } from './routines.table'
 
 export type RoutineVersionRow = typeof routineVersions.$inferSelect
@@ -118,6 +120,27 @@ export class D1RoutinesRepository {
         .where(and(eq(routineVersions.id, id), isNull(routineVersions.startedOn))),
     )
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+  }
+
+  /**
+   * Every profile with a version that has a start date, once each: the 15-minute reminder cron's list. One statement over the partial index on `started_on`, which holds only
+   * the Started rows and the profile id, so it never reads the table. A profile counts whichever of its versions carries the start (a rebuild asked for and not done has none).
+   */
+  async startedProfileIds(): Promise<string[]> {
+    const rows = await this.db.selectDistinct({ profileId: routineVersions.profileId }).from(routineVersions).where(isNotNull(routineVersions.startedOn))
+    return rows.map(({ profileId }) => profileId)
+  }
+
+  /**
+   * Every profile with a Started version, once each, with its reminder settings (null columns when it has no settings row): the 15-minute reminder cron's one statement.
+   * The Started rows come from the partial index on `started_on`; the settings are one primary-key lookup each.
+   */
+  async startedProfiles(): Promise<StartedProfile[]> {
+    return this.db
+      .selectDistinct({ profileId: routineVersions.profileId, enabled: reminderSettings.enabled, morning: reminderSettings.morning, evening: reminderSettings.evening, timeZone: reminderSettings.timeZone })
+      .from(routineVersions)
+      .leftJoin(reminderSettings, eq(reminderSettings.profileId, routineVersions.profileId))
+      .where(isNotNull(routineVersions.startedOn))
   }
 
   /**

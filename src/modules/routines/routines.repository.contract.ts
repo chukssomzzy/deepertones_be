@@ -41,6 +41,10 @@ import type { CautionState } from './routines.types'
 //                                  It also stamps `on` as the startedOn of each step-down of those rows whose startedOn is null (one already dated keeps
 //                                  its date): that is how Start puts the date on a step-down of the routine in force. Otherwise a ready row is changed by
 //                                  nothing but servedAt, startedOn, writerRetryDueAt (clearWriterRetry) and routineFingerprint (setRoutineFingerprint) (the other markStarted tests use rows with no step-downs, to keep that apart).
+//   startedProfileIds()            the id of every profile with at least one row whose startedOn is set, once each, in no order: a profile whose rows are all
+//                                  unstarted is not in it, and one with a Started row is, whether or not its newest row is Started.
+//   startedProfiles()              the same profiles as startedProfileIds, each once, as { profileId, enabled, morning, evening, timeZone }: the profile's reminder settings,
+//                                  every one of them null for a profile with no settings row (the contract writes none; the D1 class joins the reminder_settings table).
 //   lastServedBefore(profileId, excludeId)   the profile's newest `ready` row (in the order `current` uses) whose servedAt is not null and whose id is not `excludeId`, or null.
 //                                  Pending rows never count, even when marked served. It is "every served version but this one", not "older than this one".
 //   writerBuildsSince(profileId, since)   how many of that profile's rows have writerCalls > 0 and createdAt >= since, whatever their source, status or reason.
@@ -955,6 +959,44 @@ export const routinesRepositoryContract = (name: string, make: () => RoutinesCon
         await expect(repository.markStarted(profileId, at(HOUR))).resolves.toBeUndefined()
 
         expect(await repository.latest(profileId)).toBeNull()
+      })
+    })
+
+    describe('startedProfileIds', () => {
+      it('lists a profile once however many of its versions carry the start, also when its newest version has none, and no profile whose versions are all unstarted', async () => {
+        const { repository, newAccount } = await make()
+        const twice = await newAccount()
+        await repository.append(readyRow(twice.profileId, crypto.randomUUID(), BASE, { startedOn: at(HOUR), tapers: [] }))
+        await repository.append(readyRow(twice.profileId, crypto.randomUUID(), at(DAY), { startedOn: at(HOUR), tapers: [] }))
+        const rebuilding = await newAccount()
+        await repository.append(readyRow(rebuilding.profileId, crypto.randomUUID(), BASE, { startedOn: at(HOUR), tapers: [] }))
+        await repository.append(pendingRow(rebuilding.profileId, crypto.randomUUID(), at(DAY)))
+        const unstarted = await newAccount()
+        await repository.append(readyRow(unstarted.profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] }))
+        const none = await newAccount()
+
+        const ids = await repository.startedProfileIds()
+
+        expect(ids.filter((id) => id === twice.profileId)).toHaveLength(1)
+        expect(ids.filter((id) => id === rebuilding.profileId)).toHaveLength(1)
+        expect(ids).not.toContain(unstarted.profileId)
+        expect(ids).not.toContain(none.profileId)
+      })
+    })
+
+    describe('startedProfiles', () => {
+      it('lists each profile with a Started version once, with no reminder settings when it has no settings row, and no profile without a Started version', async () => {
+        const { repository, newAccount } = await make()
+        const started = await newAccount()
+        await repository.append(readyRow(started.profileId, crypto.randomUUID(), BASE, { startedOn: at(HOUR), tapers: [] }))
+        await repository.append(readyRow(started.profileId, crypto.randomUUID(), at(DAY), { startedOn: at(HOUR), tapers: [] }))
+        const unstarted = await newAccount()
+        await repository.append(readyRow(unstarted.profileId, crypto.randomUUID(), BASE, { startedOn: null, tapers: [] }))
+
+        const rows = await repository.startedProfiles()
+
+        expect(rows.filter(({ profileId }) => profileId === started.profileId)).toEqual([{ profileId: started.profileId, enabled: null, morning: null, evening: null, timeZone: null }])
+        expect(rows.map(({ profileId }) => profileId)).not.toContain(unstarted.profileId)
       })
     })
 

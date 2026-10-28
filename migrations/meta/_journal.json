@@ -379,6 +379,13 @@
       "when": 1793191230109,
       "tag": "0053_clever_rawhide_kid",
       "breakpoints": true
+    },
+    {
+      "idx": 54,
+      "version": "6",
+      "when": 1793196697974,
+      "tag": "0054_magenta_bushwacker",
+      "breakpoints": true
     }
   ]
 }
