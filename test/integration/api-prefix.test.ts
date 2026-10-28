@@ -165,6 +165,7 @@ describe('the OpenAPI document', () => {
         'GET /api/v1/me/skin-logs',
         'POST /api/v1/me/skin-care/pauses/{id}/undo',
         'POST /api/v1/me/skin-care/pauses/{id}/check-in',
+        'POST /api/v1/me/skin-care/hold/close',
         'PUT /api/v1/me/goal',
         'GET /api/v1/me/goal',
         'GET /api/v1/me/goal/switch-preview',

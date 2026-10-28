@@ -7,6 +7,7 @@ import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
 import { type InboxWrite, InboxService } from '../inbox/inbox.service'
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
 import type { SkinCareRoutine, SkinCareRoutineStep } from './skin-care.types'
@@ -154,6 +155,10 @@ const makeService = () =>
   new SkinCareService({
     repository,
     pauses,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
@@ -706,7 +711,7 @@ describe('an escalated step', () => {
     await checkIn(AMARA_ACTOR, made.paused!.id, 'worse')
 
     for (const day of [dayAt(3), dayAt(40)]) {
-      expect(await service.stateFor(AMARA, day)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
+      expect(await service.stateFor(AMARA, day)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: true })
     }
   })
 
@@ -1200,6 +1205,10 @@ describe('SkinCareService.stateFor, when reconcile fails', () => {
     const serviceReading = new SkinCareService({
       repository,
       pauses,
+      holds: new FakeEscalationHoldsRepository(),
+      safety: { markReactionProduct: async () => ({ marked: false }) },
+      verdicts: { savedFor: async () => null },
+      catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
       workbook: { responseFor: async (o) => world.responses[o] ?? null, escalationFor: async () => null, reintroductionFor: async () => structuredClone(DEFAULT_LADDER) },
       reminders: { zoneFor: async () => null },
       routine: {
@@ -1221,6 +1230,10 @@ describe('SkinCareService.stateFor, when reconcile fails', () => {
     const failing = new SkinCareService({
       repository,
       pauses,
+      holds: new FakeEscalationHoldsRepository(),
+      safety: { markReactionProduct: async () => ({ marked: false }) },
+      verdicts: { savedFor: async () => null },
+      catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
       workbook: { responseFor: async () => null, escalationFor: async () => null, reintroductionFor: async () => [] },
       reminders: { zoneFor: async () => null },
       routine: {
@@ -1251,7 +1264,7 @@ describe('SkinCareService.reconcile, an escalated step whose product was replace
     const fresh = (await openPauses(AMARA)).find((open) => open.productKey === 'prod-better-treat')!
     expect(fresh).toMatchObject({ step: 'treat', state: 'escalated', ladderCode: null, ladderStartedOn: null })
     expect(world.inboxWrites.filter((write) => write.key.startsWith('bringing-back:'))).toEqual([])
-    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-better-treat', state: 'paused' }], held: false })
+    expect(await service.stateFor(AMARA, dayAt(3))).toEqual({ pauses: [{ step: 'treat', productId: 'prod-better-treat', state: 'paused' }], held: true })
     expect(await dueIds(dayAt(400))).toEqual([])
     expect(await errorOf(checkIn(AMARA_ACTOR, fresh.id, 'calmer'))).toMatchObject({ code: 'PAUSE_NOT_FOUND' })
   })

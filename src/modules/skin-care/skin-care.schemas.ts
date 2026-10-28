@@ -1,7 +1,7 @@
 import { z } from '@hono/zod-openapi'
 import { ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
 import { ADVICE_CODES, OUTCOME_KINDS, PROFESSIONAL_REASONS } from './skin-care.outcomes'
-import { CHECK_IN_ANSWERS, HOW_BAD, NOTICING, PAUSE_STATES, WHERE } from './skin-care.vocabulary'
+import { CHECK_IN_ANSWERS, HOLD_CLOSE_HOW, HOW_BAD, NOTICING, PAUSE_STATES, WHERE } from './skin-care.vocabulary'
 
 const NoticingEnum = z.enum(NOTICING).openapi({
   description:
@@ -110,3 +110,22 @@ export const CheckInResponse = z
     }),
   })
   .openapi('CheckInResult')
+
+export const CloseHoldBody = z
+  .object({ how: z.enum(HOLD_CLOSE_HOW).openapi({ description: 'How the hold ends: `seen` (the person saw a professional) or `settled` (the skin has settled).' }) })
+  .openapi('CloseHoldBody')
+
+export const CloseHoldResponse = z
+  .object({
+    closed: z.literal(true),
+    checkInsDue: z
+      .array(
+        z.object({
+          id: z.string().openapi({ description: "The pause's id, for the check-in route." }),
+          step: z.enum(ROUTINE_STEPS).nullable().openapi({ description: 'Null for the check-in with no step.' }),
+          checkDay: z.string().openapi({ description: 'The local day it is due, `YYYY-MM-DD`: today or earlier.', example: '2030-06-15' }),
+        }),
+      )
+      .openapi({ description: 'The check-ins due on the day of the close: the steps the hold kept out, each due today, and any other check-in already due.' }),
+  })
+  .openapi('CloseHoldResult')

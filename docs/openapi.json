@@ -3203,6 +3203,74 @@
           "pause"
         ]
       },
+      "CloseHoldResult": {
+        "type": "object",
+        "properties": {
+          "closed": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "checkInsDue": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "The pause's id, for the check-in route."
+                },
+                "step": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "enum": [
+                    "cleanse",
+                    "treat",
+                    "moisturise",
+                    "protect",
+                    null
+                  ],
+                  "description": "Null for the check-in with no step."
+                },
+                "checkDay": {
+                  "type": "string",
+                  "description": "The local day it is due, `YYYY-MM-DD`: today or earlier.",
+                  "example": "2030-06-15"
+                }
+              },
+              "required": [
+                "id",
+                "step",
+                "checkDay"
+              ]
+            },
+            "description": "The check-ins due on the day of the close: the steps the hold kept out, each due today, and any other check-in already due."
+          }
+        },
+        "required": [
+          "closed",
+          "checkInsDue"
+        ]
+      },
+      "CloseHoldBody": {
+        "type": "object",
+        "properties": {
+          "how": {
+            "type": "string",
+            "enum": [
+              "seen",
+              "settled"
+            ],
+            "description": "How the hold ends: `seen` (the person saw a professional) or `settled` (the skin has settled)."
+          }
+        },
+        "required": [
+          "how"
+        ]
+      },
       "FaceConsentGivenResponse": {
         "type": "object",
         "properties": {
@@ -8948,7 +9016,7 @@
           "Skin care"
         ],
         "summary": "Say how a paused step feels",
-        "description": "The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. `worse` goes to a professional. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
+        "description": "The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. `worse` goes to a professional. While an escalation hold is open, `calmer` and `same` on a step the hold keeps out are 409 `HOLD_OPEN` (503 `ROUTINE_UNAVAILABLE` if the routine cannot be read, so it cannot be told); close the hold first. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
         "security": [
           {
             "bearerAuth": []
@@ -9056,6 +9124,129 @@
           },
           "409": {
             "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/skin-care/hold/close": {
+      "post": {
+        "operationId": "closeEscalationHold",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "Close the escalation hold",
+        "description": "A professional result (a red-flag log, a harm log with two steps already paused, a worse or unchanged check-in) keeps the steps with an active ingredient out of the routine as `held`, until the person closes the hold: `seen` (they saw a professional) or `settled` (the skin has settled). Each held step is then due a check-in the same day: an escalated pause is `paused` again (its \"about the same\" count cleared), an open pause is due today, a step being brought back is paused again (its ladder is kept, and Calmer starts it again at the first rung), and a held step with no pause gets one (it cannot be undone). `checkInsDue` lists what is due today. 503 `ROUTINE_UNAVAILABLE` when the routine cannot be read (which steps are held is then unknown): the hold stays open and the request can be repeated. 404 `HOLD_NOT_FOUND` for an account with no open hold, and for the second of two closes. 400 `VALIDATION_FAILED` for any other body. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CloseHoldBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The hold, closed, and the check-ins due today",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CloseHoldResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {

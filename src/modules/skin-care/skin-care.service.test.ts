@@ -6,6 +6,7 @@ import type { EscalationReason, ResponseOutcome } from '../catalog/catalog.vocab
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { SKIN_OUTCOME_RULES_VERSION } from './skin-care.outcomes'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
 
@@ -108,6 +109,10 @@ const makeService = () =>
   new SkinCareService({
     repository,
     pauses,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     inbox: { write: async () => ({ id: 'inbox-row', created: true }) },
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,

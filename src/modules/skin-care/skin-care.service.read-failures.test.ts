@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { runAs } from '../../lib/context'
 import type { Escalation, Response } from '../catalog/catalog.workbook.service'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
 import { SkinCareService } from './skin-care.service'
@@ -45,6 +46,10 @@ const makeService = (store: FakeStepPausesRepository = pauses) =>
   new SkinCareService({
     repository,
     pauses: store,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     workbook: {
       responseFor: async (outcome) => (outcome === 'paused' ? PAUSED : outcome === 'nothing-to-pause' ? NOTHING : outcome === 'advice-itching' ? ADVICE : null),
       escalationFor: async (reason) => (reason === 'swelling' ? SWELLING : reason === 'harm-while-two-paused' ? TWO_PAUSED : null),

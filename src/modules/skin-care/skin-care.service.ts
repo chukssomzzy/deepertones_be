@@ -1,22 +1,28 @@
 import { requireUser } from '../../lib/context'
 import { ConflictError, ForbiddenError, NotFoundError, UnavailableError, ValidationError } from '../../lib/errors'
 import { localDay } from '../../lib/local-day'
-import { FREQUENCY_STRENGTH, type Frequency, type IngredientGroup, type RoutineStep } from '../catalog/catalog.vocabulary'
+import { FREQUENCY_STRENGTH, type EscalationReason, type Frequency, type IngredientGroup, type RoutineStep } from '../catalog/catalog.vocabulary'
 import type { ScheduleStep } from '../catalog/catalog.workbook.schema'
+import type { ProductCatalogService } from '../catalog/catalog.service'
 import type { CatalogWorkbookService, Escalation, Response } from '../catalog/catalog.workbook.service'
 import type { InboxService } from '../inbox/inbox.service'
 import type { RemindersService } from '../reminders/reminders.service'
+import type { SafetyService } from '../safety/safety.service'
 import { type SkinLogReading, type SkinOutcome, SKIN_OUTCOME_RULES_VERSION, outcomeFor } from './skin-care.outcomes'
+import type { EscalationHoldsRepository } from './skin-care.holds.repository'
+import { heldSteps } from './skin-care.holds'
 import type { StepPausesRepository } from './skin-care.pauses.repository'
 import type { SkinCareRepository } from './skin-care.repository'
 import { pauseKeyOf, stepToPause } from './skin-care.step-choice'
-import type { SkinCareRoutine, SkinCareRoutineStep, SkinCareState, SkinLog, StepPause } from './skin-care.types'
+import type { EscalationHold, SkinCareRoutine, SkinCareRoutineStep, SkinCareState, SkinLog, StepPause } from './skin-care.types'
 import { fillResponse, STEP_NOUN } from './skin-care.text'
-import { CHECK_IN_ANSWERS, HOW_BAD, NOTICING, WHERE, type CheckInAnswer, type HowBad, type Noticing, type PauseState, type Where } from './skin-care.vocabulary'
+import { CHECK_IN_ANSWERS, HOW_BAD, NOTICING, WHERE, type CheckInAnswer, type HoldCloseHow, type HowBad, type Noticing, type PauseState, type Where } from './skin-care.vocabulary'
 
 export type SkinCareServiceDeps = {
   repository: SkinCareRepository
   pauses: StepPausesRepository
+  /** The escalation holds a professional result opens. */
+  holds: EscalationHoldsRepository
   /** The reviewed text of the outcomes and the ladders a step is brought back on; null (or no steps) where the team has not written a row yet. */
   workbook: Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor' | 'reintroductionFor'>
   /** Read for the zone that decides what today is. */
@@ -29,6 +35,12 @@ export type SkinCareServiceDeps = {
   }
   /** Where a pause tells the person (the inbox row). */
   inbox: Pick<InboxService, 'write'>
+  /** A product that keeps reacting is marked on the profile's safety answers. */
+  safety: Pick<SafetyService, 'markReactionProduct'>
+  /** Asked for a verdict build once a mark is new: the mark changes what the verdict is built from. Only the call matters here, not what it answers. */
+  verdicts: { savedFor(profileId: string): Promise<unknown> }
+  /** The catalog's own brand, name and category of a product (the safety mark is made from them, never from the routine's title). */
+  catalog: Pick<ProductCatalogService, 'namedProduct'>
   now?: () => Date
 }
 
@@ -61,6 +73,11 @@ export type CheckInResult = {
   pause: { id: string; step: RoutineStep | null; state: PauseState; checkDay: string | null }
 }
 
+/** A check-in that is due, as the app is told of it when a hold is closed. */
+export type CheckInDueView = { id: string; step: RoutineStep | null; checkDay: string }
+
+export type CloseHoldResult = { closed: true; checkInsDue: CheckInDueView[] }
+
 /** When a pause is made, and the pauses open before it. */
 type PauseTime = { today: string; checkDay: string; now: Date; open: StepPause[] }
 
@@ -82,23 +99,33 @@ export class SkinCareService {
   private static readonly SAME_LIMIT = 2
   private static readonly CHECK_IN_UNAVAILABLE = 'This guidance is not available yet. Your check-in was not saved; try again later.'
   private static readonly WEEK_DAYS = 7
+  // The title of a hold's inbox row: the reviewed escalation has no heading of its own, and the person is told who to see in its body.
+  private static readonly HOLD_TITLE = 'Please see someone about your skin'
   private static readonly DAY = /^\d{4}-\d{2}-\d{2}$/
 
   private readonly repository: SkinCareRepository
   private readonly pauses: StepPausesRepository
+  private readonly holds: EscalationHoldsRepository
   private readonly workbook: SkinCareServiceDeps['workbook']
   private readonly reminders: SkinCareServiceDeps['reminders']
   private readonly routine: SkinCareServiceDeps['routine']
   private readonly inbox: SkinCareServiceDeps['inbox']
+  private readonly safety: SkinCareServiceDeps['safety']
+  private readonly verdicts: SkinCareServiceDeps['verdicts']
+  private readonly catalog: SkinCareServiceDeps['catalog']
   private readonly now: () => Date
 
   constructor(deps: SkinCareServiceDeps) {
     this.repository = deps.repository
     this.pauses = deps.pauses
+    this.holds = deps.holds
     this.workbook = deps.workbook
     this.reminders = deps.reminders
     this.routine = deps.routine
     this.inbox = deps.inbox
+    this.safety = deps.safety
+    this.verdicts = deps.verdicts
+    this.catalog = deps.catalog
     this.now = deps.now ?? (() => new Date())
   }
 
@@ -170,8 +197,11 @@ export class SkinCareService {
       }
     }
     if (outcome.kind === 'nothing-to-pause') await this.checkInWithNoStepOrLog(profileId, row.id, when)
+    // Opened before the reviewed text is read, so a missing text (503) still leaves the hold.
+    const hold = outcome.kind === 'professional' ? await this.openHold(profileId, outcome.reason, row.id, today, now) : null
 
     const response = await this.responseFor(outcome, { ...reading, note }, step?.step ?? null)
+    if (hold !== null) await this.tellHold(profileId, hold, today, response as Escalation)
     // The pause of a re-pause was told when it was first made (`paused:<id>`), so nothing is written for it.
     if (paused !== null && paused.id !== again?.id) await this.tellInbox(profileId, paused.id, today, response as Response)
     return { log: SkinCareService.viewOf({ ...row, outcome: outcome.kind, reason: outcome.kind === 'professional' ? outcome.reason : null }), outcome, response, paused }
@@ -208,9 +238,100 @@ export class SkinCareService {
     SkinCareService.signedUp()
   }
 
-  /** The profile's `paused` rows (the check-in with no step too) whose check day has come: `check_day <= today`, a local day. By profile id with no session. Never a step being brought back or sent to a professional. */
+  /**
+   * The profile's `paused` rows (the check-in with no step too) whose check day has come: `check_day <= today`, a local day. By profile id with no session. Never a step being brought back or sent
+   * to a professional, and never a step an open hold keeps out (`heldSteps`): Calmer and "about the same" on it are refused until the hold is closed, so it is not asked. A hold that cannot be read
+   * rejects; a routine that cannot be read (so it cannot be told which steps are held) leaves the rows in, logged by ids, as the answer is refused anyway.
+   */
   async checkInsDue(profileId: string, today: string): Promise<StepPause[]> {
-    return (await this.pauses.openFor(profileId)).filter((pause) => pause.state === 'paused' && pause.checkDay <= today)
+    const due = (await this.pauses.openFor(profileId)).filter((pause) => pause.state === 'paused' && pause.checkDay <= today)
+    if (due.every(({ step }) => step === null) || (await this.holds.openFor(profileId)) === null) return due
+    try {
+      const routine = await this.routine.skinCareRoutineFor(profileId)
+      const held = routine === null ? [] : heldSteps(routine, true)
+      return due.filter(({ step }) => step === null || !held.includes(step))
+    } catch {
+      console.error({ outcome: 'skin-care-routine-read-failed', profileId })
+      return due
+    }
+  }
+
+  /**
+   * Closes the session profile's escalation hold, and gives the steps it kept out their check-in the same day. Gates, in order: 401, 403 `SIGNUP_REQUIRED`, 404 `HOLD_NOT_FOUND` (no open
+   * hold, or one another request closed first). The pauses and the routine are read first, then the hold is read again and the close, a compare-and-set, is made before any pause is written. A pauses
+   * read that fails rejects, and so does a routine that cannot be read (503 `ROUTINE_UNAVAILABLE`, which steps are held being unknown): both with the hold still open, so a retry works. No routine at all
+   * (read fine, none exists) still closes. If the hold was closed, or closed and opened anew, since the first look, it is 404.
+   * **A window remains** between the second read and the compare-and-set: a professional result in it finds the same open hold (`open` is idempotent), and the close then ends that hold too, so the new result
+   * has no hold of its own. The window is two awaits wide and the person is asked to close a hold they have just seen; it is accepted, not closed.
+   * For each step the routine holds out (`heldSteps`): an `escalated` row becomes `paused` in place (same id) due today with no "same" answers; an open `paused` row's check day moves to today (its log
+   * kept); a `bringing-back` row is paused again in place (due today, ladder columns kept, no source log, no reaction mark: a system action), so a Calmer restarts the ladder at its first rung; a step with
+   * no row gets a `paused` row due today with no source log. An `escalated` row of a step that is not held out (a basic) goes back to `paused` too, as it would otherwise stay escalated for good.
+   * A pause write that fails after the close is logged by ids (`skin-care-hold-close-step-failed`), the other steps still go through, and the answer stands. `checkInsDue` is what `checkInsDue(profileId, today)`
+   * answers; a read of it that fails is logged (`skin-care-hold-close-due-failed`) and answers [].
+   */
+  async closeHold(how: HoldCloseHow): Promise<CloseHoldResult> {
+    const { profileId } = SkinCareService.signedUp()
+    const seen = await this.holds.openFor(profileId)
+    if (seen === null) throw new NotFoundError('HOLD_NOT_FOUND', 'No open hold')
+    const now = this.now()
+    const today = await this.dayOf(profileId, now)
+    const open = await this.pauses.openFor(profileId)
+    let routine: SkinCareRoutine | null
+    try {
+      routine = await this.routine.skinCareRoutineFor(profileId)
+    } catch {
+      // Not closed: the steps the hold keeps out cannot be told, so none could be given their check-in, and a retry must still find the hold.
+      console.error({ outcome: 'skin-care-routine-read-failed', profileId })
+      throw new UnavailableError('ROUTINE_UNAVAILABLE', 'The routine is not available right now. The hold is still open; try again later.')
+    }
+    // Read again just before the close, so a hold closed (and perhaps opened anew) while the reads were made is not closed here on the strength of the first look.
+    const hold = await this.holds.openFor(profileId)
+    if (hold === null || hold.id !== seen.id || !(await this.holds.close(profileId, hold.id, how, now))) throw new NotFoundError('HOLD_NOT_FOUND', 'No open hold')
+
+    const heldOut = routine === null ? [] : heldSteps(routine, true)
+    for (const pause of open) {
+      if (pause.state === 'escalated') await this.closingStep(profileId, pause.id, () => this.pauses.update(profileId, pause.id, { state: 'paused', checkDay: today, sameCount: 0 }, 'escalated'))
+      else if (pause.state === 'paused' && pause.step !== null && heldOut.includes(pause.step)) await this.closingStep(profileId, pause.id, () => this.pauses.update(profileId, pause.id, { checkDay: today }, 'paused'))
+      // A system action, not a reaction: the repository is called directly, so nothing is marked, and the row has no log of the person's (Undo refuses it, and Worse marks nothing). The ladder columns stay.
+      else if (pause.state === 'bringing-back' && pause.step !== null && heldOut.includes(pause.step)) {
+        await this.closingStep(profileId, pause.id, () => this.pauses.rePause(profileId, pause.id, { pausedOn: today, checkDay: today, sourceLogId: null }))
+      }
+    }
+    for (const name of heldOut) {
+      const entry = routine!.steps.find((candidate) => candidate.step === name)!
+      if (open.some((pause) => pause.step === name) || pauseKeyOf(entry) === null) continue
+      await this.closingStep(profileId, undefined, () => this.pause(profileId, null, entry, { today, checkDay: today, now, open: [] }))
+    }
+    // The close has happened: a read that fails here still answers it.
+    let due: StepPause[] = []
+    try {
+      due = await this.checkInsDue(profileId, today)
+    } catch {
+      console.error({ outcome: 'skin-care-hold-close-due-failed', profileId })
+    }
+    return { closed: true, checkInsDue: due.map(({ id, step, checkDay }) => ({ id, step, checkDay })) }
+  }
+
+  /** Refuses (409 `HOLD_OPEN`) an answer that would start a ladder or count towards one on a step an open hold keeps out. */
+  private async requireNotHeld(profileId: string, pause: StepPause): Promise<void> {
+    if (pause.step === null || (await this.holds.openFor(profileId)) === null) return
+    let routine: SkinCareRoutine | null
+    try {
+      routine = await this.routine.skinCareRoutineFor(profileId)
+    } catch {
+      console.error({ outcome: 'skin-care-routine-read-failed', profileId })
+      throw new UnavailableError('ROUTINE_UNAVAILABLE', 'The routine is not available right now. Try again later.')
+    }
+    if (routine !== null && heldSteps(routine, true).includes(pause.step)) throw new ConflictError('HOLD_OPEN', 'Close the hold first: this step is kept out of the routine until you have seen someone or it has settled')
+  }
+
+  /** One step's pause write when a hold is closed: a failure is logged by ids and does not stop the other steps or fail the close (the hold is closed already). */
+  private async closingStep(profileId: string, pauseId: string | undefined, write: () => Promise<unknown>): Promise<void> {
+    try {
+      await write()
+    } catch {
+      console.error({ outcome: 'skin-care-hold-close-step-failed', profileId, ...(pauseId === undefined ? {} : { pauseId }) })
+    }
   }
 
   /**
@@ -221,6 +342,8 @@ export class SkinCareService {
    *   `bringing-back:<id>:1` is written; no ladder, or an empty one, is 503. On the check-in with no step: `ended`.
    * - Same: the next check is three days from today, not from the old check day, and the count goes up; the third in a row is a professional (`unchanged-after-checks`).
    * - Worse: a professional (`worse-after-pause`).
+   * - While an escalation hold is open, Calmer and "about the same" on a step the hold keeps out (`heldSteps`) are 409 `HOLD_OPEN` and change nothing (no ladder starts, no count goes up); the routine
+   *   being unreadable then is 503 `ROUTINE_UNAVAILABLE`, as it cannot be told which steps are held. Worse is still taken. The check-in is asked again once the hold is closed.
    * A professional result sets the pause to `escalated`. The state change is conditional on the pause still being `paused`, so a request another has answered first is 404.
    */
   async answerCheckIn(pauseId: string, answer: CheckInAnswer): Promise<CheckInResult> {
@@ -230,8 +353,9 @@ export class SkinCareService {
     if (pause === null || pause.state !== 'paused') throw new NotFoundError('PAUSE_NOT_FOUND', 'No such pause')
     const today = await this.dayOf(profileId, this.now())
     if (today < pause.checkDay) throw new ConflictError('CHECK_IN_NOT_DUE', 'This check-in is not due yet')
-    if (answer === 'worse') return this.professional(profileId, pause, 'worse-after-pause')
-    if (answer === 'same') return pause.sameCount >= SkinCareService.SAME_LIMIT ? this.professional(profileId, pause, 'unchanged-after-checks') : this.same(profileId, pause, today)
+    if (answer !== 'worse') await this.requireNotHeld(profileId, pause)
+    if (answer === 'worse') return this.professional(profileId, pause, 'worse-after-pause', today)
+    if (answer === 'same') return pause.sameCount >= SkinCareService.SAME_LIMIT ? this.professional(profileId, pause, 'unchanged-after-checks', today) : this.same(profileId, pause, today)
     return this.calmer(profileId, pause, today)
   }
 
@@ -286,7 +410,7 @@ export class SkinCareService {
         pauses.push({ step: pause.step, productId: pause.productKey, state: 'bringing-back', frequency: rung.frequency as Frequency, anchor: rung.anchor })
       }
     }
-    return { pauses, held: false }
+    return { pauses, held: (await this.holds.openFor(profileId)) !== null }
   }
 
   /** `reconcile` over the pauses already read: the ids it set to `replaced`, and the rows it opened for the new products. */
@@ -419,7 +543,18 @@ export class SkinCareService {
 
     // A pause for a product the routine no longer has at that step is stale (a rebuild whose reconcile has not run yet): it neither counts nor holds its step.
     const live = routine === null ? open : open.filter((pause) => pause.step === null || SkinCareService.holdsStep(routine, pause))
-    return { ...SkinCareService.actionFor(ruled, routine, live), open: live }
+    return { ...SkinCareService.actionFor(ruled, routine, live, await this.heldStepsFor(profileId, routine)), open: live }
+  }
+
+  /** The steps an open hold keeps out of the routine. A hold that cannot be read is taken as none, logged by ids: the log is always answered. The worst that follows is a step the hold keeps out being paused too, which does no harm (it is out of the routine either way, and closing the hold finds the pause and moves its check day to today); assuming a hold instead could pick the wrong step when there is none. */
+  private async heldStepsFor(profileId: string, routine: SkinCareRoutine | null): Promise<RoutineStep[]> {
+    if (routine === null) return []
+    try {
+      return heldSteps(routine, (await this.holds.openFor(profileId)) !== null)
+    } catch {
+      console.error({ outcome: 'skin-care-hold-read-failed', profileId })
+      return []
+    }
   }
 
   /** The log is stored and the person is told what is safe to do (skip what stings), as when there is no step to pause. Logs ids only. */
@@ -437,7 +572,7 @@ export class SkinCareService {
   }
 
   /** What a `pause` outcome comes to, from the pauses open and the routine in force (see `log`). */
-  private static actionFor(ruled: Extract<SkinOutcome, { kind: 'pause' }>, routine: SkinCareRoutine | null, open: StepPause[]): Action {
+  private static actionFor(ruled: Extract<SkinOutcome, { kind: 'pause' }>, routine: SkinCareRoutine | null, open: StepPause[], heldByHold: RoutineStep[]): Action {
     // A step with nothing to key a pause by cannot be paused (and the routine could not show it paused).
     const pausable = (routine?.steps ?? []).filter((entry) => pauseKeyOf(entry) !== null)
     // The cap is checked first. A step being brought back is paused again even then, so a ladder never keeps running through a harm signal.
@@ -448,7 +583,8 @@ export class SkinCareService {
     const again = SkinCareService.ladderHit(open, pausable.filter(({ activeGroups }) => !ruled.duringStepDown || activeGroups.length > 0))
     if (again !== null) return { outcome: ruled, step: again.entry!, again: again.pause }
     // Any open pause, being brought back or sent to a professional too, holds its step: a second open pause for it would be refused by the table, or is not wanted.
-    const held = open.map(({ step }) => ({ step }))
+    // A step an open hold keeps out is never chosen either: closing the hold gives it its own check-in.
+    const held = [...open.map(({ step }) => ({ step })), ...heldByHold.map((step) => ({ step }))]
     if (ruled.duringStepDown) {
       // The step-down is never stopped, and the basics are never paused for it: only another active step, else a professional.
       const chosen = routine === null ? null : stepToPause({ ...routine, steps: pausable.filter(({ activeGroups }) => activeGroups.length > 0) }, held)
@@ -498,7 +634,7 @@ export class SkinCareService {
   }
 
   /** Pauses the step, and moves every other open `paused` row's check day to the pause's, so the person is asked once. */
-  private async pause(profileId: string, logId: string, entry: SkinCareRoutineStep, when: PauseTime): Promise<PausedView> {
+  private async pause(profileId: string, logId: string | null, entry: SkinCareRoutineStep, when: PauseTime): Promise<PausedView> {
     const id = crypto.randomUUID()
     await this.pauses.insert({
       id,
@@ -523,12 +659,14 @@ export class SkinCareService {
   }
 
   /**
-   * Every pause again of a step being brought back passes here (PR 6b hooks the reaction mark here: this is the "second pause" the owner defined as a reaction). The same open row is
+   * Every pause again of a step being brought back passes here, and is a reaction (the owner's "second pause", made by the person's own log, whatever made the first): once it is written the product is marked, which never fails the pause. The same open row is
    * flipped to `paused` in place, keeping its ladder, and every other open `paused` row's check day moves to the same day. False from the store (the row was changed meanwhile) rejects.
    */
   private async rePause(profileId: string, logId: string, target: StepPause, when: PauseTime): Promise<void> {
     if (!(await this.pauses.rePause(profileId, target.id, { pausedOn: when.today, checkDay: when.checkDay, sourceLogId: logId }))) throw new Error('the pause is no longer being brought back')
     for (const other of when.open.filter(({ state }) => state === 'paused')) await this.pauses.update(profileId, other.id, { checkDay: when.checkDay })
+    // After the pause is wholly written, so a failure above is a pause-write failure and this, which never rejects, is not part of it. The log that pauses it again is the person's own.
+    await this.markReaction(profileId, target)
   }
 
   /** The one open check-in with no step: opened by the first "nothing to pause", and moved by each after it. */
@@ -580,13 +718,21 @@ export class SkinCareService {
   }
 
   /**
-   * Every professional result of a check-in passes here (PR 6b hooks the hold and the reaction mark here, next to the `escalated` state). The reviewed escalation is read before the
-   * pause is written; the pause becomes `escalated`, so it is never due again and its step stays out of the routine.
+   * Every professional result of a check-in passes here. The reviewed escalation is read before anything is written. The hold is opened next (its inbox row asked for), and only then does the pause become
+   * `escalated`, so it is never due again and its step stays out of the routine. A hold that cannot be opened is logged by ids and the answer is still the professional result, but the pause stays `paused`
+   * and due: the step stays out and the person is asked again, and the next Worse tries the hold again. For `worse-after-pause` and a pause the person's own log made, the product is also marked as one
+   * the person reacts to; that never changes the answer.
    */
-  private async professional(profileId: string, pause: StepPause, reason: CheckInReason): Promise<CheckInResult> {
+  private async professional(profileId: string, pause: StepPause, reason: CheckInReason, today: string): Promise<CheckInResult> {
     const text = SkinCareService.reviewed(await this.workbook.escalationFor(reason), SkinCareService.CHECK_IN_UNAVAILABLE)
-    await this.moveFromPaused(profileId, pause, { state: 'escalated' })
-    return SkinCareService.answered({ kind: 'professional', reason }, text, pause, 'escalated')
+    const hold = await this.openHold(profileId, reason, pause.sourceLogId, today, this.now(), pause.id)
+    if (hold !== null) {
+      await this.moveFromPaused(profileId, pause, { state: 'escalated' })
+      await this.tellHold(profileId, hold, today, text as Escalation)
+    }
+    // Only a pause the person's own log made is a reaction: one a close made (no source log) is the system's.
+    if (reason === 'worse-after-pause' && pause.sourceLogId !== null) await this.markReaction(profileId, pause)
+    return SkinCareService.answered({ kind: 'professional', reason }, text, pause, hold === null ? 'paused' : 'escalated')
   }
 
   private static answered(outcome: CheckInOutcome, response: Response | Escalation, pause: StepPause, state: PauseState): CheckInResult {
@@ -644,6 +790,54 @@ export class SkinCareService {
       await this.pauses.update(profileId, pauseId, { state: 'ended' }, 'bringing-back')
     } catch {
       console.error({ outcome: 'skin-care-ladder-end-failed', profileId })
+    }
+  }
+
+  /**
+   * Opens the profile's hold for this professional result and answers the open hold: the one made now, or the one already open (a profile has one open hold, and `open` answers the existing one
+   * whole, so a later professional result neither changes it nor needs it opened again). Null when it cannot be opened, logged by ids.
+   */
+  private async openHold(profileId: string, reason: EscalationReason, sourceLogId: string | null, today: string, now: Date, pauseId?: string): Promise<EscalationHold | null> {
+    try {
+      return await this.holds.open({ id: crypto.randomUUID(), profileId, reason, sourceLogId, openedOn: today, openedAt: now })
+    } catch {
+      console.error({ outcome: 'skin-care-hold-open-failed', profileId, ...(pauseId === undefined ? {} : { pauseId }) })
+      return null
+    }
+  }
+
+  /**
+   * The inbox row of the open hold, from the reviewed escalation. Every professional result asks for it once its text is in hand, so a row that was lost (a text not written yet, a failed write)
+   * is made by the next one; the inbox keeps the first row under the key `escalation:<holdId>` and a repeat is a no-op. The hold and the answer stand if it cannot be written: logged by ids.
+   */
+  private async tellHold(profileId: string, hold: EscalationHold, day: string, text: Escalation): Promise<void> {
+    try {
+      await this.inbox.write({
+        profileId,
+        kind: 'escalation',
+        day,
+        title: SkinCareService.HOLD_TITLE,
+        body: [text.whoToSee, text.howSoon, text.whatToTellThem].join('\n'),
+        link: '/routine',
+        key: `escalation:${hold.id}`,
+      })
+    } catch {
+      console.error({ outcome: 'escalation-inbox-write-failed', profileId, holdId: hold.id })
+    }
+  }
+
+  /**
+   * The pause's product is one the person reacts to: marked on their safety answers with the catalog's own brand, name and category, and a verdict build is asked for when the mark is new.
+   * A pause with no catalog product (no label, or no step) marks nothing and reads nothing. Never rejects: every failure is logged by ids (never the product), so it cannot change an outcome.
+   */
+  private async markReaction(profileId: string, pause: StepPause): Promise<void> {
+    if (pause.productId === null) return
+    try {
+      const { id, brand, name, category } = await this.catalog.namedProduct(pause.productId)
+      const { marked } = await this.safety.markReactionProduct(profileId, { productId: id, brand, name, category })
+      if (marked) await this.verdicts.savedFor(profileId)
+    } catch {
+      console.error({ outcome: 'skin-care-reaction-mark-failed', profileId, pauseId: pause.id })
     }
   }
 

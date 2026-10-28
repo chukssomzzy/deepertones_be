@@ -6,6 +6,7 @@ import { FakeInboxRepository } from '../inbox/inbox.repository.fake'
 import { type InboxWrite, InboxService } from '../inbox/inbox.service'
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
+import { FakeEscalationHoldsRepository } from './skin-care.holds.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
 import type { ScheduleStep } from '../catalog/catalog.workbook.schema'
@@ -144,6 +145,10 @@ const makeService = () =>
   new SkinCareService({
     repository,
     pauses,
+    holds: new FakeEscalationHoldsRepository(),
+    safety: { markReactionProduct: async () => ({ marked: false }) },
+    verdicts: { savedFor: async () => null },
+    catalog: { namedProduct: async () => Promise.reject(new Error('unused')) },
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
@@ -159,8 +164,10 @@ const makeService = () =>
     },
     inbox: {
       write: async (input: InboxWrite) => {
-        world.inboxWrites.push(input)
-        return inboxRows.write(input)
+        // The rows made: every professional result asks for the hold's escalation row, and the same key is a no-op.
+        const written = await inboxRows.write(input)
+        if (written.created) world.inboxWrites.push(input)
+        return written
       },
     },
     now: () => world.now,
