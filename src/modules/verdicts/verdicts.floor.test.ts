@@ -71,6 +71,7 @@ const noLabel = (id: string, noLabelPurpose: NoLabelPurpose, category: Category 
 const mention = (over: Partial<FloorMention> & Pick<FloorMention, 'source' | 'kind'>): FloorMention => ({ name: 'anything', productId: null, ingredients: null, ...over })
 
 const reactedTo = (productId: string, ingredients: string[] | null = null): FloorMention => mention({ source: 'reaction', kind: 'product', productId, ingredients })
+const markedByLog = (productId: string, ingredients: string[] | null = null): FloorMention => mention({ source: 'skin-log', kind: 'product', productId, ingredients })
 const prescribed = (productId: string, ingredients: string[] | null = null): FloorMention => mention({ source: 'prescription', kind: 'product', productId, ingredients })
 const reactedToIngredient = (name: string): FloorMention => mention({ source: 'reaction', kind: 'ingredient', name })
 
@@ -376,6 +377,38 @@ describe('floorVerdicts', () => {
           facts: [{ kind: 'reaction-product' }],
         })
         expect(entryOf(result, 'toner')).toEqual(OPEN('toner'))
+      })
+
+      it('is dropped the same way when the skin log marked it (a product that keeps reacting), matched by product id', () => {
+        const result = floor([product('serum', ['Aqua', 'Glycerin']), product('toner', ['Aqua', 'Rose Water'])], { mentions: [markedByLog('prod-serum')] })
+
+        expect(entryOf(result, 'serum')).toEqual({
+          id: 'serum',
+          status: 'fixed',
+          group: 'likely-the-problem',
+          verdict: { kind: 'drop' },
+          escalate: false,
+          facts: [{ kind: 'reaction-product' }],
+        })
+        expect(entryOf(result, 'toner')).toEqual(OPEN('toner'))
+      })
+
+      it('gives a skin-log mark exactly the verdict a reaction mention gives', () => {
+        const shelf = [product('serum', ['Aqua', 'Glycerin']), product('toner', ['Aqua', 'Rose Water'])]
+
+        expect(floor(shelf, { mentions: [markedByLog('prod-serum')] })).toEqual(floor(shelf, { mentions: [reactedTo('prod-serum')] }))
+      })
+
+      it('matches a skin-log mark by a list that reads the same as its own, even under another product id', () => {
+        const result = floor([product('serum', ['Aqua', 'Glycerin'])], { mentions: [markedByLog('prod-elsewhere', ['AQUA', 'glycerin'])] })
+
+        expect(entryOf(result, 'serum')).toMatchObject({ group: 'likely-the-problem', verdict: { kind: 'drop' }, escalate: false, facts: [{ kind: 'reaction-product' }] })
+      })
+
+      it('does not let a skin-log mark override a prescription of the same product', () => {
+        const result = floor([product('cream', ['Aqua', 'Clobetasol'])], { mentions: [markedByLog('prod-cream'), prescribed('prod-cream')] })
+
+        expect(entryOf(result, 'cream')).toMatchObject({ group: 'prescribed', verdict: { kind: 'keep' }, facts: [{ kind: 'prescription' }] })
       })
 
       it('is matched by a list that reads the same as its own, even under another product id and another spelling', () => {

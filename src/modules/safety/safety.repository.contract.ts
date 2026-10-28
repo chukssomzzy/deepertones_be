@@ -568,6 +568,63 @@ export const safetyRepositoryContract = (name: string, make: () => SafetyContrac
       })
     })
 
+    describe('appending a row with mentions carried onto it', () => {
+      it('makes the row the current answer and gives it the carried mentions, in position order, leaving the older row\'s mentions as they were', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const older = rowOf(profileId, { createdAt: at(MINUTE) })
+        await repository.append(older)
+        const olds = mentionOf(older.id, { source: 'skin-log', name: 'Night Cream', resolution: 'resolved', productId: 'product-night' })
+        await repository.appendMentions([olds])
+        const newer = rowOf(profileId, { choices: ['pregnant'], createdAt: at(2 * MINUTE) })
+        const second = mentionOf(newer.id, { source: 'skin-log', name: 'Day Cream', resolution: 'resolved', productId: 'product-day', position: 1 })
+        const first = mentionOf(newer.id, { source: 'skin-log', name: 'Night Cream', resolution: 'resolved', productId: 'product-night', position: 0 })
+
+        await repository.appendCarrying(newer, [second, first])
+
+        expect((await repository.current(profileId))!.id).toBe(newer.id)
+        expect(idsOf(await repository.history(profileId))).toEqual([newer.id, older.id])
+        expect(idsOf(await repository.mentions(newer.id))).toEqual([first.id, second.id])
+        expect(idsOf(await repository.mentions(older.id))).toEqual([olds.id])
+      })
+
+      it('appends the row, and fails nothing, when there is nothing to carry', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = rowOf(profileId, { choices: ['breastfeeding'] })
+
+        await expect(repository.appendCarrying(row, [])).resolves.toBeUndefined()
+
+        expect(await repository.current(profileId)).toMatchObject({ id: row.id, choices: ['breastfeeding'] })
+        expect(await repository.mentions(row.id)).toEqual([])
+      })
+
+      it('stores a mention whose source is skin-log, and reads it back as it was written (the source column takes it with no migration)', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const row = rowOf(profileId)
+        const mention = mentionOf(row.id, {
+          source: 'skin-log',
+          kind: 'product',
+          brand: 'Orbis',
+          name: 'Night Cream',
+          variant: null,
+          category: 'skin',
+          productId: 'product-night',
+          resolution: 'resolved',
+          position: 0,
+          createdAt: at(MINUTE),
+        })
+
+        await repository.appendCarrying(row, [mention])
+
+        const [found] = await repository.mentions(row.id)
+        const { createdAt, ...fields } = mention
+        expect(found).toMatchObject(fields)
+        expect(found!.createdAt.getTime()).toBe(createdAt.getTime())
+      })
+    })
+
     describe('profiles', () => {
       it('keeps one profile\'s answers out of another account\'s current and history', async () => {
         const { repository, newAccount } = await make()

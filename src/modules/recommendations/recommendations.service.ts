@@ -199,14 +199,14 @@ export class RecommendationService {
 
   /**
    * The latest ingredient list the catalog holds for each product the user named as a reaction or a prescription that the parse resolved, in the order they
-   * named them, each product once (`reaction` says whether it was named as a reaction: the only ones `sharedWithReaction` is about). A product with no list yet
+   * named them, each product once (`reaction` says whether it was named as a reaction, or marked as one in the skin log: the only ones `sharedWithReaction` is about). A product with no list yet
    * is left out: there is nothing to compare. Reads only, in parallel (the parse names at most three products); nothing is researched.
    */
   private async productLists(mentions: SafetyMentionRow[]): Promise<{ productId: string; reaction: boolean; list: string[] }[]> {
     const products = new Map<string, boolean>()
     for (const mention of mentions) {
       if (mention.kind !== 'product' || mention.resolution !== 'resolved' || mention.productId === null) continue
-      products.set(mention.productId, (products.get(mention.productId) ?? false) || mention.source === 'reaction')
+      products.set(mention.productId, (products.get(mention.productId) ?? false) || mention.source === 'reaction' || mention.source === 'skin-log')
     }
     const lists = await Promise.all([...products].map(async ([productId, reaction]) => ({ productId, reaction, list: await this.catalog.latestIngredients(productId) })))
     return lists.flatMap(({ productId, reaction, list }) => (list === null ? [] : [{ productId, reaction, list }]))
