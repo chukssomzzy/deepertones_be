@@ -1,6 +1,9 @@
 import type { NotInRoutineItem, ShelfCounts } from './routines.table'
 import type { CompletedRoutineBuild, RoutineRequestRetry, RoutineRequestRow, RoutineVersionRow, RoutinesRepository } from './routines.repository'
 
+/** As D1 reads a step stored before `changedOn` existed: the field is null (day 1), never missing. */
+const withDatedSteps = (row: RoutineVersionRow): RoutineVersionRow => ({ ...row, steps: row.steps.map((step) => ({ ...step, changedOn: step.changedOn ?? null })) })
+
 /** In-memory RoutinesRepository for unit tests. Its behaviour is pinned by routinesRepositoryContract, which the D1 class also passes. Unlike D1 it has no
  * profiles table, so append accepts a profile id that does not exist. */
 export class FakeRoutinesRepository implements RoutinesRepository {
@@ -10,7 +13,7 @@ export class FakeRoutinesRepository implements RoutinesRepository {
 
   async append(row: RoutineVersionRow): Promise<void> {
     if (this.rows.has(row.id)) throw new Error(`routine version ${row.id} already exists`)
-    this.rows.set(row.id, structuredClone(row))
+    this.rows.set(row.id, withDatedSteps(structuredClone(row)))
   }
 
   async latest(profileId: string): Promise<RoutineVersionRow | null> {
@@ -60,7 +63,7 @@ export class FakeRoutinesRepository implements RoutinesRepository {
   async complete(id: string, built: CompletedRoutineBuild): Promise<boolean> {
     const row = this.rows.get(id)
     if (!row || row.status !== 'pending') return false
-    this.rows.set(id, { ...row, ...structuredClone(built), status: 'ready' })
+    this.rows.set(id, withDatedSteps({ ...row, ...structuredClone(built), status: 'ready' }))
     return true
   }
 

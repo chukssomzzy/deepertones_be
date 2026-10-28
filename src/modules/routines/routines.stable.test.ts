@@ -107,6 +107,7 @@ const entry = (step: RoutineStep, product: StoredRoutineStep['product'], frequen
   grounding,
   gotIt: false,
   fixedFrom: null,
+  changedOn: null,
   ...over,
 })
 
@@ -489,7 +490,7 @@ describe('spliceFixed: the fixed steps over the writer answer', () => {
     const result = spliceFixed(merge, answer())
 
     expect(result.steps).toEqual([
-      { step: 'cleanse', product: { kind: 'shelf', id: 'cleanser-1' }, frequency: 'pm', reason: 'Writer cleanse reason.', grounding: [], gotIt: false, fixedFrom: null },
+      { step: 'cleanse', product: { kind: 'shelf', id: 'cleanser-1' }, frequency: 'pm', reason: 'Writer cleanse reason.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null },
       { ...previousSteps()[1]!, fixedFrom: PREVIOUS_ID },
       { ...previousSteps()[2]!, fixedFrom: PREVIOUS_ID },
       { ...previousSteps()[3]!, fixedFrom: PREVIOUS_ID },
@@ -537,5 +538,47 @@ describe('spliceFixed: the fixed steps over the writer answer', () => {
       ['protect', 'Writer protect reason.', false, null],
     ])
     expect(result.expectation).toBe('Writer expectation.')
+  })
+})
+
+// ---- changedOn (spec #233, PR 4a) ----
+// The day each step's product last changed is a date the service stamps on the steps the splice writes as new (fixedFrom null): the splice itself leaves them null, and the service
+// (which knows the clock and the zone) stamps them after. What this pure part owes is that a step kept whole is kept with its date, however the merge moves it.
+describe('changedOn: a fixed step keeps its own date', () => {
+  const CHANGED = new Date('2030-06-19T00:00:00.000Z')
+  const dated = (): StoredRoutineStep[] => previousSteps().map((e) => (e.step === 'treat' || e.step === 'protect' ? { ...e, changedOn: CHANGED } : e))
+
+  it('carries a date through the merge on every fixed step, and null on one that never had a date', () => {
+    const merge = stableMerge(previousOf({ steps: dated() }), baseSkeleton(), NO_CARRY)
+
+    expect(merge.fixed.map((e) => [e.step, e.changedOn])).toEqual([['cleanse', null], ['treat', CHANGED], ['moisturise', null], ['protect', CHANGED]])
+  })
+
+  it('keeps the date of a recommended product the person has got when it becomes their own shelf entry: it is the same product, so it is not a change', () => {
+    const skeleton = baseSkeleton([shelfProduct('cleanser-1', 'cleanse'), shelfProduct('serum-own', 'treat')])
+
+    const merge = stableMerge(previousOf({ steps: dated() }), skeleton, { candidates: {}, onShelf: { 'tr-1': 'serum-own' } })
+
+    expect(merge.fixed.find((e) => e.step === 'treat')).toMatchObject({ product: { kind: 'shelf', id: 'serum-own' }, changedOn: CHANGED })
+  })
+
+  it('keeps the dates of the fixed steps when the splice puts them back, and leaves the writer\'s own step undated for the service to stamp', () => {
+    const steps = [entry('cleanse', { kind: 'shelf', id: 'cleanser-1' }, 'am', ['https://rules.example/cleanser-1']), entry('cleanse', { kind: 'shelf', id: 'cleanser-2' }, 'pm', ['https://rules.example/cleanser-2']), ...dated().slice(1)]
+    const skeleton = baseSkeleton([shelfProduct('cleanser-1', 'cleanse'), shelfProduct('cleanser-2', 'cleanse', { kind: 'drop' })], {})
+    const merge = stableMerge(previousOf({ steps }), skeleton, NO_CARRY)
+    const written: Routine = {
+      steps: [
+        { step: 'cleanse', product: { kind: 'shelf', id: 'cleanser-1' }, frequency: 'pm', reason: 'Writer cleanse reason.', grounding: [] },
+        { step: 'treat', product: { kind: 'candidate', code: 'tr-1' }, frequency: 'am', reason: 'Writer treat reason.', grounding: [] },
+        { step: 'moisturise', product: { kind: 'candidate', code: 'mo-1' }, frequency: 'am', reason: 'Writer moisturise reason.', grounding: [] },
+        { step: 'protect', product: { kind: 'candidate', code: 'pr-1' }, frequency: 'am', reason: 'Writer protect reason.', grounding: [] },
+      ],
+      tapers: [],
+      expectation: 'Writer expectation.',
+    }
+
+    const result = spliceFixed(merge, written)
+
+    expect(result.steps.map((e) => [e.step, e.fixedFrom === null, e.changedOn])).toEqual([['cleanse', true, null], ['treat', false, CHANGED], ['moisturise', false, null], ['protect', false, CHANGED]])
   })
 })

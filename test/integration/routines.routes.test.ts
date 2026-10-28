@@ -321,6 +321,7 @@ const stored = (step: StoredStep['step'], product: StoredStep['product'], freque
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: null,
+  changedOn: null,
   ...over,
 })
 let versionCount = 0
@@ -746,6 +747,7 @@ describe('GET /api/v1/me/routine: with both step-down templates approved', () =>
       'catalogVersion',
       'verdictFingerprint',
       'routineFingerprint',
+      'changedOn',
       'writerCalls',
       'writerRetryDueAt',
       'hintsShown',

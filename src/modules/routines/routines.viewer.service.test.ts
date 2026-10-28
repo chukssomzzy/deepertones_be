@@ -82,7 +82,7 @@ const entriesOf = (routine: any): any[] => {
   return ROUTINE_ORDER.flatMap((step) => (byStep.has(step) ? [byStep.get(step)] : []))
 }
 
-const stepOf = (step: RoutineStep, product: Step['product'], frequency: Step['frequency']): Step => ({ step, product, frequency, reason: `Reason for ${step}.`, grounding: ['https://internal.example/g'], gotIt: false, fixedFrom: null })
+const stepOf = (step: RoutineStep, product: Step['product'], frequency: Step['frequency'], changedOn: Date | null = null): Step => ({ step, product, frequency, reason: `Reason for ${step}.`, grounding: ['https://internal.example/g'], gotIt: false, fixedFrom: null, changedOn })
 
 // Cleanse is on the shelf, treat is SERUM-1 (sold in NG, where Amara shops), moisturise is MOIST-GH (sold in GH only), protect has nothing to recommend.
 const defaultSteps = (): Step[] => [

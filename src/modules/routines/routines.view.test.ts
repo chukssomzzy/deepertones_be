@@ -73,6 +73,7 @@ const ownStep = (step: Step['step'], entryId: string, frequency: Step['frequency
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: 'version-0',
+  changedOn: null,
 })
 const candidateStep = (step: Step['step'], code: string, frequency: Step['frequency'] = 'pm', over: Partial<Step> = {}): Step => ({
   step,
@@ -82,9 +83,10 @@ const candidateStep = (step: Step['step'], code: string, frequency: Step['freque
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: null,
+  changedOn: null,
   ...over,
 })
-const noneStep = (step: Step['step'], frequency: Step['frequency'] = 'am'): Step => ({ step, product: { kind: 'none' }, frequency, reason: 'Use what you have.', grounding: [], gotIt: false, fixedFrom: null })
+const noneStep = (step: Step['step'], frequency: Step['frequency'] = 'am'): Step => ({ step, product: { kind: 'none' }, frequency, reason: 'Use what you have.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null })
 
 let ids = 0
 const version = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({

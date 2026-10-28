@@ -130,7 +130,7 @@ export const spliceFixed = (merge: StableMerge, answer: Routine): SplicedRoutine
   const placed = new Set<RoutineStep>()
   for (const entry of answer.steps) {
     const group = fixedByStep.get(entry.step)
-    if (!group) steps.push({ ...entry, gotIt: false, fixedFrom: null })
+    if (!group) steps.push({ ...entry, gotIt: false, fixedFrom: null, changedOn: null })
     else if (!placed.has(entry.step)) {
       placed.add(entry.step)
       steps.push(...group)
