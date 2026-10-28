@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { CatalogWorkbookRepository, PlannedProduct, WorkbookPlan } from './catalog.workbook.repository'
 import type { ConcernKind, IngredientGroup, RoutineStep } from './catalog.vocabulary'
-import type { ProductRow } from './catalog.workbook.schema'
+import type { EscalationRow, ProductRow, ReintroductionRow, ResponseRow, WeekRow } from './catalog.workbook.schema'
 import type { ShownConcern } from '../face-scans/face-scans.tables'
 import type { Goal } from '../goals/goals.vocabulary'
 
@@ -201,6 +201,54 @@ export const guideRow = (
   ...over,
 })
 
+const DAYS_SIGNED = { status: 'approved' as 'draft' | 'approved' | 'retired', approvedBy: 'Dr A. Reviewer' as string | null, approvedOn: DAY as Date | null, auditedBy: null as string | null, auditedOn: null as Date | null }
+
+/**
+ * The rows of the four reviewed tabs of contract 2.3.0 as an upload parses them. A ladder, an escalation, a response and a week card each have a key of their own (a group, a
+ * reason, an outcome, a band with a goal and a step-down) and no code, so a test chooses the key it writes. The texts are different on every call, so a test can tell its own write
+ * from another's; a ladder's schedule differs in where its first step ends.
+ */
+export const reintroductionRow = (over: Partial<ReintroductionRow> = {}): ReintroductionRow => {
+  const end = 1 + (counter++ % 8)
+  return {
+    group: null,
+    schedule: [
+      { fromWeek: 1, toWeek: end, frequency: 'weekly' },
+      { fromWeek: end + 1, toWeek: end + 1, frequency: 'back' },
+    ],
+    ...DAYS_SIGNED,
+    ...over,
+  }
+}
+
+export const escalationRow = (over: Partial<EscalationRow> = {}): EscalationRow => ({
+  reason: 'pus-or-hot-patch',
+  whoToSee: fresh('Who to see'),
+  howSoon: fresh('How soon'),
+  whatToTellThem: fresh('What to tell them'),
+  ...DAYS_SIGNED,
+  ...over,
+})
+
+export const responseRow = (over: Partial<ResponseRow> = {}): ResponseRow => ({
+  outcome: 'paused',
+  title: fresh('Title {step}'),
+  body: fresh('Body'),
+  whatToDoNow: fresh('What to do now'),
+  ...DAYS_SIGNED,
+  ...over,
+})
+
+export const weekRow = (over: Partial<WeekRow> = {}): WeekRow => ({
+  band: '1',
+  goal: null,
+  stepDown: false,
+  title: fresh('Week title'),
+  text: fresh('Week text'),
+  ...DAYS_SIGNED,
+  ...over,
+})
+
 /** Behaviour every CatalogWorkbookRepository must have. Runs against the fake (unit tier) and real local D1 (integration tier). */
 export const catalogWorkbookRepositoryContract = (name: string, make: () => RulesHarness | Promise<RulesHarness>) => {
   describe(`CatalogWorkbookRepository contract: ${name}`, () => {
@@ -317,6 +365,14 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
         retiredTapers: [],
         guides: [],
         retiredGuides: [],
+        reintroductions: [],
+        retiredReintroductions: [],
+        escalations: [],
+        retiredEscalations: [],
+        responses: [],
+        retiredResponses: [],
+        weeks: [],
+        retiredWeeks: [],
         ...over,
       })
       const stored = async (repo: CatalogWorkbookRepository, code: string) => (await repo.readWorkbook()).workbook.products.find((row) => row.code === code)
@@ -726,6 +782,171 @@ export const catalogWorkbookRepositoryContract = (name: string, make: () => Rule
           expect(withRows).toBeGreaterThan(none)
           expect(withRetire).toBeGreaterThan(none)
         })
+      })
+
+      // The four reviewed tabs are alike to a repository: rows kept by a key, written whole, changed in place, and left alone by a plan that does not name them. The database is shared
+      // by the whole run and there are only so many keys, so each test writes its own key and looks at that key alone; the texts are new on every call. A ladder and a week card can
+      // be retired by their key (an escalation and a response cannot be left out of an upload, so only the rows that can are retired here).
+      type Reviewed = {
+        title: string
+        field: 'reintroductions' | 'escalations' | 'responses' | 'weeks'
+        retireField?: 'retiredReintroductions' | 'retiredWeeks'
+        /** Two rows with different keys, and a key no other row here has. */
+        make: (key: number, over?: Record<string, unknown>) => { row: Record<string, unknown>; retire: Record<string, unknown> }
+        identity: (row: Record<string, unknown>) => string
+        /** What an update changes: a text, and an audit that was set and is cleared. */
+        changed: (row: Record<string, unknown>) => Record<string, unknown>
+      }
+      const REVIEWED: Reviewed[] = [
+        {
+          title: 'reintroductions',
+          field: 'reintroductions',
+          retireField: 'retiredReintroductions',
+          make: (key, over = {}) => {
+            const group = (['retinoid', 'exfoliating-acid', 'benzoyl-peroxide', null] as const)[key]!
+            return { row: reintroductionRow({ group, ...over }), retire: { group } }
+          },
+          identity: (row) => String(row.group),
+          changed: (row) => ({ ...row, schedule: [{ fromWeek: 1, toWeek: 9, frequency: 'as-needed' }, { fromWeek: 10, toWeek: 10, frequency: 'back' }], auditedBy: null, auditedOn: null }),
+        },
+        {
+          title: 'escalations',
+          field: 'escalations',
+          make: (key, over = {}) => {
+            const reason = (['swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks'] as const)[key]!
+            return { row: escalationRow({ reason, ...over }), retire: { reason } }
+          },
+          identity: (row) => String(row.reason),
+          changed: (row) => ({ ...row, howSoon: fresh('Newer'), auditedBy: null, auditedOn: null }),
+        },
+        {
+          title: 'responses',
+          field: 'responses',
+          make: (key, over = {}) => {
+            const outcome = (['advice-tightness', 'advice-itching', 'check-calmer', 'check-same'] as const)[key]!
+            return { row: responseRow({ outcome, ...over }), retire: { outcome } }
+          },
+          identity: (row) => String(row.outcome),
+          changed: (row) => ({ ...row, body: fresh('Newer'), whatToDoNow: null, auditedBy: null, auditedOn: null }),
+        },
+        {
+          title: 'weeks',
+          field: 'weeks',
+          retireField: 'retiredWeeks',
+          make: (key, over = {}) => {
+            const [band, goal, stepDown] = ([['5-8', 'glow', false], ['5-8', 'glow', true], ['5-8', null, true], ['9-12', 'calm-repair', false]] as const)[key]!
+            return { row: weekRow({ band, goal, stepDown, ...over }), retire: { band, goal, stepDown } }
+          },
+          identity: (row) => `${row.band}|${row.goal}|${row.stepDown}`,
+          changed: (row) => ({ ...row, text: fresh('Newer'), auditedBy: null, auditedOn: null }),
+        },
+      ]
+
+      describe.each(REVIEWED)('$title', (spec) => {
+        const rowsOf = async (repo: CatalogWorkbookRepository, ...wanted: Record<string, unknown>[]) =>
+          ((await repo.readWorkbook()).workbook[spec.field] as unknown as Record<string, unknown>[]).filter((row) => wanted.some((one) => spec.identity(one) === spec.identity(row)))
+        const plan = (rows: Record<string, unknown>[]) => ({ [spec.field]: rows }) as Partial<WorkbookPlan>
+
+        it('stores the rows of a plan and reads them back whole, with their days as dates, and moves to the next version', async () => {
+          const { repo } = await make()
+          const one = spec.make(0, { auditedBy: 'Dr B. Auditor', auditedOn: DAY }).row
+          const two = spec.make(1).row
+          const version = await repo.catalogVersion()
+
+          expect(await repo.applyWorkbook(await planOf(repo, plan([one, two])))).toBe(true)
+
+          expect(await repo.catalogVersion()).toBe(version + 1)
+          expect(await rowsOf(repo, one)).toEqual([one])
+          expect(await rowsOf(repo, two)).toEqual([two])
+        })
+
+        it('keeps a draft and a retired row whole, so what the team wrote stays on record', async () => {
+          const { repo } = await make()
+          const draft = spec.make(2, { status: 'draft', approvedBy: null, approvedOn: null }).row
+          const retired = spec.make(3, { status: 'retired' }).row
+
+          await repo.applyWorkbook(await planOf(repo, plan([draft, retired])))
+
+          expect(await rowsOf(repo, draft)).toEqual([draft])
+          expect(await rowsOf(repo, retired)).toEqual([retired])
+        })
+
+        it('leaves them alone when the plan names none: a plan that writes products does not touch the rows', async () => {
+          const { repo } = await make()
+          await repo.applyWorkbook(await planOf(repo, plan([spec.make(0).row])))
+          const before = (await repo.readWorkbook()).workbook[spec.field]
+          const one = workbookProduct()
+
+          await repo.applyWorkbook(await planOf(repo, { newProducts: [one.newProduct], products: [one.planned] }))
+
+          expect((await repo.readWorkbook()).workbook[spec.field]).toEqual(before)
+        })
+
+        it('updates a row by its key, in place, without adding a second row, and clears what a later write leaves empty', async () => {
+          const { repo } = await make()
+          const full = spec.make(1, { auditedBy: 'Dr B. Auditor', auditedOn: DAY }).row
+          await repo.applyWorkbook(await planOf(repo, plan([full])))
+          const rows = (await repo.readWorkbook()).workbook[spec.field].length
+
+          const newer = spec.changed(full)
+          await repo.applyWorkbook(await planOf(repo, plan([newer])))
+          const newest = spec.changed(newer)
+          await repo.applyWorkbook(await planOf(repo, plan([newest])))
+
+          expect((await repo.readWorkbook()).workbook[spec.field]).toHaveLength(rows)
+          expect(await rowsOf(repo, full)).toEqual([newest])
+        })
+
+        it('writes none of them for a plan that lost the race', async () => {
+          const { repo } = await make()
+          const [first, second] = [spec.make(2).row, spec.make(3).row]
+          const winner = await planOf(repo, plan([first]))
+          const loser = await planOf(repo, plan([second]))
+
+          expect(await repo.applyWorkbook(winner)).toBe(true)
+          expect(await repo.applyWorkbook(loser)).toBe(false)
+
+          // The keys are shared by the whole run, so the loser is looked for by what it said (its texts are its own), not by its key.
+          const all = (await repo.readWorkbook()).workbook[spec.field] as unknown[]
+          expect(all).not.toContainEqual(second)
+          expect(await rowsOf(repo, first)).toEqual([first])
+        })
+
+        if (spec.retireField !== undefined) {
+          const retireField = spec.retireField
+
+          it('retires the rows it is told to by key, keeping the rows and every cell but the status, and never deletes', async () => {
+            const { repo } = await make()
+            const gone = spec.make(2).row
+            const other = spec.make(3).row
+            await repo.applyWorkbook(await planOf(repo, plan([gone, other])))
+            const rows = (await repo.readWorkbook()).workbook[spec.field].length
+
+            await repo.applyWorkbook(await planOf(repo, { [retireField]: [spec.make(2).retire] } as Partial<WorkbookPlan>))
+
+            expect(await rowsOf(repo, gone)).toEqual([{ ...gone, status: 'retired' }])
+            expect(await rowsOf(repo, other)).toEqual([other])
+            expect((await repo.readWorkbook()).workbook[spec.field]).toHaveLength(rows)
+          })
+
+          it('counts their statements in the batch: more rows to write or to retire, more statements', async () => {
+            const { repo } = await make()
+            const none = repo.statementCount(await planOf(repo))
+
+            const withRows = repo.statementCount(await planOf(repo, plan([spec.make(0).row])))
+            const withRetire = repo.statementCount(await planOf(repo, { [retireField]: [spec.make(0).retire] } as Partial<WorkbookPlan>))
+
+            expect(withRows).toBeGreaterThan(none)
+            expect(withRetire).toBeGreaterThan(none)
+          })
+        } else {
+          it('counts their statements in the batch: more rows to write, more statements', async () => {
+            const { repo } = await make()
+            const none = repo.statementCount(await planOf(repo))
+
+            expect(repo.statementCount(await planOf(repo, plan([spec.make(0).row])))).toBeGreaterThan(none)
+          })
+        }
       })
 
       describe('approvedFor', () => {

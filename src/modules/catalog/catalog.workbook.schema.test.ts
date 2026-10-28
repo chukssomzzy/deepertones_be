@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { SHOWN_CONCERNS, SKIN_TYPE_LABELS } from '../face-scans/face-scans.tables'
-import { CATEGORIES, CONCERN_KINDS, PRODUCT_FORMS, BUDGET_BANDS, FREQUENCIES, ORIGINS, ROUTINE_STEPS } from './catalog.vocabulary'
+import { CATEGORIES, CONCERN_KINDS, ESCALATION_REASONS, PRODUCT_FORMS, BUDGET_BANDS, FREQUENCIES, ORIGINS, RESPONSE_OUTCOMES, ROUTINE_STEPS, WEEK_BANDS } from './catalog.vocabulary'
 import { CONTRACT, CONTRACT_VERSION, contractFingerprint, validateWorkbook, type RawWorkbook } from './catalog.workbook.schema'
 
 // The workbook schema (the contract) is pure: raw tabs in (each tab's header row, and its rows as a spreadsheet library gives them, keyed by header), either a parsed Workbook or EVERY problem out.
@@ -34,7 +34,17 @@ const HEADERS = {
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  escalations: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  responses: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  weeks: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
+
+// The vocabularies of the new tabs, written out and not read from the code: the reasons an escalation is written for, the outcomes a response answers, the week bands.
+const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+const OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
+const BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+const GOALS = ['clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair'] as const
 
 /** A tab with its full header row unless other headers are given. A row need not hold every header: a key left out is an empty cell. */
 const tab = (name: Tab, rows: Raw[], headers: readonly string[] = HEADERS[name]): RawTab => ({ headers: [...headers], rows })
@@ -134,9 +144,70 @@ const guide = (over: Raw = {}): Raw => ({
 /** The four approved base rows (no goal) every workbook needs: one for each routine step, written out here and not read from the vocabulary. */
 const baseGuides = (): Raw[] => ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step }))
 
+/** A Reintroductions row: by default the approved default ladder (no group). */
+const reintroduction = (over: Raw = {}): Raw => ({
+  group: null,
+  schedule: '1: weekly; 2: alternate-days; 3: back',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** An Escalations row: by default the approved row of the first reason. */
+const escalation = (over: Raw = {}): Raw => ({
+  reason: 'pus-or-hot-patch',
+  who_to_see: 'A doctor or a pharmacist.',
+  how_soon: 'Today, or within a day.',
+  what_to_tell_them: 'What you noticed, where, and since when. Which products you were using.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** A Responses row: by default the approved row of the paused outcome, with the one placeholder there is. */
+const response = (over: Raw = {}): Raw => ({
+  outcome: 'paused',
+  title: 'We paused your {step}',
+  body: 'Your skin needs a rest from your {step}. We will ask how it feels in three days.',
+  what_to_do_now: 'Skip anything that stings. Keep to a gentle cleanser and moisturiser.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** A Weeks row: by default the approved base row (no goal, no step-down) of band 1. */
+const week = (over: Raw = {}): Raw => ({
+  band: '1',
+  goal: null,
+  step_down: 'no',
+  title: 'Settling in',
+  text: 'The first week is about calming things down. Go gently and keep to the basics.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: APPROVED_ON,
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** What every workbook needs of the four reviewed tabs: the default ladder, a row for each reason, a row for each outcome, a base row for each band. */
+const baseReintroductions = (): Raw[] => [reintroduction()]
+const baseEscalations = (): Raw[] => REASONS.map((reason) => escalation({ reason }))
+const baseResponses = (): Raw[] => OUTCOMES.map((outcome) => response({ outcome }))
+const baseWeeks = (): Raw[] => BANDS.map((band) => week({ band }))
+
 const country = (over: Raw = {}): Raw => ({ code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active', ...over })
 
-/** A workbook whose tabs hold one valid row each (the Guides tab, one approved base row for each of the four steps), unless the rows of a tab are given. */
+/** A workbook whose tabs hold one valid row each (the five tabs that need rows hold the rows they need: a base guide for each step, the default ladder, an escalation for each reason, a response for each outcome and a base week card for each band), unless the rows of a tab are given. */
 const workbook = (over: Partial<Record<Tab, Raw[]>> = {}): RawWorkbook => ({
   products: tab('products', over.products ?? [product()]),
   availability: tab('availability', over.availability ?? [availability()]),
@@ -145,6 +216,10 @@ const workbook = (over: Partial<Record<Tab, Raw[]>> = {}): RawWorkbook => ({
   claimWords: tab('claimWords', over.claimWords ?? [claimWord()]),
   tapers: tab('tapers', over.tapers ?? [taper()]),
   guides: tab('guides', over.guides ?? baseGuides()),
+  reintroductions: tab('reintroductions', over.reintroductions ?? baseReintroductions()),
+  escalations: tab('escalations', over.escalations ?? baseEscalations()),
+  responses: tab('responses', over.responses ?? baseResponses()),
+  weeks: tab('weeks', over.weeks ?? baseWeeks()),
 })
 
 // A tab under test sits in a workbook where nothing else can add a problem: a product row mutated on its own has no availability to point
@@ -159,6 +234,9 @@ const inTapers = (...tapers: Raw[]): RawWorkbook => workbook({ products: [], ava
 const inGuides = (...guides: Raw[]): RawWorkbook => workbook({ products: [], availability: [], ingredients: [], countries: [], guides })
 /** The four base rows and then these: the row a test is about is spreadsheet row 6, and the base rows cannot add a problem. */
 const withBases = (...more: Raw[]): RawWorkbook => inGuides(...baseGuides(), ...more)
+/** One of the four new tabs holds exactly these rows; every other tab holds nothing that could add a problem. */
+const alone = (name: 'reintroductions' | 'escalations' | 'responses' | 'weeks', rows: Raw[]): RawWorkbook =>
+  workbook({ products: [], availability: [], ingredients: [], countries: [], [name]: rows })
 
 type Problem = { tab: Tab; row: number; column: string; rule: string }
 const problem = (tab: Tab, row: number, column: string, rule: string): Problem => ({ tab, row, column, rule })
@@ -181,8 +259,8 @@ const parsed = (raw: RawWorkbook) => {
 const text = (length: number, char = 'a') => char.repeat(length)
 
 describe('the contract', () => {
-  it('is version 2.2.0: the contract that adds the Guides tab', () => {
-    expect(CONTRACT_VERSION).toBe('2.2.0')
+  it('is version 2.3.0: the contract that adds the Reintroductions, Escalations, Responses and Weeks tabs', () => {
+    expect(CONTRACT_VERSION).toBe('2.3.0')
   })
 
   it('is plain data: it survives JSON unchanged, so nothing in it (a pattern, a limit) can be left out of the fingerprint', () => {
@@ -205,13 +283,13 @@ describe('the contract', () => {
     for (const value of values) expect(written, value).toContain(`"${value}"`)
   })
 
-  it('lists the seven tabs, by the names a RawWorkbook uses', () => {
+  it('lists the eleven tabs, by the names a RawWorkbook uses', () => {
     const written = JSON.stringify(CONTRACT)
 
-    for (const tab of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides']) expect(written, tab).toContain(`"${tab}"`)
+    for (const tab of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides', 'reintroductions', 'escalations', 'responses', 'weeks']) expect(written, tab).toContain(`"${tab}"`)
   })
 
-  it('titles the new tabs "Claim words", "Tapers" and "Guides", the names they have in the workbook file', () => {
+  it('titles the tabs "Claim words", "Tapers", "Guides", "Reintroductions", "Escalations", "Responses" and "Weeks", the names they have in the workbook file', () => {
     expect(CONTRACT.tabs.map((tab) => [tab.key, tab.title])).toEqual([
       ['products', 'Products'],
       ['availability', 'Availability'],
@@ -220,7 +298,61 @@ describe('the contract', () => {
       ['claimWords', 'Claim words'],
       ['tapers', 'Tapers'],
       ['guides', 'Guides'],
+      ['reintroductions', 'Reintroductions'],
+      ['escalations', 'Escalations'],
+      ['responses', 'Responses'],
+      ['weeks', 'Weeks'],
     ])
+  })
+
+  it('keeps the new vocabularies in catalog.vocabulary.ts, with the values the spec gives them', () => {
+    expect([...ESCALATION_REASONS]).toEqual([...REASONS])
+    expect([...RESPONSE_OUTCOMES]).toEqual([...OUTCOMES])
+    expect([...WEEK_BANDS]).toEqual([...BANDS])
+  })
+
+  it.each([
+    ['ESCALATION_REASONS', REASONS],
+    ['RESPONSE_OUTCOMES', OUTCOMES],
+    ['WEEK_BANDS', BANDS],
+    ['the yes and no of step_down', ['yes', 'no']],
+    ['back, the last step of a ladder', ['back']],
+  ])('lists every value of %s, so the generated document says what is allowed', (_name, values) => {
+    const written = JSON.stringify(CONTRACT)
+
+    for (const value of values) expect(written, value).toContain(`"${value}"`)
+  })
+
+  it('lists the checks each new tab makes across its rows, by the rule codes the document explains', () => {
+    const checks = (key: string) => CONTRACT.tabs.find((tab) => tab.key === key)!.checks.map((check) => check.rule)
+
+    expect(checks('reintroductions')).toEqual(expect.arrayContaining(['AUDIT_INCOMPLETE', 'REINTRO_DEFAULT_MISSING', 'REINTRO_DUPLICATE', 'REINTRO_GROUP_NEVER_BACK']))
+    expect(checks('escalations')).toEqual(expect.arrayContaining(['AUDIT_INCOMPLETE', 'ESCALATION_DUPLICATE', 'ESCALATION_MISSING', 'ESCALATION_WORDING']))
+    expect(checks('responses')).toEqual(expect.arrayContaining(['AUDIT_INCOMPLETE', 'RESPONSE_DUPLICATE', 'RESPONSE_MISSING', 'RESPONSE_PLACEHOLDER', 'RESPONSE_WORDING']))
+    expect(checks('weeks')).toEqual(expect.arrayContaining(['AUDIT_INCOMPLETE', 'WEEK_BASE_MISSING', 'WEEK_DUPLICATE', 'WEEK_WORDING']))
+  })
+
+  it('explains each new rule code in words, and the missing-row rules name what has to be there: every reason, every band', () => {
+    for (const rule of [
+      'REINTRO_DEFAULT_MISSING', 'REINTRO_DUPLICATE', 'REINTRO_GROUP_NEVER_BACK', 'REINTRO_MISSING_BACK', 'REINTRO_BACK_NOT_LAST', 'REINTRO_FREQUENCY_DECREASES',
+      'ESCALATION_MISSING', 'ESCALATION_DUPLICATE', 'ESCALATION_WORDING', 'RESPONSE_MISSING', 'RESPONSE_DUPLICATE', 'RESPONSE_PLACEHOLDER', 'RESPONSE_WORDING',
+      'WEEK_BASE_MISSING', 'WEEK_DUPLICATE', 'WEEK_WORDING',
+    ] as const) {
+      expect(CONTRACT.rules[rule as keyof typeof CONTRACT.rules], rule).toMatch(/\S{3}/)
+    }
+    for (const reason of REASONS) expect(CONTRACT.rules.ESCALATION_MISSING, reason).toContain(reason)
+    for (const outcome of OUTCOMES) expect(CONTRACT.rules.RESPONSE_MISSING, outcome).toContain(outcome)
+    for (const band of BANDS) expect(CONTRACT.rules.WEEK_BASE_MISSING, band).toContain(band)
+  })
+
+  it('says in the Responses tab that {step} is the one placeholder, and in the Reintroductions tab that mercury, steroid and lightening-agent are only ever stopped', () => {
+    const about = (key: string) => {
+      const found = CONTRACT.tabs.find((tab) => tab.key === key)!
+      return JSON.stringify(found)
+    }
+
+    expect(about('responses')).toContain('{step}')
+    for (const group of ['mercury', 'steroid', 'lightening-agent']) expect(about('reintroductions'), group).toContain(group)
   })
 
   it('lists the goals a Guides row may be written for, and the routine steps, so the generated document says what is allowed', () => {
@@ -241,11 +373,11 @@ describe('the contract', () => {
   })
 })
 
-// The fingerprint of the contract as released at CONTRACT_VERSION 2.2.0, written out. A contract change that does not bump the version (and,
+// The fingerprint of the contract as released at CONTRACT_VERSION 2.3.0, written out. A contract change that does not bump the version (and,
 // with it, this literal) is a silent change to what a workbook may hold, so it fails here. Bumping means: CONTRACT_VERSION, then the version
 // and fingerprint below, then `npm run catalog:contract-doc`.
-// The fingerprint of contract 2.2.0 (`await contractFingerprint()`, pinned at release as this file describes).
-const RELEASED = { version: '2.2.0', fingerprint: '426d2d5869d7e255e5f2290c3b43a919e0d9722d607c40e9ba893a466c2f21de' }
+// The fingerprint of contract 2.3.0 (`await contractFingerprint()`, pinned at release as this file describes).
+const RELEASED = { version: '2.3.0', fingerprint: 'e7dac0f7b0facd74446e8ed6dc566c3501fefca23c450e65fc1e9c82868fc8b7' }
 
 describe('contractFingerprint', () => {
   it('is the one released for this CONTRACT_VERSION: change CONTRACT only together with a bump of CONTRACT_VERSION and of RELEASED in this file', async () => {
@@ -419,11 +551,17 @@ describe('validateWorkbook: a valid workbook', () => {
     expect(result.ingredients[0]).toMatchObject({ strengthLimit: null, sourceUrl: null, helps: [], group: null, clashesWith: [] })
   })
 
-  it('is ok with every tab empty but Guides, which needs its four base rows', () => {
+  it('is ok with every tab empty but the five that need rows: Guides, Reintroductions, Escalations, Responses and Weeks', () => {
     const result = parsed(workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] }))
 
-    expect({ ...result, guides: [] }).toEqual({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [], guides: [] })
+    expect({ ...result, guides: [], reintroductions: [], escalations: [], responses: [], weeks: [] }).toEqual({
+      products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [], guides: [], reintroductions: [], escalations: [], responses: [], weeks: [],
+    })
     expect(result.guides.map((row) => [row.step, row.goal])).toEqual([['cleanse', null], ['treat', null], ['moisturise', null], ['protect', null]])
+    expect(result.reintroductions.map((row) => row.group)).toEqual([null])
+    expect(result.escalations.map((row) => row.reason)).toEqual([...REASONS])
+    expect(result.responses.map((row) => row.outcome)).toEqual([...OUTCOMES])
+    expect(result.weeks.map((row) => [row.band, row.goal, row.stepDown])).toEqual(BANDS.map((band) => [band, null, false]))
   })
 
   it('keeps rows in the order they were given', () => {
@@ -493,7 +631,15 @@ describe('validateWorkbook: cells', () => {
 })
 
 describe('validateWorkbook: columns', () => {
-  const TABS = ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides'] as const
+  const TABS = ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides', 'reintroductions', 'escalations', 'responses', 'weeks'] as const
+  /** The tabs that need rows, with the column their missing-row problem sits in, and its rule. */
+  const NEEDS_ROWS = [
+    ['guides', 'step', 'GUIDE_BASE_MISSING'],
+    ['reintroductions', 'group', 'REINTRO_DEFAULT_MISSING'],
+    ['escalations', 'reason', 'ESCALATION_MISSING'],
+    ['responses', 'outcome', 'RESPONSE_MISSING'],
+    ['weeks', 'band', 'WEEK_BASE_MISSING'],
+  ] as const
   /** The one-valid-row workbook with `name` given other headers (and, when asked, other rows). */
   const withTab = (name: Tab, headers: readonly string[], rows: Raw[] = workbook()[name].rows): RawWorkbook => ({ ...workbook(), [name]: tab(name, rows, headers) })
   const without = (name: Tab, column: string) => HEADERS[name].filter((header) => header !== column)
@@ -542,6 +688,16 @@ describe('validateWorkbook: columns', () => {
     ['guides', 'look_for_when_pregnant'],
     ['guides', 'goal'],
     ['guides', 'step'],
+    ['reintroductions', 'group'],
+    ['reintroductions', 'schedule'],
+    ['escalations', 'reason'],
+    ['escalations', 'how_soon'],
+    ['responses', 'outcome'],
+    ['responses', 'what_to_do_now'],
+    ['weeks', 'band'],
+    ['weeks', 'goal'],
+    ['weeks', 'step_down'],
+    ['weeks', 'title'],
   ] as const)('reports %s without a %s header once, as MISSING_COLUMN on the header row, and nothing else about that column', (name, column) => {
     expectProblems(withTab(name, without(name, column), omitting(workbook()[name].rows, column)), [problem(name, 1, column, 'MISSING_COLUMN')])
   })
@@ -566,7 +722,7 @@ describe('validateWorkbook: columns', () => {
     ])
   })
 
-  it.each(TABS.filter((name) => name !== 'guides'))('checks the header row of %s even when the tab has no rows', (name) => {
+  it.each(TABS.filter((name) => !NEEDS_ROWS.some(([needy]) => needy === name)))('checks the header row of %s even when the tab has no rows', (name) => {
     const empty = workbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [] })
     const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...empty, [name]: tab(name, [], headers) })
 
@@ -574,11 +730,11 @@ describe('validateWorkbook: columns', () => {
     expectProblems(emptyWith([...without(name, HEADERS[name][0]), 'colour']), [problem(name, 1, HEADERS[name][0], 'MISSING_COLUMN'), problem(name, 1, 'colour', 'UNKNOWN_COLUMN')])
   })
 
-  it('checks the header row of Guides even when the tab has no rows: a tab with no rows is missing its base rows, and a wrong header is told as a wrong header and nothing more', () => {
-    const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...inGuides(), guides: tab('guides', [], headers) })
+  it.each(NEEDS_ROWS)('checks the header row of %s even when the tab has no rows: a tab with no rows is missing the rows it needs, and a wrong header is told as a wrong header and nothing more', (name, key, missing) => {
+    const emptyWith = (headers: readonly string[]): RawWorkbook => ({ ...workbook({ products: [], availability: [], ingredients: [], countries: [] }), [name]: tab(name, [], headers) })
 
-    expectProblems(emptyWith(HEADERS.guides), [problem('guides', 1, 'step', 'GUIDE_BASE_MISSING')])
-    expectProblems(emptyWith([...without('guides', 'step'), 'colour']), [problem('guides', 1, 'step', 'MISSING_COLUMN'), problem('guides', 1, 'colour', 'UNKNOWN_COLUMN')])
+    expectProblems(emptyWith(HEADERS[name]), [problem(name, 1, key, missing)])
+    expectProblems(emptyWith([...without(name, key), 'colour']), [problem(name, 1, key, 'MISSING_COLUMN'), problem(name, 1, 'colour', 'UNKNOWN_COLUMN')])
   })
 
   describe('a row that leaves a key out', () => {
@@ -1972,12 +2128,849 @@ describe('validateWorkbook: Guides', () => {
   })
 })
 
+// --- the contract bump to 2.3.0: the Reintroductions, Escalations, Responses and Weeks tabs ---------------------------------------------------------
+// Where a problem is reported, where the spec leaves it open (pinned here), all as for the Guides tab:
+//   - none of the four has a code column, so none has DUPLICATE_CODE: a row is its key (a group, a reason, an outcome, or a band with goal and step-down);
+//   - a rule that a tab lacks a row it needs (REINTRO_DEFAULT_MISSING, ESCALATION_MISSING, RESPONSE_MISSING, WEEK_BASE_MISSING) has no row to point at, so it is on
+//     the header row, in the key column, once however much is missing. A draft or retired row does not count. A tab whose key header is missing says only that;
+//   - a duplicate (REINTRO_DUPLICATE, ESCALATION_DUPLICATE, RESPONSE_DUPLICATE, WEEK_DUPLICATE) is every row that shares its key with another, in the key column
+//     (`band` for Weeks), whatever the statuses: a retired or draft row keeps its key. So a reason or an outcome can only ever have its one approved row, and a row
+//     for one that is draft or retired leaves it without an approved one;
+//   - ESCALATION_WORDING, RESPONSE_WORDING and WEEK_WORDING: the text cell that holds a forbidden word, one problem for the cell however many words it holds. A cell
+//     that is too long is reported for its length only. Reintroductions has no text cell, so it has no wording rule;
+//   - REINTRO_GROUP_NEVER_BACK: the `group` cell of the row, whatever the row's status.
+
+describe('validateWorkbook: Reintroductions', () => {
+  const withDefault = (...more: Raw[]): RawWorkbook => alone('reintroductions', [reintroduction(), ...more])
+  const scheduled = (schedule: string | null): RawWorkbook => alone('reintroductions', [reintroduction({ schedule })])
+  const scheduleProblem = (rule: string) => [problem('reintroductions', 2, 'schedule', rule)]
+  const THIRD = 3
+
+  it('reads a ladder into its group, the steps of its schedule, status and sign-off', () => {
+    const rows = parsed(withDefault(reintroduction({ group: 'retinoid', schedule: '1-2: as-needed; 3: weekly; 4-5: alternate-days; 6: am; 7: am-pm; 8: back', audited_by: 'Nneka Audit', audited_on: AUDITED_ON }))).reintroductions
+
+    expect(rows[0]).toEqual({
+      group: null,
+      schedule: [
+        { fromWeek: 1, toWeek: 1, frequency: 'weekly' },
+        { fromWeek: 2, toWeek: 2, frequency: 'alternate-days' },
+        { fromWeek: 3, toWeek: 3, frequency: 'back' },
+      ],
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: null,
+      auditedOn: null,
+    })
+    expect(rows[1]).toEqual({
+      group: 'retinoid',
+      schedule: [
+        { fromWeek: 1, toWeek: 2, frequency: 'as-needed' },
+        { fromWeek: 3, toWeek: 3, frequency: 'weekly' },
+        { fromWeek: 4, toWeek: 5, frequency: 'alternate-days' },
+        { fromWeek: 6, toWeek: 6, frequency: 'am' },
+        { fromWeek: 7, toWeek: 7, frequency: 'am-pm' },
+        { fromWeek: 8, toWeek: 8, frequency: 'back' },
+      ],
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: 'Nneka Audit',
+      auditedOn: utcMidnight(AUDITED_ON),
+    })
+  })
+
+  describe('group', () => {
+    it.each(['retinoid', 'exfoliating-acid', 'benzoyl-peroxide'])('accepts %s, a group that can be brought back', (group) => {
+      expectValid(withDefault(reintroduction({ group })))
+    })
+
+    it('is optional: empty is the default ladder, and reads as null', () => {
+      expect(parsed(withDefault()).reintroductions[0]!.group).toBeNull()
+      expect(parsed(alone('reintroductions', [reintroduction({ group: '  ' })])).reintroductions[0]!.group).toBeNull()
+    })
+
+    it.each(['Retinoid', 'bleach', 'default'])('refuses %s: it is not an ingredient group', (group) => {
+      expectProblems(withDefault(reintroduction({ group })), [problem('reintroductions', THIRD, 'group', 'NOT_IN_VOCABULARY')])
+    })
+
+    it.each(['mercury', 'steroid', 'lightening-agent'])('refuses %s with REINTRO_GROUP_NEVER_BACK on its group cell: it is only ever stopped, never brought back', (group) => {
+      expectProblems(withDefault(reintroduction({ group })), [problem('reintroductions', THIRD, 'group', 'REINTRO_GROUP_NEVER_BACK')])
+    })
+
+    it.each(['draft', 'retired'])('refuses a never-back group on a %s row too, since the row would be a ladder for a product that is not brought back', (status) => {
+      expectProblems(withDefault(reintroduction({ group: 'steroid', status, approved_by: null, approved_on: null })), [problem('reintroductions', THIRD, 'group', 'REINTRO_GROUP_NEVER_BACK')])
+    })
+  })
+
+  describe('schedule', () => {
+    it('is required', () => {
+      expectProblems(scheduled(null), scheduleProblem('REQUIRED'))
+    })
+
+    it('is the example of the brief: 1: weekly; 2: alternate-days; 3: back', () => {
+      expectValid(scheduled('1: weekly; 2: alternate-days; 3: back'))
+    })
+
+    it('accepts the whole ladder, step by step up to back: as-needed, weekly, alternate-days, am or pm, am-pm', () => {
+      expectValid(scheduled('1: as-needed; 2: weekly; 3: alternate-days; 4: am; 5: am-pm; 6: back'))
+    })
+
+    it('ignores spaces around entries and after the colon', () => {
+      expect(parsed(scheduled(' 1-2:weekly ;  3 :  back ')).reintroductions[0]!.schedule).toEqual([
+        { fromWeek: 1, toWeek: 2, frequency: 'weekly' },
+        { fromWeek: 3, toWeek: 3, frequency: 'back' },
+      ])
+    })
+
+    it.each(['am-pm', 'am', 'pm', 'alternate-days', 'weekly', 'as-needed'])('accepts %s as a step before back', (frequency) => {
+      expectValid(scheduled(`1: ${frequency}; 2: back`))
+    })
+
+    it('accepts a frequency that stays the same from one step to the next, and am and pm as the same strength in either order', () => {
+      expectValid(scheduled('1: weekly; 2: weekly; 3: back'))
+      expectValid(scheduled('1: am; 2: pm; 3: back'))
+      expectValid(scheduled('1: pm; 2: am; 3: back'))
+    })
+
+    it.each([
+      ['text that is no entry', 'bring it back slowly'],
+      ['an entry with no weeks', ': weekly; 2: back'],
+      ['an entry with no frequency', '1: ; 2: back'],
+      ['an entry with no colon', '1 weekly; 2: back'],
+      ['a frequency that is not in the list', '1: daily; 2: back'],
+      ['a frequency in capitals', '1: Weekly; 2: back'],
+      ['back in capitals', '1: weekly; 2: Back'],
+      ['stop, which a ladder up never says', '1: weekly; 2: stop'],
+      ['stop alone', '1: stop'],
+      ['week 0, since weeks start at 1', '0: weekly; 1: back'],
+      ['a range written backwards', '3-1: weekly; 4: back'],
+      ['a decimal week', '1.5: weekly; 2: back'],
+    ])('refuses %s as BAD_SCHEDULE', (_what, schedule) => {
+      expectProblems(scheduled(schedule), scheduleProblem('BAD_SCHEDULE'))
+    })
+
+    describe('it is at most 12 weeks long, and the weeks run from week 1 with no gap and no overlap', () => {
+      it('accepts a ladder that ends in week 12', () => {
+        expectValid(scheduled('1-11: weekly; 12: back'))
+      })
+
+      it('refuses a ladder that runs into week 13: BAD_SCHEDULE', () => {
+        expectProblems(scheduled('1-12: weekly; 13: back'), scheduleProblem('BAD_SCHEDULE'))
+      })
+
+      it('refuses a schedule that does not start at week 1', () => {
+        expectProblems(scheduled('2: weekly; 3: back'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses a gap: 1-2, then 4', () => {
+        expectProblems(scheduled('1-2: weekly; 4: back'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses an overlap: 1-3, then 3', () => {
+        expectProblems(scheduled('1-3: weekly; 3: back'), scheduleProblem('SCHEDULE_NOT_CONTIGUOUS'))
+      })
+
+      it('refuses steps written out of order', () => {
+        expect(problemsOf(scheduled('3: back; 1-2: weekly'))).toContainEqual(problem('reintroductions', 2, 'schedule', 'SCHEDULE_NOT_CONTIGUOUS'))
+      })
+    })
+
+    describe('it ends with back, and back is only the last step', () => {
+      it('refuses a schedule whose last step is not back: REINTRO_MISSING_BACK', () => {
+        expectProblems(scheduled('1-2: weekly; 3-4: alternate-days'), scheduleProblem('REINTRO_MISSING_BACK'))
+        expectProblems(scheduled('1: weekly'), scheduleProblem('REINTRO_MISSING_BACK'))
+      })
+
+      it('refuses a back that is followed by another step: REINTRO_BACK_NOT_LAST, and nothing about the step that follows', () => {
+        expectProblems(scheduled('1: weekly; 2: back; 3: am'), scheduleProblem('REINTRO_BACK_NOT_LAST'))
+        expectProblems(scheduled('1: weekly; 2: back; 3: back'), scheduleProblem('REINTRO_BACK_NOT_LAST'))
+      })
+    })
+
+    describe('the frequency never goes down: as-needed, then weekly, then alternate-days, then am or pm, then am-pm, then back', () => {
+      it.each([
+        ['alternate-days then weekly', '1: alternate-days; 2: weekly; 3: back'],
+        ['am-pm then am', '1: am-pm; 2: am; 3: back'],
+        ['am then alternate-days', '1: am; 2: alternate-days; 3: back'],
+        ['weekly then as-needed', '1: weekly; 2: as-needed; 3: back'],
+        ['one step up then down', '1: weekly; 2: am-pm; 3: alternate-days; 4: back'],
+      ])('refuses %s: REINTRO_FREQUENCY_DECREASES', (_what, schedule) => {
+        expectProblems(scheduled(schedule), scheduleProblem('REINTRO_FREQUENCY_DECREASES'))
+      })
+    })
+  })
+
+  describe('a default ladder', () => {
+    const MISSING = [problem('reintroductions', 1, 'group', 'REINTRO_DEFAULT_MISSING')]
+
+    it('is required: an approved row with no group, reported once on the header row', () => {
+      expectProblems(alone('reintroductions', []), MISSING)
+    })
+
+    it('is not met by a row for a group: a tab of group ladders alone has no default', () => {
+      expectProblems(alone('reintroductions', [reintroduction({ group: 'retinoid' }), reintroduction({ group: 'exfoliating-acid' })]), MISSING)
+    })
+
+    it.each([
+      ['a draft', { status: 'draft', approved_by: null, approved_on: null }],
+      ['a retired row', { status: 'retired', approved_by: null, approved_on: null }],
+    ])('does not count %s as the default', (_name, over) => {
+      expectProblems(alone('reintroductions', [reintroduction(over)]), MISSING)
+    })
+
+    it('is met by one approved default, whatever else the tab has: group ladders, drafts and retired ones', () => {
+      expectValid(
+        withDefault(
+          reintroduction({ group: 'retinoid' }),
+          reintroduction({ group: 'exfoliating-acid', status: 'draft', approved_by: null, approved_on: null }),
+          reintroduction({ group: 'benzoyl-peroxide', status: 'retired', approved_by: null, approved_on: null }),
+        ),
+      )
+    })
+
+    it('is checked for a workbook that has other problems too, and adds nothing to them', () => {
+      expectProblems(workbook({ products: [product({ category: 'face' })], availability: [], ingredients: [], countries: [], reintroductions: [] }), [problem('products', 2, 'category', 'NOT_IN_VOCABULARY'), ...MISSING])
+    })
+  })
+
+  describe('one ladder for each group', () => {
+    const duplicate = (rows: number[]) => rows.map((row) => problem('reintroductions', row, 'group', 'REINTRO_DUPLICATE'))
+    const other = '1: weekly; 2: back'
+
+    it('refuses two ladders for one group: both are reported, in group', () => {
+      expectProblems(withDefault(reintroduction({ group: 'retinoid' }), reintroduction({ group: 'retinoid', schedule: other })), duplicate([THIRD, 4]))
+    })
+
+    it('refuses two default ladders: both are reported, and the default is not also missing', () => {
+      expectProblems(withDefault(reintroduction({ schedule: other })), duplicate([2, THIRD]))
+    })
+
+    it('counts a retired or a draft row too: the row keeps its group', () => {
+      expectProblems(withDefault(reintroduction({ group: 'retinoid' }), reintroduction({ group: 'retinoid', status: 'retired', approved_by: null, approved_on: null })), duplicate([THIRD, 4]))
+      expectProblems(withDefault(reintroduction({ status: 'draft', approved_by: null, approved_on: null })), duplicate([2, THIRD]))
+    })
+
+    it('lets each group have its own ladder', () => {
+      expectValid(withDefault(reintroduction({ group: 'retinoid' }), reintroduction({ group: 'exfoliating-acid' }), reintroduction({ group: 'benzoyl-peroxide' })))
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    const extra = (over: Raw) => withDefault(reintroduction({ group: 'retinoid', ...over }))
+
+    it('takes draft, approved and retired for a row, and nothing else', () => {
+      for (const status of ['draft', 'approved', 'retired']) expectValid(extra({ status, ...(status === 'approved' ? {} : { approved_by: null, approved_on: null }) }))
+      expectProblems(extra({ status: 'live' }), [problem('reintroductions', THIRD, 'status', 'NOT_IN_VOCABULARY')])
+      expectProblems(extra({ status: null }), [problem('reintroductions', THIRD, 'status', 'REQUIRED')])
+    })
+
+    it('needs an approver and a day once the row is approved', () => {
+      expectProblems(extra({ approved_by: null, approved_on: null }), [problem('reintroductions', THIRD, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('reintroductions', THIRD, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+    })
+
+    it('reads the approval day as a real calendar day', () => {
+      expectProblems(extra({ approved_on: '2030-02-30' }), [problem('reintroductions', THIRD, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('wants both halves of an audit, or neither', () => {
+      expectProblems(extra({ audited_by: 'Nneka Audit' }), [problem('reintroductions', THIRD, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(extra({ audited_on: AUDITED_ON }), [problem('reintroductions', THIRD, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+
+    it('keeps a retired ladder whole, schedule and all, so a past routine can still say which ladder it used', () => {
+      const row = parsed(extra({ status: 'retired' })).reintroductions[1]
+
+      expect(row).toMatchObject({ status: 'retired', group: 'retinoid', schedule: [expect.anything(), expect.anything(), expect.anything()] })
+    })
+  })
+})
+
+describe('validateWorkbook: Escalations', () => {
+  const TEXTS = ['who_to_see', 'how_soon', 'what_to_tell_them'] as const
+  /** The reason rows with the first one changed: it is spreadsheet row 2, and every reason still has its row. */
+  const first = (over: Raw): RawWorkbook => alone('escalations', [escalation(over), ...baseEscalations().slice(1)])
+  /** The reason rows and then these: the one a test is about is spreadsheet row 9. */
+  const withReasons = (...more: Raw[]): RawWorkbook => alone('escalations', [...baseEscalations(), ...more])
+  const NINTH = 9
+  const MISSING = [problem('escalations', 1, 'reason', 'ESCALATION_MISSING')]
+
+  it('reads an escalation into its reason, the three plain-text cells, status and sign-off', () => {
+    const rows = parsed(first({ who_to_see: 'A dermatologist.', how_soon: 'Within two days.', what_to_tell_them: 'The products you used, and when it started.', audited_by: 'Nneka Audit', audited_on: AUDITED_ON })).escalations
+
+    expect(rows[0]).toEqual({
+      reason: 'pus-or-hot-patch',
+      whoToSee: 'A dermatologist.',
+      howSoon: 'Within two days.',
+      whatToTellThem: 'The products you used, and when it started.',
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: 'Nneka Audit',
+      auditedOn: utcMidnight(AUDITED_ON),
+    })
+    expect(rows.map((row) => row.reason)).toEqual([...REASONS])
+  })
+
+  describe('reason', () => {
+    it.each(['fever', 'Swelling', 'pus or hot patch', 'near eyes'])('refuses %s: it is not one of the reasons', (reason) => {
+      expectProblems(withReasons(escalation({ reason })), [problem('escalations', NINTH, 'reason', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('is required', () => {
+      expectProblems(withReasons(escalation({ reason: null })), [problem('escalations', NINTH, 'reason', 'REQUIRED')])
+    })
+  })
+
+  describe('who_to_see, how_soon and what_to_tell_them', () => {
+    it.each(TEXTS)('holds up to 300 characters in %s, and no more', (column) => {
+      expectValid(first({ [column]: text(300) }))
+      expectProblems(first({ [column]: text(301) }), [problem('escalations', 2, column, 'TOO_LONG')])
+    })
+
+    it.each(TEXTS)('requires %s', (column) => {
+      expectProblems(first({ [column]: null }), [problem('escalations', 2, column, 'REQUIRED')])
+      expectProblems(first({ [column]: '   ' }), [problem('escalations', 2, column, 'REQUIRED')])
+    })
+
+    it.each(TEXTS)('is plain words in %s: no link and no markup', (column) => {
+      expectProblems(first({ [column]: 'Read more at https://example.com/pharmacist' }), [problem('escalations', 2, column, 'HAS_LINK_OR_MARKUP')])
+      expectProblems(first({ [column]: 'A <b>doctor</b> today.' }), [problem('escalations', 2, column, 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('reports a cell that is too long for its length only, even when it also holds a link', () => {
+      expectProblems(first({ who_to_see: `https://example.com ${text(300)}` }), [problem('escalations', 2, 'who_to_see', 'TOO_LONG')])
+    })
+  })
+
+  describe('the routine wording gate', () => {
+    it.each(TEXTS)('refuses a promise of lighter skin in %s, on that cell: ESCALATION_WORDING', (column) => {
+      expectProblems(first({ [column]: 'Helps you get lighter skin in weeks.' }), [problem('escalations', 2, column, 'ESCALATION_WORDING')])
+    })
+
+    it.each(TEXTS)('refuses the name of a condition in %s', (column) => {
+      expectProblems(first({ [column]: 'This may be eczema.' }), [problem('escalations', 2, column, 'ESCALATION_WORDING')])
+    })
+
+    it('refuses a diagnosis: the app names a pattern with honest uncertainty and never says "you have"', () => {
+      expectProblems(first({ what_to_tell_them: 'Say that you have an infection.' }), [problem('escalations', 2, 'what_to_tell_them', 'ESCALATION_WORDING')])
+    })
+
+    it('reports a cell once however many forbidden words it holds, and each bad cell of a row on its own', () => {
+      expectProblems(first({ who_to_see: 'Lighter skin, fairer and whiter.', how_soon: 'For melasma.' }), [
+        problem('escalations', 2, 'who_to_see', 'ESCALATION_WORDING'),
+        problem('escalations', 2, 'how_soon', 'ESCALATION_WORDING'),
+      ])
+    })
+
+    it('lets the words an escalation needs through: infection on its own, swelling, pus and a pharmacist', () => {
+      expectValid(first({ who_to_see: 'A pharmacist or a doctor.', how_soon: 'Today.', what_to_tell_them: 'If you see signs of infection, swelling or pus, say so.' }))
+    })
+
+    it('says a cell that is too long is too long and nothing else', () => {
+      expectProblems(first({ how_soon: `lighter skin ${text(300)}` }), [problem('escalations', 2, 'how_soon', 'TOO_LONG')])
+    })
+  })
+
+  describe('a row for every reason', () => {
+    it.each(REASONS)('is refused when %s has none: ESCALATION_MISSING on the header row', (reason) => {
+      expectProblems(alone('escalations', baseEscalations().filter((row) => row.reason !== reason)), MISSING)
+    })
+
+    it('is told once however many reasons have none, an empty tab included', () => {
+      expectProblems(alone('escalations', []), MISSING)
+      expectProblems(alone('escalations', baseEscalations().slice(0, 2)), MISSING)
+    })
+
+    it.each([
+      ['a draft', { status: 'draft', approved_by: null, approved_on: null }],
+      ['a retired row', { status: 'retired', approved_by: null, approved_on: null }],
+    ])('does not count %s as the row of its reason', (_name, over) => {
+      expectProblems(alone('escalations', baseEscalations().map((row) => (row.reason === 'near-eyes' ? { ...row, ...over } : row))), MISSING)
+    })
+
+    it('is checked for a workbook that has other problems too, and adds nothing to them', () => {
+      expectProblems(workbook({ products: [product({ category: 'face' })], availability: [], ingredients: [], countries: [], escalations: baseEscalations().slice(1) }), [problem('products', 2, 'category', 'NOT_IN_VOCABULARY'), ...MISSING])
+    })
+  })
+
+  describe('one row for each reason', () => {
+    const duplicate = (rows: number[]) => rows.map((row) => problem('escalations', row, 'reason', 'ESCALATION_DUPLICATE'))
+
+    it('refuses two rows for one reason: both are reported, in reason', () => {
+      expectProblems(withReasons(escalation({ reason: 'swelling', how_soon: 'Something else.' })), duplicate([3, NINTH]))
+    })
+
+    it('reports every row of a clash of three', () => {
+      expectProblems(withReasons(escalation({ reason: 'swelling' }), escalation({ reason: 'swelling' })), duplicate([3, NINTH, 10]))
+    })
+
+    it('counts a draft or a retired row too: the row keeps its reason', () => {
+      expectProblems(withReasons(escalation({ reason: 'swelling', status: 'draft', approved_by: null, approved_on: null })), duplicate([3, NINTH]))
+      expectProblems(withReasons(escalation({ reason: 'swelling', status: 'retired', approved_by: null, approved_on: null })), duplicate([3, NINTH]))
+    })
+
+    it('reads the reason as it is written once trimmed', () => {
+      expectProblems(withReasons(escalation({ reason: ' swelling ' })), duplicate([3, NINTH]))
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    it('takes draft, approved and retired for a row, and nothing else, though a reason with no approved row is missing one', () => {
+      expect(problemsOf(first({ status: 'live' }))).toContainEqual(problem('escalations', 2, 'status', 'NOT_IN_VOCABULARY'))
+      expect(problemsOf(first({ status: null }))).toContainEqual(problem('escalations', 2, 'status', 'REQUIRED'))
+      expectProblems(first({ status: 'draft', approved_by: null, approved_on: null }), MISSING)
+    })
+
+    it('needs an approver and a day once the row is approved', () => {
+      expectProblems(first({ approved_by: null, approved_on: null }), [problem('escalations', 2, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('escalations', 2, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+    })
+
+    it('reads the approval day as a real calendar day', () => {
+      expectProblems(first({ approved_on: '2030-02-30' }), [problem('escalations', 2, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('wants both halves of an audit, or neither', () => {
+      expectProblems(first({ audited_by: 'Nneka Audit' }), [problem('escalations', 2, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(first({ audited_on: AUDITED_ON }), [problem('escalations', 2, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+  })
+})
+
+describe('validateWorkbook: Responses', () => {
+  const TEXTS = ['title', 'body', 'what_to_do_now'] as const
+  /** The outcome rows with the first one changed: it is spreadsheet row 2, and every outcome still has its row. */
+  const first = (over: Raw): RawWorkbook => alone('responses', [response(over), ...baseResponses().slice(1)])
+  const withOutcomes = (...more: Raw[]): RawWorkbook => alone('responses', [...baseResponses(), ...more])
+  const ELEVENTH = 11
+  const MISSING = [problem('responses', 1, 'outcome', 'RESPONSE_MISSING')]
+
+  it('reads a response into its outcome, title, body, what to do now, status and sign-off', () => {
+    const rows = parsed(first({ title: 'We paused it', body: 'A rest for your {step}.', what_to_do_now: 'Skip anything that stings.', audited_by: 'Nneka Audit', audited_on: AUDITED_ON })).responses
+
+    expect(rows[0]).toEqual({
+      outcome: 'paused',
+      title: 'We paused it',
+      body: 'A rest for your {step}.',
+      whatToDoNow: 'Skip anything that stings.',
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: 'Nneka Audit',
+      auditedOn: utcMidnight(AUDITED_ON),
+    })
+    expect(rows.map((row) => row.outcome)).toEqual([...OUTCOMES])
+  })
+
+  describe('outcome', () => {
+    it.each(['sore', 'Paused', 'check calmer', 'advice'])('refuses %s: it is not one of the outcomes', (outcome) => {
+      expectProblems(withOutcomes(response({ outcome })), [problem('responses', ELEVENTH, 'outcome', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('is required', () => {
+      expectProblems(withOutcomes(response({ outcome: null })), [problem('responses', ELEVENTH, 'outcome', 'REQUIRED')])
+    })
+  })
+
+  describe('title, body and what_to_do_now', () => {
+    it('holds up to 120 characters in title, and no more', () => {
+      expectValid(first({ title: text(120) }))
+      expectProblems(first({ title: text(121) }), [problem('responses', 2, 'title', 'TOO_LONG')])
+    })
+
+    it.each(['body', 'what_to_do_now'])('holds up to 300 characters in %s, and no more', (column) => {
+      expectValid(first({ [column]: text(300) }))
+      expectProblems(first({ [column]: text(301) }), [problem('responses', 2, column, 'TOO_LONG')])
+    })
+
+    it.each(['title', 'body'])('requires %s', (column) => {
+      expectProblems(first({ [column]: null }), [problem('responses', 2, column, 'REQUIRED')])
+      expectProblems(first({ [column]: '   ' }), [problem('responses', 2, column, 'REQUIRED')])
+    })
+
+    it('does not require what_to_do_now: empty reads as null', () => {
+      expectValid(first({ what_to_do_now: null }))
+      expect(parsed(first({ what_to_do_now: '  ' })).responses[0]!.whatToDoNow).toBeNull()
+    })
+
+    it.each(TEXTS)('is plain words in %s: no link and no markup', (column) => {
+      expectProblems(first({ [column]: 'Read more at https://example.com/pause' }), [problem('responses', 2, column, 'HAS_LINK_OR_MARKUP')])
+      expectProblems(first({ [column]: 'Keep it <b>gentle</b>.' }), [problem('responses', 2, column, 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('reports a cell that is too long for its length only, even when it also holds a link', () => {
+      expectProblems(first({ body: `https://example.com ${text(300)}` }), [problem('responses', 2, 'body', 'TOO_LONG')])
+    })
+  })
+
+  describe('the placeholder {step}', () => {
+    it.each(TEXTS)('is allowed in %s, once or more than once', (column) => {
+      expectValid(first({ [column]: 'Rest your {step}, and ask how the {step} feels in three days.' }))
+    })
+
+    it.each(TEXTS)('refuses any other placeholder in %s, on that cell: RESPONSE_PLACEHOLDER', (column) => {
+      expectProblems(first({ [column]: 'Rest your {product} for now.' }), [problem('responses', 2, column, 'RESPONSE_PLACEHOLDER')])
+    })
+
+    it.each([
+      ['another name', 'Rest your {product}.'],
+      ['a capital', 'Rest your {Step}.'],
+      ['spaces inside', 'Rest your { step }.'],
+      ['a name with a dot', 'Rest your {step.name}.'],
+      ['a number', 'Rest your {0}.'],
+      ['nothing inside', 'Rest your {}.'],
+      ['{step} next to another one', 'Rest your {step} and {name}.'],
+    ])('refuses %s', (_what, body) => {
+      expectProblems(first({ body }), [problem('responses', 2, 'body', 'RESPONSE_PLACEHOLDER')])
+    })
+
+    it('says a cell that is too long is too long and nothing else', () => {
+      expectProblems(first({ body: `{product} ${text(300)}` }), [problem('responses', 2, 'body', 'TOO_LONG')])
+    })
+  })
+
+  describe('the routine wording gate', () => {
+    it.each(TEXTS)('refuses a promise of lighter skin in %s, on that cell: RESPONSE_WORDING', (column) => {
+      expectProblems(first({ [column]: 'Helps you get lighter skin in weeks.' }), [problem('responses', 2, column, 'RESPONSE_WORDING')])
+    })
+
+    it.each(TEXTS)('refuses the name of a condition in %s, with the placeholder in the text too', (column) => {
+      expectProblems(first({ [column]: 'Rest your {step}: this looks like eczema.' }), [problem('responses', 2, column, 'RESPONSE_WORDING')])
+    })
+
+    it('refuses a diagnosis and a score, and reports a cell once however many forbidden words it holds', () => {
+      expectProblems(first({ title: 'You have rosacea', body: 'Your skin score is 7/10. Lighter skin, fairer and whiter.' }), [
+        problem('responses', 2, 'title', 'RESPONSE_WORDING'),
+        problem('responses', 2, 'body', 'RESPONSE_WORDING'),
+      ])
+    })
+
+    it('lets a plain sentence with {step} through', () => {
+      expectValid(first({ title: 'Your {step} is on hold', body: 'We stopped your {step} so your skin can settle.', what_to_do_now: 'Keep your {step} off until we ask again.' }))
+    })
+
+    it('says a cell that is too long is too long and nothing else', () => {
+      expectProblems(first({ body: `lighter skin ${text(300)}` }), [problem('responses', 2, 'body', 'TOO_LONG')])
+    })
+  })
+
+  describe('a row for every outcome', () => {
+    it.each(OUTCOMES)('is refused when %s has none: RESPONSE_MISSING on the header row', (outcome) => {
+      expectProblems(alone('responses', baseResponses().filter((row) => row.outcome !== outcome)), MISSING)
+    })
+
+    it('is told once however many outcomes have none, an empty tab included', () => {
+      expectProblems(alone('responses', []), MISSING)
+      expectProblems(alone('responses', baseResponses().slice(0, 3)), MISSING)
+    })
+
+    it.each([
+      ['a draft', { status: 'draft', approved_by: null, approved_on: null }],
+      ['a retired row', { status: 'retired', approved_by: null, approved_on: null }],
+    ])('does not count %s as the row of its outcome', (_name, over) => {
+      expectProblems(alone('responses', baseResponses().map((row) => (row.outcome === 'check-worse' ? { ...row, ...over } : row))), MISSING)
+    })
+  })
+
+  describe('one row for each outcome', () => {
+    const duplicate = (rows: number[]) => rows.map((row) => problem('responses', row, 'outcome', 'RESPONSE_DUPLICATE'))
+
+    it('refuses two rows for one outcome: both are reported, in outcome', () => {
+      expectProblems(withOutcomes(response({ outcome: 'check-same', body: 'Something else.' })), duplicate([8, ELEVENTH]))
+    })
+
+    it('counts a draft or a retired row too: the row keeps its outcome', () => {
+      expectProblems(withOutcomes(response({ outcome: 'check-same', status: 'draft', approved_by: null, approved_on: null })), duplicate([8, ELEVENTH]))
+      expectProblems(withOutcomes(response({ outcome: 'check-same', status: 'retired', approved_by: null, approved_on: null })), duplicate([8, ELEVENTH]))
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    it('takes draft, approved and retired for a row, and nothing else, though an outcome with no approved row is missing one', () => {
+      expect(problemsOf(first({ status: 'live' }))).toContainEqual(problem('responses', 2, 'status', 'NOT_IN_VOCABULARY'))
+      expect(problemsOf(first({ status: null }))).toContainEqual(problem('responses', 2, 'status', 'REQUIRED'))
+      expectProblems(first({ status: 'retired', approved_by: null, approved_on: null }), MISSING)
+    })
+
+    it('needs an approver and a day once the row is approved', () => {
+      expectProblems(first({ approved_by: null, approved_on: null }), [problem('responses', 2, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('responses', 2, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+    })
+
+    it('reads the approval day as a real calendar day', () => {
+      expectProblems(first({ approved_on: '2030-02-30' }), [problem('responses', 2, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('wants both halves of an audit, or neither', () => {
+      expectProblems(first({ audited_by: 'Nneka Audit' }), [problem('responses', 2, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(first({ audited_on: AUDITED_ON }), [problem('responses', 2, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+  })
+})
+
+describe('validateWorkbook: Weeks', () => {
+  const TEXTS = ['title', 'text'] as const
+  /** The five base rows with the first one changed: it is spreadsheet row 2, and every band still has its base row. */
+  const first = (over: Raw): RawWorkbook => alone('weeks', [week(over), ...baseWeeks().slice(1)])
+  /** The five base rows and then these: the one a test is about is spreadsheet row 7. */
+  const withBands = (...more: Raw[]): RawWorkbook => alone('weeks', [...baseWeeks(), ...more])
+  const SEVENTH = 7
+  const MISSING = [problem('weeks', 1, 'band', 'WEEK_BASE_MISSING')]
+
+  it('reads a week card into its band, goal, step-down flag, title, text, status and sign-off', () => {
+    const rows = parsed(withBands(week({ band: '3-4', goal: 'glow', step_down: 'yes', title: 'Easing off', text: 'A flare is expected while you step down.', audited_by: 'Nneka Audit', audited_on: AUDITED_ON }))).weeks
+
+    expect(rows[0]).toEqual({
+      band: '1',
+      goal: null,
+      stepDown: false,
+      title: 'Settling in',
+      text: 'The first week is about calming things down. Go gently and keep to the basics.',
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: null,
+      auditedOn: null,
+    })
+    expect(rows[5]).toEqual({
+      band: '3-4',
+      goal: 'glow',
+      stepDown: true,
+      title: 'Easing off',
+      text: 'A flare is expected while you step down.',
+      status: 'approved',
+      approvedBy: 'Dr A. Reviewer',
+      approvedOn: utcMidnight(APPROVED_ON),
+      auditedBy: 'Nneka Audit',
+      auditedOn: utcMidnight(AUDITED_ON),
+    })
+  })
+
+  describe('band', () => {
+    it('is one of the five bands: 1, 2, 3-4, 5-8 and 9-12', () => {
+      expect(parsed(withBands()).weeks.map((row) => row.band)).toEqual([...BANDS])
+    })
+
+    it.each(['0', '3', '4', '5', '9', '13', '1-2', '12', 'week 1', '3–4'])('refuses %s: it is not a band', (band) => {
+      expectProblems(withBands(week({ band, goal: 'glow' })), [problem('weeks', SEVENTH, 'band', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('is required', () => {
+      expectProblems(withBands(week({ band: null, goal: 'glow' })), [problem('weeks', SEVENTH, 'band', 'REQUIRED')])
+    })
+
+    it('reads a band a spreadsheet gave as a number: 1 and 2 are bands', () => {
+      expectValid(alone('weeks', [week({ band: 1 }), week({ band: 2 }), ...baseWeeks().slice(2)]))
+      expect(parsed(alone('weeks', [week({ band: 1 }), ...baseWeeks().slice(1)])).weeks[0]!.band).toBe('1')
+    })
+  })
+
+  describe('goal', () => {
+    it.each(GOALS)('accepts %s, a goal a person can pick', (goal) => {
+      expectValid(withBands(week({ band: '5-8', goal })))
+    })
+
+    it('is optional: a row with no goal is the band\'s base card', () => {
+      expect(parsed(withBands()).weeks.every((row) => row.goal === null)).toBe(true)
+    })
+
+    it('refuses a value that is not one of the goals, in the case it is written in', () => {
+      expectProblems(withBands(week({ band: '5-8', goal: 'lighter-skin' })), [problem('weeks', SEVENTH, 'goal', 'NOT_IN_VOCABULARY')])
+      expectProblems(withBands(week({ band: '5-8', goal: 'Glow' })), [problem('weeks', SEVENTH, 'goal', 'NOT_IN_VOCABULARY')])
+    })
+  })
+
+  describe('step_down', () => {
+    it('is yes or no', () => {
+      expectValid(withBands(week({ band: '5-8', step_down: 'yes' })))
+      expectValid(withBands(week({ band: '5-8', step_down: 'no', goal: 'glow' })))
+    })
+
+    it('is no when it is empty', () => {
+      expect(parsed(alone('weeks', [week({ step_down: null }), ...baseWeeks().slice(1)])).weeks[0]!.stepDown).toBe(false)
+      expect(parsed(alone('weeks', [week({ step_down: '  ' }), ...baseWeeks().slice(1)])).weeks[0]!.stepDown).toBe(false)
+    })
+
+    it.each(['Yes', 'NO', 'true', 'maybe', '1'])('refuses %s: it is not yes or no, in the case it is written in', (step_down) => {
+      expectProblems(withBands(week({ band: '5-8', step_down })), [problem('weeks', SEVENTH, 'step_down', 'NOT_IN_VOCABULARY')])
+    })
+
+    it('lets a step-down card have a goal', () => {
+      expectValid(withBands(week({ band: '3-4', goal: 'calm-repair', step_down: 'yes' })))
+    })
+  })
+
+  describe('title and text', () => {
+    it('holds up to 60 characters in title, and no more', () => {
+      expectValid(first({ title: text(60) }))
+      expectProblems(first({ title: text(61) }), [problem('weeks', 2, 'title', 'TOO_LONG')])
+    })
+
+    it('holds up to 300 characters in text, and no more', () => {
+      expectValid(first({ text: text(300) }))
+      expectProblems(first({ text: text(301) }), [problem('weeks', 2, 'text', 'TOO_LONG')])
+    })
+
+    it.each(TEXTS)('requires %s', (column) => {
+      expectProblems(first({ [column]: null }), [problem('weeks', 2, column, 'REQUIRED')])
+      expectProblems(first({ [column]: '   ' }), [problem('weeks', 2, column, 'REQUIRED')])
+    })
+
+    it.each(TEXTS)('is plain words in %s: no link and no markup', (column) => {
+      expectProblems(first({ [column]: 'Read more at https://example.com/week' }), [problem('weeks', 2, column, 'HAS_LINK_OR_MARKUP')])
+      expectProblems(first({ [column]: 'Go <b>gently</b>.' }), [problem('weeks', 2, column, 'HAS_LINK_OR_MARKUP')])
+    })
+
+    it('reports a cell that is too long for its length only, even when it also holds a link', () => {
+      expectProblems(first({ text: `https://example.com ${text(300)}` }), [problem('weeks', 2, 'text', 'TOO_LONG')])
+    })
+  })
+
+  describe('the routine wording gate', () => {
+    it.each(TEXTS)('refuses a promise of lighter skin in %s, on that cell: WEEK_WORDING', (column) => {
+      expectProblems(first({ [column]: 'Lighter skin by week four.' }), [problem('weeks', 2, column, 'WEEK_WORDING')])
+    })
+
+    it.each(TEXTS)('refuses the name of a condition in %s', (column) => {
+      expectProblems(first({ [column]: 'Good for melasma.' }), [problem('weeks', 2, column, 'WEEK_WORDING')])
+    })
+
+    it('reports a cell once however many forbidden words it holds, and each bad cell of a row on its own', () => {
+      expectProblems(first({ title: 'Fairer and whiter', text: 'You have eczema and melasma.' }), [problem('weeks', 2, 'title', 'WEEK_WORDING'), problem('weeks', 2, 'text', 'WEEK_WORDING')])
+    })
+
+    it('also checks a card that is not approved yet, drafts included', () => {
+      expectProblems(withBands(week({ band: '5-8', goal: 'glow', status: 'draft', approved_by: null, approved_on: null, text: 'Whiter skin.' })), [problem('weeks', SEVENTH, 'text', 'WEEK_WORDING')])
+    })
+
+    it('lets a plain card through', () => {
+      expectValid(first({ title: 'Week of calm', text: 'Brighter, more even skin takes patience. Choose a lighter face cream in the heat.' }))
+    })
+
+    it('says a cell that is too long is too long and nothing else', () => {
+      expectProblems(first({ text: `lighter skin ${text(300)}` }), [problem('weeks', 2, 'text', 'TOO_LONG')])
+    })
+  })
+
+  describe('a base card for every band', () => {
+    it.each(BANDS)('is refused when band %s has none: WEEK_BASE_MISSING on the header row', (band) => {
+      expectProblems(alone('weeks', baseWeeks().filter((row) => row.band !== band)), MISSING)
+    })
+
+    it('is told once however many bands have none, an empty tab included', () => {
+      expectProblems(alone('weeks', []), MISSING)
+      expectProblems(alone('weeks', baseWeeks().slice(0, 2)), MISSING)
+    })
+
+    it.each([
+      ['a draft', { status: 'draft', approved_by: null, approved_on: null }],
+      ['a retired row', { status: 'retired', approved_by: null, approved_on: null }],
+    ])('does not count %s as the base card', (_name, over) => {
+      expectProblems(alone('weeks', baseWeeks().map((row) => (row.band === '9-12' ? { ...row, ...over } : row))), MISSING)
+    })
+
+    it('is not met by a card for a goal: a band with only goal cards has no base card', () => {
+      expectProblems(alone('weeks', baseWeeks().map((row) => (row.band === '5-8' ? { ...row, goal: 'glow' } : row))), MISSING)
+    })
+
+    it('is not met by a step-down card: a band with only a step-down card has no base card', () => {
+      expectProblems(alone('weeks', baseWeeks().map((row) => (row.band === '3-4' ? { ...row, step_down: 'yes' } : row))), MISSING)
+    })
+
+    it('counts a base card whose step_down is empty, which means no', () => {
+      expectValid(alone('weeks', baseWeeks().map((row) => ({ ...row, step_down: null }))))
+    })
+
+    it('is met by one approved base card, whatever else the band has: goal cards, step-down cards, drafts and retired ones', () => {
+      expectValid(
+        withBands(
+          week({ band: '3-4', goal: 'glow' }),
+          week({ band: '3-4', step_down: 'yes' }),
+          week({ band: '3-4', goal: 'glow', step_down: 'yes' }),
+          week({ band: '3-4', goal: 'brighter', status: 'draft', approved_by: null, approved_on: null }),
+          week({ band: '3-4', goal: 'even-tone', status: 'retired', approved_by: null, approved_on: null }),
+        ),
+      )
+    })
+
+    it('is checked for a workbook that has other problems too, and adds nothing to them', () => {
+      expectProblems(workbook({ products: [product({ category: 'face' })], availability: [], ingredients: [], countries: [], weeks: baseWeeks().slice(1) }), [problem('products', 2, 'category', 'NOT_IN_VOCABULARY'), ...MISSING])
+    })
+  })
+
+  describe('one card for each band, goal and step-down', () => {
+    const duplicate = (rows: number[]) => rows.map((row) => problem('weeks', row, 'band', 'WEEK_DUPLICATE'))
+
+    it('refuses two base cards for one band: both are reported, in band', () => {
+      expectProblems(withBands(week({ band: '2', text: 'Something else.' })), duplicate([3, SEVENTH]))
+    })
+
+    it('refuses two cards for one band and goal: both are reported', () => {
+      expectProblems(withBands(week({ band: '5-8', goal: 'glow' }), week({ band: '5-8', goal: 'glow', text: 'Something else.' })), duplicate([SEVENTH, 8]))
+    })
+
+    it('refuses two cards for one band, goal and step-down: both are reported', () => {
+      expectProblems(withBands(week({ band: '5-8', goal: 'glow', step_down: 'yes' }), week({ band: '5-8', goal: 'glow', step_down: 'yes', text: 'Something else.' })), duplicate([SEVENTH, 8]))
+    })
+
+    it('reads an empty step_down as no: a base card that says no and one that says nothing clash', () => {
+      expectProblems(withBands(week({ band: '2', step_down: null })), duplicate([3, SEVENTH]))
+    })
+
+    it('reports every row of a clash of three', () => {
+      const card = week({ band: '5-8', goal: 'glow' })
+      expectProblems(withBands(card, card, card), duplicate([SEVENTH, 8, 9]))
+    })
+
+    it('lets a band have a card for each goal, and for each step-down, and a goal have a card for each band', () => {
+      expectValid(withBands(week({ band: '5-8', goal: 'glow' }), week({ band: '5-8', goal: 'even-tone' }), week({ band: '5-8', step_down: 'yes' }), week({ band: '9-12', goal: 'glow' })))
+    })
+
+    it('counts a retired or a draft card too: the row keeps its place', () => {
+      expectProblems(withBands(week({ band: '5-8', goal: 'glow' }), week({ band: '5-8', goal: 'glow', status: 'retired', approved_by: null, approved_on: null })), duplicate([SEVENTH, 8]))
+      expectProblems(withBands(week({ band: '5-8', goal: 'glow' }), week({ band: '5-8', goal: 'glow', status: 'draft', approved_by: null, approved_on: null })), duplicate([SEVENTH, 8]))
+    })
+
+    it('reads the band, goal and step-down as they are written once trimmed', () => {
+      expectProblems(withBands(week({ band: ' 2 ', goal: null })), duplicate([3, SEVENTH]))
+    })
+  })
+
+  describe('status, approval and audit', () => {
+    const extra = (over: Raw) => withBands(week({ band: '5-8', goal: 'glow', ...over }))
+
+    it('takes draft, approved and retired for a row, and nothing else', () => {
+      for (const status of ['draft', 'approved', 'retired']) expectValid(extra({ status, ...(status === 'approved' ? {} : { approved_by: null, approved_on: null }) }))
+      expectProblems(extra({ status: 'live' }), [problem('weeks', SEVENTH, 'status', 'NOT_IN_VOCABULARY')])
+      expectProblems(extra({ status: null }), [problem('weeks', SEVENTH, 'status', 'REQUIRED')])
+    })
+
+    it('needs an approver and a day once the row is approved', () => {
+      expectProblems(extra({ approved_by: null, approved_on: null }), [problem('weeks', SEVENTH, 'approved_by', 'REQUIRED_WHEN_APPROVED'), problem('weeks', SEVENTH, 'approved_on', 'REQUIRED_WHEN_APPROVED')])
+    })
+
+    it('reads the approval day as a real calendar day', () => {
+      expectProblems(extra({ approved_on: '2030-02-30' }), [problem('weeks', SEVENTH, 'approved_on', 'BAD_DATE')])
+    })
+
+    it('wants both halves of an audit, or neither', () => {
+      expectProblems(extra({ audited_by: 'Nneka Audit' }), [problem('weeks', SEVENTH, 'audited_on', 'AUDIT_INCOMPLETE')])
+      expectProblems(extra({ audited_on: AUDITED_ON }), [problem('weeks', SEVENTH, 'audited_by', 'AUDIT_INCOMPLETE')])
+    })
+
+    it('keeps a retired card whole, so what a past week said stays on record', () => {
+      const row = parsed(extra({ status: 'retired', step_down: 'yes' })).weeks[5]
+
+      expect(row).toMatchObject({ status: 'retired', band: '5-8', goal: 'glow', stepDown: true, title: week().title })
+    })
+  })
+})
+
 // A spreadsheet cell holds up to 32767 characters, so a file can be full of cells that size. Each one is refused for its length before anything
 // reads its content, so checking the whole workbook costs about the length of the cells and no more.
 describe('validateWorkbook: cells at the spreadsheet limit', () => {
   const CELL = 32767
 
-  it('refuses a 32767-character cell in every free-text column (the Guides texts included), and a 150-item list of such items, in well under a second', () => {
+  it('refuses a 32767-character cell in every free-text column (the texts of Guides, Escalations, Responses and Weeks included), and a 150-item list of such items, in well under a second', () => {
     const huge = text(CELL)
     const raw = workbook({
       products: [product({ brand: huge, name: huge, variant: huge, approved_by: huge, ingredients: Array.from({ length: 150 }, () => huge).join(';') })],
@@ -1987,6 +2980,11 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
       tapers: [taper({ schedule: huge, what_to_expect: huge, see_a_professional_if: huge, approved_by: huge })],
       // The base rows are still all there: a row with cells that are too long still names its step.
       guides: [guide({ step: 'cleanse', what_it_does: huge, look_for: huge, for_deeper_skin: huge, look_for_when_pregnant: huge, approved_by: huge }), ...baseGuides().slice(1)],
+      // The same for the four reviewed tabs: the rows they need are all still there, each with its key, and the first has cells that are too long.
+      reintroductions: [reintroduction({ schedule: huge, approved_by: huge })],
+      escalations: [escalation({ who_to_see: huge, how_soon: huge, what_to_tell_them: huge, approved_by: huge }), ...baseEscalations().slice(1)],
+      responses: [response({ title: huge, body: huge, what_to_do_now: huge, approved_by: huge }), ...baseResponses().slice(1)],
+      weeks: [week({ title: huge, text: huge, approved_by: huge }), ...baseWeeks().slice(1)],
     })
 
     const started = performance.now()
@@ -2015,6 +3013,19 @@ describe('validateWorkbook: cells at the spreadsheet limit', () => {
         problem('guides', 2, 'for_deeper_skin', 'TOO_LONG'),
         problem('guides', 2, 'look_for_when_pregnant', 'TOO_LONG'),
         problem('guides', 2, 'approved_by', 'TOO_LONG'),
+        problem('reintroductions', 2, 'schedule', 'TOO_LONG'),
+        problem('reintroductions', 2, 'approved_by', 'TOO_LONG'),
+        problem('escalations', 2, 'who_to_see', 'TOO_LONG'),
+        problem('escalations', 2, 'how_soon', 'TOO_LONG'),
+        problem('escalations', 2, 'what_to_tell_them', 'TOO_LONG'),
+        problem('escalations', 2, 'approved_by', 'TOO_LONG'),
+        problem('responses', 2, 'title', 'TOO_LONG'),
+        problem('responses', 2, 'body', 'TOO_LONG'),
+        problem('responses', 2, 'what_to_do_now', 'TOO_LONG'),
+        problem('responses', 2, 'approved_by', 'TOO_LONG'),
+        problem('weeks', 2, 'title', 'TOO_LONG'),
+        problem('weeks', 2, 'text', 'TOO_LONG'),
+        problem('weeks', 2, 'approved_by', 'TOO_LONG'),
       ]),
     )
     expect(took).toBeLessThan(1000)

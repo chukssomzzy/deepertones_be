@@ -1,10 +1,22 @@
 import { stableJson } from '../../lib/stable-json'
-import { guideKey, type Workbook } from './catalog.workbook.schema'
+import { guideKey, reintroductionKey, weekKey, type Workbook } from './catalog.workbook.schema'
 
-/** What an upload does to one tab, as codes. Availability is keyed "<product code>:<country>", a guide by its step ("<step>:<goal>" when it has a goal), and a row that is gone is listed under `retired`. */
+/** What an upload does to one tab, as codes. Availability is keyed "<product code>:<country>", a guide by its step ("<step>:<goal>" when it has a goal), a ladder by its group ("default" for the one with none), an escalation by its reason, a response by its outcome, a week card by its band ("<band>:<goal>" for a goal, then ":step-down" for a step-down), and a row that is gone is listed under `retired`. */
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 
-export type WorkbookDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; guides: TabDiff }
+export type WorkbookDiff = {
+  products: TabDiff
+  availability: TabDiff
+  ingredients: TabDiff
+  countries: TabDiff
+  claimWords: TabDiff
+  tapers: TabDiff
+  guides: TabDiff
+  reintroductions: TabDiff
+  escalations: TabDiff
+  responses: TabDiff
+  weeks: TabDiff
+}
 
 // Rows are compared by what they mean: both sides are parsed, so "a;b" and "a; b" are one list, and a date is a day, not a string.
 const meaning = (row: object): string => stableJson(JSON.parse(JSON.stringify(row)))
@@ -39,4 +51,8 @@ export const diffWorkbooks = (live: Workbook, next: Workbook): WorkbookDiff => (
   claimWords: diffTab(live.claimWords, next.claimWords, (row) => row.code, rowStatus),
   tapers: diffTab(live.tapers, next.tapers, (row) => row.code, rowStatus),
   guides: diffTab(live.guides, next.guides, guideKey, rowStatus),
+  reintroductions: diffTab(live.reintroductions, next.reintroductions, reintroductionKey, rowStatus),
+  escalations: diffTab(live.escalations, next.escalations, (row) => row.reason, rowStatus),
+  responses: diffTab(live.responses, next.responses, (row) => row.outcome, rowStatus),
+  weeks: diffTab(live.weeks, next.weeks, weekKey, rowStatus),
 })

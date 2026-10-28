@@ -6,12 +6,12 @@ import type { Goal } from '../goals/goals.vocabulary'
 import { ingredientsKey } from './catalog.ingredients'
 import type { ReferenceEntry } from './catalog.reference'
 import type { NewProduct } from './catalog.types'
-import type { IngredientGroup, RoutineStep, TaperKind } from './catalog.vocabulary'
+import { WEEK_BANDS, type EscalationReason, type IngredientGroup, type ResponseOutcome, type RoutineStep, type TaperKind, type WeekBand } from './catalog.vocabulary'
 import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbook.diff'
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, RecommendedByCode, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, guideKey, validateWorkbook, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, guideKey, reintroductionKey, validateWorkbook, weekKey, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type ScheduleStep, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
@@ -80,6 +80,18 @@ export type Guide = { whatItDoes: string; lookFor: string; forDeeperSkin: string
 
 const guideOf = (row: GuideRow): Guide => ({ whatItDoes: row.whatItDoes, lookFor: row.lookFor, forDeeperSkin: row.forDeeperSkin, lookForWhenPregnant: row.lookForWhenPregnant })
 
+/** An escalation as a screen reads it: the three texts and nothing else. */
+export type Escalation = { whoToSee: string; howSoon: string; whatToTellThem: string }
+
+/** A response as a screen reads it. The texts may hold `{step}`, which the caller fills with the step's plain noun. */
+export type Response = { title: string; body: string; whatToDoNow: string | null }
+
+/** A week card as a screen reads it: a short heading and the text. The server prints "Week {n}" itself. */
+export type WeekCard = { title: string; text: string }
+
+/** The band of week cards a week falls in: week 13 and later use the last band. */
+const bandOfWeek = (week: number): WeekBand => (week <= 1 ? '1' : week === 2 ? '2' : week <= 4 ? '3-4' : week <= 8 ? '5-8' : WEEK_BANDS[WEEK_BANDS.length - 1]!)
+
 export type ImportDiff = WorkbookDiff & { newProducts: NewProductSummary[] }
 
 /** The workbook is whatever JSON object was uploaded: its shape is checked by the import, after the contract version. */
@@ -99,7 +111,7 @@ type Deps = {
 }
 
 /**
- * The catalog workbook: what the Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides tabs hold, served as an export, changed by an import, and read
+ * The catalog workbook: what the Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks tabs hold, served as an export, changed by an import, and read
  * by the modules that need the live rules, the countries or the approved products. No actor is needed: the admin routes are guarded by a token
  * before this is called, and a user never reaches it. Nothing here asks a model or a web page anything: a row's product is found by exact
  * identity key or alias, else made.
@@ -163,7 +175,7 @@ export class CatalogWorkbookService {
     const unqualified = this.unqualifiedApprovals(next)
     if (unqualified.length > 0) {
       console.info({ outcome: 'catalog-import-unqualified-approver', problems: unqualified.length })
-      throw new ValidationError('CATALOG_INVALID', 'A step-down template or a guide is approved by someone who may not approve it', { problems: unqualified })
+      throw new ValidationError('CATALOG_INVALID', 'A step-down template, guide, ladder, escalation, response or week card is approved by someone who may not approve it', { problems: unqualified })
     }
     const live = await this.repository.readWorkbook()
     if (input.baseVersion !== live.catalogVersion) {
@@ -260,6 +272,42 @@ export class CatalogWorkbookService {
   }
 
   /**
+   * The steps a person is brought back on: the approved ladder of the group, else the approved default ladder, else no steps (the team has not written one yet).
+   * A ladder is given whole: nothing is borrowed from the default.
+   */
+  async reintroductionFor(group: IngredientGroup | null): Promise<ScheduleStep[]> {
+    const approved = await this.repository.approvedReintroductions()
+    const row = (group === null ? undefined : approved.find((candidate) => candidate.group === group)) ?? approved.find((candidate) => candidate.group === null)
+    return row === undefined ? [] : row.schedule
+  }
+
+  /** The approved escalation of the reason, or null (the team has not written one yet). */
+  async escalationFor(reason: EscalationReason): Promise<Escalation | null> {
+    const row = await this.repository.approvedEscalation(reason)
+    return row === null ? null : { whoToSee: row.whoToSee, howSoon: row.howSoon, whatToTellThem: row.whatToTellThem }
+  }
+
+  /** The approved response of the outcome, `{step}` left as it is written, or null (the team has not written one yet). */
+  async responseFor(outcome: ResponseOutcome): Promise<Response | null> {
+    const row = await this.repository.approvedResponse(outcome)
+    return row === null ? null : { title: row.title, body: row.body, whatToDoNow: row.whatToDoNow }
+  }
+
+  /**
+   * The week card for a week, a goal and whether the person is stepping down a product: the first approved card of the week's band that exists for the goal on a
+   * step-down, then for no goal on a step-down, then for the goal, then for no goal; null when the team has written none.
+   */
+  async weekCardFor(week: number, goal: Goal, stepDown: boolean): Promise<WeekCard | null> {
+    const approved = await this.repository.approvedWeeks(bandOfWeek(week))
+    const wanted: [Goal | null, boolean][] = [[goal, stepDown], [null, stepDown], [goal, false], [null, false]]
+    for (const [wantedGoal, wantedStepDown] of wanted) {
+      const row = approved.find((candidate) => candidate.goal === wantedGoal && candidate.stepDown === wantedStepDown)
+      if (row !== undefined) return { title: row.title, text: row.text }
+    }
+    return null
+  }
+
+  /**
    * The recommended rows with these codes, whatever their status and in whatever country they are sold, by code: a saved routine shows its product by code even
    * when it has since been retired or is not sold where the person is now (the screen compares `availability` to their country). A code that names no row is absent.
    */
@@ -278,16 +326,24 @@ export class CatalogWorkbookService {
   }
 
   /**
-   * In production only, the approved Tapers and Guides rows whose approver is not on the list: a template and a guide are shown to people, so a qualified person
-   * has to have approved them. The approver is a label in a cell, so this is a process control and not authentication. The problem never holds the name.
+   * In production only, the approved rows of the tabs people are shown (Tapers, Guides, Reintroductions, Escalations, Responses, Weeks) whose approver is not on
+   * the list: they have to have been approved by a qualified person. The approver is a label in a cell, so this is a process control and not authentication. The
+   * problem never holds the name.
    */
   private unqualifiedApprovals(workbook: Workbook): WorkbookProblem[] {
     if (this.environment !== 'production') return []
-    const unqualified = (tab: 'tapers' | 'guides', rows: readonly { status: string; approvedBy: string | null }[]) =>
+    const unqualified = (tab: 'tapers' | 'guides' | 'reintroductions' | 'escalations' | 'responses' | 'weeks', rows: readonly { status: string; approvedBy: string | null }[]) =>
       rows.flatMap((row, i): WorkbookProblem[] =>
         row.status === 'approved' && !this.qualifiedApprovers.has(row.approvedBy ?? '') ? [{ tab, row: i + 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] : [],
       )
-    return [...unqualified('tapers', workbook.tapers), ...unqualified('guides', workbook.guides)]
+    return [
+      ...unqualified('tapers', workbook.tapers),
+      ...unqualified('guides', workbook.guides),
+      ...unqualified('reintroductions', workbook.reintroductions),
+      ...unqualified('escalations', workbook.escalations),
+      ...unqualified('responses', workbook.responses),
+      ...unqualified('weeks', workbook.weeks),
+    ]
   }
 
   private stale(): ConflictError {
@@ -329,6 +385,14 @@ export class CatalogWorkbookService {
     const taperCodes = written(changes.tapers)
     const guideKeys = written(changes.guides)
     const keptGuides = new Set(next.guides.map(guideKey))
+    const ladderKeys = written(changes.reintroductions)
+    const keptLadders = new Set(next.reintroductions.map(reintroductionKey))
+    const reasons = written(changes.escalations)
+    const keptReasons = new Set(next.escalations.map((escalation) => escalation.reason))
+    const outcomes = written(changes.responses)
+    const keptOutcomes = new Set(next.responses.map((response) => response.outcome))
+    const cardKeys = written(changes.weeks)
+    const keptCards = new Set(next.weeks.map(weekKey))
     const availabilityChanged = Object.values(changes.availability).some((codes) => codes.length > 0)
     return {
       plan: {
@@ -351,6 +415,22 @@ export class CatalogWorkbookService {
           .map((key) => {
             const [step, goal = null] = key.split(':')
             return { step: step as RoutineStep, goal: goal as Goal | null }
+          }),
+        reintroductions: next.reintroductions.filter((ladder) => ladderKeys.has(reintroductionKey(ladder))),
+        // The diff names the ladder with no group `default`, which no group is called.
+        retiredReintroductions: changes.reintroductions.retired.filter((key) => !keptLadders.has(key)).map((key) => ({ group: key === 'default' ? null : (key as IngredientGroup) })),
+        escalations: next.escalations.filter((escalation) => reasons.has(escalation.reason)),
+        retiredEscalations: changes.escalations.retired.filter((key) => !keptReasons.has(key as EscalationReason)).map((key) => ({ reason: key as EscalationReason })),
+        responses: next.responses.filter((response) => outcomes.has(response.outcome)),
+        retiredResponses: changes.responses.retired.filter((key) => !keptOutcomes.has(key as ResponseOutcome)).map((key) => ({ outcome: key as ResponseOutcome })),
+        weeks: next.weeks.filter((card) => cardKeys.has(weekKey(card))),
+        // A week card has no code, so the key the diff names it by is split back into its band, goal and step-down.
+        retiredWeeks: changes.weeks.retired
+          .filter((key) => !keptCards.has(key))
+          .map((key) => {
+            const stepDown = key.endsWith(':step-down')
+            const [band, goal = null] = (stepDown ? key.slice(0, -':step-down'.length) : key).split(':')
+            return { band: band as WeekBand, goal: goal as Goal | null, stepDown }
           }),
       },
       newProducts,
@@ -389,6 +469,10 @@ export class CatalogWorkbookService {
       claimWords: of(changes.claimWords),
       tapers: of(changes.tapers),
       guides: of(changes.guides),
+      reintroductions: of(changes.reintroductions),
+      escalations: of(changes.escalations),
+      responses: of(changes.responses),
+      weeks: of(changes.weeks),
     }
   }
 }

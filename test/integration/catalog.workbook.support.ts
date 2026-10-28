@@ -1,4 +1,4 @@
-import { ADMIN_TOKEN, fetchWorker as fetchAdmin, withBaseGuides } from './admin.catalog.support'
+import { ADMIN_TOKEN, fetchWorker as fetchAdmin, withBaseGuides, withReviewedRows } from './admin.catalog.support'
 
 // Shared by the integration tests that need a recommendation catalog in D1: they put it there the way the team does, through the admin import
 // endpoint (PR 3), as an export of what is live with their own rows added. Nothing writes a table directly. The endpoint, its header and the
@@ -11,7 +11,7 @@ export const APPROVED_ON = new Date().toISOString().slice(0, 10)
 type Cell = string | number | boolean | null
 export type RawRow = Record<string, Cell>
 export type RawTab = { headers: string[]; rows: RawRow[] }
-export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab; guides: RawTab }
+export type RawWorkbook = { products: RawTab; availability: RawTab; ingredients: RawTab; countries: RawTab; claimWords: RawTab; tapers: RawTab; guides: RawTab; reintroductions: RawTab; escalations: RawTab; responses: RawTab; weeks: RawTab }
 export type Exported = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 type Fetch = (input: RequestInfo | URL, init?: RequestInit) => Response | Promise<Response>
 
@@ -80,6 +80,7 @@ export const applyCatalogChange = async (fetchWorker: Fetch, change: (workbook: 
   const workbook = structuredClone(live.workbook)
   change(workbook)
   withBaseGuides(workbook)
+  withReviewedRows(workbook)
   const form = new FormData()
   form.set('workbook', JSON.stringify(workbook))
   form.set('file', new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], 'catalog.xlsx', { type: XLSX_TYPE }))

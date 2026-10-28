@@ -85,3 +85,33 @@ export type IngredientGroup = (typeof INGREDIENT_GROUPS)[number]
 /** The kinds of product a step-down template is for: the groups that are stopped with a plan, not at once (mercury is stopped at once). */
 export const TAPER_KINDS = ['steroid', 'lightening-agent'] as const
 export type TaperKind = (typeof TAPER_KINDS)[number]
+
+/** The reasons the app sends a person to a professional: each has one reviewed escalation (who to see, how soon, what to tell them). */
+export const ESCALATION_REASONS = [
+  'pus-or-hot-patch',
+  'swelling',
+  'near-eyes',
+  'worse-after-pause',
+  'unchanged-after-checks',
+  'harm-while-two-paused',
+  'hard-to-ignore-during-step-down',
+] as const
+export type EscalationReason = (typeof ESCALATION_REASONS)[number]
+
+/** What a skin log or a check-in after a pause comes to: each has one reviewed response. `nothing-to-pause` is last because it came after the others. */
+export const RESPONSE_OUTCOMES = [
+  'paused',
+  'advice-tightness',
+  'advice-itching',
+  'advice-breakouts',
+  'expected-flare',
+  'check-calmer',
+  'check-same',
+  'check-worse',
+  'nothing-to-pause',
+] as const
+export type ResponseOutcome = (typeof RESPONSE_OUTCOMES)[number]
+
+/** The stretches of weeks a week card on Today is written for. A week past the last band uses the last. */
+export const WEEK_BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+export type WeekBand = (typeof WEEK_BANDS)[number]

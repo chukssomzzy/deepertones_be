@@ -2,8 +2,28 @@ import { REFERENCE, REFERENCE_VERSION } from './catalog.reference'
 import { seedRuleCode } from './catalog.workbook.seed'
 import { STATEMENT_ROWS, type CatalogWorkbookRepository, type Country, type LiveRules, type Recommendation, type RecommendedByCode, type WorkbookPlan } from './catalog.workbook.repository'
 import type { RuleRow } from './catalog.workbook.repository.contract'
-import { compareGuides, guideKey, type AvailabilityRow, type ClaimWordRow, type GuideRow, type IngredientRule, type ProductRow, type TaperRow, type Workbook } from './catalog.workbook.schema'
-import type { RoutineStep } from './catalog.vocabulary'
+import {
+  compareEscalations,
+  compareGuides,
+  compareReintroductions,
+  compareResponses,
+  compareWeeks,
+  guideKey,
+  reintroductionKey,
+  weekKey,
+  type AvailabilityRow,
+  type ClaimWordRow,
+  type EscalationRow,
+  type GuideRow,
+  type IngredientRule,
+  type ProductRow,
+  type ReintroductionRow,
+  type ResponseRow,
+  type TaperRow,
+  type WeekRow,
+  type Workbook,
+} from './catalog.workbook.schema'
+import type { EscalationReason, ResponseOutcome, RoutineStep, WeekBand } from './catalog.vocabulary'
 import { SHOWN_CONCERNS, type ShownConcern } from '../face-scans/face-scans.tables'
 
 const day = (text: string | null): Date | null => (text === null ? null : new Date(`${text}T00:00:00.000Z`))
@@ -39,6 +59,10 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
   private claimWordRows: ClaimWordRow[] = []
   private taperRows: TaperRow[] = []
   private guideRows: GuideRow[] = []
+  private reintroductionRows: ReintroductionRow[] = []
+  private escalationRows: EscalationRow[] = []
+  private responseRows: ResponseRow[] = []
+  private weekRows: WeekRow[] = []
   /** The catalog products a row can join: identity key to product id. A product an upload makes is added. */
   private readonly productIds = new Map<string, string>()
   /** Other spellings of a product: alias key to the product's identity key. */
@@ -73,6 +97,10 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
         claimWords: structuredClone([...this.claimWordRows].sort(byCode)),
         tapers: structuredClone([...this.taperRows].sort(byCode)),
         guides: structuredClone([...this.guideRows].sort(compareGuides)),
+        reintroductions: structuredClone([...this.reintroductionRows].sort(compareReintroductions)),
+        escalations: structuredClone([...this.escalationRows].sort(compareEscalations)),
+        responses: structuredClone([...this.responseRows].sort(compareResponses)),
+        weeks: structuredClone([...this.weekRows].sort(compareWeeks)),
       },
     }
   }
@@ -89,6 +117,22 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
 
   async approvedGuides(step: GuideRow['step']): Promise<GuideRow[]> {
     return structuredClone(this.guideRows.filter((row) => row.step === step && row.status === 'approved').sort(compareGuides))
+  }
+
+  async approvedReintroductions(): Promise<ReintroductionRow[]> {
+    return structuredClone(this.reintroductionRows.filter((row) => row.status === 'approved').sort(compareReintroductions))
+  }
+
+  async approvedEscalation(reason: EscalationReason): Promise<EscalationRow | null> {
+    return structuredClone(this.escalationRows.find((row) => row.reason === reason && row.status === 'approved') ?? null)
+  }
+
+  async approvedResponse(outcome: ResponseOutcome): Promise<ResponseRow | null> {
+    return structuredClone(this.responseRows.find((row) => row.outcome === outcome && row.status === 'approved') ?? null)
+  }
+
+  async approvedWeeks(band: WeekBand): Promise<WeekRow[]> {
+    return structuredClone(this.weekRows.filter((row) => row.band === band && row.status === 'approved').sort(compareWeeks))
   }
 
   async tapersByCode(codes: string[]): Promise<TaperRow[]> {
@@ -208,7 +252,15 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
       batches(plan.tapers.length, rows.tapers) +
       batches(plan.retiredTapers.length, rows.codes) +
       batches(plan.guides.length, rows.guides) +
-      batches(plan.retiredGuides.length, rows.codes)
+      batches(plan.retiredGuides.length, rows.codes) +
+      batches(plan.reintroductions.length, rows.reintroductions) +
+      batches(plan.retiredReintroductions.length, rows.codes) +
+      batches(plan.escalations.length, rows.escalations) +
+      batches(plan.retiredEscalations.length, rows.codes) +
+      batches(plan.responses.length, rows.responses) +
+      batches(plan.retiredResponses.length, rows.codes) +
+      batches(plan.weeks.length, rows.weeks) +
+      batches(plan.retiredWeeks.length, rows.codes)
     )
   }
 
@@ -253,6 +305,18 @@ export class FakeCatalogWorkbookRepository implements CatalogWorkbookRepository 
     for (const guide of plan.guides) this.guideRows = [...this.guideRows.filter((existing) => guideKey(existing) !== guideKey(guide)), structuredClone(guide)]
     const retiredGuides = new Set(plan.retiredGuides.map(guideKey))
     this.guideRows = this.guideRows.map((guide) => (retiredGuides.has(guideKey(guide)) ? { ...guide, status: 'retired' } : guide))
+    for (const ladder of plan.reintroductions) this.reintroductionRows = [...this.reintroductionRows.filter((existing) => reintroductionKey(existing) !== reintroductionKey(ladder)), structuredClone(ladder)]
+    const retiredLadders = new Set(plan.retiredReintroductions.map(reintroductionKey))
+    this.reintroductionRows = this.reintroductionRows.map((ladder) => (retiredLadders.has(reintroductionKey(ladder)) ? { ...ladder, status: 'retired' } : ladder))
+    for (const escalation of plan.escalations) this.escalationRows = [...this.escalationRows.filter((existing) => existing.reason !== escalation.reason), structuredClone(escalation)]
+    const retiredReasons = new Set(plan.retiredEscalations.map((escalation) => escalation.reason))
+    this.escalationRows = this.escalationRows.map((escalation) => (retiredReasons.has(escalation.reason) ? { ...escalation, status: 'retired' } : escalation))
+    for (const response of plan.responses) this.responseRows = [...this.responseRows.filter((existing) => existing.outcome !== response.outcome), structuredClone(response)]
+    const retiredOutcomes = new Set(plan.retiredResponses.map((response) => response.outcome))
+    this.responseRows = this.responseRows.map((response) => (retiredOutcomes.has(response.outcome) ? { ...response, status: 'retired' } : response))
+    for (const card of plan.weeks) this.weekRows = [...this.weekRows.filter((existing) => weekKey(existing) !== weekKey(card)), structuredClone(card)]
+    const retiredCards = new Set(plan.retiredWeeks.map(weekKey))
+    this.weekRows = this.weekRows.map((card) => (retiredCards.has(weekKey(card)) ? { ...card, status: 'retired' } : card))
     this.catalogNumber = plan.baseVersion + 1
     this.version = plan.rulesVersion
     return true

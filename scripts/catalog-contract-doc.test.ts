@@ -25,16 +25,17 @@ describe('docs/catalog-workbook-contract.md', () => {
     expect(doc).toContain(await contractFingerprint())
   })
 
-  it('names the seven tabs and every column the contract checks', async () => {
+  it('names the eleven tabs and every column the contract checks', async () => {
     const doc = await renderContractDoc()
 
-    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides']) expect(doc, tab).toContain(tab)
+    for (const tab of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides', 'Reintroductions', 'Escalations', 'Responses', 'Weeks']) expect(doc, tab).toContain(tab)
     for (const column of [
       'code', 'brand', 'variant', 'ingredients_source_url', 'key_ingredient', 'strength', 'skin_concerns', 'skin_types', 'steps', 'frequency', 'own_cautions', 'evidence_urls', 'origin',
       'approved_by', 'approved_on', 'audited_by', 'audited_on', 'draft_cells', 'product_code', 'price_min', 'price_max', 'where_sold', 'aliases',
       'strength_limit', 'statement', 'source_url', 'helps', 'currency', 'low_max', 'mid_max',
       'group', 'clashes_with', 'phrase', 'claim', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if',
       'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant',
+      'reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'outcome', 'body', 'what_to_do_now', 'band', 'step_down', 'title', 'text',
     ]) {
       expect(doc, column).toContain(column)
     }
@@ -60,6 +61,39 @@ describe('docs/catalog-workbook-contract.md', () => {
     expect(guides).toMatch(/pregnan/i)
   })
 
+  it('lists the reasons, outcomes, week bands and ladder steps the new tabs accept, so nobody has to read the code to learn them', async () => {
+    const doc = await renderContractDoc()
+
+    for (const value of [
+      'pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down',
+      'paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause',
+      '3-4', '5-8', '9-12',
+    ]) {
+      expect(doc, value).toContain(value)
+    }
+  })
+
+  it('tells the people who write responses about {step}, the one placeholder, and shows a ladder that climbs and ends with back', async () => {
+    const doc = await renderContractDoc()
+
+    expect(doc).toContain('{step}')
+    expect(doc).toContain('1: weekly; 2: alternate-days; 3: back')
+  })
+
+  it.each([
+    ['Escalations', 'Responses', 'ESCALATION_WORDING'],
+    ['Responses', 'Weeks', 'RESPONSE_WORDING'],
+    ['Weeks', 'Accepted values', 'WEEK_WORDING'],
+  ])('names the wording rule of the %s tab on its own text columns, and not the Guides rule', async (tab, next, rule) => {
+    const doc = await renderContractDoc()
+    const start = doc.indexOf(`### ${tab}`)
+    const section = doc.slice(start, doc.indexOf(next, start + 1))
+
+    expect(start).toBeGreaterThan(-1)
+    expect(section).toContain(`\`${rule}\``)
+    expect(section).not.toContain('GUIDE_WORDING')
+  })
+
   it('explains the schedule format with an example that is valid, so a person can copy its shape', async () => {
     expect(await renderContractDoc()).toContain('1-2: alternate-days; 3-4: weekly; 5: stop')
   })
@@ -75,6 +109,9 @@ describe('docs/catalog-workbook-contract.md', () => {
       'CLASH_NOT_SYMMETRIC', 'CLASH_WITHOUT_GROUP', 'SELF_CLASH', 'STRENGTH_WITHOUT_INGREDIENT', 'DUPLICATE_PHRASE', 'NOT_LOWER_CASE', 'NOT_A_LIGHTENING_CLAIM',
       'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'SCHEDULE_MISSING_STOP', 'SCHEDULE_STOP_NOT_LAST', 'SCHEDULE_FREQUENCY_INCREASES',
       'UNQUALIFIED_APPROVER', 'GUIDE_BASE_MISSING', 'GUIDE_DUPLICATE', 'GUIDE_WORDING',
+      'REINTRO_DEFAULT_MISSING', 'REINTRO_DUPLICATE', 'REINTRO_GROUP_NEVER_BACK', 'REINTRO_MISSING_BACK', 'REINTRO_BACK_NOT_LAST', 'REINTRO_FREQUENCY_DECREASES',
+      'ESCALATION_MISSING', 'ESCALATION_DUPLICATE', 'ESCALATION_WORDING', 'RESPONSE_MISSING', 'RESPONSE_DUPLICATE', 'RESPONSE_PLACEHOLDER', 'RESPONSE_WORDING',
+      'WEEK_BASE_MISSING', 'WEEK_DUPLICATE', 'WEEK_WORDING',
     ]) {
       expect(doc, rule).toContain(rule)
     }

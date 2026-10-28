@@ -7,7 +7,7 @@ import { validateWorkbook } from '../../src/modules/catalog/catalog.workbook.sch
 // the same rules apply, and no formulation analysed at `seed-2026-10` is analysed again. This file reads the tables a freshly migrated
 // database holds (setup.ts applies every migration) and never writes to them.
 
-/** The one day the guides this file stands in for were approved on. */
+/** The one day the guides and the other reviewed rows this file stands in for were approved on. */
 const BASE = new Date('2030-06-15T00:00:00.000Z')
 
 type RuleRow = {
@@ -139,6 +139,54 @@ describe('the seeded ingredient rules', () => {
             look_for: 'What to look for.',
             for_deeper_skin: 'What suits deeper skin.',
             look_for_when_pregnant: null,
+            status: 'approved',
+            approved_by: 'Dr A. Reviewer',
+            approved_on: BASE.toISOString().slice(0, 10),
+            audited_by: null,
+            audited_on: null,
+          })),
+        ),
+        // The same for the four reviewed tabs of contract 2.3.0: the default ladder, a row for each reason and each outcome, and a base card for each band.
+        reintroductions: tab(
+          ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          [{ group: null, schedule: '1: weekly; 2: back', status: 'approved', approved_by: 'Dr A. Reviewer', approved_on: BASE.toISOString().slice(0, 10), audited_by: null, audited_on: null }],
+        ),
+        escalations: tab(
+          ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'].map((reason) => ({
+            reason,
+            who_to_see: 'A doctor.',
+            how_soon: 'Today.',
+            what_to_tell_them: 'What you noticed.',
+            status: 'approved',
+            approved_by: 'Dr A. Reviewer',
+            approved_on: BASE.toISOString().slice(0, 10),
+            audited_by: null,
+            audited_on: null,
+          })),
+        ),
+        responses: tab(
+          ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'].map((outcome) => ({
+            outcome,
+            title: 'A title',
+            body: 'A body for your {step}.',
+            what_to_do_now: null,
+            status: 'approved',
+            approved_by: 'Dr A. Reviewer',
+            approved_on: BASE.toISOString().slice(0, 10),
+            audited_by: null,
+            audited_on: null,
+          })),
+        ),
+        weeks: tab(
+          ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          ['1', '2', '3-4', '5-8', '9-12'].map((band) => ({
+            band,
+            goal: null,
+            step_down: 'no',
+            title: 'A title',
+            text: 'A text.',
             status: 'approved',
             approved_by: 'Dr A. Reviewer',
             approved_on: BASE.toISOString().slice(0, 10),

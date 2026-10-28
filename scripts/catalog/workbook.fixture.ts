@@ -20,10 +20,14 @@ export const HEADERS = {
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  escalations: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  responses: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  weeks: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 /** The tab names a workbook file has, in order. */
-export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides' } as const satisfies Record<Tab, string>
+export const TAB_NAMES = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides', reintroductions: 'Reintroductions', escalations: 'Escalations', responses: 'Responses', weeks: 'Weeks' } as const satisfies Record<Tab, string>
 
 export const product = (over: Row = {}): Row => ({
   code: 'PRD-CERAVE-CLEANSER',
@@ -118,9 +122,75 @@ export const guide = (over: Row = {}): Row => ({
 /** The four approved base rows the contract needs, one for each routine step, written out here and not read from the vocabulary. */
 export const baseGuides = (): Row[] => ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step }))
 
+/** The reasons an escalation row is written for, the outcomes a response row is, and the week bands: written out here and not read from the vocabularies. */
+export const ESCALATION_REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+export const RESPONSE_OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
+export const WEEK_BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+
+/** A Reintroductions row: by default the approved default ladder (no group). */
+export const reintroduction = (over: Row = {}): Row => ({
+  group: null,
+  schedule: '1: weekly; 2: alternate-days; 3: back',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** An Escalations row: by default the approved row for the first reason. Each says its own reason, so a test can tell which it was given. */
+export const escalation = (over: Row = {}): Row => ({
+  reason: 'pus-or-hot-patch',
+  who_to_see: 'A doctor or a pharmacist.',
+  how_soon: 'Today, or within a day.',
+  what_to_tell_them: 'What you noticed, where, and since when. Which products you were using.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** A Responses row: by default the approved row for the paused outcome, with the one placeholder there is. */
+export const response = (over: Row = {}): Row => ({
+  outcome: 'paused',
+  title: 'We paused your {step}',
+  body: 'Your skin needs a rest from your {step}. We will ask how it feels in three days.',
+  what_to_do_now: 'Skip anything that stings. Keep to a gentle cleanser and moisturiser.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** A Weeks row: by default the approved base row (no goal, no step-down) of band 1. */
+export const week = (over: Row = {}): Row => ({
+  band: '1',
+  goal: null,
+  step_down: 'no',
+  title: 'Settling in',
+  text: 'The first week is about calming things down. Go gently and keep to the basics.',
+  status: 'approved',
+  approved_by: 'Dr A. Reviewer',
+  approved_on: day(-3),
+  audited_by: null,
+  audited_on: null,
+  ...over,
+})
+
+/** The rows the contract needs of each new tab, each saying its own key so a test can tell which one it was given. */
+export const baseReintroductions = (): Row[] => [reintroduction()]
+export const allEscalations = (): Row[] => ESCALATION_REASONS.map((reason) => escalation({ reason, who_to_see: `Who to see for ${reason}.` }))
+export const allResponses = (): Row[] => RESPONSE_OUTCOMES.map((outcome) => response({ outcome, title: `Title for ${outcome}`, body: `Body for ${outcome}.` }))
+export const baseWeeks = (): Row[] => WEEK_BANDS.map((band) => week({ band, title: `Title for ${band}`, text: `Text for ${band}.` }))
+
 export const country = (over: Row = {}): Row => ({ code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active', ...over })
 
-/** A workbook the real contract accepts: one valid row in each tab (four in Guides, the base row of each step), unless the rows of a tab are given. Every header is present. */
+/** A workbook the real contract accepts: one valid row in each tab (and the rows the contract needs: four in Guides, the base row of each step; one default ladder; seven escalations, eight responses and five week cards), unless the rows of a tab are given. Every header is present. */
 export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbook => ({
   products: { headers: [...HEADERS.products], rows: over.products ?? [product()] },
   availability: { headers: [...HEADERS.availability], rows: over.availability ?? [availability()] },
@@ -129,4 +199,8 @@ export const validWorkbook = (over: Partial<Record<Tab, Row[]>> = {}): RawWorkbo
   claimWords: { headers: [...HEADERS.claimWords], rows: over.claimWords ?? [claimWord()] },
   tapers: { headers: [...HEADERS.tapers], rows: over.tapers ?? [taper()] },
   guides: { headers: [...HEADERS.guides], rows: over.guides ?? baseGuides() },
+  reintroductions: { headers: [...HEADERS.reintroductions], rows: over.reintroductions ?? baseReintroductions() },
+  escalations: { headers: [...HEADERS.escalations], rows: over.escalations ?? allEscalations() },
+  responses: { headers: [...HEADERS.responses], rows: over.responses ?? allResponses() },
+  weeks: { headers: [...HEADERS.weeks], rows: over.weeks ?? baseWeeks() },
 })

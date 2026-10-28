@@ -9,22 +9,30 @@ import {
   NIGERIA,
   TABS,
   applied,
+  allEscalationRows,
+  allResponseRows,
   availabilityRow,
   baseGuideRows,
+  baseReintroductionRows,
+  baseWeekRows,
   claimWordRow,
   dataOf,
   errorOf,
+  escalationRow,
   exportLive,
   exportRaw,
   guideRow,
   importRaw,
   productRow,
+  reintroductionRow,
+  responseRow,
   rowWith,
   ruleRow,
   rulesVersion,
   sorted,
   taperRow,
   upload,
+  weekRow,
   withCountry,
   type ImportResult,
 } from './admin.catalog.support'
@@ -45,12 +53,12 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(Object.keys(body.data.workbook as object).sort()).toEqual([...TABS].sort())
   })
 
-  it('is catalog version 1, served under the current contract version 2.2.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
+  it('is catalog version 1, served under the current contract version 2.3.0 (the migration stamped the version it seeded 1.0.0, which the export does not read)', async () => {
     const live = await exportLive()
 
     expect(live.catalogVersion).toBe(1)
     expect(live.contractVersion).toBe(CONTRACT_VERSION)
-    expect(CONTRACT_VERSION).toBe('2.2.0')
+    expect(CONTRACT_VERSION).toBe('2.3.0')
     expect(await rulesVersion()).toBe(REFERENCE_VERSION)
   })
 
@@ -69,6 +77,10 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     expect(workbook.claimWords.rows).toEqual([])
     expect(workbook.tapers.rows).toEqual([])
     expect(workbook.guides.rows).toEqual([])
+    expect(workbook.reintroductions.rows).toEqual([])
+    expect(workbook.escalations.rows).toEqual([])
+    expect(workbook.responses.rows).toEqual([])
+    expect(workbook.weeks.rows).toEqual([])
     expect(workbook.ingredients.rows).toHaveLength(REFERENCE.length)
     for (const entry of REFERENCE) {
       const rows = workbook.ingredients.rows.filter((row) => row.name === entry.name && row.kind === entry.kind)
@@ -90,18 +102,27 @@ describe('GET /api/v1/admin/catalog/export on a freshly migrated database', () =
     }
   })
 
-  it('serves a workbook that fails the contract it declares on nothing but the base guides the team has yet to write, and an import of it unedited is refused for that', async () => {
+  it('serves a workbook that fails the contract it declares on nothing but the rows the team has yet to write for five tabs, and an import of it unedited is refused for that', async () => {
     // Loaded here, not at the top: the schema module is renamed in the change this one builds on, and a missing module should fail this test alone.
     const { validateWorkbook } = await import('../../src/modules/catalog/catalog.workbook.schema')
     const live = await exportLive()
-    const missing = [{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }]
+    const missing = [
+      { tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' },
+      { tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' },
+      { tab: 'reintroductions', row: 1, column: 'group', rule: 'REINTRO_DEFAULT_MISSING' },
+      { tab: 'responses', row: 1, column: 'outcome', rule: 'RESPONSE_MISSING' },
+      { tab: 'weeks', row: 1, column: 'band', rule: 'WEEK_BASE_MISSING' },
+    ]
+    const byTab = (problems: { tab: string }[]) => [...problems].sort((a, b) => a.tab.localeCompare(b.tab))
 
-    expect(validateWorkbook(live.workbook)).toEqual({ ok: false, problems: missing })
+    const checked = validateWorkbook(live.workbook)
+    expect(checked.ok).toBe(false)
+    expect(byTab(checked.ok ? [] : checked.problems)).toEqual(missing)
     const res = await importRaw({ workbook: live.workbook, baseVersion: live.catalogVersion, dryRun: true })
     expect(res.status).toBe(400)
     const error = await errorOf(res)
     expect(error.code).toBe('CATALOG_INVALID')
-    expect((error.details as { problems: unknown[] }).problems).toEqual(missing)
+    expect(byTab((error.details as { problems: { tab: string }[] }).problems)).toEqual(missing)
   })
 })
 
@@ -157,6 +178,33 @@ describe('GET /api/v1/admin/catalog/export after an upload', () => {
     for (const base of bases) expect(find(base.step as string, null), `${base.step}`).toEqual(base)
     expect(find('treat', 'fade-dark-marks')).toEqual(goalGuide)
     expect(live.rows).toHaveLength(5)
+  })
+
+  it('gives back the rows of the four reviewed tabs as they were uploaded: a ladder for a group, an audit, a response with no what-to-do, a goal card and a step-down card', async () => {
+    const retinoid = reintroductionRow({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: am; 6: back', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const escalations = allEscalationRows().map((row) => (row.reason === 'near-eyes' ? escalationRow({ ...row, audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON }) : row))
+    const responses = allResponseRows().map((row) => (row.outcome === 'check-same' ? responseRow({ ...row, what_to_do_now: null }) : row))
+    const glow = weekRow({ band: '3-4', goal: 'glow', title: 'Glow, weeks 3 to 4', text: 'Glow text.' })
+    const stepDown = weekRow({ band: '3-4', step_down: 'yes', title: 'Step-down', text: 'Step-down text.' })
+
+    await applied((workbook) => {
+      workbook.reintroductions.rows = [...baseReintroductionRows(), retinoid]
+      workbook.escalations.rows = escalations
+      workbook.responses.rows = responses
+      workbook.weeks.rows = [...baseWeekRows(), glow, stepDown]
+    })
+
+    const live = (await exportLive()).workbook
+    expect(rowWith(live.reintroductions, 'group', 'retinoid')).toEqual(retinoid)
+    expect(live.reintroductions.rows.find((row) => row.group === null)).toEqual(baseReintroductionRows()[0])
+    expect(live.reintroductions.rows).toHaveLength(2)
+    expect(live.escalations.rows.find((row) => row.reason === 'near-eyes')).toEqual(escalations.find((row) => row.reason === 'near-eyes'))
+    expect(live.escalations.rows).toHaveLength(7)
+    expect(live.responses.rows.find((row) => row.outcome === 'check-same')).toEqual(responses.find((row) => row.outcome === 'check-same'))
+    expect(live.responses.rows).toHaveLength(9)
+    expect(live.weeks.rows.find((row) => row.band === '3-4' && row.goal === 'glow')).toEqual(glow)
+    expect(live.weeks.rows.find((row) => row.band === '3-4' && row.step_down === 'yes')).toEqual(stepDown)
+    expect(live.weeks.rows).toHaveLength(7)
   })
 
   it('joins lists with "; " however the upload separated them, and the dates stay YYYY-MM-DD', async () => {

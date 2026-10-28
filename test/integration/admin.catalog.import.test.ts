@@ -14,6 +14,7 @@ import {
   archived,
   availabilityRow,
   baseGuideRows,
+  baseReintroductionRows,
   claimWordRow,
   code,
   counts,
@@ -21,6 +22,7 @@ import {
   diffOf,
   edited,
   errorOf,
+  escalationRow,
   exportLive,
   guideRow,
   importRaw,
@@ -29,12 +31,15 @@ import {
   liveRules,
   productRow,
   productsOfBrand,
+  reintroductionRow,
+  responseRow,
   rowWith,
   ruleRow,
   rulesVersion,
   sorted,
   taperRow,
   upload,
+  weekRow,
   withCountry,
   without,
   word,
@@ -95,6 +100,10 @@ describe('a dry run', () => {
       claimWords: diffOf({}),
       tapers: diffOf({}),
       guides: diffOf({}),
+      reintroductions: diffOf({}),
+      escalations: diffOf({}),
+      responses: diffOf({}),
+      weeks: diffOf({}),
       newProducts: [{ code: product.code, brand: product.brand, name: product.name, variant: 'Night', form: 'cream' }],
     })
     expect(await exportLive()).toEqual(live)
@@ -608,6 +617,7 @@ describe('the contract version', () => {
     ['an older contract', '1.0.0'],
     ['the 2.0.0 contract, before key_ingredient and strength', '2.0.0'],
     ['the 2.1.0 contract, before the Guides tab', '2.1.0'],
+    ['the 2.2.0 contract, before the Reintroductions, Escalations, Responses and Weeks tabs', '2.2.0'],
     ['a newer contract', '9.9.9'],
   ])('refuses a file made for %s with 409 CONTRACT_MISMATCH, as a dry run and as an apply, and writes nothing', async (_what, contractVersion) => {
     const live = await exportLive()
@@ -661,6 +671,29 @@ describe('the contract version', () => {
       expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
     }
     expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a genuine 2.2.0 workbook, which has seven tabs and none of the four reviewed ones, with 409 CONTRACT_MISMATCH and not a 400 for its shape, as a dry run and as an apply', async () => {
+    const live = await exportLive()
+    const { reintroductions: _r, escalations: _e, responses: _s, weeks: _w, ...sevenTabs } = live.workbook
+    const before = await counts()
+
+    for (const dryRun of [true, false]) {
+      const res = await importRaw({ workbook: sevenTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun, file: dryRun ? null : xlsxBytes('seven-tabs'), contractVersion: '2.2.0' })
+
+      expect(res.status).toBe(409)
+      expect((await errorOf(res)).code).toBe('CONTRACT_MISMATCH')
+    }
+    expect(await counts()).toEqual(before)
+  })
+
+  it.each(['reintroductions', 'escalations', 'responses', 'weeks'] as const)('refuses a workbook of the current contract version that has no %s tab, with a 400 and not a 409', async (tab) => {
+    const live = await exportLive()
+    const { [tab]: _gone, ...tenTabs } = live.workbook
+
+    const res = await importRaw({ workbook: tenTabs as unknown as RawWorkbook, baseVersion: live.catalogVersion, dryRun: true, contractVersion: live.contractVersion })
+
+    expect(res.status).toBe(400)
   })
 
   it('refuses a workbook of the current contract version that has no Guides tab, with a 400 and not a 409', async () => {
@@ -1031,6 +1064,364 @@ describe('guides', () => {
   })
 })
 
+// ---- the four reviewed tabs of contract 2.3.0 (spec #233, PR 1) ----
+// A ladder is named in a diff by its group ("default" for the one with none), an escalation by its reason, a response by its outcome, and a week card by its band, then
+// ":<goal>" when it has a goal, then ":step-down" when it is for a step-down. The database is shared by the whole file, so each test writes keys no other test does.
+
+describe('reintroductions', () => {
+  const ladder = (over: RawRow = {}) => reintroductionRow({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: am; 6: back', ...over })
+  const dryRun = (edit: (workbook: RawWorkbook) => void) => upload(edit, { dryRun: true })
+
+  it('reports an added ladder in a dry run, keyed by its group, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+
+    const { res } = await dryRun((workbook) => workbook.reintroductions.rows.push(ladder()))
+
+    expect(res.status).toBe(200)
+    expect(sorted((await dataOf<ImportResult>(res)).diff)).toEqual({ ...EMPTY_DIFF, reintroductions: diffOf({ added: ['retinoid'] }) })
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores a ladder on apply: the next catalog version, the row in the export as uploaded, the rules version where it was', async () => {
+    const row = ladder({ group: 'exfoliating-acid', schedule: '1-3: as-needed; 4: back', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const version = await rulesVersion()
+
+    const { before, data } = await applied((workbook) => workbook.reintroductions.rows.push({ ...row }))
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff).reintroductions).toEqual(diffOf({ added: ['exfoliating-acid'] }))
+    const live = await exportLive()
+    expect(rowWith(live.workbook.reintroductions, 'group', 'exfoliating-acid')).toEqual(row)
+    expect(live.workbook.reintroductions.rows.find((one) => one.group === null)).toEqual(baseReintroductionRows()[0])
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('reports an edit as updated, the default ladder as "default", and only the row edited; a schedule with other spaces is no change', async () => {
+    await applied((workbook) => workbook.reintroductions.rows.push(ladder()))
+
+    const edit = await dryRun((workbook) => {
+      workbook.reintroductions.rows.find((row) => row.group === null)!.schedule = '1: weekly; 2: back'
+    })
+    const spaced = await dryRun((workbook) => {
+      workbook.reintroductions.rows.find((row) => row.group === 'retinoid')!.schedule = ' 1-2:as-needed ;  3-4 : weekly; 5:am;6: back '
+    })
+
+    expect(sorted((await dataOf<ImportResult>(edit.res)).diff)).toEqual({ ...EMPTY_DIFF, reintroductions: diffOf({ updated: ['default'] }) })
+    expect((await dataOf<ImportResult>(spaced.res)).diff.reintroductions).toEqual(diffOf({}))
+  })
+
+  it('never deletes: a group ladder left out of the upload is retired in place, with its cells, and reactivated when it comes back', async () => {
+    const row = ladder({ group: 'benzoyl-peroxide', schedule: '1: weekly; 2: back' })
+    await applied((workbook) => workbook.reintroductions.rows.push({ ...row }))
+
+    const { data: retired } = await applied((workbook) => {
+      workbook.reintroductions.rows = workbook.reintroductions.rows.filter((one) => one.group !== 'benzoyl-peroxide')
+    })
+
+    expect(retired.diff.reintroductions).toEqual(diffOf({ retired: ['benzoyl-peroxide'] }))
+    expect(rowWith((await exportLive()).workbook.reintroductions, 'group', 'benzoyl-peroxide')).toEqual({ ...row, status: 'retired' })
+    const { data: back } = await applied((workbook) => {
+      workbook.reintroductions.rows = workbook.reintroductions.rows.filter((one) => one.group !== 'benzoyl-peroxide').concat({ ...row })
+    })
+    expect(back.diff.reintroductions).toEqual(diffOf({ reactivated: ['benzoyl-peroxide'] }))
+    expect(rowWith((await exportLive()).workbook.reintroductions, 'group', 'benzoyl-peroxide')).toEqual(row)
+  })
+
+  it('refuses a workbook without the default ladder, 400 CATALOG_INVALID with REINTRO_DEFAULT_MISSING on the Reintroductions header row, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.reintroductions.rows = workbook.reintroductions.rows.filter((row) => row.group !== null)
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-default-ladder') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'reintroductions', row: 1, column: 'group', rule: 'REINTRO_DEFAULT_MISSING' }])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a ladder for a group that is only ever stopped, a ladder that goes down, and two ladders for one group, each on its row', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.reintroductions.rows = [
+        ...baseReintroductionRows(),
+        reintroductionRow({ group: 'steroid', schedule: '1: weekly; 2: back' }),
+        reintroductionRow({ group: 'retinoid', schedule: '1: alternate-days; 2: weekly; 3: back' }),
+        reintroductionRow({ group: 'exfoliating-acid' }),
+        reintroductionRow({ group: 'exfoliating-acid' }),
+      ]
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'reintroductions', row: 3, column: 'group', rule: 'REINTRO_GROUP_NEVER_BACK' },
+        { tab: 'reintroductions', row: 4, column: 'schedule', rule: 'REINTRO_FREQUENCY_DECREASES' },
+        { tab: 'reintroductions', row: 5, column: 'group', rule: 'REINTRO_DUPLICATE' },
+        { tab: 'reintroductions', row: 6, column: 'group', rule: 'REINTRO_DUPLICATE' },
+      ]),
+    )
+  })
+})
+
+describe('escalations', () => {
+  const dryRun = (edit: (workbook: RawWorkbook) => void) => upload(edit, { dryRun: true })
+  const edit = (reason: string, over: RawRow) => (workbook: RawWorkbook) => Object.assign(workbook.escalations.rows.find((row) => row.reason === reason)!, over)
+
+  it('reports an edited escalation as updated, keyed by its reason, in a dry run, and writes nothing; a text with other spaces is no change', async () => {
+    const live = await exportLive()
+    const before = await counts()
+
+    const changed = await dryRun(edit('swelling', { how_soon: word('Soon') }))
+    const spaced = await dryRun((workbook) => {
+      const row = workbook.escalations.rows.find((one) => one.reason === 'swelling')!
+      row.how_soon = `  ${String(row.how_soon)}  `
+    })
+
+    expect(sorted((await dataOf<ImportResult>(changed.res)).diff)).toEqual({ ...EMPTY_DIFF, escalations: diffOf({ updated: ['swelling'] }) })
+    expect((await dataOf<ImportResult>(spaced.res)).diff.escalations).toEqual(diffOf({}))
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores an edited escalation on apply: the next catalog version, the row in the export as uploaded, in place, the rules version where it was', async () => {
+    const soon = word('Soon')
+    const version = await rulesVersion()
+
+    const { before, data } = await applied(edit('near-eyes', { how_soon: soon, audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON }))
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff).escalations).toEqual(diffOf({ updated: ['near-eyes'] }))
+    const live = (await exportLive()).workbook.escalations
+    expect(live.rows.filter((row) => row.reason === 'near-eyes')).toEqual([expect.objectContaining({ how_soon: soon, audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })])
+    expect(live.rows).toHaveLength(7)
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('refuses a workbook without a row for each reason, 400 CATALOG_INVALID with ESCALATION_MISSING on the Escalations header row, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.escalations.rows = workbook.escalations.rows.filter((row) => row.reason !== 'harm-while-two-paused')
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-escalation') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' }])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses an escalation that says lighter skin, with the problem on the cell, and two rows for one reason, naming both rows', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.escalations.rows.find((row) => row.reason === 'swelling')!.what_to_tell_them = 'That your skin is going lighter skin.'
+      workbook.escalations.rows.push(escalationRow({ reason: 'near-eyes' }))
+    })
+    const swelling = bad.escalations.rows.findIndex((row) => row.reason === 'swelling') + 2
+    const nearEyes = bad.escalations.rows.findIndex((row) => row.reason === 'near-eyes') + 2
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'escalations', row: swelling, column: 'what_to_tell_them', rule: 'ESCALATION_WORDING' },
+        { tab: 'escalations', row: nearEyes, column: 'reason', rule: 'ESCALATION_DUPLICATE' },
+        { tab: 'escalations', row: bad.escalations.rows.length + 1, column: 'reason', rule: 'ESCALATION_DUPLICATE' },
+      ]),
+    )
+  })
+})
+
+describe('responses', () => {
+  const dryRun = (edit: (workbook: RawWorkbook) => void) => upload(edit, { dryRun: true })
+  const edit = (outcome: string, over: RawRow) => (workbook: RawWorkbook) => Object.assign(workbook.responses.rows.find((row) => row.outcome === outcome)!, over)
+
+  it('reports an edited response as updated, keyed by its outcome, in a dry run, and writes nothing; a text with other spaces is no change', async () => {
+    const live = await exportLive()
+    const before = await counts()
+
+    const changed = await dryRun(edit('check-same', { body: word('Body') }))
+    const spaced = await dryRun((workbook) => {
+      const row = workbook.responses.rows.find((one) => one.outcome === 'check-same')!
+      row.body = `  ${String(row.body)}  `
+    })
+
+    expect(sorted((await dataOf<ImportResult>(changed.res)).diff)).toEqual({ ...EMPTY_DIFF, responses: diffOf({ updated: ['check-same'] }) })
+    expect((await dataOf<ImportResult>(spaced.res)).diff.responses).toEqual(diffOf({}))
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores an edited response on apply: the row in the export as uploaded, {step} untouched, an empty what-to-do-now as null, the rules version where it was', async () => {
+    const body = `${word('Body')} for your {step}.`
+    const version = await rulesVersion()
+
+    const { before, data } = await applied(edit('check-calmer', { body, what_to_do_now: null }))
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff).responses).toEqual(diffOf({ updated: ['check-calmer'] }))
+    const live = (await exportLive()).workbook.responses
+    expect(live.rows.filter((row) => row.outcome === 'check-calmer')).toEqual([expect.objectContaining({ body, what_to_do_now: null })])
+    expect(live.rows).toHaveLength(9)
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('refuses a workbook without a row for each outcome, 400 CATALOG_INVALID with RESPONSE_MISSING on the Responses header row, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.responses.rows = workbook.responses.rows.filter((row) => row.outcome !== 'expected-flare')
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-response') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'responses', row: 1, column: 'outcome', rule: 'RESPONSE_MISSING' }])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a placeholder other than {step} and a text that says lighter skin, each on its cell, and two rows for one outcome, naming both rows', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.responses.rows.find((row) => row.outcome === 'paused')!.title = 'We paused your {product}'
+      workbook.responses.rows.find((row) => row.outcome === 'advice-itching')!.body = 'This gives you lighter skin.'
+      workbook.responses.rows.push(responseRow({ outcome: 'check-worse' }))
+    })
+    const at = (outcome: string) => bad.responses.rows.findIndex((row) => row.outcome === outcome) + 2
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'responses', row: at('paused'), column: 'title', rule: 'RESPONSE_PLACEHOLDER' },
+        { tab: 'responses', row: at('advice-itching'), column: 'body', rule: 'RESPONSE_WORDING' },
+        { tab: 'responses', row: at('check-worse'), column: 'outcome', rule: 'RESPONSE_DUPLICATE' },
+        { tab: 'responses', row: bad.responses.rows.length + 1, column: 'outcome', rule: 'RESPONSE_DUPLICATE' },
+      ]),
+    )
+  })
+})
+
+describe('weeks', () => {
+  const dryRun = (edit: (workbook: RawWorkbook) => void) => upload(edit, { dryRun: true })
+  const card = (over: RawRow = {}) => weekRow({ band: '5-8', goal: 'glow', title: 'Glow, weeks 5 to 8', text: 'Glow text.', ...over })
+
+  it('reports added cards in a dry run, keyed by band, then goal, then step-down, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+
+    const { res } = await dryRun((workbook) => workbook.weeks.rows.push(card(), card({ step_down: 'yes' }), card({ goal: null, step_down: 'yes' })))
+
+    expect(res.status).toBe(200)
+    expect(sorted((await dataOf<ImportResult>(res)).diff)).toEqual({ ...EMPTY_DIFF, weeks: diffOf({ added: ['5-8:glow', '5-8:glow:step-down', '5-8:step-down'] }) })
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('stores cards on apply: the next catalog version, the rows in the export as uploaded (an empty step_down as no), the rules version where it was', async () => {
+    const goalCard = card({ band: '9-12', goal: 'even-tone', audited_by: 'Dr B. Auditor', audited_on: APPROVED_ON })
+    const stepDown = card({ band: '9-12', goal: null, step_down: 'yes', title: 'Step-down', text: 'Step-down text.' })
+    const version = await rulesVersion()
+
+    const { before, data } = await applied((workbook) => workbook.weeks.rows.push({ ...goalCard }, { ...stepDown }, card({ band: '2', goal: 'brighter', step_down: null })))
+
+    expect(data.catalogVersion).toBe(before.catalogVersion + 1)
+    expect(sorted(data.diff).weeks).toEqual(diffOf({ added: ['2:brighter', '9-12:even-tone', '9-12:step-down'] }))
+    const live = (await exportLive()).workbook.weeks
+    expect(live.rows.find((row) => row.band === '9-12' && row.goal === 'even-tone')).toEqual(goalCard)
+    expect(live.rows.find((row) => row.band === '9-12' && row.step_down === 'yes')).toEqual(stepDown)
+    expect(live.rows.find((row) => row.band === '2' && row.goal === 'brighter')).toMatchObject({ step_down: 'no' })
+    expect(await rulesVersion()).toBe(version)
+  })
+
+  it('reports an edit as updated, a base card as its band, and only the row edited; a text with other spaces is no change', async () => {
+    await applied((workbook) => workbook.weeks.rows.push(card({ band: '9-12', goal: 'fade-dark-marks' })))
+
+    const edit = await dryRun((workbook) => {
+      workbook.weeks.rows.find((row) => row.band === '3-4' && row.goal === null && row.step_down === 'no')!.text = word('Text')
+    })
+    const spaced = await dryRun((workbook) => {
+      const row = workbook.weeks.rows.find((one) => one.band === '9-12' && one.goal === 'fade-dark-marks')!
+      row.text = `  ${String(row.text)}  `
+    })
+
+    expect(sorted((await dataOf<ImportResult>(edit.res)).diff)).toEqual({ ...EMPTY_DIFF, weeks: diffOf({ updated: ['3-4'] }) })
+    expect((await dataOf<ImportResult>(spaced.res)).diff.weeks).toEqual(diffOf({}))
+  })
+
+  it('never deletes: a card left out of the upload is retired in place, with its cells, and reactivated when it comes back', async () => {
+    const row = card({ band: '1', goal: 'calm-repair', step_down: 'yes', title: 'Calm', text: 'Calm text.' })
+    const mine = (one: RawRow) => one.band === '1' && one.goal === 'calm-repair'
+    await applied((workbook) => workbook.weeks.rows.push({ ...row }))
+
+    const { data: retired } = await applied((workbook) => {
+      workbook.weeks.rows = workbook.weeks.rows.filter((one) => !mine(one))
+    })
+
+    expect(retired.diff.weeks).toEqual(diffOf({ retired: ['1:calm-repair:step-down'] }))
+    expect((await exportLive()).workbook.weeks.rows.find(mine)).toEqual({ ...row, status: 'retired' })
+    const { data: back } = await applied((workbook) => {
+      workbook.weeks.rows = workbook.weeks.rows.filter((one) => !mine(one)).concat({ ...row })
+    })
+    expect(back.diff.weeks).toEqual(diffOf({ reactivated: ['1:calm-repair:step-down'] }))
+    expect((await exportLive()).workbook.weeks.rows.find(mine)).toEqual(row)
+  })
+
+  it('refuses a workbook without a base card for each band, 400 CATALOG_INVALID with WEEK_BASE_MISSING on the Weeks header row, and writes nothing', async () => {
+    const live = await exportLive()
+    const before = await counts()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.weeks.rows = workbook.weeks.rows.filter((row) => !(row.band === '5-8' && row.goal === null && row.step_down === 'no'))
+    })
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: false, file: xlsxBytes('no-base-card') })
+
+    expect(res.status).toBe(400)
+    const error = await errorOf(res)
+    expect(error.code).toBe('CATALOG_INVALID')
+    expect((error.details as { problems: unknown[] }).problems).toEqual([{ tab: 'weeks', row: 1, column: 'band', rule: 'WEEK_BASE_MISSING' }])
+    expect(await exportLive()).toEqual(live)
+    expect(await counts()).toEqual(before)
+  })
+
+  it('refuses a card that says lighter skin, with the problem on the cell, and two cards for one band, goal and step-down, naming both rows', async () => {
+    const live = await exportLive()
+    const bad = edited(live.workbook, (workbook) => {
+      workbook.weeks.rows.push(card({ band: '3-4', goal: 'clear-skin', text: 'Lighter skin by week four.' }), card({ band: '3-4', goal: 'fade-dark-marks' }), card({ band: '3-4', goal: 'fade-dark-marks' }))
+    })
+    // The three rows are the last three of the tab; the first data row is row 2.
+    const first = bad.weeks.rows.length - 1
+
+    const res = await importRaw({ workbook: bad, baseVersion: live.catalogVersion, dryRun: true })
+
+    expect(res.status).toBe(400)
+    expect(((await errorOf(res)).details as { problems: unknown[] }).problems).toEqual(
+      expect.arrayContaining([
+        { tab: 'weeks', row: first, column: 'text', rule: 'WEEK_WORDING' },
+        { tab: 'weeks', row: first + 1, column: 'band', rule: 'WEEK_DUPLICATE' },
+        { tab: 'weeks', row: first + 2, column: 'band', rule: 'WEEK_DUPLICATE' },
+      ]),
+    )
+  })
+})
+
 // The server knows which environment it is. In production only, a Tapers row that is approved must have been approved by someone on the list of
 // qualified approvers; elsewhere anyone may approve, so the owner or Claude can approve on staging. It is a process control, not authentication:
 // the approver is a label in a cell. Each call here hands the Worker its own bindings.
@@ -1049,6 +1440,11 @@ describe('the production approver gate', () => {
     workbook.tapers.rows = []
     // The guides in force are approved too, and the gate is for them as much as for templates: theirs are approved by someone on the list, so a test is about what it adds.
     workbook.guides.rows = baseGuideRows().map((row) => ({ ...row, approved_by: QUALIFIED }))
+    signReviewed(workbook)
+  }
+  /** The ladders, escalations, responses and week cards in force are approved too, and the gate is for them as much as for templates: they are signed by someone on the list. */
+  const signReviewed = (workbook: RawWorkbook) => {
+    for (const tab of ['reintroductions', 'escalations', 'responses', 'weeks'] as const) workbook[tab].rows = workbook[tab].rows.map((row) => ({ ...row, approved_by: QUALIFIED }))
   }
   const dry = (edit: (workbook: RawWorkbook) => void, workerEnv: typeof env) =>
     upload(
@@ -1144,7 +1540,7 @@ describe('the production approver gate', () => {
     expect(res.status).toBe(200)
   })
 
-  it('checks only Tapers and Guides: products, rules and claim words approved by anyone are accepted in production', async () => {
+  it('checks only Tapers, Guides, Reintroductions, Escalations, Responses and Weeks: products, rules and claim words approved by anyone are accepted in production', async () => {
     const { res } = await dry((workbook) => {
       withCountry(workbook, NIGERIA)
       workbook.products.rows.push(productRow({ approved_by: 'Somebody Else' }))
@@ -1179,6 +1575,7 @@ describe('the production approver gate', () => {
         (workbook) => {
           workbook.tapers.rows = []
           workbook.guides.rows = guides
+          signReviewed(workbook)
         },
         { dryRun: true, workerEnv, baseGuides: false },
       )
@@ -1216,6 +1613,65 @@ describe('the production approver gate', () => {
 
     it.each([['staging'], ['development']])('accepts any approver in %s', async (environment) => {
       const { res } = await dryGuides(bases('Somebody Else'), asEnvironment(environment, QUALIFIED))
+
+      expect(res.status).toBe(200)
+    })
+  })
+
+  describe('for the four reviewed tabs', () => {
+    /** The edit that signs one row of the tab with `approver`, and the row of the tab it is, as the problem would name it. */
+    const SIGNED = [
+      ['reintroductions', 'group', null, 'a ladder'],
+      ['escalations', 'reason', 'swelling', 'an escalation'],
+      ['responses', 'outcome', 'check-worse', 'a response'],
+      ['weeks', 'band', '5-8', 'a week card'],
+    ] as const
+    const rowOf = (workbook: RawWorkbook, tab: (typeof SIGNED)[number][0], key: string, value: string | null) =>
+      workbook[tab].rows.findIndex((row) => row[key] === value && (tab !== 'weeks' || (row.goal === null && row.step_down === 'no')) && row.status === 'approved') + 2
+
+    it.each(SIGNED)('refuses an approved row of %s (%s %s, %s) whose approver is not on the list, 400 CATALOG_INVALID with one UNQUALIFIED_APPROVER problem at its row, and never the approver\'s name', async (tab, key, value) => {
+      const approver = word('Owner')
+      let row = 0
+
+      const { res } = await dry((workbook) => {
+        const found = workbook[tab].rows.find((one) => one[key] === value && (tab !== 'weeks' || (one.goal === null && one.step_down === 'no')))!
+        found.approved_by = approver
+        row = rowOf(workbook, tab, key, value as string | null)
+      }, asProduction(QUALIFIED))
+
+      expect(res.status).toBe(400)
+      const text = await res.text()
+      expect(text).not.toContain(approver)
+      const body = JSON.parse(text) as { error: { code: string; details: { problems: unknown[] } } }
+      expect(body.error.code).toBe('CATALOG_INVALID')
+      expect(body.error.details.problems).toEqual([{ tab, row, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }])
+    })
+
+    it('accepts all four tabs approved by someone on the list, and a draft or retired ladder or week card by anyone', async () => {
+      const { res } = await dry((workbook) => {
+        // Only the rows the contract needs are kept, so the draft and retired rows below are for keys no row of the tab already has.
+        workbook.reintroductions.rows = workbook.reintroductions.rows.filter((row) => row.group === null)
+        workbook.weeks.rows = workbook.weeks.rows.filter((row) => row.goal === null && row.step_down === 'no')
+        workbook.reintroductions.rows.push(
+          reintroductionRow({ group: 'exfoliating-acid', status: 'draft', approved_by: 'Somebody Else' }),
+          reintroductionRow({ group: 'benzoyl-peroxide', status: 'retired', approved_by: 'Somebody Else' }),
+        )
+        workbook.weeks.rows.push(
+          weekRow({ band: '3-4', goal: 'brighter', status: 'draft', approved_by: 'Somebody Else' }),
+          weekRow({ band: '3-4', goal: 'even-tone', status: 'retired', approved_by: 'Somebody Else' }),
+        )
+      }, asProduction(QUALIFIED))
+
+      expect(res.status).toBe(200)
+    })
+
+    it.each([['staging'], ['development']])('accepts any approver in %s', async (environment) => {
+      const { res } = await upload(
+        (workbook) => {
+          for (const tab of ['reintroductions', 'escalations', 'responses', 'weeks'] as const) workbook[tab].rows = workbook[tab].rows.map((row) => ({ ...row, approved_by: 'Somebody Else' }))
+        },
+        { dryRun: true, workerEnv: asEnvironment(environment, QUALIFIED) },
+      )
 
       expect(res.status).toBe(200)
     })

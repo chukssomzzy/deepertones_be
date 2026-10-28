@@ -1,13 +1,13 @@
 /**
  * The workbook file, shared by `catalog:export` (writes one) and `catalog:upload` (reads one back). The layout is the contract with the people
- * who edit it: seven tabs named exactly Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides, the header row first, and a hidden `_meta` sheet that
+ * who edit it: eleven tabs named exactly Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks, the header row first, and a hidden `_meta` sheet that
  * remembers where the file came from, one `key | value` pair per row: `catalogVersion`, `environment` and `contractVersion`.
  */
 import { readFile } from 'node:fs/promises'
 import ExcelJS from 'exceljs'
 import { CONTRACT_VERSION, type Cell, type RawRow, type RawTab, type RawWorkbook, type TabKey } from '../../src/modules/catalog/catalog.workbook.schema'
 
-export const TAB_NAMES: Record<TabKey, string> = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides' }
+export const TAB_NAMES: Record<TabKey, string> = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides', reintroductions: 'Reintroductions', escalations: 'Escalations', responses: 'Responses', weeks: 'Weeks' }
 const TAB_KEYS = Object.keys(TAB_NAMES) as TabKey[]
 const META = '_meta'
 

@@ -7,7 +7,7 @@ import { MemoryWorkbookArchive } from '../../src/providers/workbook-archive/memo
 import { FakeCatalogWorkbookRepository } from '../../src/modules/catalog/catalog.workbook.repository.fake'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { CatalogWorkbookService } from '../../src/modules/catalog/catalog.workbook.service'
-import { availability, baseGuides, claimWord, country, day, dayAsDate, ingredient, product, taper, validWorkbook } from '../catalog/workbook.fixture'
+import { allEscalations, allResponses, availability, baseGuides, baseReintroductions, baseWeeks, claimWord, country, day, dayAsDate, ingredient, product, taper, validWorkbook } from '../catalog/workbook.fixture'
 import { writeWorkbookFile } from '../catalog/xlsx'
 import { caseOf, product as shelfProduct, noLabel } from './verdict.fixture'
 import {
@@ -230,8 +230,13 @@ describe('the reference the eval builds from a workbook', () => {
       ingredient({ code: 'ING-ZZ-GREY', name: 'zzyzx neutralum', aliases: null, kind: 'drying', statement: 'Can dry the skin.', source_url: null }),
     )
     live.workbook.claimWords.rows.push(claimWord({ code: 'CLM-ZZ-B', phrase: 'bleaching' }), claimWord({ code: 'CLM-ZZ-A', phrase: 'whitening' }))
-    // A fresh catalog has no guides, and the contract refuses a workbook without a base guide for each step.
+    // A fresh catalog has none of the reviewed tabs' required rows, and the contract refuses a workbook without them: a base guide for each step, the default
+    // ladder, an escalation for each reason, a response for each outcome and a week card for each band.
     live.workbook.guides.rows.push(...baseGuides())
+    live.workbook.reintroductions.rows.push(...baseReintroductions())
+    live.workbook.escalations.rows.push(...allEscalations())
+    live.workbook.responses.rows.push(...allResponses())
+    live.workbook.weeks.rows.push(...baseWeeks())
     live.workbook.tapers.rows.push(
       taper({ code: 'TPR-ZZ-STEROID-OLD', kind: 'steroid', approved_on: day(-20) }),
       taper({ code: 'TPR-ZZ-STEROID-NEW', kind: 'steroid', approved_on: day(-2) }),

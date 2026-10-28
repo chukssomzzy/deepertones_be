@@ -37,7 +37,7 @@ const args = (over: Partial<Args> = {}): Args => ({ file: 'edited.xlsx', env: 's
 const XLSX_BYTES = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0, 255])
 
 const emptyTab = { added: [], updated: [], retired: [], reactivated: [] }
-const EMPTY_DIFF = { products: emptyTab, availability: emptyTab, ingredients: emptyTab, countries: emptyTab, claimWords: emptyTab, tapers: emptyTab, guides: emptyTab, newProducts: [] }
+const EMPTY_DIFF = { products: emptyTab, availability: emptyTab, ingredients: emptyTab, countries: emptyTab, claimWords: emptyTab, tapers: emptyTab, guides: emptyTab, reintroductions: emptyTab, escalations: emptyTab, responses: emptyTab, weeks: emptyTab, newProducts: [] }
 const DIFF = {
   products: { added: ['PRD-NEW-A', 'PRD-NEW-B'], updated: ['PRD-CERAVE-CLEANSER'], retired: [], reactivated: [] },
   availability: { added: ['PRD-NEW-A:NG'], updated: [], retired: ['PRD-OLD:GH'], reactivated: [] },
@@ -47,6 +47,12 @@ const DIFF = {
   tapers: { added: ['TPR-STEROID-1'], updated: ['TPR-LIGHTENING-1'], retired: ['TPR-STEROID-0'], reactivated: [] },
   // A guide has no code: it is named by its step, and by step:goal when it is for a goal.
   guides: { added: ['treat:fade-dark-marks'], updated: ['cleanse'], retired: ['protect:glow'], reactivated: [] },
+  // Named as the server names them: a ladder by its group ('default' for the one with none), an escalation by its reason, a response by its outcome, a week card by its band
+  // with ':<goal>' for a goal and ':step-down' for a step-down variant.
+  reintroductions: { added: ['retinoid'], updated: ['default'], retired: [], reactivated: [] },
+  escalations: { added: [], updated: ['swelling'], retired: [], reactivated: ['near-eyes'] },
+  responses: { added: ['check-calmer'], updated: [], retired: ['expected-flare'], reactivated: [] },
+  weeks: { added: ['3-4:glow:step-down'], updated: ['1'], retired: ['9-12:calm-repair'], reactivated: [] },
   newProducts: [
     { code: 'PRD-NEW-A', brand: 'La Roche-Posay', name: 'Anthelios Mineral', variant: null, form: null },
     { code: 'PRD-NEW-B', brand: 'Bioderma', name: 'Sensibio Gel', variant: 'Fragrance free', form: 'gel' },
@@ -320,13 +326,13 @@ describe('runUpload: the request', () => {
     expect(formOf(http.sent[0]!).get('contractVersion')).toBe(CONTRACT_VERSION)
   })
 
-  it('sends all seven tabs of the workbook', async () => {
+  it('sends all eleven tabs of the workbook', async () => {
     const { deps, http } = setup()
 
     await runUpload(args(), deps)
 
     const sent = JSON.parse(formOf(http.sent[0]!).get('workbook') as string) as Record<string, unknown>
-    expect(Object.keys(sent).sort()).toEqual(['availability', 'claimWords', 'countries', 'guides', 'ingredients', 'products', 'tapers'])
+    expect(Object.keys(sent).sort()).toEqual(['availability', 'claimWords', 'countries', 'escalations', 'guides', 'ingredients', 'products', 'reintroductions', 'responses', 'tapers', 'weeks'])
   })
 
   it('takes baseVersion from the file, whatever version the server is at now', async () => {
@@ -414,6 +420,22 @@ describe('runUpload: what it prints when the server answers', () => {
     expect(hasLine(text, /guides/i, /retired/i, /\b1\b/, 'protect:glow')).toBe(true)
   })
 
+  it('prints the rows of the four reviewed tabs that were added, updated, retired or reactivated, named as the server names them, under their own tab', async () => {
+    const { deps, out } = setup()
+
+    expect(await runUpload(args(), deps)).toBe(0)
+
+    const text = out.stdout()
+    expect(hasLine(text, /reintroductions/i, /added/i, /\b1\b/, 'retinoid')).toBe(true)
+    expect(hasLine(text, /reintroductions/i, /updated/i, /\b1\b/, 'default')).toBe(true)
+    expect(hasLine(text, /escalations/i, /updated/i, /\b1\b/, 'swelling')).toBe(true)
+    expect(hasLine(text, /escalations/i, /reactivated/i, /\b1\b/, 'near-eyes')).toBe(true)
+    expect(hasLine(text, /responses/i, /added/i, /\b1\b/, 'check-calmer')).toBe(true)
+    expect(hasLine(text, /responses/i, /retired/i, /\b1\b/, 'expected-flare')).toBe(true)
+    expect(hasLine(text, /weeks/i, /added/i, /\b1\b/, '3-4:glow:step-down')).toBe(true)
+    expect(hasLine(text, /weeks/i, /retired/i, /\b1\b/, '9-12:calm-repair')).toBe(true)
+  })
+
   it('shows each product the workbook would create as new, with its brand and name, so a different spelling is seen before it is applied', async () => {
     const { deps, out } = setup()
 
@@ -459,7 +481,7 @@ describe('runUpload: what it prints when the server answers', () => {
     expect(out.stdout()).not.toContain('--apply')
   })
 
-  it.each(['claimWords', 'tapers', 'guides'])('exits non-zero rather than claim success when a 200 holds a diff with no %s in it', async (tab) => {
+  it.each(['claimWords', 'tapers', 'guides', 'reintroductions', 'escalations', 'responses', 'weeks'])('exits non-zero rather than claim success when a 200 holds a diff with no %s in it', async (tab) => {
     const { [tab as 'tapers']: _left, ...partial } = EMPTY_DIFF
     const { deps, out } = setup({ reply: okReply({ applied: false, catalogVersion: 7, diff: partial }) })
 
