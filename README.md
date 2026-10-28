@@ -267,6 +267,9 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   until there is one **approved** default ladder (the `group` cell left empty), one row for each of the seven escalation reasons, one for each of the nine response
   outcomes, and one base card (no goal, `step_down` no) for each of the five week bands. Fill them (plain words, no condition names or promises of lighter skin), and in
   production have a qualified approver sign them. This includes the staging catalog sheet and a saved eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`).
+  A ladder needs at least one step before `back` (`1: back` is refused), and mercury, steroid and lightening-agent have no ladder. In Responses, `{step}` is shown as
+  Cleanser, Treatment, Moisturiser or Sunscreen (or "your routine" when the answer is about no step), the wording rules must pass for each, and any other brace is refused.
+  **Keep the Weeks `band` column formatted as text** (the export sets it): a spreadsheet turns `3-4` into a date otherwise, and the contract reports it as `WEEK_BAND_DATE`.
 - **Contract 2.2.0: export again after this is deployed, and write the four base guides before the next import.** The new Guides tab holds what each routine
   step is for, what to look for and what suits deeper skin. A file exported at 2.1.0 (or earlier) is refused by `catalog:upload` with a message to export
   again, and by the server as `409 CONTRACT_MISMATCH`. The live catalog has no guides yet, so a fresh export has an empty Guides tab, and the server refuses

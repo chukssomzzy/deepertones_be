@@ -2920,18 +2920,23 @@ Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Rei
      - **Reintroductions** (`group`, `schedule`): how a paused product is brought back slowly. The schedule is written like a Tapers one (`1: weekly; 2: alternate-days; 3: back`)
        but climbs (as-needed, weekly, alternate-days, am or pm, am-pm; equal steps are fine) and ends with `back`, the routine's own frequency from there on. There is
        no `stop`, weeks run on from 1 with no gap, and it is at most 12 weeks: `BAD_SCHEDULE` (a `stop` or week 13), `SCHEDULE_NOT_CONTIGUOUS`,
-       `REINTRO_MISSING_BACK`, `REINTRO_BACK_NOT_LAST`, `REINTRO_FREQUENCY_DECREASES`. An empty `group` is the default ladder, and one approved default is needed
-       (`REINTRO_DEFAULT_MISSING`); one row a group (`REINTRO_DUPLICATE`); `mercury`, `steroid` and `lightening-agent` have no ladder, whatever the status
-       (`REINTRO_GROUP_NEVER_BACK`). Key: `default` or the group.
+       `REINTRO_MISSING_BACK`, `REINTRO_BACK_NOT_LAST`, `REINTRO_FREQUENCY_DECREASES`. **A ladder needs at least one step before `back`** (`REINTRO_BACK_ONLY`, for
+       `1: back` or `1-12: back`): nothing is brought back at full strength at once. An empty `group` is the default ladder, and one approved default is needed
+       (`REINTRO_DEFAULT_MISSING`); one row a group (`REINTRO_DUPLICATE`); `mercury`, `steroid` and `lightening-agent` (`REINTRO_NEVER_BACK` in the schema) have no ladder,
+       whatever the status (`REINTRO_GROUP_NEVER_BACK`). Key: `default` or the group.
      - **Escalations** (`reason` from `ESCALATION_REASONS`, `who_to_see`, `how_soon`, `what_to_tell_them`, each up to 300 characters): what the app shows when it sends a
        person to a professional. Each reason needs one approved row (`ESCALATION_MISSING`, `ESCALATION_DUPLICATE`, `ESCALATION_WORDING`). Key: the reason.
      - **Responses** (`outcome` from `RESPONSE_OUTCOMES`, `title` up to 120, `body` and optional `what_to_do_now` up to 300): the text that answers a skin log or a check-in
-       after a pause. `{step}` is the one placeholder; any other `{...}` is `RESPONSE_PLACEHOLDER`, and the wording gate (`RESPONSE_WORDING`) reads the text with `{step}`
-       replaced by a plain noun. Each outcome needs one approved row (`RESPONSE_MISSING`, `RESPONSE_DUPLICATE`). Key: the outcome.
+       after a pause. `{step}` is the one placeholder, and the app always shows it as the step's plain noun (Cleanser, Treatment, Moisturiser or Sunscreen, never a product
+       title), or as "your routine" when the answer is about no step (the `nothing-to-pause` check-in). The wording gate (`RESPONSE_WORDING`) reads the text once for each of
+       those five readings, and every reading must pass. Braces are strict: once every exact `{step}` is taken out, any `{` or `}` left is `RESPONSE_PLACEHOLDER`
+       (`{step`, `step}`, `{step}}` and `{x}` are all refused). Each outcome needs one approved row (`RESPONSE_MISSING`, `RESPONSE_DUPLICATE`). Key: the outcome.
      - **Weeks** (`band` from `WEEK_BANDS`, optional `goal`, `step_down` yes or no with empty meaning no, `title` up to 60, `text` up to 300): the week card on Today. Each
        band needs one approved base card with no goal and no step-down (`WEEK_BASE_MISSING`); one row for a band, goal and step-down (`WEEK_DUPLICATE`, `WEEK_WORDING`).
-       Key: the band, then `:<goal>`, then `:step-down`. A spreadsheet number 1 or 2 is read as the band.
-     The service reads them: `reintroductionFor(group | null)` (the approved ladder of the group, else the approved default, else `[]`), `escalationFor(reason)`,
+       Key: the band, then `:<goal>`, then `:step-down`. A spreadsheet number 1 or 2 is read as the band. **Keep the band column as text:** a spreadsheet turns a band typed as `3-4` into a
+       date, so `catalog:export` writes the column (header, cells and the rest of the column) with the text format `@`; a band cell that arrives as a date a band makes (`3-4` as
+       4 March or 3 April, `5-8`, `9-12`) is reported as `WEEK_BAND_DATE` and not only as not in the vocabulary.
+     The service reads them: `reintroductionFor(group | null)` (the approved ladder of the group, else the approved default, else `[]`; `[]` too for a group that is never brought back, which does not get the default), `escalationFor(reason)`,
      `responseFor(outcome)` (`{step}` left as written) and `weekCardFor(week, goal, stepDown)` (week 13 and later use `9-12`; the first approved match of
      (band, goal, step-down), (band, no goal, step-down), (band, goal, no step-down), (band) wins), each `null` when the catalog has nothing approved. A draft or
      retired row is never given. Statement budget: 11 ladders, 9 escalations, 9 responses and 8 week cards to a statement.

@@ -60,6 +60,13 @@ describe('reintroductionFor after the team has written ladders', () => {
     expect(await workbook().reintroductionFor('exfoliating-acid')).toEqual(DEFAULT_STEPS)
   })
 
+  it.each(['mercury', 'steroid', 'lightening-agent'] as const)('gives no steps for %s, which is never brought back, and not the default ladder either', async (group) => {
+    await setLadders(retinoid)
+
+    expect(await workbook().reintroductionFor(group)).toEqual([])
+    expect(await workbook().reintroductionFor('exfoliating-acid')).toEqual(DEFAULT_STEPS)
+  })
+
   it('gives the default ladder for a group whose ladder is a draft, and for one that has been retired', async () => {
     await setLadders(reintroductionRow({ group: 'exfoliating-acid', schedule: '1: as-needed; 2: back' }), reintroductionRow({ group: 'benzoyl-peroxide', schedule: '1: as-needed; 2: back' }))
     await setLadders(reintroductionRow({ group: 'exfoliating-acid', schedule: '1: as-needed; 2: back', status: 'draft', approved_by: null, approved_on: null }))
