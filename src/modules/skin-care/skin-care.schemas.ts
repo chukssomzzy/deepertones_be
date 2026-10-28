@@ -1,7 +1,7 @@
 import { z } from '@hono/zod-openapi'
 import { ROUTINE_STEPS } from '../catalog/catalog.vocabulary'
 import { ADVICE_CODES, OUTCOME_KINDS, PROFESSIONAL_REASONS } from './skin-care.outcomes'
-import { HOW_BAD, NOTICING, WHERE } from './skin-care.vocabulary'
+import { CHECK_IN_ANSWERS, HOW_BAD, NOTICING, PAUSE_STATES, WHERE } from './skin-care.vocabulary'
 
 const NoticingEnum = z.enum(NOTICING).openapi({
   description:
@@ -77,4 +77,36 @@ export const PauseParams = z.object({
   id: z.string().min(1).openapi({ param: { name: 'id', in: 'path' }, description: "The pause's id (`paused.id` of a log)." }),
 })
 
-export const UndoPauseResponse = z.object({ id: z.string(), state: z.literal('undone') }).openapi('UndoPauseResult')
+export const UndoPauseResponse = z
+  .object({
+    id: z.string(),
+    state: z.enum(['undone', 'bringing-back']).openapi({ description: '`undone` for a first pause. `bringing-back` for a pause made again while the step was being brought back: the step goes back on its ladder, never straight to full strength.' }),
+  })
+  .openapi('UndoPauseResult')
+
+export const CheckInBody = z
+  .object({ answer: z.enum(CHECK_IN_ANSWERS).openapi({ description: 'How the step feels now: `calmer`, `same` (about the same) or `worse`.' }) })
+  .openapi('CheckInBody')
+
+const CheckInOutcome = z
+  .discriminatedUnion('kind', [
+    z.object({ kind: z.literal('calmer') }),
+    z.object({ kind: z.literal('same') }),
+    z.object({ kind: z.literal('professional'), reason: z.enum(['worse-after-pause', 'unchanged-after-checks']) }),
+  ])
+  .openapi({ description: 'What the answer came to. Branch on `kind`.' })
+
+export const CheckInResponse = z
+  .object({
+    outcome: CheckInOutcome,
+    response: z
+      .union([ReviewedText, z.object({ whoToSee: z.string(), howSoon: z.string(), whatToTellThem: z.string() })])
+      .openapi({ description: 'The reviewed text, with `{step}` already filled, for `calmer` and `same`; the reviewed professional text (`whoToSee`, `howSoon`, `whatToTellThem`) for `professional`.' }),
+    pause: z.object({
+      id: z.string(),
+      step: z.enum(ROUTINE_STEPS).nullable().openapi({ description: 'Null for the check-in with no step.' }),
+      state: z.enum(PAUSE_STATES).openapi({ description: '`bringing-back` after calmer on a step, `ended` after calmer on the check-in with no step, `paused` after same, `escalated` after a professional result.' }),
+      checkDay: z.string().nullable().openapi({ description: 'The next local day to ask, `YYYY-MM-DD`; null unless the pause is still `paused`.', example: '2030-06-18' }),
+    }),
+  })
+  .openapi('CheckInResult')

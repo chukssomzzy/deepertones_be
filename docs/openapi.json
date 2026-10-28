@@ -3033,13 +3033,174 @@
           "state": {
             "type": "string",
             "enum": [
-              "undone"
-            ]
+              "undone",
+              "bringing-back"
+            ],
+            "description": "`undone` for a first pause. `bringing-back` for a pause made again while the step was being brought back: the step goes back on its ladder, never straight to full strength."
           }
         },
         "required": [
           "id",
           "state"
+        ]
+      },
+      "CheckInResult": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "calmer"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "same"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "professional"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "enum": [
+                      "worse-after-pause",
+                      "unchanged-after-checks"
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "reason"
+                ]
+              }
+            ],
+            "description": "What the answer came to. Branch on `kind`."
+          },
+          "response": {
+            "anyOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "body": {
+                    "type": "string"
+                  },
+                  "whatToDoNow": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "body",
+                  "whatToDoNow"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "whoToSee": {
+                    "type": "string"
+                  },
+                  "howSoon": {
+                    "type": "string"
+                  },
+                  "whatToTellThem": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "whoToSee",
+                  "howSoon",
+                  "whatToTellThem"
+                ]
+              }
+            ],
+            "description": "The reviewed text, with `{step}` already filled, for `calmer` and `same`; the reviewed professional text (`whoToSee`, `howSoon`, `whatToTellThem`) for `professional`."
+          },
+          "pause": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "step": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "cleanse",
+                  "treat",
+                  "moisturise",
+                  "protect",
+                  null
+                ],
+                "description": "Null for the check-in with no step."
+              },
+              "state": {
+                "type": "string",
+                "enum": [
+                  "paused",
+                  "bringing-back",
+                  "escalated",
+                  "ended",
+                  "replaced",
+                  "undone"
+                ],
+                "description": "`bringing-back` after calmer on a step, `ended` after calmer on the check-in with no step, `paused` after same, `escalated` after a professional result."
+              },
+              "checkDay": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The next local day to ask, `YYYY-MM-DD`; null unless the pause is still `paused`.",
+                "example": "2030-06-18"
+              }
+            },
+            "required": [
+              "id",
+              "step",
+              "state",
+              "checkDay"
+            ]
+          }
+        },
+        "required": [
+          "outcome",
+          "response",
+          "pause"
         ]
       },
       "FaceConsentGivenResponse": {
@@ -8661,7 +8822,7 @@
           "Skin care"
         ],
         "summary": "Undo a pause",
-        "description": "Brings the paused step back at once. Only on the local day of the pause (409 `UNDO_EXPIRED` after it). The log that caused the pause is kept and marked overridden. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is no longer paused (undone already, or replaced when the step's product changed). 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.",
+        "description": "Brings the paused step back at once. Only on the local day of the pause (409 `UNDO_EXPIRED` after it). The log that caused the pause is kept and marked overridden. A pause made again while its step was being brought back goes back on its ladder (`state` is `bringing-back`), never straight to full strength; any other pause is `undone`. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is no longer paused (undone already, or replaced when the step's product changed). 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.",
         "security": [
           {
             "bearerAuth": []
@@ -8769,6 +8930,152 @@
           },
           "500": {
             "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/skin-care/pauses/{id}/check-in": {
+      "post": {
+        "operationId": "answerCheckIn",
+        "tags": [
+          "Skin care"
+        ],
+        "summary": "Say how a paused step feels",
+        "description": "The answer to the check-in on a pause, from its check day on (409 `CHECK_IN_NOT_DUE` before it). `calmer` on a step brings it back on a gentle ladder: the pause becomes `bringing-back`, the routine shows the step on its first rung and an inbox row says so; on the check-in with no step it ends. `same` keeps the step paused and asks again three days from today, and the third `same` in a row goes to a professional. `worse` goes to a professional. A professional result sets the pause to `escalated`: it is never asked again and the routine keeps the step out. `response` is the reviewed text with `{step}` filled, or the reviewed professional text. A reviewed text or ladder the team has not written is 503 `CONTENT_UNAVAILABLE`, and the pause is as it was. 400 `VALIDATION_FAILED` for any other answer. 404 `PAUSE_NOT_FOUND` for another account's pause, an id nobody holds, and a pause that is not `paused`. 401 without a session and 403 `SIGNUP_REQUIRED` for a guest, both before the body is read.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The pause's id (`paused.id` of a log)."
+            },
+            "required": true,
+            "description": "The pause's id (`paused.id` of a log).",
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckInBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The outcome, the reviewed text and the pause as it is now",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/CheckInResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Conflicts with the current state",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "A dependency is down; retry later",
             "content": {
               "application/json": {
                 "schema": {

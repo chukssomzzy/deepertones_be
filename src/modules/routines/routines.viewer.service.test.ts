@@ -94,6 +94,14 @@ const defaultSteps = (): Step[] => [
   stepOf('protect', { kind: 'none' }, 'am'),
 ]
 
+/** The routine with the treatment (SERUM-1) used at `frequency` and the moisturiser at `moisturiser`, to see a rung weaker, equal and stronger than the step's own. */
+const stepsWith = (frequency: Step['frequency'], moisturiser: Step['frequency'] = 'am-pm'): Step[] => [
+  stepOf('cleanse', { kind: 'shelf', id: 'entry-a' }, 'am'),
+  stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, frequency),
+  stepOf('moisturise', { kind: 'candidate', code: 'MOIST-GH' }, moisturiser),
+  stepOf('protect', { kind: 'none' }, 'am'),
+]
+
 let ids = 0
 const versionRow = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
   id: `version-${++ids}`,
@@ -2089,6 +2097,31 @@ describe('RoutineViewerService.current: what each entry is doing (the skin-care 
     ])
   })
 
+  // A rung is never stronger than the step's own frequency: the ladder brings a step back gently, it does not raise it past what the routine wrote.
+  it.each([
+    ['weekly', 'alternate-days', 'Once a week'],
+    ['weekly', 'pm', 'Once a week'],
+    ['alternate-days', 'am-pm', 'Every other evening'],
+    ['pm', 'weekly', 'Once a week'],
+  ] as [Step['frequency'], string, string][])('shows a %s step on a %s rung at the weaker of the two: %s', async (own, rung, when) => {
+    await showing(versionRow({ startedOn: START_DAY, steps: stepsWith(own) }))
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: rung as Frequency, anchor: dayText(START_DAY) })], held: false }
+
+    const treat = allEntries(await read()).filter((entry) => entry.step === 'treat')
+
+    expect(treat.map((entry) => entry.when)).toEqual([when])
+  })
+
+  it('keeps a step\'s own frequency when the rung is as strong (am and pm are the same strength) and lists it where the routine does', async () => {
+    await showing(versionRow({ startedOn: START_DAY, steps: stepsWith('am') }))
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'pm', anchor: dayText(START_DAY) })], held: false }
+
+    const routine = await read()
+
+    expect(routine.morning.map((entry: any) => entry.step)).toContain('treat')
+    expect(routine.evening.map((entry: any) => entry.step)).not.toContain('treat')
+  })
+
   it('fails closed: when the skin-care state cannot be read the read fails, never showing a paused step as active, and marks nothing served', async () => {
     stateFor.mockRejectedValue(new Error('state unavailable'))
 
@@ -2203,6 +2236,15 @@ describe('RoutineViewerService.reminderPlanFor: the skin-care overlay', () => {
       { step: 'treat', title: 'Serum', frequency: 'pm' },
       { step: 'moisturise', title: 'Moisturiser', frequency: 'alternate-days', anchor: ANCHOR },
     ])
+  })
+
+  it('never gives a step a rung stronger than its own frequency: a weekly treatment on an every-other-day or a twice-daily rung stays weekly, with the rung\'s anchor', async () => {
+    await showing(versionRow({ startedOn: START_DAY, steps: stepsWith('weekly') }))
+    for (const rung of ['alternate-days', 'am-pm'] as const) {
+      world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: rung, anchor: ANCHOR })], held: false }
+
+      expect((await plan())!.evening.find((entry) => entry.step === 'treat')).toEqual({ step: 'treat', title: 'Serum', frequency: 'weekly', anchor: ANCHOR })
+    }
   })
 
   it('counts a weekly rung in the evening too, with its anchor', async () => {

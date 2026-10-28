@@ -1,6 +1,6 @@
 import type { z } from '@hono/zod-openapi'
 import type { ProductSummary } from '../catalog/catalog.service'
-import { ROUTINE_STEPS, type Frequency, type ProductForm } from '../catalog/catalog.vocabulary'
+import { FREQUENCY_STRENGTH, ROUTINE_STEPS, type Frequency, type ProductForm } from '../catalog/catalog.vocabulary'
 import type { RecommendedByCode } from '../catalog/catalog.workbook.repository'
 import type { CountryRow, TaperRow } from '../catalog/catalog.workbook.schema'
 import { GOAL_LABELS } from '../goals/goals.vocabulary'
@@ -118,8 +118,14 @@ const rungOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInpu
   return over?.status === 'bringing-back' ? over : undefined
 }
 
-/** How often a step is used now: the rung's while it is being brought back, else the routine's own. The body's `when`, the list it is in and the reminders all follow it. */
-const frequencyOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): RoutineVersionRow['steps'][number]['frequency'] => rungOf(step, input)?.frequency ?? step.frequency
+/**
+ * How often a step is used now: the rung's while it is being brought back, else the routine's own; never more often than the routine's own (a weekly step on a ladder that climbs
+ * past weekly stays weekly until the ladder ends). The body's `when`, the list it is in and the reminders all follow it.
+ */
+const frequencyOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): RoutineVersionRow['steps'][number]['frequency'] => {
+  const rung = rungOf(step, input)?.frequency
+  return rung === undefined || FREQUENCY_STRENGTH[rung] >= FREQUENCY_STRENGTH[step.frequency] ? step.frequency : rung
+}
 
 const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
   const { title, product } = titleOf(step, input)

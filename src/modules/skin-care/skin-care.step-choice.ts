@@ -16,8 +16,8 @@ export const pauseKeyOf = (entry: SkinCareRoutineStep): string | null => entry.p
  * holds an active ingredient) the one that changed most recently; with no active step left, the most recently changed of the rest. A `changedOn` of null is day 1, and a tie
  * on the day goes treat, then cleanse, then moisturise. Null when nothing is left to pause. A step-down product is never in `routine.steps`, so it is never chosen.
  */
-// For PR 5: a `bringing-back` row holds its step here (the service passes every open pause, and the table allows one open pause for a step and product). When the check-in
-// PR brings steps back, a harm signal that hits a step being brought back must turn that row back into `paused` instead of choosing around it.
+// A `bringing-back` or `escalated` row holds its step here (the service passes every open pause). The service re-pauses a step being brought back before it asks for a step to pause,
+// so this never sees a step it should have turned back into `paused`.
 export const stepToPause = (routine: SkinCareRoutine, openPauses: readonly { step: RoutineStep | null }[]): SkinCareRoutineStep | null => {
   const taken = new Set(openPauses.flatMap(({ step }) => (step === null ? [] : [step])))
   const pausable = routine.steps.filter(({ step }) => step !== 'protect' && !taken.has(step))

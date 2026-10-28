@@ -70,6 +70,9 @@ export type RoutineStep = (typeof ROUTINE_STEPS)[number]
 export const FREQUENCIES = ['am', 'pm', 'am-pm', 'alternate-days', 'weekly', 'as-needed'] as const
 export type Frequency = (typeof FREQUENCIES)[number]
 
+/** How strong each frequency is, weakest first. am and pm are the same strength. Step-down schedules and reintroduction ladders are checked against it, and a ladder rung is never used above the step's own. */
+export const FREQUENCY_STRENGTH: Record<Frequency, number> = { 'as-needed': 1, weekly: 2, 'alternate-days': 3, am: 4, pm: 4, 'am-pm': 5 }
+
 /** Cheapest first. Each country sets where a band ends (the workbook's Countries tab). */
 export const BUDGET_BANDS = ['low', 'mid', 'high'] as const
 export type BudgetBand = (typeof BUDGET_BANDS)[number]
