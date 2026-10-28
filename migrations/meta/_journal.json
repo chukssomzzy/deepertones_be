@@ -351,6 +351,13 @@
       "when": 1793110492292,
       "tag": "0049_lethal_ken_ellis",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "6",
+      "when": 1793157981106,
+      "tag": "0050_loud_korvac",
+      "breakpoints": true
     }
   ]
 }
