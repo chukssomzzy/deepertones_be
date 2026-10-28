@@ -1,7 +1,11 @@
+import type { RoutineStep } from '../catalog/catalog.vocabulary'
 import type { Response } from '../catalog/catalog.workbook.service'
 
 const PLACEHOLDER = '{step}'
 const NO_STEP = 'your routine'
+
+/** The plain noun a reviewed text shows for each step (the workbook checks its wording once for each of these), never a product title. */
+export const STEP_NOUN: Record<RoutineStep, string> = { cleanse: 'Cleanser', treat: 'Treatment', moisturise: 'Moisturiser', protect: 'Sunscreen' }
 
 /**
  * Fills every `{step}` of a reviewed text: with the plain noun of the step the answer is about (Cleanser, Treatment, Moisturiser or Sunscreen, never a product title), or

@@ -372,6 +372,13 @@
       "when": 1793189151688,
       "tag": "0052_clever_overlord",
       "breakpoints": true
+    },
+    {
+      "idx": 53,
+      "version": "6",
+      "when": 1793191230109,
+      "tag": "0053_clever_rawhide_kid",
+      "breakpoints": true
     }
   ]
 }

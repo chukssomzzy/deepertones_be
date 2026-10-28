@@ -4,16 +4,29 @@ import type { HowBad, Noticing, Where } from './skin-care.vocabulary'
 /** Stored on every log, so a later change of the rules can tell which version decided an old one. */
 export const SKIN_OUTCOME_RULES_VERSION = 1
 
-type ProfessionalReason = Extract<EscalationReason, 'pus-or-hot-patch' | 'swelling' | 'near-eyes'>
-type AdviceCode = Extract<ResponseOutcome, 'advice-tightness' | 'advice-itching' | 'advice-breakouts'>
+type RedFlagReason = Extract<EscalationReason, 'pus-or-hot-patch' | 'swelling' | 'near-eyes'>
+/** What sends a person to a professional: a red flag (`outcomeFor`), or what the service finds when it acts on a pause (two steps already paused, or no other active step during a step-down). */
+export const PROFESSIONAL_REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const satisfies readonly EscalationReason[]
+type ProfessionalReason = (typeof PROFESSIONAL_REASONS)[number]
+/** The reviewed advice lines, one for each thing noticed. */
+export const ADVICE_CODES = ['advice-tightness', 'advice-itching', 'advice-breakouts'] as const satisfies readonly ResponseOutcome[]
+type AdviceCode = (typeof ADVICE_CODES)[number]
 
-/** What a skin log comes to. `pause` and `expected-flare` carry no text here; the service looks up the reviewed line. */
+/**
+ * What a skin log comes to. `pause`, `expected-flare` and `nothing-to-pause` carry no text here; the service looks up the reviewed line. `outcomeFor` never answers
+ * `nothing-to-pause` or the two reasons beyond a red flag: the service turns a `pause` into the action it can take (a step, a professional, or nothing to pause).
+ */
 export type SkinOutcome =
   | { kind: 'professional'; reason: ProfessionalReason }
   | { kind: 'pause'; duringStepDown: boolean }
+  | { kind: 'nothing-to-pause' }
   | { kind: 'expected-flare' }
   | { kind: 'advice'; codes: AdviceCode[] }
   | { kind: 'logged' }
+
+const KINDS: Record<SkinOutcome['kind'], null> = { professional: null, pause: null, 'nothing-to-pause': null, 'expected-flare': null, advice: null, logged: null }
+/** Every kind of outcome (what a stored log says it came to); the compiler holds the list to `SkinOutcome`. */
+export const OUTCOME_KINDS = Object.keys(KINDS) as [SkinOutcome['kind'], ...SkinOutcome['kind'][]]
 
 type Symptom = Exclude<Noticing, 'nothing-unusual'>
 
@@ -27,7 +40,7 @@ const ADVICE: [Symptom, AdviceCode][] = [
 ]
 
 // Which red flag is named when several apply: the first.
-const RED_FLAGS: [Symptom, ProfessionalReason][] = [
+const RED_FLAGS: [Symptom, RedFlagReason][] = [
   ['pus-or-hot-patch', 'pus-or-hot-patch'],
   ['swelling', 'swelling'],
 ]

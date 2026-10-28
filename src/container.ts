@@ -46,8 +46,10 @@ import { ScanDataCleaner } from './modules/scans/scans.cleaner'
 import { ScanService } from './modules/scans/scans.service'
 import { D1ShelfRepository } from './modules/shelf/shelf.repository'
 import { ShelfService } from './modules/shelf/shelf.service'
+import { D1StepPausesRepository } from './modules/skin-care/skin-care.pauses.repository'
 import { D1SkinCareRepository } from './modules/skin-care/skin-care.repository'
 import { SkinCareService } from './modules/skin-care/skin-care.service'
+import type { SkinCareRoutine } from './modules/skin-care/skin-care.types'
 import { D1UsersRepository } from './modules/users/users.repository'
 import { UsersService } from './modules/users/users.service'
 import { D1VerdictsRepository } from './modules/verdicts/verdicts.repository'
@@ -438,14 +440,22 @@ export const buildContainer = (env: CloudflareBindings) => {
     })
   })
 
-  // Skin logs have no route yet. The step-down answer is a stub until the routine can say whether one is running (PRs 4a and 4b replace it).
+  // Skin care reads the routine through the viewer: the viewer is reached lazily so neither needs the other to exist first, and the lambdas name their return types so the cycle
+  // does not make them infer from each other. (The viewer shows a pause and the routine service reconciles pauses from the next PR, 4b-ii.)
   const skinCare = once(
     () =>
       new SkinCareService({
         repository: new D1SkinCareRepository(db()),
+        pauses: new D1StepPausesRepository(db()),
         workbook: catalogWorkbook(),
         reminders: reminders(),
-        routine: { stepDownRunning: async () => false },
+        routine: {
+          // The log hands over the routine it has read (one read for the step-down and the choice); a call without one reads it.
+          stepDownRunning: async (profileId: string, _today: string, read?: SkinCareRoutine | null): Promise<boolean> =>
+            (read === undefined ? await routineViewer().skinCareRoutineFor(profileId) : read)?.stepDownRunning ?? false,
+          skinCareRoutineFor: async (profileId: string): Promise<SkinCareRoutine | null> => routineViewer().skinCareRoutineFor(profileId),
+        },
+        inbox: inbox(),
       }),
   )
 
