@@ -311,3 +311,114 @@ describe('SafetyService.set carrying the marks forward', () => {
     expect(await skinLogOf('profile-amara-1')).toHaveLength(1)
   })
 })
+
+// A concurrent save and a concurrent mark, interleaved at the one place D1 has no transaction: between a read and the write that follows it. The hooked
+// repository runs `beforeWrite` once, just before the named write, so each test lands the other call exactly there.
+class HookedSafetyRepository extends FakeSafetyRepository {
+  beforeAppendMentions: (() => Promise<void>) | null = null
+  beforeAppendCarrying: (() => Promise<void>) | null = null
+
+  override async appendMentions(...args: Parameters<FakeSafetyRepository['appendMentions']>) {
+    const hook = this.beforeAppendMentions
+    this.beforeAppendMentions = null
+    await hook?.()
+    return super.appendMentions(...args)
+  }
+
+  override async appendCarrying(...args: Parameters<FakeSafetyRepository['appendCarrying']>) {
+    const hook = this.beforeAppendCarrying
+    this.beforeAppendCarrying = null
+    await hook?.()
+    return super.appendCarrying(...args)
+  }
+}
+
+describe('SafetyService: a mark is not lost to a concurrent save', () => {
+  let hooked: HookedSafetyRepository
+
+  beforeEach(() => {
+    hooked = new HookedSafetyRepository()
+    let n = 0
+    service = new SafetyService({ repository: hooked, reader, catalog, jobs: new MemoryJobQueue(), now: () => clock, newId: () => `hid-${++n}` })
+    repository = hooked
+  })
+
+  it('puts a mark on the new row when a save replaced the row between the mark reading it and writing', async () => {
+    await set(AMARA, { choices: ['none'] })
+    tick()
+    hooked.beforeAppendMentions = async () => {
+      await set(AMARA, { choices: ['pregnant'] })
+    }
+
+    const result = await service.markReactionProduct('profile-amara-1', NIGHT)
+
+    expect(result).toEqual({ marked: true })
+    expect((await repository.history('profile-amara-1')).length).toBe(2)
+    expect(await skinLogOf('profile-amara-1')).toMatchObject([{ safetyId: await idOfCurrent('profile-amara-1'), productId: 'product-night' }])
+  })
+
+  it('carries a mark that landed on the old row after the save read it', async () => {
+    await set(AMARA, { choices: ['none'] })
+    tick()
+    hooked.beforeAppendCarrying = async () => {
+      await service.markReactionProduct('profile-amara-1', NIGHT)
+    }
+
+    await set(AMARA, { choices: ['pregnant'] })
+
+    const newRowId = await idOfCurrent('profile-amara-1')
+    expect(newRowId).not.toBe('hid-1')
+    expect(await skinLogOf('profile-amara-1')).toMatchObject([{ safetyId: newRowId, productId: 'product-night' }])
+  })
+
+  it('does not double a mark the save carried before the mark reconciled', async () => {
+    await set(AMARA, { choices: ['none'] })
+    tick()
+    // The save reads the old row (with no mark), the mark lands on it, then the save writes: the late carry adds it once, and the mark's own check finds it there.
+    hooked.beforeAppendCarrying = async () => {
+      await service.markReactionProduct('profile-amara-1', NIGHT)
+    }
+    await set(AMARA, { choices: ['pregnant'] })
+
+    const again = await service.markReactionProduct('profile-amara-1', NIGHT)
+
+    expect(again).toEqual({ marked: false })
+    expect(await skinLogOf('profile-amara-1')).toHaveLength(1)
+  })
+
+  it('does not carry a product twice when two concurrent marks left a duplicate on the old row', async () => {
+    await set(AMARA, { choices: ['none'] })
+    const oldRow = await idOfCurrent('profile-amara-1')
+    const duplicate = (id: string, position: number) => ({
+      id,
+      safetyId: oldRow,
+      source: 'skin-log' as const,
+      kind: 'product' as const,
+      brand: 'Orbis',
+      name: 'Night Cream',
+      variant: null,
+      category: 'skin',
+      productId: 'product-night',
+      resolution: 'resolved' as const,
+      position,
+      createdAt: T0,
+    })
+    await repository.appendMentions([duplicate('dup-1', 0), duplicate('dup-2', 1)])
+    tick()
+
+    await set(AMARA, { choices: ['pregnant'] })
+
+    expect((await skinLogOf('profile-amara-1')).map((mention) => [mention.productId, mention.position])).toEqual([['product-night', 0]])
+  })
+})
+
+describe('SafetyService.markReactionProduct: a product with no catalog id', () => {
+  it.each([['empty', ''], ['blank', '   ']])('marks nothing for an %s product id', async (_name, productId) => {
+    await set(AMARA, { choices: ['none'] })
+
+    const result = await service.markReactionProduct('profile-amara-1', { ...NIGHT, productId })
+
+    expect(result).toEqual({ marked: false })
+    expect(await mentionsOf('profile-amara-1')).toEqual([])
+  })
+})

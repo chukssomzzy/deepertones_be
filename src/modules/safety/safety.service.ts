@@ -118,7 +118,10 @@ export class SafetyService {
       parseRetried: false,
       createdAt: now,
     }
-    await this.repository.appendCarrying(row, await this.carriedMarks(profileId, row.id))
+    const { fromId, carried } = await this.carriedMarks(profileId, row.id)
+    await this.repository.appendCarrying(row, carried)
+    // A mark may have landed on the old row after it was read above: carry what the new row lacks (D1 has no transaction across the read and the write).
+    if (fromId !== null) await this.carryLateMarks(fromId, row.id)
     if (hasWords) await this.queueParse(row, delaySeconds)
     return this.view(row)
   }
@@ -127,32 +130,22 @@ export class SafetyService {
    * Marks a product the person keeps reacting to, on the profile's current safety row: a resolved `skin-log` product mention, which the verdict's floor and the
    * routine's picks treat as one they named as a reaction. By profile id with no session, since the skin-care module calls it from a job as well as a request. It
    * changes neither the view nor the row. `marked` is false, and nothing is written, when the product is already marked or the profile never answered. The
-   * mark counts toward no slot of the parse's three-product limit (see `mentionRows`). The caller must pass a catalog product id: a product without one cannot be marked.
+   * mark counts toward no slot of the parse's three-product limit (see `mentionRows`). A blank product id marks nothing (`marked` false). Once written, the mark is re-checked against the current row, so a
+   * concurrent save cannot leave it behind on the old row; `marked` is true only when it is on the current row.
    */
   async markReactionProduct(
     profileId: string,
     product: { productId: string; brand: string; name: string; category: ProductCategory },
   ): Promise<{ marked: boolean }> {
+    // A product with no catalog id (no label, or a `none` step) cannot be marked.
+    if (product.productId.trim() === '') return { marked: false }
     const row = await this.repository.current(profileId)
     if (!row) return { marked: false }
-    const stored = await this.repository.mentions(row.id)
-    if (stored.some((mention) => mention.source === 'skin-log' && mention.productId === product.productId)) return { marked: false }
-    await this.repository.appendMentions([
-      {
-        id: this.newId(),
-        safetyId: row.id,
-        source: 'skin-log',
-        kind: 'product',
-        brand: product.brand,
-        name: product.name,
-        variant: null,
-        category: product.category,
-        productId: product.productId,
-        resolution: 'resolved',
-        position: stored.length,
-        createdAt: this.now(),
-      },
-    ])
+    if (!(await this.addMark(row.id, product))) return { marked: false }
+    // A save may have replaced the row between the read and the write, leaving the mark on the old one: put it on the new current row too (the per-row check
+    // makes this a no-op when the save carried it). Marks are never removed: there is no unmark, by design.
+    const latest = await this.repository.current(profileId)
+    if (latest && latest.id !== row.id) await this.addMark(latest.id, product)
     return { marked: true }
   }
 
@@ -240,12 +233,58 @@ export class SafetyService {
     return queued
   }
 
-  /** The `skin-log` marks of the profile's current row, as rows for the new one: fresh ids, in their order from 0. Reaction and prescription mentions are never carried. */
-  private async carriedMarks(profileId: string, safetyId: string): Promise<SafetyMentionRow[]> {
+  /**
+   * The `skin-log` marks of the profile's current row, as rows for the new one: fresh ids, in their order from 0, one for each product (two concurrent marks of
+   * the same product may have left a duplicate, which is never carried). `fromId` is the row they come from, null when there is none. Reaction and prescription
+   * mentions are never carried.
+   */
+  private async carriedMarks(profileId: string, safetyId: string): Promise<{ fromId: string | null; carried: SafetyMentionRow[] }> {
     const current = await this.repository.current(profileId)
-    if (!current) return []
-    const marks = (await this.repository.mentions(current.id)).filter((mention) => mention.source === 'skin-log')
-    return marks.map((mark, position) => ({ ...mark, id: this.newId(), safetyId, position }))
+    if (!current) return { fromId: null, carried: [] }
+    const seen = new Set<string | null>()
+    const marks = (await this.repository.mentions(current.id)).filter((mention) => {
+      if (mention.source !== 'skin-log' || seen.has(mention.productId)) return false
+      seen.add(mention.productId)
+      return true
+    })
+    return { fromId: current.id, carried: marks.map((mark, position) => ({ ...mark, id: this.newId(), safetyId, position })) }
+  }
+
+  /** Puts on the new row the marks of the old row it lacks (by product), for a mark that landed after `carriedMarks` read the old row. */
+  private async carryLateMarks(fromId: string, toId: string): Promise<void> {
+    const onNew = new Set((await this.repository.mentions(toId)).filter((mention) => mention.source === 'skin-log').map((mention) => mention.productId))
+    for (const mark of (await this.repository.mentions(fromId)).filter((mention) => mention.source === 'skin-log')) {
+      if (mark.productId === null || onNew.has(mark.productId)) continue
+      onNew.add(mark.productId)
+      await this.addMark(toId, { ...mark, productId: mark.productId }, mark.createdAt)
+    }
+  }
+
+  /** Appends a resolved `skin-log` product mention to the row after its others; false, writing nothing, when the row already marks that product. */
+  private async addMark(
+    safetyId: string,
+    product: { productId: string; brand: string | null; name: string; category: string | null },
+    createdAt: Date = this.now(),
+  ): Promise<boolean> {
+    const stored = await this.repository.mentions(safetyId)
+    if (stored.some((mention) => mention.source === 'skin-log' && mention.productId === product.productId)) return false
+    await this.repository.appendMentions([
+      {
+        id: this.newId(),
+        safetyId,
+        source: 'skin-log',
+        kind: 'product',
+        brand: product.brand,
+        name: product.name,
+        variant: null,
+        category: product.category,
+        productId: product.productId,
+        resolution: 'resolved',
+        position: stored.length,
+        createdAt,
+      },
+    ])
+    return true
   }
 
   private async currentRow(): Promise<SafetyRow | null> {
