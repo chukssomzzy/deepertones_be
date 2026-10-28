@@ -23,3 +23,7 @@ export type PauseState = (typeof PAUSE_STATES)[number]
 /** What a person can answer when asked how a paused step feels. */
 export const CHECK_IN_ANSWERS = ['calmer', 'same', 'worse'] as const
 export type CheckInAnswer = (typeof CHECK_IN_ANSWERS)[number]
+
+/** How an escalation hold ends: `seen` (the person says they saw a professional) or `settled` (the skin has settled). */
+export const HOLD_CLOSE_HOW = ['seen', 'settled'] as const
+export type HoldCloseHow = (typeof HOLD_CLOSE_HOW)[number]
