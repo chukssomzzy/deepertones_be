@@ -150,4 +150,51 @@ describe('safety_mentions in D1', () => {
 
     expect(await repository.mentions(saved.id)).toEqual([])
   })
+
+  describe('carried onto a new row (appendCarrying)', () => {
+    it('writes the new row and its carried mentions together', async () => {
+      const repository = new D1SafetyRepository(db)
+      const guest = await newGuest()
+      const older = row(guest.profileId, { parseState: 'none', reactionText: null, choices: ['none'] })
+      await repository.append(older)
+      const newer = row(guest.profileId, { parseState: 'none', reactionText: null, choices: ['pregnant'], createdAt: new Date(BASE.getTime() + 2 * MINUTE) })
+      const carried = mention(newer.id, { source: 'skin-log', resolution: 'resolved', productId: 'product-night' })
+
+      await repository.appendCarrying(newer, [carried])
+
+      expect((await repository.current(guest.profileId))!.id).toBe(newer.id)
+      expect(await repository.mentions(newer.id)).toMatchObject([{ id: carried.id, source: 'skin-log', productId: 'product-night' }])
+    })
+
+    it('writes neither the row nor its mentions when one mention is refused (one batch)', async () => {
+      const repository = new D1SafetyRepository(db)
+      const guest = await newGuest()
+      const older = row(guest.profileId, { parseState: 'none', reactionText: null, choices: ['none'] })
+      await repository.append(older)
+      const newer = row(guest.profileId, { parseState: 'none', reactionText: null, choices: ['pregnant'], createdAt: new Date(BASE.getTime() + 2 * MINUTE) })
+      const good = mention(newer.id, { source: 'skin-log', resolution: 'resolved', productId: 'product-night' })
+      const orphan = mention(`safety-${crypto.randomUUID()}`, { source: 'skin-log', resolution: 'resolved', productId: 'product-day', position: 1 })
+
+      await expect(repository.appendCarrying(newer, [good, orphan])).rejects.toThrow()
+
+      expect(await repository.find(newer.id)).toBeNull()
+      expect((await repository.current(guest.profileId))!.id).toBe(older.id)
+      expect(await repository.mentions(newer.id)).toEqual([])
+    })
+
+    it('removes the carried mentions with the user, and leaves other accounts\' carried mentions', async () => {
+      const repository = new D1SafetyRepository(db)
+      const guest = await newGuest()
+      const kept = await newGuest()
+      const goneRow = row(guest.profileId, { parseState: 'none', reactionText: null })
+      const keptRow = row(kept.profileId, { parseState: 'none', reactionText: null })
+      await repository.appendCarrying(goneRow, [mention(goneRow.id, { source: 'skin-log', resolution: 'resolved', productId: 'product-night' })])
+      await repository.appendCarrying(keptRow, [mention(keptRow.id, { source: 'skin-log', resolution: 'resolved', productId: 'product-night' })])
+
+      expect(await users.deleteUsers([guest.userId])).toBe(1)
+
+      expect(await repository.mentions(goneRow.id)).toEqual([])
+      expect(await repository.mentions(keptRow.id)).toHaveLength(1)
+    })
+  })
 })

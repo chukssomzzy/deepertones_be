@@ -2388,6 +2388,96 @@
         },
         "additionalProperties": false
       },
+      "Inbox": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "kind": {
+                  "type": "string",
+                  "description": "What happened, such as `reminder`, `step-down` or `rest-night`. Open-ended: show the title and body, not a name picked from the kind."
+                },
+                "day": {
+                  "type": "string",
+                  "description": "The local calendar day the item is about, `YYYY-MM-DD`.",
+                  "example": "2030-06-15"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "body": {
+                  "type": "string"
+                },
+                "link": {
+                  "type": "string",
+                  "description": "An in-app path to open when the item is tapped.",
+                  "example": "/routine"
+                },
+                "read": {
+                  "type": "boolean"
+                },
+                "createdAt": {
+                  "type": "string",
+                  "format": "date-time"
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "day",
+                "title",
+                "body",
+                "link",
+                "read",
+                "createdAt"
+              ]
+            },
+            "description": "Newest first. Items are kept for good."
+          },
+          "next": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Send as `before` for the next, older page. Null when no older item follows."
+          }
+        },
+        "required": [
+          "items",
+          "next"
+        ]
+      },
+      "MarkInboxReadResult": {
+        "type": "object",
+        "properties": {
+          "unread": {
+            "type": "integer",
+            "description": "How many items are still unread."
+          }
+        },
+        "required": [
+          "unread"
+        ]
+      },
+      "MarkInboxReadBody": {
+        "type": "object",
+        "properties": {
+          "upTo": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The id of an item. It and every older item are marked read."
+          }
+        },
+        "required": [
+          "upTo"
+        ]
+      },
       "FaceConsentGivenResponse": {
         "type": "object",
         "properties": {
@@ -7513,6 +7603,258 @@
           },
           "403": {
             "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "415": {
+            "description": "The Content-Type of the body is not supported by this route",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/inbox": {
+      "get": {
+        "operationId": "getInbox",
+        "tags": [
+          "Inbox"
+        ],
+        "summary": "What the routine has told the profile, newest first",
+        "description": "For a signed-up account: 401 without a session, 403 `SIGNUP_REQUIRED` for a guest. Each profile has its own inbox, and its items are kept for good. Pages are `limit` items (default 20, 1 to 50 or 400 `VALIDATION_FAILED`); follow `next` as `before` until it is null. A `before` that is no item of the caller's is 404 `INBOX_ITEM_NOT_FOUND`.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "description": "The `next` of the page before. Anything that is no item of the caller's is 404 `INBOX_ITEM_NOT_FOUND`."
+            },
+            "required": false,
+            "description": "The `next` of the page before. Anything that is no item of the caller's is 404 `INBOX_ITEM_NOT_FOUND`.",
+            "name": "before",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "description": "How many items to answer, 1 to 50 (default 20). Anything else is 400 `VALIDATION_FAILED`.",
+              "example": 20
+            },
+            "required": false,
+            "description": "How many items to answer, 1 to 50 (default 20). Anything else is 400 `VALIDATION_FAILED`.",
+            "name": "limit",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A page of inbox items",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/Inbox"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Unexpected server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me/inbox/read": {
+      "post": {
+        "operationId": "markInboxRead",
+        "tags": [
+          "Inbox"
+        ],
+        "summary": "Mark an item and everything older as read",
+        "description": "Marks the item `upTo` and every older unread item read, and answers how many are still unread. It is idempotent, and an item already read keeps the time it was first read. An item that is no item of the caller's is 404 `INBOX_ITEM_NOT_FOUND`. 401 without a session, 403 `SIGNUP_REQUIRED` for a guest.",
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MarkInboxReadBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "How many items are still unread",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "enum": [
+                        true
+                      ],
+                      "description": "Always true for a 2xx response."
+                    },
+                    "status": {
+                      "type": "integer",
+                      "description": "The HTTP status code, repeated for clients that only keep the body."
+                    },
+                    "message": {
+                      "type": "string",
+                      "description": "Human-readable; may change."
+                    },
+                    "data": {
+                      "$ref": "#/components/schemas/MarkInboxReadResult"
+                    }
+                  },
+                  "required": [
+                    "success",
+                    "status",
+                    "message",
+                    "data"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid input (code VALIDATION_FAILED) or a broken business rule",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Sign-in required",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Signed in, but not allowed to do this",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not found",
             "content": {
               "application/json": {
                 "schema": {

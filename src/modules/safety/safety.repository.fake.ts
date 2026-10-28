@@ -1,5 +1,5 @@
 import type { MentionResolution, SafetyRepository } from './safety.repository'
-import type { MentionSource, ParseState, SafetyMentionRow, SafetyRow } from './safety.types'
+import type { ParseState, ReadSource, SafetyMentionRow, SafetyRow } from './safety.types'
 
 /** In-memory SafetyRepository for unit tests. Its behaviour is pinned by safetyRepositoryContract, which the D1 class also passes. */
 export class FakeSafetyRepository implements SafetyRepository {
@@ -9,6 +9,11 @@ export class FakeSafetyRepository implements SafetyRepository {
 
   async append(row: SafetyRow): Promise<void> {
     this.rows.push({ ...row, choices: [...row.choices] })
+  }
+
+  async appendCarrying(row: SafetyRow, carried: SafetyMentionRow[]): Promise<void> {
+    this.rows.push({ ...row, choices: [...row.choices] })
+    this.mentionRows.push(...carried.map((mention) => ({ ...mention })))
   }
 
   async find(id: string): Promise<SafetyRow | null> {
@@ -47,12 +52,12 @@ export class FakeSafetyRepository implements SafetyRepository {
       .map((row) => ({ ...row, choices: [...row.choices] }))
   }
 
-  async storeRead(safetyId: string, source: MentionSource, mentions: SafetyMentionRow[]): Promise<void> {
+  async storeRead(safetyId: string, source: ReadSource, mentions: SafetyMentionRow[]): Promise<void> {
     this.mentionRows.push(...mentions.map((mention) => ({ ...mention })))
     this.readSources.add(`${safetyId}:${source}`)
   }
 
-  async reads(safetyId: string): Promise<MentionSource[]> {
+  async reads(safetyId: string): Promise<ReadSource[]> {
     return (['reaction', 'prescription'] as const).filter((source) => this.readSources.has(`${safetyId}:${source}`))
   }
 

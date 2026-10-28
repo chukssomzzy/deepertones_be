@@ -3,7 +3,7 @@ import type { BatchItem } from 'drizzle-orm/batch'
 import type { Db } from '../../lib/db'
 import type { PublicOf } from '../../lib/types'
 import { profileSafety, safetyMentions, safetyReads } from './safety.table'
-import type { MentionSource, ParseState, SafetyMentionRow, SafetyRow } from './safety.types'
+import type { ParseState, ReadSource, SafetyMentionRow, SafetyRow } from './safety.types'
 
 /** How a product mention ended up: found in the catalog with ingredients, or not (the catalog's product id, when it has one, is kept either way). */
 export type MentionResolution = { resolution: 'resolved' | 'unresolved'; productId: string | null }
@@ -18,6 +18,15 @@ export class D1SafetyRepository {
   /** Adds a row to the profile's history. Rejects a profile that does not exist. */
   async append(row: SafetyRow): Promise<void> {
     await this.db.insert(profileSafety).values(row)
+  }
+
+  /**
+   * Adds a row to the profile's history together with mentions carried onto it, in one batch: either both or neither. An empty list still adds the row.
+   * One INSERT per mention keeps each statement under D1's bound-parameter limit. Rejects a profile that does not exist.
+   */
+  async appendCarrying(row: SafetyRow, carried: SafetyMentionRow[]): Promise<void> {
+    const statements: BatchItem<'sqlite'>[] = [this.db.insert(profileSafety).values(row), ...carried.map((mention) => this.db.insert(safetyMentions).values(mention))]
+    await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
   }
 
   /** The row with this id, whoever it belongs to and whether or not it is still the current one; null when there is none. */
@@ -81,13 +90,13 @@ export class D1SafetyRepository {
    * Stores what the parse found in ONE of the row's texts, together with the record that the text has been read, in one batch: either both or
    * neither. An empty list still records the read (a text that named nothing is not read again). Rejects a row that does not exist.
    */
-  async storeRead(safetyId: string, source: MentionSource, mentions: SafetyMentionRow[]): Promise<void> {
+  async storeRead(safetyId: string, source: ReadSource, mentions: SafetyMentionRow[]): Promise<void> {
     const statements: BatchItem<'sqlite'>[] = [...mentions.map((mention) => this.db.insert(safetyMentions).values(mention)), this.db.insert(safetyReads).values({ safetyId, source }).onConflictDoNothing()]
     await this.db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
   }
 
   /** Which of the row's texts have been read, in no particular order. */
-  async reads(safetyId: string): Promise<MentionSource[]> {
+  async reads(safetyId: string): Promise<ReadSource[]> {
     const rows = await this.db.select({ source: safetyReads.source }).from(safetyReads).where(eq(safetyReads.safetyId, safetyId))
     return rows.map((row) => row.source)
   }
