@@ -9,6 +9,9 @@ import { CONTRACT_VERSION, type Cell, type RawRow, type RawTab, type RawWorkbook
 
 export const TAB_NAMES: Record<TabKey, string> = { products: 'Products', availability: 'Availability', ingredients: 'Ingredients', countries: 'Countries', claimWords: 'Claim words', tapers: 'Tapers', guides: 'Guides', reintroductions: 'Reintroductions', escalations: 'Escalations', responses: 'Responses', weeks: 'Weeks' }
 const TAB_KEYS = Object.keys(TAB_NAMES) as TabKey[]
+/** Columns written with the text format (`@`): a spreadsheet turns a week band typed as 3-4 into a date unless its cell is text. */
+const TEXT_COLUMNS: Partial<Record<TabKey, string[]>> = { weeks: ['band'] }
+const TEXT_FORMAT = '@'
 const META = '_meta'
 
 /** What a file remembers about where it came from. `contractVersion` is the server's when it was exported, and defaults to this checkout's. */
@@ -24,11 +27,14 @@ export async function writeWorkbookFile(path: string, workbook: RawWorkbook, cat
     const sheet = book.addWorksheet(TAB_NAMES[key])
     headers.forEach((header, column) => {
       sheet.getRow(1).getCell(column + 1).value = header
+      // The whole column, so a row the person adds under the exported ones is text too.
+      if (TEXT_COLUMNS[key]?.includes(header)) sheet.getColumn(column + 1).numFmt = TEXT_FORMAT
     })
     rows.forEach((row, index) => {
       headers.forEach((header, column) => {
         const value = row[header]
         if (value !== null && value !== undefined) sheet.getRow(index + 2).getCell(column + 1).value = value
+        if (TEXT_COLUMNS[key]?.includes(header)) sheet.getRow(index + 2).getCell(column + 1).numFmt = TEXT_FORMAT
       })
     })
   }

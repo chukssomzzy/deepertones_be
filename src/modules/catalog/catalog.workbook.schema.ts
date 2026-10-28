@@ -128,6 +128,7 @@ const RULES = {
   REINTRO_GROUP_NEVER_BACK:
     'A ladder is written for mercury, steroid or lightening-agent. Those are only ever stopped and never brought back, so they have no ladder. It is reported whatever the status of the row.',
   REINTRO_MISSING_BACK: 'The ladder never ends with back. A ladder climbs to back, which means the routine\'s own frequency from there on, and back is its last step.',
+  REINTRO_BACK_ONLY: 'The ladder has no step before back. A ladder needs at least one step before back, since a product is never brought back at full strength at once: start with a rarer step such as weekly.',
   REINTRO_BACK_NOT_LAST: 'A step whose frequency is back is followed by another step. Back ends the ladder, so it is the last step.',
   REINTRO_FREQUENCY_DECREASES:
     'A step uses the product less often than the step before it. A ladder only ever goes up: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm, then back. The same frequency twice is fine.',
@@ -137,9 +138,12 @@ const RULES = {
     'An escalation text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say what to do in plain words, without them.',
   RESPONSE_MISSING: `An outcome has no approved response. Each of the outcomes (${RESPONSE_OUTCOMES.join(', ')}) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row.`,
   RESPONSE_DUPLICATE: 'Two rows of the Responses tab are for the same outcome. Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each.',
-  RESPONSE_PLACEHOLDER: 'A response text holds a placeholder in braces other than {step}. {step} is the only one there is: it is replaced with the plain name of the routine step. Write anything else as plain words.',
+  RESPONSE_PLACEHOLDER:
+    'A response text holds a brace that is not part of an exact {step}: another placeholder such as {product}, an unfinished {step or step}, or a doubled {step}}. {step} is the only placeholder there is: the app replaces it with the plain name of the routine step. Write anything else as plain words.',
   RESPONSE_WORDING:
-    'A response text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. It is checked with {step} replaced by a plain noun. Say it in plain words, without them.',
+    'A response text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. It is checked once for each way {step} is shown (Cleanser, Treatment, Moisturiser, Sunscreen, or "your routine"), and every one must pass. Say it in plain words, without them.',
+  WEEK_BAND_DATE:
+    'A band cell holds a date. A spreadsheet turned a band such as 3-4 into a day (4 March) when it was typed. Format the band column as text and write the band again. A file made by the export has the column formatted as text already.',
   WEEK_BASE_MISSING: `A band has no approved base week card. Each of the bands (${WEEK_BANDS.join(', ')}) needs one approved row with the goal column empty and step_down no (or empty): it is the card a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row.`,
   WEEK_DUPLICATE: 'Two rows of the Weeks tab are for the same band, goal and step_down (an empty goal, and an empty step_down meaning no, count as values). Every such row is reported, whatever its status. Keep one row for each.',
   WEEK_WORDING:
@@ -294,8 +298,6 @@ const statusColumn = (about: string, vocabulary: VocabularyName = 'productStatus
 // The longest a step-down may run, in weeks, and the longest its cell may be: ten steps of `52-52: alternate-days` fit in 300 characters with room.
 const SCHEDULE_MAX_WEEKS = 52
 const SCHEDULE_LENGTH = 300
-/** The groups that are only ever stopped, never brought back, so no ladder is written for them. */
-const NEVER_BACK: readonly IngredientGroup[] = ['mercury', 'steroid', 'lightening-agent']
 const SCHEDULE_EXAMPLE = '1-2: alternate-days; 3-4: weekly; 5: stop'
 const PHRASE_LENGTH = 60
 const TAPER_TEXT_LENGTH = 400
@@ -303,9 +305,10 @@ const GUIDE_TEXT_LENGTH = 300
 // A ladder is brought back over at most 12 weeks, the length of the longest band of week cards.
 const LADDER_MAX_WEEKS = 12
 const LADDER_EXAMPLE = '1: weekly; 2: alternate-days; 3: back'
-// The one placeholder a response may hold, and the plain noun the wording gate reads in its place.
+// The one placeholder a response may hold. The app shows it as the step's plain noun, never a product title, and as "your routine" when the answer is about no step (the
+// nothing-to-pause check-in). The wording gate reads the text once for each of those, and every reading must pass.
 const STEP_PLACEHOLDER = '{step}'
-const STEP_NOUN = 'product'
+const STEP_NOUNS = ['Cleanser', 'Treatment', 'Moisturiser', 'Sunscreen', 'your routine'] as const
 const ESCALATION_TEXT_LENGTH = 300
 const RESPONSE_TITLE_LENGTH = 120
 const RESPONSE_TEXT_LENGTH = 300
@@ -336,7 +339,7 @@ export const CONTRACT: Contract = {
       'The frequencies of a reintroduction ladder: the usual frequencies, and back. A ladder only climbs, weakest first: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm. Its last step is back, which means the routine\'s own frequency from there on. It never says stop.',
     escalationReasons: 'The reasons the app sends a person to a professional. Each has exactly one approved row in the Escalations tab.',
     responseOutcomes: 'What a skin log or a check-in after a pause comes to. Each has exactly one approved row in the Responses tab.',
-    weekBands: 'The stretches of weeks a week card is written for. A person in week 13 or later is shown the 9-12 card. Each band needs one approved base card.',
+    weekBands: 'The stretches of weeks a week card is written for. A person in week 13 or later is shown the 9-12 card. Each band needs one approved base card. A band such as 3-4 looks like a date to a spreadsheet: the exported file has the band column formatted as text, so keep that format, and write a band you add as text.',
     yesNo: 'Whether a week card is for a person who is stepping down a product. Empty means no.',
     claims: 'What a claim word says about a product. For now there is one: a product whose brand, name or variant holds the phrase is sold for lightening.',
     ingredientGroups:
@@ -547,7 +550,7 @@ export const CONTRACT: Contract = {
       key: 'reintroductions',
       title: 'Reintroductions',
       about:
-        `How a person brings a paused product back slowly: a ladder that climbs from rare use to the routine's own frequency and ends with back. The ladder of a group is used for that group, and the ladder with no group for every group without one of its own. Mercury, steroid and lightening-agent have no ladder: they are only ever stopped, never brought back. A ladder is shown to people, so a qualified person approves it; in production the server refuses an approved ladder whose approver is not on its list. A row is identified by its group, and is retired, never deleted.`,
+        `How a person brings a paused product back slowly: a ladder that climbs from rare use to the routine's own frequency and ends with back, after at least one step before it. The ladder of a group is used for that group, and the ladder with no group for every group without one of its own. Mercury, steroid and lightening-agent have no ladder: they are only ever stopped, never brought back. A ladder is shown to people, so a qualified person approves it; in production the server refuses an approved ladder whose approver is not on its list. A row is identified by its group, and is retired, never deleted.`,
       columns: [
         { name: 'group', type: 'vocabulary', required: 'optional', vocabulary: 'ingredientGroups', about: 'The ingredient group the ladder is for. Leave it empty for the default ladder, which every group without a ladder of its own is brought back on.' },
         {
@@ -556,7 +559,7 @@ export const CONTRACT: Contract = {
           required: 'always',
           vocabulary: 'ladderFrequencies',
           maxLength: SCHEDULE_LENGTH,
-          about: `The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week ${LADDER_MAX_WEEKS}. The frequency never goes down, and the last step is back, the routine's own frequency from there on. For example: ${LADDER_EXAMPLE}`,
+          about: `The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week ${LADDER_MAX_WEEKS}. The frequency never goes down, the last step is back, the routine's own frequency from there on, and at least one step comes before back. For example: ${LADDER_EXAMPLE}`,
         },
         statusColumn('draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its group is never reused.'),
         ...signOff('ladder'),
@@ -592,7 +595,7 @@ export const CONTRACT: Contract = {
       key: 'responses',
       title: 'Responses',
       about:
-        'The text that answers a skin log or a check-in after a pause. Each outcome needs exactly one approved row. {step} is the one placeholder a text may hold: it is replaced with the plain name of the routine step the answer is about, and any other word in braces is refused. A qualified person approves a response; in production the server refuses an approved row whose approver is not on its list. A row is identified by its outcome, and is retired, never deleted.',
+        'The text that answers a skin log or a check-in after a pause. Each outcome needs exactly one approved row. {step} is the one placeholder a text may hold. The app always shows it as the plain noun of the routine step the answer is about (Cleanser, Treatment, Moisturiser or Sunscreen, never a product title), and as "your routine" when the answer is about no step (the check-in when there is nothing to pause). Any other brace is refused: {product}, {step or step} and {step}} are all problems. The wording rules are checked once for each of those five readings, and every one must pass, so a text must still read well as "your Sunscreen" and as "your routine". A qualified person approves a response; in production the server refuses an approved row whose approver is not on its list. A row is identified by its outcome, and is retired, never deleted.',
       columns: [
         { name: 'outcome', type: 'vocabulary', required: 'always', vocabulary: 'responseOutcomes', about: 'What the log or check-in came to.' },
         { name: 'title', type: 'text', required: 'always', maxLength: RESPONSE_TITLE_LENGTH, plainText: true, routineWording: true, wordingRule: 'RESPONSE_WORDING', stepPlaceholder: true, about: 'The heading of the answer, in plain words. May hold {step}.' },
@@ -604,8 +607,8 @@ export const CONTRACT: Contract = {
       checks: [
         { rule: 'RESPONSE_MISSING', about: 'Each outcome has one approved row. A draft or retired row does not count.' },
         { rule: 'RESPONSE_DUPLICATE', about: 'Each outcome appears once. A draft or retired row counts.' },
-        { rule: 'RESPONSE_PLACEHOLDER', about: 'No text holds a placeholder in braces other than {step}.' },
-        { rule: 'RESPONSE_WORDING', about: 'No text, with {step} replaced by a plain noun, holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.' },
+        { rule: 'RESPONSE_PLACEHOLDER', about: 'No text holds a brace that is not part of an exact {step}.' },
+        { rule: 'RESPONSE_WORDING', about: 'No text, read with {step} as each of Cleanser, Treatment, Moisturiser, Sunscreen and "your routine", holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.' },
         { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
       ],
     },
@@ -615,7 +618,7 @@ export const CONTRACT: Contract = {
       about:
         'The week card on the Today screen: a short heading and a few plain words for the stretch of weeks a person is in. A row is one band, and optionally a goal and a step-down: the card shown is the first that exists of the band\'s card for the goal on a step-down, the band\'s step-down card, the band\'s card for the goal, and the band\'s base card, so each band needs one approved base card (no goal, step_down no). The server prints "Week 1" and the like itself, so the title is a short heading. A qualified person approves a card; in production the server refuses an approved row whose approver is not on its list. A row is identified by its band, goal and step_down, and is retired, never deleted.',
       columns: [
-        { name: 'band', type: 'vocabulary', required: 'always', vocabulary: 'weekBands', about: 'The weeks the card is for. A person in week 13 or later is shown the 9-12 card.' },
+        { name: 'band', type: 'vocabulary', required: 'always', vocabulary: 'weekBands', about: 'The weeks the card is for. A person in week 13 or later is shown the 9-12 card. Keep the column formatted as text: a spreadsheet turns 3-4 into a date otherwise.' },
         { name: 'goal', type: 'vocabulary', required: 'optional', vocabulary: 'goals', about: 'The goal the card is for. Leave it empty for the band\'s base card, which people with any other goal are shown.' },
         { name: 'step_down', type: 'vocabulary', required: 'optional', vocabulary: 'yesNo', about: 'yes for a card shown to a person who is stepping down a product, no for any other. Empty means no.' },
         { name: 'title', type: 'text', required: 'always', maxLength: WEEK_TITLE_LENGTH, plainText: true, routineWording: true, wordingRule: 'WEEK_WORDING', about: 'A short heading, in plain words. Do not write "Week 1": the server adds that.' },
@@ -626,6 +629,7 @@ export const CONTRACT: Contract = {
       checks: [
         { rule: 'WEEK_BASE_MISSING', about: 'Each band has one approved row with no goal and step_down no (or empty). A draft or retired row does not count.' },
         { rule: 'WEEK_DUPLICATE', about: 'Each band, goal and step_down appears once, no goal counting as a goal and an empty step_down as no. A draft or retired row counts.' },
+        { rule: 'WEEK_BAND_DATE', about: 'No band cell holds a date that a spreadsheet made of a band (3-4 turned into 4 March, 5-8, 9-12).' },
         { rule: 'WEEK_WORDING', about: 'No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.' },
         { rule: 'AUDIT_INCOMPLETE', about: 'audited_by and audited_on are given together, or not at all.' },
       ],
@@ -809,6 +813,9 @@ export const compareGuides = (a: { step: RoutineStep; goal: Goal | null }, b: { 
   return ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step) || goalAt(a.goal) - goalAt(b.goal)
 }
 
+/** The groups that are only ever stopped, never brought back: no ladder is written for them, and none is ever given to them (not even the default). */
+export const REINTRO_NEVER_BACK: readonly IngredientGroup[] = ['mercury', 'steroid', 'lightening-agent']
+
 /** A ladder's key where one is needed (a diff, a stored row): its group, or `default` for the ladder with none. */
 export const reintroductionKey = (row: { group: string | null }): string => row.group ?? 'default'
 
@@ -841,6 +848,8 @@ type ScheduleKind = {
   end: string
   missingEnd: RuleCode
   endNotLast: RuleCode
+  /** The rule for a schedule whose first step is the end, when that is not allowed; null when it is. */
+  endAlone: RuleCode | null
   wrongWay: RuleCode
   isWrongWay: (now: number, before: number) => boolean
 }
@@ -852,6 +861,7 @@ const TAPER_SCHEDULE: ScheduleKind = {
   end: 'stop',
   missingEnd: 'SCHEDULE_MISSING_STOP',
   endNotLast: 'SCHEDULE_STOP_NOT_LAST',
+  endAlone: null,
   wrongWay: 'SCHEDULE_FREQUENCY_INCREASES',
   isWrongWay: (now, before) => now > before,
 }
@@ -863,6 +873,7 @@ const LADDER_SCHEDULE: ScheduleKind = {
   end: 'back',
   missingEnd: 'REINTRO_MISSING_BACK',
   endNotLast: 'REINTRO_BACK_NOT_LAST',
+  endAlone: 'REINTRO_BACK_ONLY',
   wrongWay: 'REINTRO_FREQUENCY_DECREASES',
   isWrongWay: (now, before) => now < before,
 }
@@ -897,6 +908,7 @@ const scheduleFaults = (steps: ScheduleStep[], kind: ScheduleKind): RuleCode[] =
   })
   if (!contiguous) faults.push('SCHEDULE_NOT_CONTIGUOUS')
   const firstEnd = steps.findIndex((step) => step.frequency === kind.end)
+  if (firstEnd === 0 && kind.endAlone !== null) faults.push(kind.endAlone)
   if (firstEnd < 0) faults.push(kind.missingEnd)
   else if (firstEnd < steps.length - 1 || steps.filter((step) => step.frequency === kind.end).length > 1) faults.push(kind.endNotLast)
   // Only the steps up to the first end are compared: what follows a misplaced end is already reported.
@@ -916,8 +928,6 @@ const scheduleFaults = (steps: ScheduleStep[], kind: ScheduleKind): RuleCode[] =
 class Sheet {
   private static readonly DATE = /^(\d{4})-(\d{2})-(\d{2})$/
   private static readonly WHOLE_NUMBER = /^\d+$/
-  /** Anything in braces. The flag is global, so it is read with `match` only: `test` would keep a position between cells. */
-  private static readonly PLACEHOLDER = /\{[^}]*\}/g
   /** A header the contract does not know is named in a problem, so a long one is cut: a header can be as long as a cell. */
   private static readonly UNKNOWN_COLUMN_NAME = 80
 
@@ -1184,10 +1194,11 @@ class Sheet {
     else {
       if (definition.plainText && hasLinkOrMarkup(value)) this.fail(i, definition.name, 'HAS_LINK_OR_MARKUP')
       if (definition.lowerCase && value !== value.toLowerCase()) this.fail(i, definition.name, 'NOT_LOWER_CASE')
-      if (definition.stepPlaceholder && (value.match(Sheet.PLACEHOLDER) ?? []).some((found) => found !== STEP_PLACEHOLDER)) this.fail(i, definition.name, 'RESPONSE_PLACEHOLDER')
-      // The wording gate reads the sentence the person will, so {step} is a plain noun in it.
-      const read = definition.stepPlaceholder ? value.replaceAll(STEP_PLACEHOLDER, STEP_NOUN) : value
-      if (definition.routineWording && FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(read))) this.fail(i, definition.name, definition.wordingRule ?? 'GUIDE_WORDING')
+      // Strict: once every exact {step} is taken out, no brace may be left ({step, step}, {step}} and {x} are all refused).
+      if (definition.stepPlaceholder && /[{}]/.test(value.replaceAll(STEP_PLACEHOLDER, ''))) this.fail(i, definition.name, 'RESPONSE_PLACEHOLDER')
+      // The wording gate reads the sentences the person will: once for each way {step} is shown, and a text fails if any reading does.
+      const readings = definition.stepPlaceholder ? STEP_NOUNS.map((noun) => value.replaceAll(STEP_PLACEHOLDER, noun)) : [value]
+      if (definition.routineWording && readings.some((read) => FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(read)))) this.fail(i, definition.name, definition.wordingRule ?? 'GUIDE_WORDING')
     }
   }
 
@@ -1438,7 +1449,7 @@ class WorkbookValidator {
     s.checkAudit(i)
     const group = s.vocabulary<IngredientGroup>(i, 'group')
     // Whatever the row's status: a ladder for a product that is only ever stopped would be there to be switched on.
-    if (group !== null && NEVER_BACK.includes(group)) s.fail(i, 'group', 'REINTRO_GROUP_NEVER_BACK')
+    if (group !== null && REINTRO_NEVER_BACK.includes(group)) s.fail(i, 'group', 'REINTRO_GROUP_NEVER_BACK')
     return {
       group,
       schedule: s.ladder(i, 'schedule'),
@@ -1466,6 +1477,24 @@ class WorkbookValidator {
     }
   }
 
+  /**
+   * The band of a card. A spreadsheet turns a band typed as 3-4 into a day, which the file then holds as a date: when the cell is a date that a band such as that
+   * makes (in either order of day and month), the problem says so and not only that the value is not a band.
+   */
+  private weekBand(i: number): WeekBand | null {
+    const s = this.weeks
+    const written = s.has('band') ? s.value(i, 'band') : null
+    const day = written === null ? null : /^\d{4}-(\d{2})-(\d{2})$/.exec(written)
+    if (day !== null) {
+      const [month, date] = [Number(day[1]), Number(day[2])]
+      if ([`${month}-${date}`, `${date}-${month}`].some((band) => (WEEK_BANDS as readonly string[]).includes(band))) {
+        s.fail(i, 'band', 'WEEK_BAND_DATE')
+        return null
+      }
+    }
+    return s.vocabulary<WeekBand>(i, 'band')
+  }
+
   private response(i: number): ResponseRow {
     const s = this.responses
     s.checkAudit(i)
@@ -1486,7 +1515,7 @@ class WorkbookValidator {
     const s = this.weeks
     s.checkAudit(i)
     return {
-      band: s.vocabulary<WeekBand>(i, 'band')!,
+      band: this.weekBand(i)!,
       goal: s.vocabulary<Goal>(i, 'goal'),
       // An empty step_down is no.
       stepDown: s.vocabulary<'yes' | 'no'>(i, 'step_down') === 'yes',

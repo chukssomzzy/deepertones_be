@@ -11,7 +11,7 @@ import { diffWorkbooks, type TabDiff, type WorkbookDiff } from './catalog.workbo
 import { toRawWorkbook } from './catalog.workbook.raw'
 import type { CatalogWorkbookRepository, Country, LiveRules, PlannedProduct, Recommendation, RecommendedByCode, WorkbookChanges } from './catalog.workbook.repository'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
-import { CONTRACT_VERSION, guideKey, reintroductionKey, validateWorkbook, weekKey, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type ScheduleStep, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
+import { CONTRACT_VERSION, REINTRO_NEVER_BACK, guideKey, reintroductionKey, validateWorkbook, weekKey, type GuideRow, type IngredientRule, type ProductRow, type RawWorkbook, type ScheduleStep, type TaperRow, type Workbook, type WorkbookProblem } from './catalog.workbook.schema'
 import { RawWorkbookSchema } from './catalog.workbook.schemas'
 
 /** A product row that no product of the catalog has the identity of (by identity key or alias): the upload would make it. */
@@ -273,9 +273,11 @@ export class CatalogWorkbookService {
 
   /**
    * The steps a person is brought back on: the approved ladder of the group, else the approved default ladder, else no steps (the team has not written one yet).
-   * A ladder is given whole: nothing is borrowed from the default.
+   * A ladder is given whole: nothing is borrowed from the default. A group that is never brought back (mercury, steroid, lightening-agent) has no steps, and
+   * does not get the default ladder either.
    */
   async reintroductionFor(group: IngredientGroup | null): Promise<ScheduleStep[]> {
+    if (group !== null && REINTRO_NEVER_BACK.includes(group)) return []
     const approved = await this.repository.approvedReintroductions()
     const row = (group === null ? undefined : approved.find((candidate) => candidate.group === group)) ?? approved.find((candidate) => candidate.group === null)
     return row === undefined ? [] : row.schedule

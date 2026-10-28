@@ -75,6 +75,32 @@ describe('writeWorkbookFile', () => {
     for (const name of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides', 'Reintroductions', 'Escalations', 'Responses', 'Weeks']) expect(book.getWorksheet(name)?.state, name).toBe('visible')
   })
 
+  it('formats the band column of Weeks as text, header, rows and the rest of the column, so a spreadsheet does not turn 3-4 into a date', async () => {
+    const path = newPath()
+    await writeWorkbookFile(path, validWorkbook({ weeks: [...baseWeeks(), week({ band: '3-4', goal: 'glow' })] }), 7)
+
+    const sheet = (await load(path)).getWorksheet('Weeks')!
+    const bandColumn = HEADERS.weeks.indexOf('band') + 1
+
+    expect(sheet.getRow(1).getCell(bandColumn).numFmt).toBe('@')
+    for (let row = 2; row <= sheet.actualRowCount; row++) expect(sheet.getRow(row).getCell(bandColumn).numFmt, `row ${row}`).toBe('@')
+    expect(sheet.getColumn(bandColumn).numFmt).toBe('@')
+    // Only that column: the other cells of the tab keep the general format.
+    expect(sheet.getRow(2).getCell(HEADERS.weeks.indexOf('title') + 1).numFmt).not.toBe('@')
+    expect(sheet.getColumn(HEADERS.weeks.indexOf('goal') + 1).numFmt).not.toBe('@')
+  })
+
+  it('reads a band back as the text it was written, 3-4 and 9-12 included', async () => {
+    const path = newPath()
+    const weeks = [...baseWeeks(), week({ band: '3-4', goal: 'glow' }), week({ band: '9-12', goal: 'glow' })]
+    await writeWorkbookFile(path, validWorkbook({ weeks }), 7)
+
+    const read = (await readWorkbookFile(path)).workbook.weeks.rows
+
+    expect(read.map((row) => row.band)).toEqual(weeks.map((row) => row.band))
+    expect(read.every((row) => typeof row.band === 'string')).toBe(true)
+  })
+
   it('puts each tab\'s headers in row 1, in order, and the rows below them', async () => {
     const path = newPath()
     const workbook = validWorkbook({ products: [product(), product({ code: 'PRD-SECOND', brand: 'Second Brand' })] })

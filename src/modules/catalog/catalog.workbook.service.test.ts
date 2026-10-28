@@ -1667,6 +1667,14 @@ describe('CatalogWorkbookService.reintroductionFor', () => {
     expect(await service.reintroductionFor('benzoyl-peroxide')).toEqual(steps)
   })
 
+  it.each(['mercury', 'steroid', 'lightening-agent'] as const)('gives no steps for %s, which is never brought back, and not the default ladder either', async (group) => {
+    const service = await live(retinoid)
+
+    expect(await service.reintroductionFor(group)).toEqual([])
+    // The default ladder is still there for a group that can be brought back.
+    expect(await service.reintroductionFor('exfoliating-acid')).toHaveLength(2)
+  })
+
   it('ignores a ladder that is a draft, and one that has been retired, and gives the default', async () => {
     const service = await live(ladder({ group: 'exfoliating-acid', schedule: '1: as-needed; 2: back', ...unsigned }), ladder({ group: 'benzoyl-peroxide', schedule: '1: as-needed; 2: back' }))
     await applyEdit(service, await edited(service, (w) => (w.reintroductions.rows = w.reintroductions.rows.filter((row) => row.group !== 'benzoyl-peroxide'))))
