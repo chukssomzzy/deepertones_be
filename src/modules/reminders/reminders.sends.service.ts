@@ -1,5 +1,5 @@
 import { describeError } from '../../jobs/safe-error'
-import { dueOnDay } from '../catalog/catalog.frequency'
+import { daysBetween, dueOnDay } from '../catalog/catalog.frequency'
 import type { NotificationsService } from '../notifications/notifications.service'
 import type { RemindersRepository } from './reminders.repository'
 import type { ReminderSendsRepository } from './reminders.sends.repository'
@@ -58,8 +58,8 @@ export class ReminderSendsService {
    *
    * A time is due when the profile's local time (its zone; UTC while none is stored) is in [time, time + 15 minutes) of real time: a time the clocks skip is due at the first
    * instant after the gap, and one that happens twice is due once (the second pass is refused by the claim). Nothing is sent before day 1, for a profile with no phone or when
-   * nothing is due. The evening lists only the entries due that local day: alternate-days entries on every other day counted from day 1, weekly ones on day 1's weekday,
-   * never as-needed ones. The order is the phone (once per profile, before the routine is read), then per reminder the claim, then the push: a window with no phone
+   * nothing is due. The evening lists only the entries due that local day: alternate-days entries on every other day and weekly ones on the same weekday, counted from the entry's anchor day (an entry being brought back after a pause) or
+   * day 1 without one, never as-needed ones. The order is the phone (once per profile, before the routine is read), then per reminder the claim, then the push: a window with no phone
    * claims nothing, so a phone that registers before it closes is still sent to. A push whose enqueue fails keeps its claim, so it is not tried again that day.
    *
    * At the morning time there are up to two more pushes, each its own claim and its own job: the step-down alert (a step of a step-down begins that local day; claimed as 'step-down' for
@@ -140,7 +140,7 @@ export class ReminderSendsService {
     const streak = await this.checkIns.missedStreak(profileId, today)
     if (streak.since === null) return false
     const since = enabledOn !== null && enabledOn > streak.since ? enabledOn : streak.since
-    const days = ReminderSendsService.daysBetween(since, ReminderSendsService.dayBefore(today)) + 1
+    const days = daysBetween(since, ReminderSendsService.dayBefore(today)) + 1
     if (days < ReminderSendsService.NUDGE_AFTER_DAYS) return false
     if ((await this.channel.missedDaysChannelFor(profileId)) === 'whatsapp') {
       console.log({ job: 'reminder-send', outcome: 'nudge-whatsapp-not-sent', profileId, channel: 'whatsapp' })
@@ -167,10 +167,6 @@ export class ReminderSendsService {
   private static titleFor(plan: ReminderRoutinePlan, time: ReminderTime, day: string): string {
     const entries = time === 'morning' ? plan.morning : plan.evening.filter(({ frequency, anchor }) => dueOnDay(frequency, anchor ?? plan.dayOne, day))
     return entries.map(({ title }) => title).join(', ')
-  }
-
-  private static daysBetween(from: string, to: string): number {
-    return Math.round((Date.parse(`${to}T00:00:00.000Z`) - Date.parse(`${from}T00:00:00.000Z`)) / ReminderSendsService.DAY_MS)
   }
 
   private static dayBefore(day: string): string {

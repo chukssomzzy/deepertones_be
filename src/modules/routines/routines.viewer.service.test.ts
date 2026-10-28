@@ -2014,6 +2014,51 @@ describe('RoutineViewerService.current: what each entry is doing (the skin-care 
     expect(['cleanse', 'moisturise', 'protect'].flatMap((step) => statusOf(routine, step as RoutineStep))).toEqual(['active', 'active', 'active', 'active'])
   })
 
+  it('lets an open hold win over a rung: the entry with an active ingredient is held though a bringing-back pause names it, and a paused one stays paused', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'alternate-days', anchor: dayText(START_DAY) })], held: true }
+
+    expect(statusOf(await read(), 'treat')).toEqual(['held'])
+
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'paused')], held: true }
+
+    expect(statusOf(await read(), 'treat')).toEqual(['paused'])
+  })
+
+  it('leaves a rung alone under a hold when the entry has no active ingredient', async () => {
+    world.skinCare = { pauses: [pause('moisturise', 'product-MOIST-GH', 'bringing-back', { frequency: 'alternate-days', anchor: dayText(START_DAY) })], held: true }
+
+    expect(statusOf(await read(), 'moisturise')).toEqual(['bringing-back'])
+  })
+
+  it('shows a bringing-back entry at its rung\'s frequency and in the list the rung places it in, as the reminder plan does: an am-pm moisturiser brought back every other day is an evening entry only', async () => {
+    world.skinCare = { pauses: [pause('moisturise', 'product-MOIST-GH', 'bringing-back', { frequency: 'alternate-days', anchor: dayText(START_DAY) })], held: false }
+
+    const routine = await read()
+
+    expect(routine.morning.map((entry: any) => entry.step)).toEqual(['cleanse', 'protect'])
+    expect(routine.evening.map((entry: any) => [entry.step, entry.when, entry.status])).toEqual([
+      ['treat', 'Every day', 'active'],
+      ['moisturise', 'Every other evening', 'bringing-back'],
+    ])
+  })
+
+  it('fails closed: when the skin-care state cannot be read the read fails, never showing a paused step as active, and marks nothing served', async () => {
+    stateFor.mockRejectedValue(new Error('state unavailable'))
+
+    await expect(read()).rejects.toThrow('state unavailable')
+    await expect(asVerified(() => viewer.watch())).rejects.toThrow('state unavailable')
+
+    expect((await repository.current(PROFILE))!.servedAt).toBeNull()
+  })
+
+  it('sends no routine frame when the skin-care state cannot be read: the stream never carries a paused step as active', async () => {
+    stateFor.mockRejectedValue(new Error('state unavailable'))
+
+    await runAs(SYSTEM, () => viewer.announce(PROFILE))
+
+    expect(events.eventsFor(`routine:${PROFILE}`).filter((event: any) => event.type === 'routine')).toEqual([])
+  })
+
   it('holds nothing when a hold is open and no entry has an active ingredient', async () => {
     setIngredients('form-serum-1', ['Aqua'])
     world.skinCare = { pauses: [], held: true }
@@ -2117,6 +2162,18 @@ describe('RoutineViewerService.reminderPlanFor: the skin-care overlay', () => {
     world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'weekly', anchor: ANCHOR })], held: false }
 
     expect((await plan())!.evening[0]).toEqual({ step: 'treat', title: 'Serum', frequency: 'weekly', anchor: ANCHOR })
+  })
+
+  it('leaves out an entry with an active ingredient under a hold even when a bringing-back pause names it', async () => {
+    world.skinCare = { pauses: [pause('treat', 'product-SERUM-1', 'bringing-back', { frequency: 'alternate-days', anchor: ANCHOR })], held: true }
+
+    expect((await plan())!.evening.map((entry) => entry.step)).toEqual(['moisturise'])
+  })
+
+  it('fails closed: with the skin-care state unreadable there is no plan, rather than a plan that still lists a paused step', async () => {
+    stateFor.mockRejectedValue(new Error('state unavailable'))
+
+    await expect(plan()).rejects.toThrow('state unavailable')
   })
 
   it('does not touch the step-down days', async () => {

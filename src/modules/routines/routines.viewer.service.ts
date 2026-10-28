@@ -359,8 +359,10 @@ export class RoutineViewerService {
     steps.forEach((step, at) => {
       const { productId } = identities[at]!
       const pause = productId === null ? undefined : state.pauses.find((paused) => paused.step === step.step && paused.productId === productId)
-      if (pause) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }) })
-      else if (groups?.[at]!.length) overlay.set(step, { status: 'held' })
+      const held = (groups?.[at]?.length ?? 0) > 0
+      // An open hold wins over a rung: nothing active comes back while it is open. A paused step stays paused (both are left out of the reminders).
+      if (pause && !(held && pause.state === 'bringing-back')) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }) })
+      else if (held) overlay.set(step, { status: 'held' })
     })
     return { ...input, overlay }
   }

@@ -112,9 +112,18 @@ const titleOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInp
   return { title: titleFor({ step: step.step, form, keyIngredient }), product }
 }
 
+/** The rung a step is being brought back at, when it is: its frequency and the day its count starts. */
+const rungOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): StepOverlay | undefined => {
+  const over = input.overlay?.get(step)
+  return over?.status === 'bringing-back' ? over : undefined
+}
+
+/** How often a step is used now: the rung's while it is being brought back, else the routine's own. The body's `when`, the list it is in and the reminders all follow it. */
+const frequencyOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): RoutineVersionRow['steps'][number]['frequency'] => rungOf(step, input)?.frequency ?? step.frequency
+
 const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
   const { title, product } = titleOf(step, input)
-  return { step: step.step, title, when: whenFor(step.frequency), reason: step.reason, status: input.overlay?.get(step)?.status ?? 'active', changed: changedSince(step, previous, input), product }
+  return { step: step.step, title, when: whenFor(frequencyOf(step, input)), reason: step.reason, status: input.overlay?.get(step)?.status ?? 'active', changed: changedSince(step, previous, input), product }
 }
 
 // Morning is am and am-pm; evening is pm, am-pm and anything used less than daily, which the routine places in the evening. The sunscreen is only ever a morning step.
@@ -192,8 +201,8 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
     status: input.status,
     startedOn: version.startedOn === null ? null : dayString(utcDay(version.startedOn)),
     expectation: version.expectation ?? '',
-    morning: ordered.filter(inMorning).map((step) => entryOf(step, previous, input)),
-    evening: ordered.filter(inEvening).map((step) => entryOf(step, previous, input)),
+    morning: ordered.filter((step) => inMorning({ step: step.step, frequency: frequencyOf(step, input) })).map((step) => entryOf(step, previous, input)),
+    evening: ordered.filter((step) => inEvening({ step: step.step, frequency: frequencyOf(step, input) })).map((step) => entryOf(step, previous, input)),
     // The stored list as it was built, field by field like everything else here: its titles and reasons were fixed at the build, and a product since gone from the shelf still shows.
     notInRoutine: version.notInRoutine?.map(({ entryId, title, status, reason }) => ({ entryId, title, status, reason })) ?? null,
     tapers,
@@ -228,8 +237,8 @@ export const toReminderPlan = (input: RoutineViewInput): ReminderPlan | null => 
   const entries = ordered.flatMap((step): ReminderPlanEntry[] => {
     const over = input.overlay?.get(step)
     if (over?.status === 'paused' || over?.status === 'held') return []
-    const rung = over?.status === 'bringing-back' ? over : undefined
-    return [{ step: step.step, title: titleOf(step, input).title, frequency: rung?.frequency ?? step.frequency, ...(rung?.anchor === undefined ? {} : { anchor: rung.anchor }) }]
+    const rung = rungOf(step, input)
+    return [{ step: step.step, title: titleOf(step, input).title, frequency: frequencyOf(step, input), ...(rung?.anchor === undefined ? {} : { anchor: rung.anchor }) }]
   })
   return { dayOne: dayString(utcDay(version.startedOn)), morning: entries.filter(inMorning), evening: entries.filter(inEvening), stepDownChanges: stepDownChangesOf(input) }
 }
@@ -242,19 +251,20 @@ export type StepDownProgress = { entryId: string; title: string; step: number; o
 
 /**
  * Where each step-down that has begun is on `today` (a local day, 'YYYY-MM-DD'), in the order given, by the arithmetic the schedule screen counts its dates with. A step-down with no
- * start date has not begun, and one whose template the workbook no longer holds has no schedule: both are left out, the second logged as the body logs it. A step-down is running
+ * start date has not begun, and one whose template the workbook no longer holds has no schedule: both are left out, the second logged as the body logs it (with the profile's id, when given). A step-down is running
  * until its start plus the last week's end (so also before its first day), and after that it is still its last step.
  */
 export const stepDownProgressOf = (
   tapers: readonly (Pick<RoutineVersionRow['tapers'][number], 'shelfProductId' | 'templateId' | 'startedOn'> & { title: string })[],
   templates: ReadonlyMap<string, TaperRow>,
   today: string,
+  profileId?: string,
 ): StepDownProgress[] =>
   tapers.flatMap((stopped) => {
     if (stopped.startedOn === null) return []
     const template = templates.get(stopped.templateId)
     if (!template) {
-      console.error({ outcome: 'routine-taper-template-missing', templateId: stopped.templateId })
+      console.error({ outcome: 'routine-taper-template-missing', profileId, templateId: stopped.templateId })
       return []
     }
     const began = utcDay(stopped.startedOn)
@@ -281,4 +291,5 @@ export const stepDownsOf = (input: RoutineViewInput, today: string): StepDownPro
     input.version.tapers.map((stopped) => ({ ...stopped, title: frozenTitleOf(input, stopped.shelfProductId) })),
     input.tapers,
     today,
+    input.version.profileId,
   )
