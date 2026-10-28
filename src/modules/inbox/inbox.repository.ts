@@ -12,7 +12,7 @@ export class D1InboxRepository {
    * stays as it was. One INSERT ... ON CONFLICT DO NOTHING, so of several writes made at the same time exactly one is created. Rejects a profile that does not exist.
    */
   async insertOnce(row: NewInboxItem): Promise<{ id: string; created: boolean }> {
-    const inserted = await this.db.insert(inboxItems).values(row).onConflictDoNothing().returning({ id: inboxItems.id })
+    const inserted = await this.db.insert(inboxItems).values(row).onConflictDoNothing({ target: [inboxItems.profileId, inboxItems.key] }).returning({ id: inboxItems.id })
     if (inserted.length > 0) return { id: row.id, created: true }
     const [held] = await this.db
       .select({ id: inboxItems.id })

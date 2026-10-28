@@ -107,7 +107,8 @@ export class InboxService {
   /** The error names the row's key, never its text: the text is what failed. */
   private static checked({ title, body, link, key }: InboxWrite) {
     if ([title, body].some((text) => FORBIDDEN_WORDING.some(({ pattern }) => pattern.test(text)))) throw new Error(`Inbox row ${key} fails the wording gate`)
-    if (!link.startsWith('/')) throw new Error(`Inbox row ${key} must link to an in-app path`)
+    // An in-app path: one leading slash, never '//host' or a backslash, which a URL opener could take off the app.
+    if (!link.startsWith('/') || link.startsWith('//') || link.includes('\\')) throw new Error(`Inbox row ${key} must link to an in-app path`)
   }
 
   private static viewOf({ id, kind, localDay, title, body, link, readAt, createdAt }: InboxItem): InboxItemView {

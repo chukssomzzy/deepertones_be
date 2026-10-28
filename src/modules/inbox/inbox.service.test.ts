@@ -142,6 +142,8 @@ describe('InboxService.write', () => {
     ['a link without a leading slash', 'routine'],
     ['a full URL', 'https://deepertones.com/routine'],
     ['an empty link', ''],
+    ['a protocol-relative link', '//evil.example/x'],
+    ['a link with a backslash', '/\\evil.example'],
   ])('refuses %s and writes nothing', async (_name, link) => {
     await expect(write(AMARA, { link })).rejects.toThrow()
 
