@@ -5,12 +5,15 @@ import { formulations, products } from './catalog.table'
 import {
   CATEGORIES,
   CONCERN_KINDS,
+  ESCALATION_REASONS,
   FREQUENCIES,
   INGREDIENT_GROUPS,
   ORIGINS,
   PRODUCT_FORMS,
+  RESPONSE_OUTCOMES,
   ROUTINE_STEPS,
   TAPER_KINDS,
+  WEEK_BANDS,
   type ConcernKind,
   type Frequency,
   type IngredientGroup,
@@ -87,6 +90,72 @@ export const guides = sqliteTable('guides', {
   lookFor: text('look_for').notNull(),
   forDeeperSkin: text('for_deeper_skin').notNull(),
   lookForWhenPregnant: text('look_for_when_pregnant'),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/**
+ * A reintroduction ladder, as the workbook's Reintroductions tab holds it: how a paused product is brought back slowly. A ladder is identified by its group, and `key` is
+ * that group, or `default` for the ladder with none (`reintroductionKey`), and is the primary key: SQLite counts a null group as different from every other, so a composite
+ * key could not hold the default ladder. Retired, never deleted.
+ */
+export const reintroductions = sqliteTable('reintroductions', {
+  key: text('key').primaryKey(),
+  group: text('group', { enum: INGREDIENT_GROUPS }),
+  schedule: text('schedule', { mode: 'json' }).$type<ScheduleStep[]>().notNull(),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/** What the app tells a person when it sends them to a professional, as the workbook's Escalations tab holds it. `key` is the reason. Retired, never deleted. */
+export const escalations = sqliteTable('escalations', {
+  key: text('key').primaryKey(),
+  reason: text('reason', { enum: ESCALATION_REASONS }).notNull(),
+  whoToSee: text('who_to_see').notNull(),
+  howSoon: text('how_soon').notNull(),
+  whatToTellThem: text('what_to_tell_them').notNull(),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/** The text that answers a skin log or a check-in after a pause, as the workbook's Responses tab holds it. `key` is the outcome. The texts may hold `{step}`. Retired, never deleted. */
+export const responses = sqliteTable('responses', {
+  key: text('key').primaryKey(),
+  outcome: text('outcome', { enum: RESPONSE_OUTCOMES }).notNull(),
+  title: text('title').notNull(),
+  body: text('body').notNull(),
+  whatToDoNow: text('what_to_do_now'),
+  status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
+  approvedBy: text('approved_by'),
+  approvedOn: text('approved_on'),
+  auditedBy: text('audited_by'),
+  auditedOn: text('audited_on'),
+  updatedInVersion: integer('updated_in_version').notNull(),
+})
+
+/**
+ * A week card on Today, as the workbook's Weeks tab holds it. `key` is the band, then `:<goal>` for a goal, then `:step-down` for a step-down (`weekKey`), and is the
+ * primary key, for the reason a ladder's is. Retired, never deleted.
+ */
+export const weeks = sqliteTable('weeks', {
+  key: text('key').primaryKey(),
+  band: text('band', { enum: WEEK_BANDS }).notNull(),
+  goal: text('goal', { enum: GOALS }),
+  stepDown: integer('step_down', { mode: 'boolean' }).notNull(),
+  title: text('title').notNull(),
+  text: text('text').notNull(),
   status: text('status', { enum: ['draft', 'approved', 'retired'] }).notNull(),
   approvedBy: text('approved_by'),
   approvedOn: text('approved_on'),

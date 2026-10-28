@@ -6,10 +6,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CONTRACT_VERSION, type RawWorkbook } from '../../src/modules/catalog/catalog.workbook.schema'
 import { readFileBytes, readWorkbookBytes, readWorkbookFile, WorkbookFileError, writeWorkbookFile } from './xlsx'
 import { readFile } from 'node:fs/promises'
-import { availability, baseGuides, claimWord, country, day, dayAsDate, guide, HEADERS, ingredient, product, TAB_NAMES, taper, validWorkbook } from './workbook.fixture'
+import { allEscalations, allResponses, availability, baseGuides, baseReintroductions, baseWeeks, claimWord, country, day, dayAsDate, escalation, guide, HEADERS, ingredient, product, reintroduction, response, TAB_NAMES, taper, validWorkbook, week } from './workbook.fixture'
 
 // The shared xlsx module behind `catalog:export` (which writes a workbook file) and `catalog:upload` (which reads one back). The file layout is
-// the contract with the people who edit it: seven tabs named exactly Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides, the header row first, and a
+// the contract with the people who edit it: eleven tabs named exactly Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks, the header row first, and a
 // hidden `_meta` sheet that remembers which catalog version the file was exported at. `_meta` holds one `key | value` pair per row:
 //   catalogVersion | <number>
 //   contractVersion | <text>
@@ -63,16 +63,42 @@ const load = async (path: string): Promise<ExcelJS.Workbook> => new ExcelJS.Work
 const productCells = (row: Record<string, unknown>): unknown[] => HEADERS.products.map((header) => row[header] ?? null)
 
 describe('writeWorkbookFile', () => {
-  it('writes the seven tabs under their exact names, in order, then a hidden _meta sheet', async () => {
+  it('writes the eleven tabs under their exact names, in order, then a hidden _meta sheet', async () => {
     const path = newPath()
     await writeWorkbookFile(path, validWorkbook(), 7)
 
     const book = await load(path)
 
-    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides', '_meta'])
+    expect(book.worksheets.map((sheet) => sheet.name)).toEqual(['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides', 'Reintroductions', 'Escalations', 'Responses', 'Weeks', '_meta'])
     // veryHidden, not hidden: Excel's Unhide menu does not list it, so nobody edits the version stamp by accident.
     expect(book.getWorksheet('_meta')?.state).toBe('veryHidden')
-    for (const name of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides']) expect(book.getWorksheet(name)?.state, name).toBe('visible')
+    for (const name of ['Products', 'Availability', 'Ingredients', 'Countries', 'Claim words', 'Tapers', 'Guides', 'Reintroductions', 'Escalations', 'Responses', 'Weeks']) expect(book.getWorksheet(name)?.state, name).toBe('visible')
+  })
+
+  it('formats the band column of Weeks as text, header, rows and the rest of the column, so a spreadsheet does not turn 3-4 into a date', async () => {
+    const path = newPath()
+    await writeWorkbookFile(path, validWorkbook({ weeks: [...baseWeeks(), week({ band: '3-4', goal: 'glow' })] }), 7)
+
+    const sheet = (await load(path)).getWorksheet('Weeks')!
+    const bandColumn = HEADERS.weeks.indexOf('band') + 1
+
+    expect(sheet.getRow(1).getCell(bandColumn).numFmt).toBe('@')
+    for (let row = 2; row <= sheet.actualRowCount; row++) expect(sheet.getRow(row).getCell(bandColumn).numFmt, `row ${row}`).toBe('@')
+    expect(sheet.getColumn(bandColumn).numFmt).toBe('@')
+    // Only that column: the other cells of the tab keep the general format.
+    expect(sheet.getRow(2).getCell(HEADERS.weeks.indexOf('title') + 1).numFmt).not.toBe('@')
+    expect(sheet.getColumn(HEADERS.weeks.indexOf('goal') + 1).numFmt).not.toBe('@')
+  })
+
+  it('reads a band back as the text it was written, 3-4 and 9-12 included', async () => {
+    const path = newPath()
+    const weeks = [...baseWeeks(), week({ band: '3-4', goal: 'glow' }), week({ band: '9-12', goal: 'glow' })]
+    await writeWorkbookFile(path, validWorkbook({ weeks }), 7)
+
+    const read = (await readWorkbookFile(path)).workbook.weeks.rows
+
+    expect(read.map((row) => row.band)).toEqual(weeks.map((row) => row.band))
+    expect(read.every((row) => typeof row.band === 'string')).toBe(true)
   })
 
   it('puts each tab\'s headers in row 1, in order, and the rows below them', async () => {
@@ -134,7 +160,7 @@ describe('writeWorkbookFile', () => {
 
   it('writes a tab that has headers and no rows as just its header row', async () => {
     const path = newPath()
-    await writeWorkbookFile(path, validWorkbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [], guides: [] }), 1)
+    await writeWorkbookFile(path, validWorkbook({ products: [], availability: [], ingredients: [], countries: [], claimWords: [], tapers: [], guides: [], reintroductions: [], escalations: [], responses: [], weeks: [] }), 1)
 
     const book = await load(path)
 
@@ -197,6 +223,10 @@ describe('readWorkbookFile: a round trip', () => {
         guide({ step: 'treat', goal: 'fade-dark-marks', look_for_when_pregnant: 'Azelaic acid only.', audited_by: 'Nneka Audit', audited_on: day(-1) }),
         guide({ step: 'protect', goal: 'glow', status: 'retired' }),
       ],
+      reintroductions: [...baseReintroductions(), reintroduction({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: am; 6: back', audited_by: 'Nneka Audit', audited_on: day(-1) })],
+      escalations: [...allEscalations().slice(1), escalation({ audited_by: 'Nneka Audit', audited_on: day(-1) })],
+      responses: [...allResponses().slice(1), response({ what_to_do_now: null })],
+      weeks: [...baseWeeks(), week({ band: '3-4', goal: 'glow', step_down: 'yes' }), week({ band: '9-12', goal: 'calm-repair', status: 'retired' })],
     })
 
     await writeWorkbookFile(path, written, 7)
@@ -404,10 +434,10 @@ describe('readWorkbookFile: _meta', () => {
     expect(read.contractVersion).toBeNull()
   })
 
-  it('does not treat _meta as one of the seven tabs', async () => {
+  it('does not treat _meta as one of the eleven tabs', async () => {
     const path = await buildFile()
 
-    expect(Object.keys((await readWorkbookFile(path)).workbook).sort()).toEqual(['availability', 'claimWords', 'countries', 'guides', 'ingredients', 'products', 'tapers'])
+    expect(Object.keys((await readWorkbookFile(path)).workbook).sort()).toEqual(['availability', 'claimWords', 'countries', 'escalations', 'guides', 'ingredients', 'products', 'reintroductions', 'responses', 'tapers', 'weeks'])
   })
 })
 
@@ -517,6 +547,23 @@ describe('readWorkbookFile: a tab that is not there', () => {
 
     await expect(readWorkbookFile(path)).rejects.toThrow(/missing the Guides tab/)
   })
+
+  it.each([
+    ['reintroductions', 'Reintroductions'],
+    ['escalations', 'Escalations'],
+    ['responses', 'Responses'],
+    ['weeks', 'Weeks'],
+  ])('names the %s tab (%s) when a file stamped with this contract version does not have it', async (missing, title) => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    for (const [key, name] of Object.entries(TAB_NAMES)) if (key !== missing) book.addWorksheet(name).addRow([...HEADERS[key as keyof typeof HEADERS]])
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['contractVersion', CONTRACT_VERSION])
+    await book.xlsx.writeFile(path)
+
+    await expect(readWorkbookFile(path)).rejects.toThrow(new RegExp(`missing the ${title} tab`))
+  })
 })
 
 // The contract bump adds two tabs, so a file exported before it has neither. `_meta` is read BEFORE the tabs: such a file is not "missing the Claim
@@ -576,6 +623,27 @@ describe('readWorkbookFile: a file made before the contract bump', () => {
     expect(outcome.message).not.toMatch(/Guides/)
     if (outcome.message === '') expect(outcome.contractVersion).toBe('2.1.0')
     else expect(outcome.message).toContain('2.1.0')
+  })
+
+  it('does not call the four missing tabs the problem of a file exported at 2.2.0, which has the other seven', async () => {
+    const path = newPath()
+    const book = new ExcelJS.Workbook()
+    const newTabs = ['reintroductions', 'escalations', 'responses', 'weeks']
+    for (const [key, name] of Object.entries(TAB_NAMES)) if (!newTabs.includes(key)) book.addWorksheet(name).addRow([...HEADERS[key as keyof typeof HEADERS]])
+    const meta = book.addWorksheet('_meta')
+    meta.addRow(['catalogVersion', 7])
+    meta.addRow(['contractVersion', '2.2.0'])
+    await book.xlsx.writeFile(path)
+
+    const outcome = await readWorkbookFile(path).then(
+      (read) => ({ contractVersion: read.contractVersion, message: '' }),
+      (error: unknown) => ({ contractVersion: null, message: (error as Error).message }),
+    )
+
+    expect(outcome.message).not.toMatch(/missing/i)
+    for (const title of ['Reintroductions', 'Escalations', 'Responses', 'Weeks']) expect(outcome.message).not.toContain(title)
+    if (outcome.message === '') expect(outcome.contractVersion).toBe('2.2.0')
+    else expect(outcome.message).toContain('2.2.0')
   })
 
   it('still names a missing tab when the file has no contract stamp at all, since nothing says it was made for another contract', async () => {

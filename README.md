@@ -233,7 +233,7 @@ database. A dermatologist reviews the rules in [docs/catalog-workbook-contract.m
 `npm run catalog:contract-doc`), and the two commands below move the workbook in and out of an environment.
 
 1. **Export** the live catalog: `npm run catalog:export -- --env staging` (or `local`, `production`; `--out file.xlsx` to name the file). It writes
-   `catalog-<env>-v<version>.xlsx` with the seven tabs (Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides) and a hidden `_meta` sheet that
+   `catalog-<env>-v<version>.xlsx` with the eleven tabs (Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses, Weeks) and a hidden `_meta` sheet that
    remembers the catalog version and contract version the file came from. Leave `_meta` alone.
 2. **Edit** the workbook in Excel or Sheets. Keep the tab names and header rows as they are.
 3. **Upload as a dry run**: `npm run catalog:upload -- catalog-staging-v12.xlsx --env staging --by "Your name"`. The file is checked against the
@@ -261,6 +261,15 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   sheet. An upload is refused, before anything is sent, if the file was exported from another environment or for another contract version, and the
   server refuses it (`CATALOG_STALE`) if the catalog has moved on since: export again and redo the edits on the new file. `catalog:export` will not replace a file that already exists unless you pass
   `--force`.
+- **Contract 2.3.0: export again after this is deployed, and fill the required rows of four new tabs before the next import.** The Reintroductions, Escalations,
+  Responses and Weeks tabs hold the reviewed text of the daily loop. A file exported at 2.2.0 (or earlier) is refused by `catalog:upload` with a message to export
+  again, and by the server as `409 CONTRACT_MISMATCH`. The live catalog has none of these rows yet, so a fresh export has four empty tabs, and the server refuses it
+  until there is one **approved** default ladder (the `group` cell left empty), one row for each of the seven escalation reasons, one for each of the nine response
+  outcomes, and one base card (no goal, `step_down` no) for each of the five week bands. Fill them (plain words, no condition names or promises of lighter skin), and in
+  production have a qualified approver sign them. This includes the staging catalog sheet and a saved eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`).
+  A ladder needs at least one step before `back` (`1: back` is refused), and mercury, steroid and lightening-agent have no ladder. In Responses, `{step}` is shown as
+  Cleanser, Treatment, Moisturiser or Sunscreen (or "your routine" when the answer is about no step), the wording rules must pass for each, and any other brace is refused.
+  **Keep the Weeks `band` column formatted as text** (the export sets it): a spreadsheet turns `3-4` into a date otherwise, and the contract reports it as `WEEK_BAND_DATE`.
 - **Contract 2.2.0: export again after this is deployed, and write the four base guides before the next import.** The new Guides tab holds what each routine
   step is for, what to look for and what suits deeper skin. A file exported at 2.1.0 (or earlier) is refused by `catalog:upload` with a message to export
   again, and by the server as `409 CONTRACT_MISMATCH`. The live catalog has no guides yet, so a fresh export has an empty Guides tab, and the server refuses
@@ -275,9 +284,9 @@ deployed ones (the same gitignored files as above). The token is sent only in th
   server refuses it too, as `409 CONTRACT_MISMATCH` whatever tabs the body has (the upload sends the file's contract version, and it is checked before the
   tabs), so a 1.0.0 file posted by hand gets that and not a 400. Export a fresh file and move your edits across; the old file's rows keep
   working as they are. An old eval snapshot (`eval-data/routine/catalog-snapshot.xlsx`) needs the same re-export.
-- **Who may approve a step-down template or a guide.** Both are shown to people, so in **production** the server refuses an approved Tapers or Guides row unless its
+- **Who may approve a step-down template, a guide or the daily-loop text.** All are shown to people, so in **production** the server refuses an approved Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row unless its
   `approved_by` is one of the labels in the `QUALIFIED_APPROVERS` var (comma-separated, matched whole and exactly, spaces around a label ignored). It is set in
-  `wrangler.jsonc` for each environment and is **empty** until the first qualified approver is named, which refuses every approved template and guide in production.
+  `wrangler.jsonc` for each environment and is **empty** until the first qualified approver is named, which refuses every approved row of those tabs in production.
   The refusal is `400 CATALOG_INVALID` with `UNQUALIFIED_APPROVER` for each row, and never repeats the name. Staging and local accept any approver, so the
   owner or Claude can approve there. It is a process control, not authentication: the approver is only a name typed in a cell.
 - **Use Excel or LibreOffice.** Google Sheets and Numbers may drop the hidden `_meta` sheet when they save; a file without it is refused, so use Excel or

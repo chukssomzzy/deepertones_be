@@ -6,9 +6,30 @@ import { SHOWN_CONCERNS, type ShownConcern, type SkinTypeLabel } from '../face-s
 import { formulations, productAliases, products } from './catalog.table'
 import type { NewProduct } from './catalog.types'
 import type { ReferenceEntry } from './catalog.reference'
-import type { ConcernKind, Frequency, Origin, RoutineStep } from './catalog.vocabulary'
-import { compareGuides, guideKey, type AvailabilityRow, type ClaimWordRow, type CountryRow, type GuideRow, type IngredientRule, type ProductRow, type TaperRow, type Workbook } from './catalog.workbook.schema'
-import { catalogVersions, claimWords, countries, guides, ingredientRules, productAvailability, recommendedProducts, tapers } from './catalog.workbook.table'
+import type { ConcernKind, EscalationReason, Frequency, Origin, ResponseOutcome, RoutineStep, WeekBand } from './catalog.vocabulary'
+import {
+  compareEscalations,
+  compareGuides,
+  compareReintroductions,
+  compareResponses,
+  compareWeeks,
+  guideKey,
+  reintroductionKey,
+  weekKey,
+  type AvailabilityRow,
+  type ClaimWordRow,
+  type CountryRow,
+  type EscalationRow,
+  type GuideRow,
+  type IngredientRule,
+  type ProductRow,
+  type ReintroductionRow,
+  type ResponseRow,
+  type TaperRow,
+  type WeekRow,
+  type Workbook,
+} from './catalog.workbook.schema'
+import { catalogVersions, claimWords, countries, escalations, guides, ingredientRules, productAvailability, recommendedProducts, reintroductions, responses, tapers, weeks } from './catalog.workbook.table'
 
 /** The approved ingredient rules in the shape the matcher reads, and the rules version they are under. */
 export type LiveRules = { version: string; entries: ReferenceEntry[] }
@@ -80,6 +101,16 @@ export type WorkbookChanges = {
   guides: GuideRow[]
   /** Guides the upload leaves out, by step and goal: a guide has no code. */
   retiredGuides: { step: GuideRow['step']; goal: GuideRow['goal'] }[]
+  reintroductions: ReintroductionRow[]
+  /** Ladders the upload leaves out, by group (null for the default ladder): a ladder has no code. */
+  retiredReintroductions: { group: ReintroductionRow['group'] }[]
+  escalations: EscalationRow[]
+  retiredEscalations: { reason: EscalationRow['reason'] }[]
+  responses: ResponseRow[]
+  retiredResponses: { outcome: ResponseRow['outcome'] }[]
+  weeks: WeekRow[]
+  /** Week cards the upload leaves out, by band, goal and step-down: a card has no code. */
+  retiredWeeks: { band: WeekRow['band']; goal: WeekRow['goal']; stepDown: WeekRow['stepDown'] }[]
 }
 
 /**
@@ -110,6 +141,10 @@ export const STATEMENT_ROWS = {
   claimWords: 11, // 9
   tapers: 9, // 11
   guides: 7, // 13
+  reintroductions: 11, // 9
+  escalations: 9, // 11
+  responses: 9, // 11
+  weeks: 8, // 12
   codes: 90, // one parameter a code, and two more for the values set
 } as const
 
@@ -161,7 +196,7 @@ export class D1CatalogWorkbookRepository {
    * that same catalog version. Read in one batch, so the rows and both versions belong together.
    */
   async readWorkbook(): Promise<{ catalogVersion: number; rulesVersion: string; workbook: Workbook }> {
-    const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows, guideRows] = await this.db.batch([
+    const [versions, productRows, availabilityRows, ruleRows, countryRows, claimWordRows, taperRows, guideRows, reintroductionRows, escalationRows, responseRows, weekRows] = await this.db.batch([
       this.latestRulesVersion(),
       this.db.select().from(recommendedProducts).orderBy(asc(recommendedProducts.code)),
       this.db.select().from(productAvailability).orderBy(asc(productAvailability.productCode), asc(productAvailability.country)),
@@ -170,6 +205,10 @@ export class D1CatalogWorkbookRepository {
       this.db.select().from(claimWords).orderBy(asc(claimWords.code)),
       this.db.select().from(tapers).orderBy(asc(tapers.code)),
       this.db.select().from(guides),
+      this.db.select().from(reintroductions),
+      this.db.select().from(escalations),
+      this.db.select().from(responses),
+      this.db.select().from(weeks),
     ])
     const [latest] = versions
     if (!latest) throw new Error('no catalog version')
@@ -210,6 +249,10 @@ export class D1CatalogWorkbookRepository {
         claimWords: claimWordRows.map((row) => D1CatalogWorkbookRepository.claimWordOf(row)),
         tapers: taperRows.map((row) => D1CatalogWorkbookRepository.taperOf(row)),
         guides: guideRows.map((row) => D1CatalogWorkbookRepository.guideOf(row)).sort(compareGuides),
+        reintroductions: reintroductionRows.map((row) => D1CatalogWorkbookRepository.reintroductionOf(row)).sort(compareReintroductions),
+        escalations: escalationRows.map((row) => D1CatalogWorkbookRepository.escalationOf(row)).sort(compareEscalations),
+        responses: responseRows.map((row) => D1CatalogWorkbookRepository.responseOf(row)).sort(compareResponses),
+        weeks: weekRows.map((row) => D1CatalogWorkbookRepository.weekOf(row)).sort(compareWeeks),
       },
     }
   }
@@ -241,6 +284,30 @@ export class D1CatalogWorkbookRepository {
   async approvedGuides(step: GuideRow['step']): Promise<GuideRow[]> {
     const rows = await this.db.select().from(guides).where(and(eq(guides.step, step), eq(guides.status, 'approved')))
     return rows.map((row) => D1CatalogWorkbookRepository.guideOf(row)).sort(compareGuides)
+  }
+
+  /** The approved ladders, the default one and the ones for a group: the rows `reintroductionFor` chooses from. A draft or retired ladder is never returned. */
+  async approvedReintroductions(): Promise<ReintroductionRow[]> {
+    const rows = await this.db.select().from(reintroductions).where(eq(reintroductions.status, 'approved'))
+    return rows.map((row) => D1CatalogWorkbookRepository.reintroductionOf(row)).sort(compareReintroductions)
+  }
+
+  /** The approved escalation of a reason, or null: a draft or retired one is never returned. */
+  async approvedEscalation(reason: EscalationReason): Promise<EscalationRow | null> {
+    const [row] = await this.db.select().from(escalations).where(and(eq(escalations.key, reason), eq(escalations.status, 'approved')))
+    return row === undefined ? null : D1CatalogWorkbookRepository.escalationOf(row)
+  }
+
+  /** The approved response of an outcome, or null: a draft or retired one is never returned. */
+  async approvedResponse(outcome: ResponseOutcome): Promise<ResponseRow | null> {
+    const [row] = await this.db.select().from(responses).where(and(eq(responses.key, outcome), eq(responses.status, 'approved')))
+    return row === undefined ? null : D1CatalogWorkbookRepository.responseOf(row)
+  }
+
+  /** The approved week cards of a band, its base card, its goal cards and its step-down cards: the rows `weekCardFor` chooses from. A draft or retired card is never returned. */
+  async approvedWeeks(band: WeekBand): Promise<WeekRow[]> {
+    const rows = await this.db.select().from(weeks).where(and(eq(weeks.band, band), eq(weeks.status, 'approved')))
+    return rows.map((row) => D1CatalogWorkbookRepository.weekOf(row)).sort(compareWeeks)
   }
 
   /** The step-down templates with these codes, retired ones included, in code order. A code that names none is absent. */
@@ -548,6 +615,109 @@ export class D1CatalogWorkbookRepository {
     for (const rows of chunked(plan.retiredGuides.map(guideKey), STATEMENT_ROWS.codes)) {
       statements.push(this.db.update(guides).set({ status: 'retired', updatedInVersion: version }).where(inArray(guides.key, rows)))
     }
+
+    for (const rows of chunked(plan.reintroductions, STATEMENT_ROWS.reintroductions)) {
+      statements.push(
+        this.db
+          .insert(reintroductions)
+          .values(rows.map((ladder) => ({ ...ladder, key: reintroductionKey(ladder), approvedOn: dayOf(ladder.approvedOn), auditedOn: dayOf(ladder.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: reintroductions.key,
+            set: {
+              group: sql`excluded."group"`,
+              schedule: sql`excluded.schedule`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredReintroductions.map(reintroductionKey), STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(reintroductions).set({ status: 'retired', updatedInVersion: version }).where(inArray(reintroductions.key, rows)))
+    }
+
+    for (const rows of chunked(plan.escalations, STATEMENT_ROWS.escalations)) {
+      statements.push(
+        this.db
+          .insert(escalations)
+          .values(rows.map((escalation) => ({ ...escalation, key: escalation.reason, approvedOn: dayOf(escalation.approvedOn), auditedOn: dayOf(escalation.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: escalations.key,
+            set: {
+              reason: sql`excluded.reason`,
+              whoToSee: sql`excluded.who_to_see`,
+              howSoon: sql`excluded.how_soon`,
+              whatToTellThem: sql`excluded.what_to_tell_them`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredEscalations.map((escalation) => escalation.reason), STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(escalations).set({ status: 'retired', updatedInVersion: version }).where(inArray(escalations.key, rows)))
+    }
+
+    for (const rows of chunked(plan.responses, STATEMENT_ROWS.responses)) {
+      statements.push(
+        this.db
+          .insert(responses)
+          .values(rows.map((response) => ({ ...response, key: response.outcome, approvedOn: dayOf(response.approvedOn), auditedOn: dayOf(response.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: responses.key,
+            set: {
+              outcome: sql`excluded.outcome`,
+              title: sql`excluded.title`,
+              body: sql`excluded.body`,
+              whatToDoNow: sql`excluded.what_to_do_now`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredResponses.map((response) => response.outcome), STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(responses).set({ status: 'retired', updatedInVersion: version }).where(inArray(responses.key, rows)))
+    }
+
+    for (const rows of chunked(plan.weeks, STATEMENT_ROWS.weeks)) {
+      statements.push(
+        this.db
+          .insert(weeks)
+          .values(rows.map((card) => ({ ...card, key: weekKey(card), approvedOn: dayOf(card.approvedOn), auditedOn: dayOf(card.auditedOn), updatedInVersion: version })))
+          .onConflictDoUpdate({
+            target: weeks.key,
+            set: {
+              band: sql`excluded.band`,
+              goal: sql`excluded.goal`,
+              stepDown: sql`excluded.step_down`,
+              title: sql`excluded.title`,
+              text: sql`excluded.text`,
+              status: sql`excluded.status`,
+              approvedBy: sql`excluded.approved_by`,
+              approvedOn: sql`excluded.approved_on`,
+              auditedBy: sql`excluded.audited_by`,
+              auditedOn: sql`excluded.audited_on`,
+              updatedInVersion: sql`excluded.updated_in_version`,
+            },
+          }),
+      )
+    }
+    for (const rows of chunked(plan.retiredWeeks.map(weekKey), STATEMENT_ROWS.codes)) {
+      statements.push(this.db.update(weeks).set({ status: 'retired', updatedInVersion: version }).where(inArray(weeks.key, rows)))
+    }
     return statements
   }
 
@@ -706,6 +876,61 @@ export class D1CatalogWorkbookRepository {
       lookFor: row.lookFor,
       forDeeperSkin: row.forDeeperSkin,
       lookForWhenPregnant: row.lookForWhenPregnant,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static reintroductionOf(row: typeof reintroductions.$inferSelect): ReintroductionRow {
+    return {
+      group: row.group,
+      schedule: row.schedule,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static escalationOf(row: typeof escalations.$inferSelect): EscalationRow {
+    return {
+      reason: row.reason,
+      whoToSee: row.whoToSee,
+      howSoon: row.howSoon,
+      whatToTellThem: row.whatToTellThem,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static responseOf(row: typeof responses.$inferSelect): ResponseRow {
+    return {
+      outcome: row.outcome,
+      title: row.title,
+      body: row.body,
+      whatToDoNow: row.whatToDoNow,
+      status: row.status,
+      approvedBy: row.approvedBy,
+      approvedOn: dateOf(row.approvedOn),
+      auditedBy: row.auditedBy,
+      auditedOn: dateOf(row.auditedOn),
+    }
+  }
+
+  private static weekOf(row: typeof weeks.$inferSelect): WeekRow {
+    return {
+      band: row.band,
+      goal: row.goal,
+      stepDown: row.stepDown,
+      title: row.title,
+      text: row.text,
       status: row.status,
       approvedBy: row.approvedBy,
       approvedOn: dateOf(row.approvedOn),

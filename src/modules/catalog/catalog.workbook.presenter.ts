@@ -16,6 +16,10 @@ export const toImportCatalogResponse = ({ applied, catalogVersion, diff }: Impor
     claimWords: diff.claimWords,
     tapers: diff.tapers,
     guides: diff.guides,
+    reintroductions: diff.reintroductions,
+    escalations: diff.escalations,
+    responses: diff.responses,
+    weeks: diff.weeks,
     newProducts: diff.newProducts.map(({ code, brand, name, variant, form }) => ({ code, brand, name, variant, form })),
   },
 })

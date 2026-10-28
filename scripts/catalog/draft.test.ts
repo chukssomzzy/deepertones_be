@@ -10,6 +10,7 @@ import { MemoryProductResearcher } from '../../src/providers/product-research/me
 import type { ProductIdentity, ProductResearcher } from '../../src/providers/product-research/product-researcher.provider'
 import { draftWorkbook, formatReport, NOTHING_TO_DRAFT, NO_ACTIVE_COUNTRIES, runDraft } from './draft'
 import { DraftInputError } from './draft-input-error'
+import { allEscalations, allResponses, baseReintroductions, baseWeeks } from './workbook.fixture'
 
 // `catalog:draft`, minus the file and the network: a workbook in, the same workbook with its empty draft cells filled out, with the researcher and the
 // drafter faked. What is pinned: it fills only EMPTY cells of DRAFT rows, never adds or removes a product, marks each cell it filled in draft_cells with
@@ -35,6 +36,10 @@ const HEADERS = {
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  escalations: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  responses: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  weeks: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 
 const tab = (name: Tab, rows: Raw[]): RawTab => ({ headers: [...HEADERS[name]], rows })
@@ -138,6 +143,11 @@ const workbook = (rows: Rows = {}): RawWorkbook => ({
   claimWords: tab('claimWords', rows.claimWords ?? []),
   tapers: tab('tapers', rows.tapers ?? []),
   guides: tab('guides', rows.guides ?? BASE_GUIDES),
+  // The rows the contract needs of the four reviewed tabs the drafter does not touch: a workbook without them is not one the contract accepts.
+  reintroductions: tab('reintroductions', rows.reintroductions ?? baseReintroductions()),
+  escalations: tab('escalations', rows.escalations ?? allEscalations()),
+  responses: tab('responses', rows.responses ?? allResponses()),
+  weeks: tab('weeks', rows.weeks ?? baseWeeks()),
 })
 
 // Where the fakes say their values came from.
@@ -405,7 +415,7 @@ describe('draftWorkbook: rows that are not drafts', () => {
     expect(outcome.workbook.products.rows).toEqual(rows)
   })
 
-  it('leaves the Ingredients, Countries and Guides tabs and every header row as they were', async () => {
+  it('leaves the Ingredients, Countries, Guides, Reintroductions, Escalations, Responses and Weeks tabs and every header row as they were', async () => {
     const input = base()
 
     const { outcome } = await run(input)
@@ -413,7 +423,8 @@ describe('draftWorkbook: rows that are not drafts', () => {
     expect(outcome.workbook.ingredients).toEqual(input.ingredients)
     expect(outcome.workbook.countries).toEqual(input.countries)
     expect(outcome.workbook.guides).toEqual(input.guides)
-    for (const name of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides'] as const) expect(outcome.workbook[name].headers).toEqual(input[name].headers)
+    for (const name of ['reintroductions', 'escalations', 'responses', 'weeks'] as const) expect(outcome.workbook[name]).toEqual(input[name])
+    for (const name of ['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides', 'reintroductions', 'escalations', 'responses', 'weeks'] as const) expect(outcome.workbook[name].headers).toEqual(input[name].headers)
   })
 
   it('skips a draft row that has no brand, name or category, asking about nothing, and says so', async () => {

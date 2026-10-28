@@ -2,7 +2,7 @@ import { env } from 'cloudflare:workers'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDb } from '../../src/lib/db'
 import { D1CatalogWorkbookRepository, type WorkbookPlan } from '../../src/modules/catalog/catalog.workbook.repository'
-import { claimWordRow, country, guideRow, ruleRow, sale, taperRow, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
+import { claimWordRow, country, escalationRow, guideRow, reintroductionRow, responseRow, ruleRow, sale, taperRow, weekRow, workbookProduct } from '../../src/modules/catalog/catalog.workbook.repository.contract'
 
 // How applyWorkbook meets D1 itself: what its one batch is made of, and what it does with a batch that fails. The behaviour a repository must have
 // is in catalogWorkbookRepositoryContract (catalog.workbook.repository.test.ts); these need the real driver to be spied on.
@@ -31,6 +31,14 @@ const planOf = async (over: Partial<WorkbookPlan> = {}): Promise<WorkbookPlan> =
   retiredTapers: [],
   guides: [],
   retiredGuides: [],
+  reintroductions: [],
+  retiredReintroductions: [],
+  escalations: [],
+  retiredEscalations: [],
+  responses: [],
+  retiredResponses: [],
+  weeks: [],
+  retiredWeeks: [],
   ...over,
 })
 
@@ -39,6 +47,10 @@ type Built = { toSQL(): { sql: string; params: unknown[] } }
 const GUIDE_STEPS = ['cleanse', 'treat', 'moisturise', 'protect'] as const
 const GUIDE_GOALS = [null, 'clear-skin', 'even-tone', 'fade-dark-marks', 'brighter', 'glow', 'calm-repair'] as const
 const guideKeys = GUIDE_STEPS.flatMap((step) => GUIDE_GOALS.map((goal) => [step, goal] as const))
+
+const WEEK_BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+// A week card has no code either: it is a band, a goal (or none) and a step-down or not, which is 70 keys.
+const weekKeys = WEEK_BANDS.flatMap((band) => GUIDE_GOALS.flatMap((goal) => [false, true].map((stepDown) => [band, goal, stepDown] as const)))
 
 afterEach(() => vi.restoreAllMocks())
 
@@ -68,6 +80,13 @@ describe('the batch applyWorkbook sends', () => {
       // statement's 100 parameters, and half retired.
       guides: guideKeys.slice(0, 14).map(([step, goal]) => guideRow({ step, goal, lookForWhenPregnant: 'Fragrance-free wash.', auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
       retiredGuides: guideKeys.slice(14).map(([step, goal]) => ({ step, goal })),
+      // The four reviewed tabs, the same way: a week card is the widest row of them, and 35 of the 70 keys are written (more than a statement's 100 parameters) and 35 retired.
+      reintroductions: [reintroductionRow({ group: null, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') }), reintroductionRow({ group: 'retinoid' })],
+      retiredReintroductions: [{ group: 'exfoliating-acid' }, { group: 'benzoyl-peroxide' }],
+      escalations: (['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const).map((reason) => escalationRow({ reason, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      responses: (['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const).map((outcome) => responseRow({ outcome, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      weeks: weekKeys.slice(0, 35).map(([band, goal, stepDown]) => weekRow({ band, goal, stepDown, auditedBy: 'Dr B. Auditor', auditedOn: new Date('2030-06-15T00:00:00.000Z') })),
+      retiredWeeks: weekKeys.slice(35).map(([band, goal, stepDown]) => ({ band, goal, stepDown })),
     })
     const count = repo.statementCount(plan)
     // After the plan is made: building it reads the rules in a batch of its own.

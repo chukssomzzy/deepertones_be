@@ -28,10 +28,10 @@ export const EXPORT_URL = `${ORIGIN}/api/v1/admin/catalog/export`
 export const IMPORT_URL = `${ORIGIN}/api/v1/admin/catalog/import`
 
 /**
- * The contract version this checkout serves, written out: the version of the contract that adds the Guides tab. A literal, not read
+ * The contract version this checkout serves, written out: the version of the contract that adds the Reintroductions, Escalations, Responses and Weeks tabs. A literal, not read
  * from the code, so a bump has to be made here too.
  */
-export const CONTRACT_VERSION = '2.2.0'
+export const CONTRACT_VERSION = '2.3.0'
 
 export const XLSX_MEDIA_TYPE = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
 
@@ -67,6 +67,10 @@ export const HEADERS = {
   claimWords: ['code', 'phrase', 'claim', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   tapers: ['code', 'kind', 'schedule', 'what_to_expect', 'see_a_professional_if', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
   guides: ['step', 'goal', 'what_it_does', 'look_for', 'for_deeper_skin', 'look_for_when_pregnant', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  escalations: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  responses: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+  weeks: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
 } as const satisfies Record<Tab, readonly string[]>
 export const TABS = Object.keys(HEADERS) as Tab[]
 
@@ -194,6 +198,63 @@ export const withBaseGuides = (workbook: RawWorkbook): void => {
   }
 }
 
+/** The reasons an escalation is written for, the outcomes a response answers and the week bands, written out and not read from the code. */
+export const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+export const OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
+export const BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+const signed = { status: 'approved', approved_by: 'Dr A. Reviewer', approved_on: APPROVED_ON, audited_by: null, audited_on: null }
+
+/** A Reintroductions row: by default the approved default ladder (no group). */
+export const reintroductionRow = (over: RawRow = {}): RawRow => ({ group: null, schedule: '1: weekly; 2: alternate-days; 3: back', ...signed, ...over })
+/** An Escalations row: by default the approved row of the first reason. */
+export const escalationRow = (over: RawRow = {}): RawRow => ({
+  reason: 'pus-or-hot-patch',
+  who_to_see: 'A doctor or a pharmacist.',
+  how_soon: 'Today, or within a day.',
+  what_to_tell_them: 'What you noticed, where, and since when. Which products you were using.',
+  ...signed,
+  ...over,
+})
+/** A Responses row: by default the approved row of the paused outcome. */
+export const responseRow = (over: RawRow = {}): RawRow => ({
+  outcome: 'paused',
+  title: 'We paused your {step}',
+  body: 'Your skin needs a rest from your {step}. We will ask how it feels in three days.',
+  what_to_do_now: 'Skip anything that stings. Keep to a gentle cleanser and moisturiser.',
+  ...signed,
+  ...over,
+})
+/** A Weeks row: by default the approved base card (no goal, no step-down) of band 1. */
+export const weekRow = (over: RawRow = {}): RawRow => ({
+  band: '1',
+  goal: null,
+  step_down: 'no',
+  title: 'Settling in',
+  text: 'The first week is about calming things down. Go gently and keep to the basics.',
+  ...signed,
+  ...over,
+})
+
+/** The rows the contract needs of each of the four tabs; each says its own key, so a test can tell which it was given. */
+export const baseReintroductionRows = (): RawRow[] => [reintroductionRow()]
+export const allEscalationRows = (): RawRow[] => REASONS.map((reason) => escalationRow({ reason, who_to_see: `Who to see for ${reason}.`, how_soon: `How soon for ${reason}.`, what_to_tell_them: `What to tell them for ${reason}.` }))
+export const allResponseRows = (): RawRow[] => OUTCOMES.map((outcome) => responseRow({ outcome, title: `Title for ${outcome}`, body: `Body for ${outcome}.`, what_to_do_now: `What to do for ${outcome}.` }))
+export const baseWeekRows = (): RawRow[] => BANDS.map((band) => weekRow({ band, title: `Title for ${band}`, text: `Text for ${band}.` }))
+
+/**
+ * Adds the rows the four reviewed tabs need that the workbook lacks: the default ladder, a row for each reason and each outcome, a base card for each band. A catalog that
+ * has never had them exports none, so an upload that is about something else starts with this, as the team fills the rows in before its first import.
+ */
+export const withReviewedRows = (workbook: RawWorkbook): void => {
+  const missing = (tab: RawTab, needed: RawRow[], same: (a: RawRow, b: RawRow) => boolean) => {
+    for (const row of needed) if (!tab.rows.some((have) => same(have, row) && have.status === 'approved')) tab.rows.push(row)
+  }
+  missing(workbook.reintroductions, baseReintroductionRows(), (a, b) => (a.group ?? null) === (b.group ?? null))
+  missing(workbook.escalations, allEscalationRows(), (a, b) => a.reason === b.reason)
+  missing(workbook.responses, allResponseRows(), (a, b) => a.outcome === b.outcome)
+  missing(workbook.weeks, baseWeekRows(), (a, b) => a.band === b.band && (a.goal ?? null) === null && (a.step_down ?? 'no') === 'no')
+}
+
 export const NIGERIA: RawRow = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' }
 export const BRITAIN: RawRow = { code: 'GB', currency: 'GBP', low_max: 10, mid_max: 25, status: 'active' }
 
@@ -218,12 +279,25 @@ export const errorOf = async (res: Reply) => {
 
 export type TabDiff = { added: string[]; updated: string[]; retired: string[]; reactivated: string[] }
 export type NewProduct = { code: string; brand: string; name: string; variant: string | null; form: string | null }
-export type ImportDiff = { products: TabDiff; availability: TabDiff; ingredients: TabDiff; countries: TabDiff; claimWords: TabDiff; tapers: TabDiff; guides: TabDiff; newProducts: NewProduct[] }
+export type ImportDiff = {
+  products: TabDiff
+  availability: TabDiff
+  ingredients: TabDiff
+  countries: TabDiff
+  claimWords: TabDiff
+  tapers: TabDiff
+  guides: TabDiff
+  reintroductions: TabDiff
+  escalations: TabDiff
+  responses: TabDiff
+  weeks: TabDiff
+  newProducts: NewProduct[]
+}
 export type ImportResult = { applied: boolean; catalogVersion: number; diff: ImportDiff }
 export type ExportResult = { catalogVersion: number; contractVersion: string; workbook: RawWorkbook }
 
 export const NO_CHANGE: TabDiff = { added: [], updated: [], retired: [], reactivated: [] }
-export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, claimWords: NO_CHANGE, tapers: NO_CHANGE, guides: NO_CHANGE, newProducts: [] }
+export const EMPTY_DIFF: ImportDiff = { products: NO_CHANGE, availability: NO_CHANGE, ingredients: NO_CHANGE, countries: NO_CHANGE, claimWords: NO_CHANGE, tapers: NO_CHANGE, guides: NO_CHANGE, reintroductions: NO_CHANGE, escalations: NO_CHANGE, responses: NO_CHANGE, weeks: NO_CHANGE, newProducts: [] }
 /** A TabDiff with only the lists given; the lists are compared sorted, because the order of codes within a list is not part of the contract. */
 export const diffOf = (over: Partial<TabDiff>): TabDiff => ({ ...NO_CHANGE, ...over })
 /** Codes inside a diff in a fixed order, so a test compares the codes and not the order they came in. */
@@ -235,6 +309,10 @@ export const sorted = (diff: ImportDiff): ImportDiff => ({
   claimWords: sortTab(diff.claimWords),
   tapers: sortTab(diff.tapers),
   guides: sortTab(diff.guides),
+  reintroductions: sortTab(diff.reintroductions),
+  escalations: sortTab(diff.escalations),
+  responses: sortTab(diff.responses),
+  weeks: sortTab(diff.weeks),
   newProducts: [...diff.newProducts].sort((a, b) => (a.code < b.code ? -1 : a.code > b.code ? 1 : 0)),
 })
 const sortTab = (tab: TabDiff): TabDiff => ({ added: [...tab.added].sort(), updated: [...tab.updated].sort(), retired: [...tab.retired].sort(), reactivated: [...tab.reactivated].sort() })
@@ -306,15 +384,24 @@ export const without = (tab: RawTab, key: string, value: unknown) => {
 
 /**
  * Export, edit, import: the way the catalog is changed in life. Returns what was live before, and the reply. The base guide rows the contract needs are
- * added for a step that has none (`withBaseGuides`), unless the test says `baseGuides: false` because it is about them.
+ * added for a step that has none (`withBaseGuides`), unless the test says `baseGuides: false` because it is about them; the rows of the four reviewed tabs
+ * likewise (`withReviewedRows`), unless it says `reviewedRows: false`.
  */
 export const upload = async (
   edit: (workbook: RawWorkbook) => void,
-  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number; baseGuides?: boolean } = {},
+  over: Partial<Omit<ImportInput, 'workbook' | 'baseVersion'>> & { baseVersion?: (live: number) => number; baseGuides?: boolean; reviewedRows?: boolean } = {},
 ) => {
   const before = await exportLive()
-  const { baseVersion, baseGuides, ...rest } = over
-  const res = await importRaw({ workbook: edited(before.workbook, (workbook) => { edit(workbook); if (baseGuides !== false) withBaseGuides(workbook) }), baseVersion: baseVersion ? baseVersion(before.catalogVersion) : before.catalogVersion, ...rest })
+  const { baseVersion, baseGuides, reviewedRows, ...rest } = over
+  const res = await importRaw({
+    workbook: edited(before.workbook, (workbook) => {
+      edit(workbook)
+      if (baseGuides !== false) withBaseGuides(workbook)
+      if (reviewedRows !== false) withReviewedRows(workbook)
+    }),
+    baseVersion: baseVersion ? baseVersion(before.catalogVersion) : before.catalogVersion,
+    ...rest,
+  })
   return { before, res }
 }
 

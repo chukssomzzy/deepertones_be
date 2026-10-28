@@ -97,6 +97,26 @@ const GUIDE_ROWS: RawRow[] = ['cleanse', 'treat', 'moisturise', 'protect'].map((
   audited_on: null,
 }))
 
+// The same for the four reviewed tabs: the default ladder, a row for each reason and each outcome, and a base card for each band. Written out here, not read from the
+// vocabularies, for the same reason; the texts are placeholders the eval never reads.
+const SIGNED = { status: 'approved', approved_by: 'Eval', approved_on: '2026-01-01', audited_by: null, audited_on: null }
+const LADDER_ROWS: RawRow[] = [{ group: null, schedule: '1: weekly; 2: back', ...SIGNED }]
+const ESCALATION_ROWS: RawRow[] = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'].map((reason) => ({
+  reason,
+  who_to_see: 'A doctor.',
+  how_soon: 'Today.',
+  what_to_tell_them: 'What you noticed.',
+  ...SIGNED,
+}))
+const RESPONSE_ROWS: RawRow[] = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'].map((outcome) => ({
+  outcome,
+  title: 'A title',
+  body: 'A body for your {step}.',
+  what_to_do_now: null,
+  ...SIGNED,
+}))
+const WEEK_ROWS: RawRow[] = ['1', '2', '3-4', '5-8', '9-12'].map((band) => ({ band, goal: null, step_down: 'no', title: 'A title', text: 'A text.', ...SIGNED }))
+
 const EVAL_COUNTRIES: DraftCountry[] = COUNTRY_ROWS.map((row) => ({ code: row.code as string, currency: row.currency as string }))
 
 // The eval measures catalog:draft as it runs by default, pinned here so a change to that default is a deliberate eval change.
@@ -114,6 +134,10 @@ const workbookOf = (products: RawRow[], availability: RawRow[]): RawWorkbook => 
   claimWords: { headers: headersOf('claimWords'), rows: [] },
   tapers: { headers: headersOf('tapers'), rows: [] },
   guides: { headers: headersOf('guides'), rows: structuredClone(GUIDE_ROWS) },
+  reintroductions: { headers: headersOf('reintroductions'), rows: structuredClone(LADDER_ROWS) },
+  escalations: { headers: headersOf('escalations'), rows: structuredClone(ESCALATION_ROWS) },
+  responses: { headers: headersOf('responses'), rows: structuredClone(RESPONSE_ROWS) },
+  weeks: { headers: headersOf('weeks'), rows: structuredClone(WEEK_ROWS) },
 })
 
 const codeOf = (c: DraftCase): string => `EVAL-${c.id.toUpperCase()}`

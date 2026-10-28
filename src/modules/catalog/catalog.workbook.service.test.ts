@@ -3,6 +3,7 @@ import { MemoryWorkbookArchive } from '../../providers/workbook-archive/memory.w
 import { REFERENCE_VERSION } from './catalog.reference'
 import { diffWorkbooks } from './catalog.workbook.diff'
 import { toRawWorkbook } from './catalog.workbook.raw'
+import type { WorkbookPlan } from './catalog.workbook.repository'
 import { FakeCatalogWorkbookRepository } from './catalog.workbook.repository.fake'
 import { nextRulesVersion } from './catalog.workbook.rules-version'
 import { CONTRACT_VERSION, validateWorkbook, type RawRow, type RawWorkbook, type Workbook } from './catalog.workbook.schema'
@@ -34,6 +35,20 @@ const guide = (over: RawRow = {}): RawRow => ({
 /** The four approved base rows, each saying its own step so a test can tell which one it was given. */
 const baseGuides = (): RawRow[] =>
   ['cleanse', 'treat', 'moisturise', 'protect'].map((step) => guide({ step, what_it_does: `What ${step} does.`, look_for: `What to look for in ${step}.`, for_deeper_skin: `Deeper skin and ${step}.` }))
+// The four reviewed tabs of contract 2.3.0. Each row says its own key in its text, so a test can tell which row it was given.
+const REASONS = ['pus-or-hot-patch', 'swelling', 'near-eyes', 'worse-after-pause', 'unchanged-after-checks', 'harm-while-two-paused', 'hard-to-ignore-during-step-down'] as const
+const OUTCOMES = ['paused', 'advice-tightness', 'advice-itching', 'advice-breakouts', 'expected-flare', 'check-calmer', 'check-same', 'check-worse', 'nothing-to-pause'] as const
+const BANDS = ['1', '2', '3-4', '5-8', '9-12'] as const
+const sign = { status: 'approved', approved_by: 'Dr A', approved_on: '2030-01-02', audited_by: null, audited_on: null }
+const ladder = (over: RawRow = {}): RawRow => ({ group: null, schedule: '1: weekly; 2: alternate-days; 3: back', ...sign, ...over })
+const escalation = (over: RawRow = {}): RawRow => ({ reason: 'pus-or-hot-patch', who_to_see: 'A doctor.', how_soon: 'Today.', what_to_tell_them: 'What you noticed and since when.', ...sign, ...over })
+const response = (over: RawRow = {}): RawRow => ({ outcome: 'paused', title: 'We paused your {step}', body: 'A rest for your {step}.', what_to_do_now: 'Skip anything that stings.', ...sign, ...over })
+const weekCard = (over: RawRow = {}): RawRow => ({ band: '1', goal: null, step_down: 'no', title: 'Settling in', text: 'The first week is about calming things down.', ...sign, ...over })
+/** The rows the contract needs of each of the four tabs, each saying its own key so a test can tell which one it was given. */
+const baseLadders = (): RawRow[] => [ladder()]
+const allEscalations = (): RawRow[] => REASONS.map((reason) => escalation({ reason, who_to_see: `Who to see for ${reason}.`, how_soon: `How soon for ${reason}.`, what_to_tell_them: `What to tell them for ${reason}.` }))
+const allResponses = (): RawRow[] => OUTCOMES.map((outcome) => response({ outcome, title: `Title for ${outcome}`, body: `Body for ${outcome}.`, what_to_do_now: `What to do for ${outcome}.` }))
+const baseWeeks = (): RawRow[] => BANDS.map((band) => weekCard({ band, title: `Title for ${band}`, text: `Text for ${band}.` }))
 const ng: RawRow = { code: 'NG', currency: 'NGN', low_max: 5000, mid_max: 15000, status: 'active' }
 const sold = (code = 'PRD-ONE'): RawRow => ({ product_code: code, country: 'NG', price_min: 3000, price_max: 4500, where_sold: null, source_url: null })
 
@@ -45,16 +60,37 @@ const build = () => {
   return { repository, archive, service }
 }
 
+type ReviewedTab = 'reintroductions' | 'escalations' | 'responses' | 'weeks'
+/** The default rows a tab needs, and how a row says which one it is (a ladder's group, a reason, an outcome, a band with its goal and step-down). */
+const REVIEWED: Record<ReviewedTab, { rows: () => RawRow[]; keyOf: (row: RawRow) => string }> = {
+  reintroductions: { rows: baseLadders, keyOf: (row) => String(row.group ?? '') },
+  escalations: { rows: allEscalations, keyOf: (row) => String(row.reason) },
+  responses: { rows: allResponses, keyOf: (row) => String(row.outcome) },
+  weeks: { rows: baseWeeks, keyOf: (row) => `${row.band}|${row.goal ?? ''}|${row.step_down ?? 'no'}` },
+}
+
 /**
- * The live workbook as the export gives it, with `edit` applied. A catalog that has never had guides exports an empty Guides tab, which the contract refuses, so
- * unless the test is about guides (`guides: false`) the base row of each step the edit leaves without one is added, as the team fills them in before an import.
+ * The live workbook as the export gives it, with `edit` applied. A catalog that has never had them exports the tabs that need rows empty, which the contract refuses, so
+ * unless the test is about one (`guides: false`, or its name in `skip`) the rows each is missing are added, as the team fills them in before an import: a base row for each step,
+ * the default ladder, a row for each reason and each outcome, a base card for each band. `approver` signs the rows that are added, for a test of the production approver gate.
  */
-const edited = async (service: CatalogWorkbookService, edit: (workbook: RawWorkbook) => void, options: { guides?: boolean } = {}): Promise<{ workbook: RawWorkbook; baseVersion: number }> => {
+const edited = async (
+  service: CatalogWorkbookService,
+  edit: (workbook: RawWorkbook) => void,
+  options: { guides?: boolean; skip?: ReviewedTab[]; approver?: string } = {},
+): Promise<{ workbook: RawWorkbook; baseVersion: number }> => {
   const live = await service.exportWorkbook()
   edit(live.workbook)
+  const signed = (row: RawRow): RawRow => (options.approver === undefined ? row : { ...row, approved_by: options.approver })
   if (options.guides !== false) {
     for (const base of baseGuides()) {
-      if (!live.workbook.guides.rows.some((row) => row.step === base.step && row.goal === null && row.status === 'approved')) live.workbook.guides.rows.push(base)
+      if (!live.workbook.guides.rows.some((row) => row.step === base.step && row.goal === null && row.status === 'approved')) live.workbook.guides.rows.push(signed(base))
+    }
+  }
+  for (const [name, { rows, keyOf }] of Object.entries(REVIEWED) as [ReviewedTab, (typeof REVIEWED)[ReviewedTab]][]) {
+    if (options.skip?.includes(name)) continue
+    for (const needed of rows()) {
+      if (!live.workbook[name].rows.some((row) => keyOf(row) === keyOf(needed) && row.status === 'approved')) live.workbook[name].rows.push(signed(needed))
     }
   }
   return { workbook: live.workbook, baseVersion: live.catalogVersion }
@@ -71,18 +107,37 @@ describe('CatalogWorkbookService.exportWorkbook', () => {
 
     const live = await service.exportWorkbook()
 
-    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.2.0' })
+    expect(live).toMatchObject({ catalogVersion: 1, contractVersion: '2.3.0' })
     expect(live.workbook.products).toEqual({ headers: expect.arrayContaining(['code', 'status', 'draft_cells']), rows: [] })
     expect(live.workbook.ingredients.rows.length).toBeGreaterThan(0)
   })
 
-  it('has no guides until the team writes them, so a fresh export fails the contract on nothing but the base rows of the Guides tab', async () => {
+  it('has no guides, ladders, escalations, responses or week cards until the team writes them, so a fresh export fails the contract on nothing but the rows those five tabs need', async () => {
+    const { service } = build()
+
+    const { workbook } = await service.exportWorkbook()
+    const result = validateWorkbook(workbook)
+
+    for (const tab of ['guides', 'reintroductions', 'escalations', 'responses', 'weeks'] as const) expect(workbook[tab].rows, tab).toEqual([])
+    expect(result.ok).toBe(false)
+    expect(result.ok ? [] : [...result.problems].sort((a, b) => a.tab.localeCompare(b.tab))).toEqual([
+      { tab: 'escalations', row: 1, column: 'reason', rule: 'ESCALATION_MISSING' },
+      { tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' },
+      { tab: 'reintroductions', row: 1, column: 'group', rule: 'REINTRO_DEFAULT_MISSING' },
+      { tab: 'responses', row: 1, column: 'outcome', rule: 'RESPONSE_MISSING' },
+      { tab: 'weeks', row: 1, column: 'band', rule: 'WEEK_BASE_MISSING' },
+    ])
+  })
+
+  it('gives the four reviewed tabs with their headers, empty', async () => {
     const { service } = build()
 
     const { workbook } = await service.exportWorkbook()
 
-    expect(workbook.guides.rows).toEqual([])
-    expect(validateWorkbook(workbook)).toEqual({ ok: false, problems: [{ tab: 'guides', row: 1, column: 'step', rule: 'GUIDE_BASE_MISSING' }] })
+    expect(workbook.reintroductions).toEqual({ headers: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
+    expect(workbook.escalations).toEqual({ headers: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
+    expect(workbook.responses).toEqual({ headers: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
+    expect(workbook.weeks).toEqual({ headers: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'], rows: [] })
   })
 
   it('gives the Guides tab with its headers, empty', async () => {
@@ -123,7 +178,7 @@ describe('CatalogWorkbookService.importWorkbook', () => {
     expect(result).toEqual({
       applied: false,
       catalogVersion: 2,
-      diff: { ...Object.fromEntries(['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides'].map((tab) => [tab, { added: [], updated: [], retired: [], reactivated: [] }])), newProducts: [] },
+      diff: { ...Object.fromEntries(['products', 'availability', 'ingredients', 'countries', 'claimWords', 'tapers', 'guides', 'reintroductions', 'escalations', 'responses', 'weeks'].map((tab) => [tab, { added: [], updated: [], retired: [], reactivated: [] }])), newProducts: [] },
     })
     expect(archive.stored.size).toBe(0)
   })
@@ -288,6 +343,7 @@ describe('CatalogWorkbookService.importWorkbook: the contract version', () => {
     ['an older contract', '1.0.0'],
     ['the 2.0.0 contract (before key_ingredient and strength)', '2.0.0'],
     ['the 2.1.0 contract (before the Guides tab)', '2.1.0'],
+    ['the 2.2.0 contract (before the Reintroductions, Escalations, Responses and Weeks tabs)', '2.2.0'],
     ['a newer contract', '9.9.9'],
     ['no version at all', ''],
   ])('refuses a file made for %s with a ConflictError CONTRACT_MISMATCH, for a dry run and an apply alike, and writes nothing', async (_what, contractVersion) => {
@@ -1106,7 +1162,7 @@ describe('CatalogWorkbookService: the Guides tab', () => {
 
     it('refuses an approved guide whose approver is not on the list, row by row, naming the approved_by cell and never the name', async () => {
       const service = inProduction(QUALIFIED)
-      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED).slice(0, 2), ...bases('Somebody Else').slice(2), override({ approved_by: 'Somebody Else' })), { guides: false })
+      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED).slice(0, 2), ...bases('Somebody Else').slice(2), override({ approved_by: 'Somebody Else' })), { guides: false, approver: QUALIFIED })
 
       const error = await dry(service, edit).catch((caught: unknown) => caught)
 
@@ -1135,7 +1191,7 @@ describe('CatalogWorkbookService: the Guides tab', () => {
             override({ goal: 'glow', status: 'draft', approved_by: 'Somebody Else' }),
             override({ goal: 'even-tone', status: 'retired', approved_by: 'Somebody Else' }),
           ),
-        { guides: false },
+        { guides: false, approver: QUALIFIED },
       )
 
       await expect(dry(service, edit)).resolves.toMatchObject({ applied: false })
@@ -1143,7 +1199,7 @@ describe('CatalogWorkbookService: the Guides tab', () => {
 
     it('lets nobody approve a guide when no list is held', async () => {
       const service = inProduction(undefined)
-      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED)), { guides: false })
+      const edit = await edited(service, (w) => w.guides.rows.push(...bases(QUALIFIED)), { guides: false, approver: QUALIFIED })
 
       await expect(dry(service, edit)).rejects.toMatchObject({ code: 'CATALOG_INVALID', details: { problems: expect.arrayContaining([{ tab: 'guides', row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }]) } })
     })
@@ -1235,5 +1291,645 @@ describe('CatalogWorkbookService: the Guides tab', () => {
 
       expect(await service.guideFor('treat', 'fade-dark-marks')).toMatchObject({ lookFor: 'Azelaic acid.' })
     })
+  })
+})
+
+// ---- the four reviewed tabs of contract 2.3.0 (spec #233, PR 1): Reintroductions, Escalations, Responses and Weeks ----
+// Stored, exported, imported and diffed like Guides. A row is named in a diff by its key: a ladder by its group ("default" for the one with none), an escalation by its
+// reason, a response by its outcome, and a week card by its band, then ":<goal>" when it has a goal, then ":step-down" when it is for a step-down ("3-4", "3-4:glow",
+// "3-4:step-down", "3-4:glow:step-down"). An escalation and a response are the one approved row of their reason or outcome, so neither can be left out, drafted or retired in an
+// upload: the contract refuses it. A ladder for a group and a week card for a goal or a step-down can.
+
+type Spec = {
+  tab: ReviewedTab
+  title: string
+  /** The column a missing-row problem sits in, and its rule. */
+  column: string
+  missing: string
+  /** The rows the contract needs, and nothing else. */
+  rows: () => RawRow[]
+  /** How the server names a row in a diff. */
+  keyOf: (row: RawRow) => string
+  /** An edit to the first row, and the key of that row. */
+  change: RawRow
+  firstKey: string
+  /** A cell of the first row that holds plain text, for the wording gate; none for a tab with no text cell. */
+  wording?: { column: string; rule: string }
+  /** More valid rows with keys of their own: approved, draft and retired. None for a tab where every key is taken. */
+  extra: () => RawRow[]
+}
+
+const unsigned = { status: 'draft', approved_by: null, approved_on: null }
+const SPECS: Spec[] = [
+  {
+    tab: 'reintroductions',
+    title: 'Reintroductions',
+    column: 'group',
+    missing: 'REINTRO_DEFAULT_MISSING',
+    rows: baseLadders,
+    keyOf: (row) => String(row.group ?? 'default'),
+    change: { schedule: '1: weekly; 2: back' },
+    firstKey: 'default',
+    extra: () => [
+      ladder({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: back' }),
+      ladder({ group: 'exfoliating-acid', ...unsigned }),
+      ladder({ group: 'benzoyl-peroxide', status: 'retired', approved_by: null, approved_on: null }),
+    ],
+  },
+  {
+    tab: 'escalations',
+    title: 'Escalations',
+    column: 'reason',
+    missing: 'ESCALATION_MISSING',
+    rows: allEscalations,
+    keyOf: (row) => String(row.reason),
+    change: { how_soon: 'Within a day.' },
+    firstKey: 'pus-or-hot-patch',
+    wording: { column: 'how_soon', rule: 'ESCALATION_WORDING' },
+    extra: () => [],
+  },
+  {
+    tab: 'responses',
+    title: 'Responses',
+    column: 'outcome',
+    missing: 'RESPONSE_MISSING',
+    rows: allResponses,
+    keyOf: (row) => String(row.outcome),
+    change: { body: 'A new body for your {step}.' },
+    firstKey: 'paused',
+    wording: { column: 'body', rule: 'RESPONSE_WORDING' },
+    extra: () => [],
+  },
+  {
+    tab: 'weeks',
+    title: 'Weeks',
+    column: 'band',
+    missing: 'WEEK_BASE_MISSING',
+    rows: baseWeeks,
+    keyOf: (row) => `${row.band}${row.goal ? `:${row.goal}` : ''}${row.step_down === 'yes' ? ':step-down' : ''}`,
+    change: { text: 'A new text.' },
+    firstKey: '1',
+    wording: { column: 'text', rule: 'WEEK_WORDING' },
+    extra: () => [
+      weekCard({ band: '3-4', goal: 'glow', title: 'Glow, weeks 3 to 4', text: 'Glow text.' }),
+      weekCard({ band: '3-4', step_down: 'yes', title: 'Step-down, weeks 3 to 4', text: 'Step-down text.' }),
+      weekCard({ band: '3-4', goal: 'brighter', ...unsigned }),
+      weekCard({ band: '3-4', goal: 'even-tone', status: 'retired', approved_by: null, approved_on: null }),
+    ],
+  },
+]
+
+const emptyTab = { added: [], updated: [], retired: [], reactivated: [] }
+const dryRun = (service: CatalogWorkbookService, edit: { workbook: RawWorkbook; baseVersion: number }) => service.importWorkbook({ ...edit, file: null, dryRun: true, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+const applyEdit = (service: CatalogWorkbookService, edit: { workbook: RawWorkbook; baseVersion: number }) => service.importWorkbook({ ...edit, file: FILE, dryRun: false, uploadedBy: 'T', contractVersion: CONTRACT_VERSION })
+
+describe.each(SPECS)('CatalogWorkbookService: the $title tab', (spec) => {
+  const { tab } = spec
+  const byKey = (rows: RawRow[]) => [...rows].sort((a, b) => spec.keyOf(a).localeCompare(spec.keyOf(b)))
+  const exportedRows = async (service: CatalogWorkbookService) => byKey((await service.exportWorkbook()).workbook[tab].rows)
+  /** The export with this tab's rows replaced by `rows`: everything else a workbook needs is added as the team would. */
+  const uploading = (service: CatalogWorkbookService, rows: RawRow[], options: { approver?: string } = {}) => edited(service, (w) => (w[tab].rows = rows), { skip: [tab], ...options })
+  const live = async (rows: RawRow[] = [...spec.rows(), ...spec.extra()]) => {
+    const built = build()
+    await applyEdit(built.service, await uploading(built.service, rows))
+    return built
+  }
+  const first = (rows: RawRow[], over: RawRow): RawRow[] => rows.map((row, i) => (i === 0 ? { ...row, ...over } : row))
+
+  describe('importing', () => {
+    it(`refuses a workbook that leaves out the row the contract needs as CATALOG_INVALID, naming the ${spec.title} tab, and applies nothing`, async () => {
+      const { service, repository } = build()
+
+      await expect(applyEdit(service, await uploading(service, spec.rows().slice(1)))).rejects.toMatchObject({
+        name: 'ValidationError',
+        code: 'CATALOG_INVALID',
+        details: { problems: [{ tab, row: 1, column: spec.column, rule: spec.missing }] },
+      })
+      expect(await repository.catalogVersion()).toBe(1)
+      expect(await exportedRows(service)).toEqual([])
+    })
+
+    if (spec.wording !== undefined) {
+      const { column, rule } = spec.wording
+
+      it('refuses a text that breaks the routine wording gate, with the problem on the cell, and applies nothing', async () => {
+        const { service, repository } = build()
+        const rows = first(spec.rows(), { [column]: 'Something for lighter skin.' })
+
+        await expect(applyEdit(service, await uploading(service, rows))).rejects.toMatchObject({
+          name: 'ValidationError',
+          code: 'CATALOG_INVALID',
+          details: { problems: [{ tab, row: 2, column, rule }] },
+        })
+        expect(await repository.catalogVersion()).toBe(1)
+      })
+    }
+
+    it('reports new rows as added in a dry run, named by their keys, and writes nothing', async () => {
+      const { service, repository, archive } = build()
+
+      const result = await dryRun(service, await uploading(service, [...spec.rows(), ...spec.extra()]))
+
+      expect(result.applied).toBe(false)
+      expect([...result.diff[tab].added].sort()).toEqual([...spec.rows(), ...spec.extra()].map(spec.keyOf).sort())
+      expect({ ...result.diff[tab], added: [] }).toEqual(emptyTab)
+      expect(await repository.catalogVersion()).toBe(1)
+      expect(archive.stored.size).toBe(0)
+      expect(await exportedRows(service)).toEqual([])
+    })
+
+    it('stores the rows it applies, and the export gives them back exactly as the upload had them, for the next edit to start from', async () => {
+      const { service } = build()
+      const rows = first([...spec.rows(), ...spec.extra()], { audited_by: 'Nneka Audit', audited_on: '2030-02-03' })
+
+      const result = await applyEdit(service, await uploading(service, rows))
+
+      expect(result).toMatchObject({ applied: true, catalogVersion: 2 })
+      expect(await exportedRows(service)).toEqual(byKey(rows))
+    })
+
+    it('gives the export the headers of the tab, whatever the upload had', async () => {
+      const { service } = await live()
+
+      expect((await service.exportWorkbook()).workbook[tab].headers).toEqual(
+        {
+          reintroductions: ['group', 'schedule', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          escalations: ['reason', 'who_to_see', 'how_soon', 'what_to_tell_them', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          responses: ['outcome', 'title', 'body', 'what_to_do_now', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+          weeks: ['band', 'goal', 'step_down', 'title', 'text', 'status', 'approved_by', 'approved_on', 'audited_by', 'audited_on'],
+        }[tab],
+      )
+    })
+
+    it('reports an unchanged export as an empty diff for the tab, and a cell spelt with other spaces as the same row', async () => {
+      const { service } = await live()
+      const column = Object.keys(spec.change)[0]!
+
+      const same = await dryRun(service, await edited(service, () => {}, { skip: [tab] }))
+      const spaced = await dryRun(
+        service,
+        await edited(service, (w) => {
+          const row = w[tab].rows.find((candidate) => spec.keyOf(candidate) === spec.firstKey)!
+          row[column] = ` ${String(row[column])} `
+        }),
+      )
+
+      expect(same.diff[tab]).toEqual(emptyTab)
+      expect(spaced.diff[tab]).toEqual(emptyTab)
+    })
+
+    it('reports a changed row as updated, only that one, and changes the stored row in place with no second row for its key', async () => {
+      const { service } = await live()
+      const rows = (await exportedRows(service)).length
+
+      const result = await applyEdit(service, await edited(service, (w) => Object.assign(w[tab].rows.find((row) => spec.keyOf(row) === spec.firstKey)!, spec.change)))
+
+      expect(result.diff[tab]).toEqual({ ...emptyTab, updated: [spec.firstKey] })
+      const after = await exportedRows(service)
+      expect(after).toHaveLength(rows)
+      expect(after.find((row) => spec.keyOf(row) === spec.firstKey)).toMatchObject(spec.change)
+    })
+
+    it('does not move the rules version: none of these is an ingredient rule', async () => {
+      const { repository } = await live()
+
+      expect((await repository.liveRules()).version).toBe(REFERENCE_VERSION)
+    })
+  })
+
+  describe('the approver gate in production', () => {
+    const QUALIFIED = 'Dr Q. Approver'
+    const inProduction = (qualifiedApprovers: string | undefined) =>
+      new CatalogWorkbookService({
+        repository: new FakeCatalogWorkbookRepository(),
+        archive: new MemoryWorkbookArchive({ environment: 'production' }),
+        now: () => new Date('2030-06-15T10:00:00Z'),
+        newId: () => 'id',
+        environment: 'production',
+        qualifiedApprovers,
+      })
+    const signedBy = (approver: string, rows: RawRow[] = spec.rows()): RawRow[] => rows.map((row) => ({ ...row, approved_by: approver }))
+
+    it('refuses an approved row whose approver is not on the list, naming the approved_by cell and never the name', async () => {
+      const service = inProduction(QUALIFIED)
+      const rows = first(signedBy(QUALIFIED), { approved_by: 'Somebody Else' })
+
+      const error = await dryRun(service, await uploading(service, rows, { approver: QUALIFIED })).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({
+        name: 'ValidationError',
+        code: 'CATALOG_INVALID',
+        details: { problems: [{ tab, row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }] },
+      })
+      expect(JSON.stringify(error)).not.toContain('Somebody Else')
+    })
+
+    it('takes rows approved by anyone on the list', async () => {
+      const service = inProduction(`${QUALIFIED}, Dr Other`)
+      const rows = first(signedBy(QUALIFIED), { approved_by: 'Dr Other' })
+
+      await expect(dryRun(service, await uploading(service, rows, { approver: QUALIFIED }))).resolves.toMatchObject({ applied: false })
+    })
+
+    if (spec.extra().length > 0) {
+      it('takes a draft or retired row by anyone: only an approved row is shown to people', async () => {
+        const service = inProduction(QUALIFIED)
+        const rows = [...signedBy(QUALIFIED), ...spec.extra().map((row) => (row.status === 'approved' ? { ...row, approved_by: QUALIFIED } : { ...row, approved_by: 'Somebody Else' }))]
+
+        await expect(dryRun(service, await uploading(service, rows, { approver: QUALIFIED }))).resolves.toMatchObject({ applied: false })
+      })
+
+      it('refuses an approved row of a group, goal or step-down by someone who is not on the list too', async () => {
+        const service = inProduction(QUALIFIED)
+        const rows = [...signedBy(QUALIFIED), ...spec.extra().filter((row) => row.status === 'approved').map((row) => ({ ...row, approved_by: 'Somebody Else' }))]
+
+        await expect(dryRun(service, await uploading(service, rows, { approver: QUALIFIED }))).rejects.toMatchObject({
+          code: 'CATALOG_INVALID',
+          details: { problems: expect.arrayContaining([expect.objectContaining({ tab, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' })]) },
+        })
+      })
+    }
+
+    it('lets nobody approve a row when no list is held', async () => {
+      const service = inProduction(undefined)
+
+      await expect(dryRun(service, await uploading(service, signedBy(QUALIFIED)))).rejects.toMatchObject({
+        code: 'CATALOG_INVALID',
+        details: { problems: expect.arrayContaining([{ tab, row: 2, column: 'approved_by', rule: 'UNQUALIFIED_APPROVER' }]) },
+      })
+    })
+
+    it('is not asked for outside production, where any approver does', async () => {
+      const { service } = build()
+
+      await expect(dryRun(service, await uploading(service, signedBy('Somebody Else')))).resolves.toMatchObject({ applied: false })
+    })
+  })
+})
+
+describe('CatalogWorkbookService: retiring a ladder or a week card, which an upload may do', () => {
+  const retinoid = ladder({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: back' })
+  const glow = weekCard({ band: '3-4', goal: 'glow', title: 'Glow, weeks 3 to 4', text: 'Glow text.' })
+  const isRetinoid = (row: RawRow) => row.group === 'retinoid'
+  const isGlow = (row: RawRow) => row.goal === 'glow' && row.band === '3-4'
+
+  it.each([
+    ['a group ladder', 'reintroductions', retinoid, 'retinoid', isRetinoid],
+    ['a goal card', 'weeks', glow, '3-4:glow', isGlow],
+  ] as const)('never deletes: %s the upload leaves out is retired in place, stays in the export, and comes back as reactivated', async (_what, tab, row, key, match) => {
+    const { service } = build()
+    const exported = async () => (await service.exportWorkbook()).workbook[tab].rows.filter(match)
+    await applyEdit(service, await edited(service, (w) => w[tab].rows.push({ ...row })))
+
+    const retired = await applyEdit(service, await edited(service, (w) => (w[tab].rows = w[tab].rows.filter((candidate) => !match(candidate)))))
+
+    expect(retired.diff[tab]).toEqual({ ...emptyTab, retired: [key] })
+    expect(await exported()).toEqual([{ ...row, status: 'retired' }])
+
+    const back = await applyEdit(service, await edited(service, (w) => (w[tab].rows = w[tab].rows.filter((candidate) => !match(candidate)).concat({ ...row }))))
+    expect(back.diff[tab]).toEqual({ ...emptyTab, reactivated: [key] })
+    expect(await exported()).toEqual([row])
+  })
+
+  it.each([
+    ['a group ladder', 'reintroductions', retinoid, 'retinoid', isRetinoid],
+    ['a goal card', 'weeks', glow, '3-4:glow', isGlow],
+  ] as const)('reports %s set to retired as retired, once, and not again when it is uploaded retired again', async (_what, tab, row, key, match) => {
+    const { service } = build()
+    await applyEdit(service, await edited(service, (w) => w[tab].rows.push({ ...row })))
+
+    const result = await applyEdit(service, await edited(service, (w) => Object.assign(w[tab].rows.find(match)!, { status: 'retired' })))
+    const again = await dryRun(service, await edited(service, () => {}))
+
+    expect(result.diff[tab]).toEqual({ ...emptyTab, retired: [key] })
+    expect(again.diff[tab]).toEqual(emptyTab)
+  })
+})
+
+describe('CatalogWorkbookService: how a ladder and a week card are written back', () => {
+  it('writes a ladder\'s schedule the one way a schedule is written, whatever spaces and spelling it came in', async () => {
+    const { service } = build()
+
+    await applyEdit(service, await edited(service, (w) => w.reintroductions.rows.push(ladder({ group: 'retinoid', schedule: ' 1-2:as-needed ;3 : weekly;  4:   back ' }))))
+
+    const row = (await service.exportWorkbook()).workbook.reintroductions.rows.find((candidate) => candidate.group === 'retinoid')
+    expect(row).toMatchObject({ schedule: '1-2: as-needed; 3: weekly; 4: back' })
+  })
+
+  it('writes a ladder with no group with an empty group cell, and a card with no step_down as no', async () => {
+    const { service } = build()
+
+    await applyEdit(service, await edited(service, (w) => w.weeks.rows.push(weekCard({ band: '2', title: 'Second', text: 'Second text.', step_down: null }), weekCard({ band: '3-4', step_down: 'yes', text: 'Down.' }))))
+
+    const exported = (await service.exportWorkbook()).workbook
+    expect(exported.reintroductions.rows.map((row) => row.group)).toEqual([null])
+    expect(exported.weeks.rows.find((row) => row.band === '2')).toMatchObject({ step_down: 'no', goal: null })
+    expect(exported.weeks.rows.find((row) => row.band === '3-4' && row.step_down === 'yes')).toBeTruthy()
+  })
+
+  it('reads a band that came as a number as the band it names', async () => {
+    const { service } = build()
+
+    await applyEdit(service, await edited(service, (w) => (w.weeks.rows = [weekCard({ band: 1, title: 'Number', text: 'Number text.' }), ...baseWeeks().slice(1)]), { skip: ['weeks'] }))
+
+    expect((await service.exportWorkbook()).workbook.weeks.rows.find((row) => row.band === '1')).toMatchObject({ title: 'Number' })
+  })
+})
+
+// ---- the four reads the later PRs of #233 build on: what the app shows, never what is not approved ----
+
+describe('CatalogWorkbookService.reintroductionFor', () => {
+  const retinoid = ladder({ group: 'retinoid', schedule: '1-2: as-needed; 3-4: weekly; 5: am; 6: back' })
+  const defaultLadder = ladder({ schedule: '1: weekly; 2: back' })
+  const live = async (...rows: RawRow[]) => {
+    const { service } = build()
+    await applyEdit(service, await edited(service, (w) => (w.reintroductions.rows = [defaultLadder, ...rows]), { skip: ['reintroductions'] }))
+    return service
+  }
+
+  it('gives the steps of the ladder of the group, as the schedule reads', async () => {
+    const service = await live(retinoid)
+
+    expect(await service.reintroductionFor('retinoid')).toEqual([
+      { fromWeek: 1, toWeek: 2, frequency: 'as-needed' },
+      { fromWeek: 3, toWeek: 4, frequency: 'weekly' },
+      { fromWeek: 5, toWeek: 5, frequency: 'am' },
+      { fromWeek: 6, toWeek: 6, frequency: 'back' },
+    ])
+  })
+
+  it('gives the default ladder for no group, and for a group with no ladder of its own', async () => {
+    const service = await live(retinoid)
+    const steps = [{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 2, frequency: 'back' }]
+
+    expect(await service.reintroductionFor(null)).toEqual(steps)
+    expect(await service.reintroductionFor('exfoliating-acid')).toEqual(steps)
+    expect(await service.reintroductionFor('benzoyl-peroxide')).toEqual(steps)
+  })
+
+  it.each(['mercury', 'steroid', 'lightening-agent'] as const)('gives no steps for %s, which is never brought back, and not the default ladder either', async (group) => {
+    const service = await live(retinoid)
+
+    expect(await service.reintroductionFor(group)).toEqual([])
+    // The default ladder is still there for a group that can be brought back.
+    expect(await service.reintroductionFor('exfoliating-acid')).toHaveLength(2)
+  })
+
+  it('ignores a ladder that is a draft, and one that has been retired, and gives the default', async () => {
+    const service = await live(ladder({ group: 'exfoliating-acid', schedule: '1: as-needed; 2: back', ...unsigned }), ladder({ group: 'benzoyl-peroxide', schedule: '1: as-needed; 2: back' }))
+    await applyEdit(service, await edited(service, (w) => (w.reintroductions.rows = w.reintroductions.rows.filter((row) => row.group !== 'benzoyl-peroxide'))))
+
+    expect(await service.reintroductionFor('exfoliating-acid')).toEqual([{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 2, frequency: 'back' }])
+    expect(await service.reintroductionFor('benzoyl-peroxide')).toEqual([{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 2, frequency: 'back' }])
+  })
+
+  it('gives an empty ladder when the catalog has none at all, as it has before the team fills the tab in', async () => {
+    const { service } = build()
+
+    expect(await service.reintroductionFor(null)).toEqual([])
+    expect(await service.reintroductionFor('retinoid')).toEqual([])
+  })
+
+  it('reads what is live now: a changed ladder is given as changed after the upload that changed it', async () => {
+    const service = await live(retinoid)
+    expect(await service.reintroductionFor('retinoid')).toHaveLength(4)
+
+    await applyEdit(service, await edited(service, (w) => Object.assign(w.reintroductions.rows.find((row) => row.group === 'retinoid')!, { schedule: '1: weekly; 2: back' })))
+
+    expect(await service.reintroductionFor('retinoid')).toEqual([{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 2, frequency: 'back' }])
+  })
+})
+
+describe('CatalogWorkbookService.escalationFor', () => {
+  const live = async () => {
+    const { service } = build()
+    await applyEdit(service, await edited(service, () => {}))
+    return service
+  }
+
+  it('gives the three texts of the reason and nothing else', async () => {
+    const service = await live()
+
+    expect(await service.escalationFor('swelling')).toEqual({
+      whoToSee: 'Who to see for swelling.',
+      howSoon: 'How soon for swelling.',
+      whatToTellThem: 'What to tell them for swelling.',
+    })
+  })
+
+  it.each(REASONS)('gives the row of its own reason: %s', async (reason) => {
+    const service = await live()
+
+    expect(await service.escalationFor(reason)).toMatchObject({ whoToSee: `Who to see for ${reason}.` })
+  })
+
+  it('gives null when the catalog has no escalation at all, as it has before the team fills the tab in', async () => {
+    const { service } = build()
+
+    expect(await service.escalationFor('swelling')).toBeNull()
+  })
+
+  it('reads what is live now: a changed text is given as changed after the upload that changed it', async () => {
+    const service = await live()
+
+    await applyEdit(service, await edited(service, (w) => Object.assign(w.escalations.rows.find((row) => row.reason === 'near-eyes')!, { how_soon: 'The same day.' })))
+
+    expect(await service.escalationFor('near-eyes')).toMatchObject({ howSoon: 'The same day.' })
+    expect(await service.escalationFor('swelling')).toMatchObject({ howSoon: 'How soon for swelling.' })
+  })
+})
+
+describe('CatalogWorkbookService.responseFor', () => {
+  const live = async (edit: (workbook: RawWorkbook) => void = () => {}) => {
+    const { service } = build()
+    await applyEdit(service, await edited(service, edit))
+    return service
+  }
+
+  it('gives the title, body and what to do now of the outcome and nothing else, with {step} left in for the server to fill', async () => {
+    const service = await live((w) => w.responses.rows.push(response({ outcome: 'paused', title: 'We paused your {step}', body: 'A rest for your {step}.', what_to_do_now: 'Skip anything that stings.' }), ...allResponses().slice(1)))
+
+    expect(await service.responseFor('paused')).toEqual({ title: 'We paused your {step}', body: 'A rest for your {step}.', whatToDoNow: 'Skip anything that stings.' })
+  })
+
+  it.each(OUTCOMES)('gives the row of its own outcome: %s', async (outcome) => {
+    const service = await live()
+
+    expect(await service.responseFor(outcome)).toEqual({ title: `Title for ${outcome}`, body: `Body for ${outcome}.`, whatToDoNow: `What to do for ${outcome}.` })
+  })
+
+  it('gives whatToDoNow as null when the row has none', async () => {
+    const service = await live((w) => w.responses.rows.push(...allResponses().map((row) => (row.outcome === 'check-calmer' ? { ...row, what_to_do_now: null } : row))))
+
+    expect(await service.responseFor('check-calmer')).toEqual({ title: 'Title for check-calmer', body: 'Body for check-calmer.', whatToDoNow: null })
+  })
+
+  it('gives null when the catalog has no response at all, as it has before the team fills the tab in', async () => {
+    const { service } = build()
+
+    expect(await service.responseFor('paused')).toBeNull()
+  })
+
+  it('reads what is live now: a changed text is given as changed after the upload that changed it', async () => {
+    const service = await live()
+
+    await applyEdit(service, await edited(service, (w) => Object.assign(w.responses.rows.find((row) => row.outcome === 'check-worse')!, { body: 'A newer body.' })))
+
+    expect(await service.responseFor('check-worse')).toMatchObject({ body: 'A newer body.' })
+  })
+})
+
+describe('CatalogWorkbookService.weekCardFor', () => {
+  const live = async (...extra: RawRow[]) => {
+    const { service } = build()
+    await applyEdit(service, await edited(service, (w) => w.weeks.rows.push(...baseWeeks(), ...extra), { skip: ['weeks'] }))
+    return service
+  }
+  // Four cards for band 3-4, each saying which of the four it is, so a test can tell which one it was given.
+  const both = weekCard({ band: '3-4', goal: 'glow', step_down: 'yes', title: 'Goal and step-down', text: 'Goal and step-down text.' })
+  const stepDownOnly = weekCard({ band: '3-4', step_down: 'yes', title: 'Step-down only', text: 'Step-down only text.' })
+  const goalOnly = weekCard({ band: '3-4', goal: 'glow', title: 'Goal only', text: 'Goal only text.' })
+
+  it('gives the title and text and nothing else', async () => {
+    const service = await live()
+
+    expect(await service.weekCardFor(1, 'glow', false)).toEqual({ title: 'Title for 1', text: 'Text for 1.' })
+  })
+
+  it.each([
+    [1, '1'], [2, '2'], [3, '3-4'], [4, '3-4'], [5, '5-8'], [8, '5-8'], [9, '9-12'], [12, '9-12'], [13, '9-12'], [26, '9-12'], [52, '9-12'],
+  ] as const)('maps week %i to band %s: the bands end at weeks 1, 2, 4, 8 and 12, and week 13 and later use the last', async (week, band) => {
+    const service = await live()
+
+    expect(await service.weekCardFor(week, 'glow', false)).toEqual({ title: `Title for ${band}`, text: `Text for ${band}.` })
+  })
+
+  describe('the first approved match wins: (band, goal, step-down), then (band, no goal, step-down), then (band, goal, no step-down), then the base card', () => {
+    it('gives the goal and step-down card to a person with that goal on a step-down', async () => {
+      const service = await live(both, stepDownOnly, goalOnly)
+
+      expect(await service.weekCardFor(3, 'glow', true)).toEqual({ title: 'Goal and step-down', text: 'Goal and step-down text.' })
+    })
+
+    it('gives the step-down card with no goal to a person on a step-down whose goal has no step-down card of its own', async () => {
+      const service = await live(both, stepDownOnly, goalOnly)
+
+      expect(await service.weekCardFor(3, 'even-tone', true)).toEqual({ title: 'Step-down only', text: 'Step-down only text.' })
+    })
+
+    it('prefers the step-down card with no goal to the goal card without a step-down: step-down comes before goal', async () => {
+      const service = await live(stepDownOnly, goalOnly)
+
+      expect(await service.weekCardFor(3, 'glow', true)).toEqual({ title: 'Step-down only', text: 'Step-down only text.' })
+    })
+
+    it('gives the goal card without a step-down to a person on a step-down when there is no step-down card at all', async () => {
+      const service = await live(goalOnly)
+
+      expect(await service.weekCardFor(3, 'glow', true)).toEqual({ title: 'Goal only', text: 'Goal only text.' })
+    })
+
+    it('gives the goal card without a step-down to a person with that goal who is not on a step-down, even when step-down cards exist', async () => {
+      const service = await live(both, stepDownOnly, goalOnly)
+
+      expect(await service.weekCardFor(3, 'glow', false)).toEqual({ title: 'Goal only', text: 'Goal only text.' })
+    })
+
+    it('gives the base card to a person whose goal has no card and who is not on a step-down, even when step-down cards exist', async () => {
+      const service = await live(both, stepDownOnly, goalOnly)
+
+      expect(await service.weekCardFor(3, 'even-tone', false)).toEqual({ title: 'Title for 3-4', text: 'Text for 3-4.' })
+    })
+
+    it('gives the base card to a person on a step-down when the band has no step-down card and the goal has no card', async () => {
+      const service = await live()
+
+      expect(await service.weekCardFor(3, 'glow', true)).toEqual({ title: 'Title for 3-4', text: 'Text for 3-4.' })
+    })
+
+    it('looks in the band of the week only: a goal card of another band is not given', async () => {
+      const service = await live(goalOnly)
+
+      expect(await service.weekCardFor(5, 'glow', false)).toEqual({ title: 'Title for 5-8', text: 'Text for 5-8.' })
+    })
+  })
+
+  it('ignores a card that is a draft, and one that has been retired, and gives the next match', async () => {
+    const service = await live(
+      weekCard({ band: '3-4', goal: 'glow', title: 'Draft', text: 'Draft text.', ...unsigned }),
+      weekCard({ band: '3-4', goal: 'even-tone', title: 'Retired later', text: 'Retired later text.' }),
+      weekCard({ band: '3-4', step_down: 'yes', title: 'Retired step-down', text: 'x', status: 'retired', approved_by: null, approved_on: null }),
+    )
+    await applyEdit(service, await edited(service, (w) => (w.weeks.rows = w.weeks.rows.filter((row) => row.goal !== 'even-tone'))))
+
+    expect(await service.weekCardFor(3, 'glow', false)).toEqual({ title: 'Title for 3-4', text: 'Text for 3-4.' })
+    expect(await service.weekCardFor(3, 'even-tone', false)).toEqual({ title: 'Title for 3-4', text: 'Text for 3-4.' })
+    expect(await service.weekCardFor(3, 'glow', true)).toEqual({ title: 'Title for 3-4', text: 'Text for 3-4.' })
+  })
+
+  it('gives null when the catalog has no week card at all, as it has before the team fills the tab in', async () => {
+    const { service } = build()
+
+    expect(await service.weekCardFor(1, 'glow', false)).toBeNull()
+    expect(await service.weekCardFor(20, 'glow', true)).toBeNull()
+  })
+
+  it('reads what is live now: a changed card is given as changed after the upload that changed it', async () => {
+    const service = await live(goalOnly)
+
+    await applyEdit(service, await edited(service, (w) => Object.assign(w.weeks.rows.find((row) => row.goal === 'glow')!, { text: 'Newer goal text.' })))
+
+    expect(await service.weekCardFor(4, 'glow', false)).toEqual({ title: 'Goal only', text: 'Newer goal text.' })
+  })
+})
+
+// A draft or a retired escalation or response cannot be uploaded (the contract refuses the upload that would leave its reason or outcome without an approved row), so the only
+// way to see that the reads leave one alone is to write it to the store directly, through the same plan an upload is applied with.
+describe('CatalogWorkbookService: a read never gives an escalation or a response that is not approved', () => {
+  const planOf = async (repository: FakeCatalogWorkbookRepository, over: Partial<WorkbookPlan>): Promise<WorkbookPlan> => ({
+    baseVersion: await repository.catalogVersion(),
+    rulesVersion: (await repository.liveRules()).version,
+    contractVersion: CONTRACT_VERSION,
+    uploadedBy: 'T',
+    archiveKey: 'workbooks/test/1',
+    now: new Date('2030-06-15T10:00:00Z'),
+    newProducts: [],
+    products: [],
+    availability: null,
+    ingredients: [],
+    countries: [],
+    retiredProducts: [],
+    retiredIngredients: [],
+    retiredCountries: [],
+    claimWords: [],
+    tapers: [],
+    retiredClaimWords: [],
+    retiredTapers: [],
+    guides: [],
+    retiredGuides: [],
+    reintroductions: [],
+    retiredReintroductions: [],
+    escalations: [],
+    retiredEscalations: [],
+    responses: [],
+    retiredResponses: [],
+    weeks: [],
+    retiredWeeks: [],
+    ...over,
+  })
+  const unapproved = { approvedBy: null, approvedOn: null, auditedBy: null, auditedOn: null }
+
+  it.each(['draft', 'retired'] as const)('gives null for the escalation of a reason whose only row is %s', async (status) => {
+    const { service, repository } = build()
+    await repository.applyWorkbook(await planOf(repository, { escalations: [{ reason: 'swelling', whoToSee: 'A', howSoon: 'B', whatToTellThem: 'C', status, ...unapproved }] }))
+
+    expect(await service.escalationFor('swelling')).toBeNull()
+  })
+
+  it.each(['draft', 'retired'] as const)('gives null for the response of an outcome whose only row is %s', async (status) => {
+    const { service, repository } = build()
+    await repository.applyWorkbook(await planOf(repository, { responses: [{ outcome: 'check-same', title: 'A', body: 'B', whatToDoNow: null, status, ...unapproved }] }))
+
+    expect(await service.responseFor('check-same')).toBeNull()
   })
 })

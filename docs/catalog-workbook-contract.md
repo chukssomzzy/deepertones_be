@@ -1,13 +1,13 @@
 # Catalog workbook contract
 
-Version 2.2.0. Fingerprint `426d2d5869d7e255e5f2290c3b43a919e0d9722d607c40e9ba893a466c2f21de`.
+Version 2.3.0. Fingerprint `e18f5eb3b236fc158535faf3621f7d6d72fbf5527ad1f9c8939629cba1de3423`.
 
 This document is written by `npm run catalog:contract-doc` from `src/modules/catalog/catalog.workbook.schema.ts`. Do not edit it by hand: change the
 contract, and run the command again.
 
 ## How the workbook is read
 
-The workbook has seven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides. The first row of a tab is its header: one column name for each
+The workbook has eleven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks. The first row of a tab is its header: one column name for each
 column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not
 listed here is a problem. A tab with no rows is fine, but it still needs its header row.
 
@@ -190,6 +190,99 @@ Checks across cells and rows:
 - `GUIDE_WORDING`: No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
 - `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
 
+### Reintroductions
+
+How a person brings a paused product back slowly: a ladder that climbs from rare use to the routine's own frequency and ends with back, after at least one step before it. The ladder of a group is used for that group, and the ladder with no group for every group without one of its own. Mercury, steroid and lightening-agent have no ladder: they are only ever stopped, never brought back. A ladder is shown to people, so a qualified person approves it; in production the server refuses an approved ladder whose approver is not on its list. A row is identified by its group, and is retired, never deleted.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `group` | Optional | The ingredient group the ladder is for. Leave it empty for the default ladder, which every group without a ladder of its own is brought back on. | One of: `mercury`, `steroid`, `lightening-agent`, `retinoid`, `exfoliating-acid`, `benzoyl-peroxide`. | `NOT_IN_VOCABULARY` |
+| `schedule` | Required | The steps, separated by ;. Each step is its weeks, a colon and a frequency: a single week (3) or a run of weeks (1-2), then the frequency. Weeks run on from week 1 with no gap, up to week 12. The frequency never goes down, the last step is back, the routine's own frequency from there on, and at least one step comes before back. For example: 1: weekly; 2: alternate-days; 3: back | Steps separated by semicolons, each `<weeks>: <frequency>`, the frequency one of: `am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `back`. Up to 300 characters. | `REQUIRED` `TOO_LONG` `BAD_SCHEDULE` `SCHEDULE_NOT_CONTIGUOUS` `REINTRO_MISSING_BACK` `REINTRO_BACK_ONLY` `REINTRO_BACK_NOT_LAST` `REINTRO_FREQUENCY_DECREASES` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its group is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this ladder. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `REINTRO_DEFAULT_MISSING`: One approved row has no group. A draft or retired row does not count.
+- `REINTRO_DUPLICATE`: Each group appears once, no group counting as a group. A draft or retired row counts.
+- `REINTRO_GROUP_NEVER_BACK`: No row is for mercury, steroid or lightening-agent, whatever its status.
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
+### Escalations
+
+What the app tells a person when it sends them to a professional: who to see, how soon, and what to tell them. Each reason needs exactly one approved row. The texts are plain words and are never a diagnosis. A qualified person approves them; in production the server refuses an approved row whose approver is not on its list. A row is identified by its reason, and is retired, never deleted.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `reason` | Required | Why the app sends the person to a professional. | One of: `pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `who_to_see` | Required | The kind of professional to see, in plain words: for example "A doctor or a pharmacist." | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
+| `how_soon` | Required | How soon to be seen, in plain words: for example "Today, or within a day." | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
+| `what_to_tell_them` | Required | What the person should tell the professional, in plain words. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `ESCALATION_WORDING` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its reason is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this escalation. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `ESCALATION_MISSING`: Each reason has one approved row. A draft or retired row does not count.
+- `ESCALATION_DUPLICATE`: Each reason appears once. A draft or retired row counts.
+- `ESCALATION_WORDING`: No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
+### Responses
+
+The text that answers a skin log or a check-in after a pause. Each outcome needs exactly one approved row. {step} is the one placeholder a text may hold. The app always shows it as the plain noun of the routine step the answer is about (Cleanser, Treatment, Moisturiser or Sunscreen, never a product title), and as "your routine" when the answer is about no step (the check-in when there is nothing to pause). Any other brace is refused: {product}, {step or step} and {step}} are all problems. The wording rules are checked once for each of those five readings, and every one must pass, so a text must still read well as "your Sunscreen" and as "your routine". A qualified person approves a response; in production the server refuses an approved row whose approver is not on its list. A row is identified by its outcome, and is retired, never deleted.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `outcome` | Required | What the log or check-in came to. | One of: `paused`, `advice-tightness`, `advice-itching`, `advice-breakouts`, `expected-flare`, `check-calmer`, `check-same`, `check-worse`, `nothing-to-pause`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `title` | Required | The heading of the answer, in plain words. May hold {step}. | Text. Up to 120 characters. No links or markup. `{step}` is the only placeholder allowed. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `RESPONSE_PLACEHOLDER` `RESPONSE_WORDING` |
+| `body` | Required | The answer, in plain words. May hold {step}. | Text. Up to 300 characters. No links or markup. `{step}` is the only placeholder allowed. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `RESPONSE_PLACEHOLDER` `RESPONSE_WORDING` |
+| `what_to_do_now` | Optional | What to do now, in plain words. May hold {step}. Leave it empty when the answer needs no action. | Text. Up to 300 characters. No links or markup. `{step}` is the only placeholder allowed. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `TOO_LONG` `HAS_LINK_OR_MARKUP` `RESPONSE_PLACEHOLDER` `RESPONSE_WORDING` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its outcome is never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this response. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `RESPONSE_MISSING`: Each outcome has one approved row. A draft or retired row does not count.
+- `RESPONSE_DUPLICATE`: Each outcome appears once. A draft or retired row counts.
+- `RESPONSE_PLACEHOLDER`: No text holds a brace that is not part of an exact {step}.
+- `RESPONSE_WORDING`: No text, read with {step} as each of Cleanser, Treatment, Moisturiser, Sunscreen and "your routine", holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
+### Weeks
+
+The week card on the Today screen: a short heading and a few plain words for the stretch of weeks a person is in. A row is one band, and optionally a goal and a step-down: the card shown is the first that exists of the band's card for the goal on a step-down, the band's step-down card, the band's card for the goal, and the band's base card, so each band needs one approved base card (no goal, step_down no). The server prints "Week 1" and the like itself, so the title is a short heading. A qualified person approves a card; in production the server refuses an approved row whose approver is not on its list. A row is identified by its band, goal and step_down, and is retired, never deleted.
+
+| Column | Needed | What it holds | Format and accepted values | Problems it can raise |
+| --- | --- | --- | --- | --- |
+| `band` | Required | The weeks the card is for. A person in week 13 or later is shown the 9-12 card. Keep the column formatted as text: a spreadsheet turns 3-4 into a date otherwise. | One of: `1`, `2`, `3-4`, `5-8`, `9-12`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `goal` | Optional | The goal the card is for. Leave it empty for the band's base card, which people with any other goal are shown. | One of: `clear-skin`, `even-tone`, `fade-dark-marks`, `brighter`, `glow`, `calm-repair`. | `NOT_IN_VOCABULARY` |
+| `step_down` | Optional | yes for a card shown to a person who is stepping down a product, no for any other. Empty means no. | One of: `yes`, `no`. | `NOT_IN_VOCABULARY` |
+| `title` | Required | A short heading, in plain words. Do not write "Week 1": the server adds that. | Text. Up to 60 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `WEEK_WORDING` |
+| `text` | Required | What the week is about, in plain words. | Text. Up to 300 characters. No links or markup. No condition names, diagnoses, or promises of lighter, fairer or whiter skin. | `REQUIRED` `TOO_LONG` `HAS_LINK_OR_MARKUP` `WEEK_WORDING` |
+| `status` | Required | draft: still being worked on, and never shown. approved: reviewed by a qualified person and shown. retired: no longer used; the row stays so its band, goal and step-down are never reused. | One of: `draft`, `approved`, `retired`. | `REQUIRED` `NOT_IN_VOCABULARY` |
+| `approved_by` | Required when approved | Who approved this week card. Needed when the status is approved. | Text. Up to 80 characters. | `REQUIRED_WHEN_APPROVED` `TOO_LONG` |
+| `approved_on` | Required when approved | The day it was approved. Needed when the status is approved. | A day written `YYYY-MM-DD`. | `REQUIRED_WHEN_APPROVED` `BAD_DATE` |
+| `audited_by` | Optional | Who checked the approval afterwards. Optional, but given together with audited_on. | Text. Up to 80 characters. | `TOO_LONG` `AUDIT_INCOMPLETE` |
+| `audited_on` | Optional | The day of that check. Optional, but given together with audited_by. | A day written `YYYY-MM-DD`. | `BAD_DATE` `AUDIT_INCOMPLETE` |
+
+Checks across cells and rows:
+
+- `WEEK_BASE_MISSING`: Each band has one approved row with no goal and step_down no (or empty). A draft or retired row does not count.
+- `WEEK_DUPLICATE`: Each band, goal and step_down appears once, no goal counting as a goal and an empty step_down as no. A draft or retired row counts.
+- `WEEK_BAND_DATE`: No band cell holds a date that a spreadsheet made of a band (3-4 turned into 4 March, 5-8, 9-12).
+- `WEEK_WORDING`: No text holds a word the routine never uses (a condition, a diagnosis, lighter, fairer or whiter skin, a score). Every row is checked, drafts too.
+- `AUDIT_INCOMPLETE`: audited_by and audited_on are given together, or not at all.
+
 ## Accepted values
 
 A value is accepted only when written exactly as here, in lower case.
@@ -269,7 +362,7 @@ Used by: `Products.own_cautions`, `Ingredients.kind`
 
 `draft`, `approved`, `retired`
 
-Used by: `Products.status`, `Ingredients.status`, `Tapers.status`, `Guides.status`
+Used by: `Products.status`, `Ingredients.status`, `Tapers.status`, `Guides.status`, `Reintroductions.status`, `Escalations.status`, `Responses.status`, `Weeks.status`
 
 ### Country statuses
 
@@ -297,7 +390,7 @@ Used by: `Claim words.claim`
 
 What an ingredient is, for the rules that look across a shelf, as opposed to what it does. Most ingredient rules have no group. Mercury is stopped at once; steroid and lightening-agent are stopped with a step-down plan.
 
-Used by: `Ingredients.group`, `Ingredients.clashes_with`
+Used by: `Ingredients.group`, `Ingredients.clashes_with`, `Reintroductions.group`
 
 ### Taper kinds
 
@@ -313,7 +406,7 @@ Used by: `Tapers.kind`
 
 The goals a person can pick. A guide row with a goal is shown to people with that goal instead of the step's guide with no goal; the list is the goals the app offers, so it moves when they do.
 
-Used by: `Guides.goal`
+Used by: `Guides.goal`, `Weeks.goal`
 
 ### Schedule frequencies
 
@@ -322,6 +415,46 @@ Used by: `Guides.goal`
 The frequencies of a step-down schedule: the usual frequencies, and stop. A schedule goes only down the ladder, strongest first: am-pm, then am or pm (the same strength), then alternate-days, then weekly, then as-needed, then stop. It never goes back up, and it ends with stop.
 
 Used by: `Tapers.schedule`
+
+### Ladder frequencies
+
+`am`, `pm`, `am-pm`, `alternate-days`, `weekly`, `as-needed`, `back`
+
+The frequencies of a reintroduction ladder: the usual frequencies, and back. A ladder only climbs, weakest first: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm. Its last step is back, which means the routine's own frequency from there on. It never says stop.
+
+Used by: `Reintroductions.schedule`
+
+### Escalation reasons
+
+`pus-or-hot-patch`, `swelling`, `near-eyes`, `worse-after-pause`, `unchanged-after-checks`, `harm-while-two-paused`, `hard-to-ignore-during-step-down`
+
+The reasons the app sends a person to a professional. Each has exactly one approved row in the Escalations tab.
+
+Used by: `Escalations.reason`
+
+### Response outcomes
+
+`paused`, `advice-tightness`, `advice-itching`, `advice-breakouts`, `expected-flare`, `check-calmer`, `check-same`, `check-worse`, `nothing-to-pause`
+
+What a skin log or a check-in after a pause comes to. Each has exactly one approved row in the Responses tab.
+
+Used by: `Responses.outcome`
+
+### Week bands
+
+`1`, `2`, `3-4`, `5-8`, `9-12`
+
+The stretches of weeks a week card is written for. A person in week 13 or later is shown the 9-12 card. Each band needs one approved base card. A band such as 3-4 looks like a date to a spreadsheet: the exported file has the band column formatted as text, so keep that format, and write a band you add as text.
+
+Used by: `Weeks.band`
+
+### Yes no
+
+`yes`, `no`
+
+Whether a week card is for a person who is stepping down a product. Empty means no.
+
+Used by: `Weeks.step_down`
 
 ## Problem codes
 
@@ -362,12 +495,30 @@ Used by: `Tapers.schedule`
 | `DUPLICATE_PHRASE` | Two claim words that are not retired have the same phrase. Every such row is reported. A retired word may share the phrase of a live one. |
 | `NOT_A_LIGHTENING_CLAIM` | The phrase holds "brightening" or "glow" as a whole word. Brightening and glow are goals people have, not claims to lighten skin, so a product named with them is never flagged for lightening. Leave the phrase out. |
 | `NOT_LOWER_CASE` | The phrase has a capital letter. Claim phrases are written in lower case, since a product name is compared with them in lower case. |
-| `BAD_SCHEDULE` | The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop. A schedule is at most 52 weeks long. |
+| `BAD_SCHEDULE` | The schedule is not written as steps like `1-2: alternate-days; 3-4: weekly; 5: stop`. Each step is its weeks (a week number from 1, or two with a hyphen, such as 1-2), a colon, and one frequency; steps are separated by semicolons. The frequency is one of the accepted frequencies, or stop in a Tapers schedule and back in a Reintroductions ladder (never stop in a ladder). A Tapers schedule is at most 52 weeks long, and a ladder at most 12. |
 | `SCHEDULE_NOT_CONTIGUOUS` | The weeks of the schedule do not run on from week 1 one step after another: it starts after week 1, or leaves a gap, or two steps share a week, or the steps are out of order. |
 | `SCHEDULE_MISSING_STOP` | The schedule never says stop. A step-down ends with a step whose frequency is stop. |
 | `SCHEDULE_STOP_NOT_LAST` | A step whose frequency is stop is followed by another step. Stop ends the schedule, so it is the last step. |
 | `SCHEDULE_FREQUENCY_INCREASES` | A step uses the product more often than the step before it. A step-down only ever goes down: am-pm, then am or pm, then alternate-days, then weekly, then as-needed, then stop. |
-| `UNQUALIFIED_APPROVER` | In production only: a Tapers or Guides row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. A step-down template and a guide are shown to people, so a qualified person has to approve them. It is raised by the server, not by the contract check on the file. |
+| `UNQUALIFIED_APPROVER` | In production only: a Tapers, Guides, Reintroductions, Escalations, Responses or Weeks row is approved by someone who is not on the list of qualified approvers the server holds. The name is never repeated. What these tabs hold is shown to people, so a qualified person has to approve it. It is raised by the server, not by the contract check on the file. |
 | `GUIDE_BASE_MISSING` | A routine step has no approved guide without a goal. Each of the four steps (cleanse, treat, moisturise, protect) needs one approved row with the goal column empty: it is what a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row of the Guides tab. |
 | `GUIDE_DUPLICATE` | Two rows of the Guides tab are for the same step and goal (or the same step with no goal). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
 | `GUIDE_WORDING` | A guide text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. The same words are refused in every part of the routine. Say what the product does for the skin in plain words, without them. |
+| `REINTRO_DEFAULT_MISSING` | The Reintroductions tab has no approved ladder without a group. It needs one approved row with the group column empty: it is the ladder every group without a ladder of its own is brought back on. A draft or retired row does not count. It is reported once, on the header row. |
+| `REINTRO_DUPLICATE` | Two rows of the Reintroductions tab are for the same group (or both have no group). Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
+| `REINTRO_GROUP_NEVER_BACK` | A ladder is written for mercury, steroid or lightening-agent. Those are only ever stopped and never brought back, so they have no ladder. It is reported whatever the status of the row. |
+| `REINTRO_MISSING_BACK` | The ladder never ends with back. A ladder climbs to back, which means the routine's own frequency from there on, and back is its last step. |
+| `REINTRO_BACK_ONLY` | The ladder has no step before back. A ladder needs at least one step before back, since a product is never brought back at full strength at once: start with a rarer step such as weekly. |
+| `REINTRO_BACK_NOT_LAST` | A step whose frequency is back is followed by another step. Back ends the ladder, so it is the last step. |
+| `REINTRO_FREQUENCY_DECREASES` | A step uses the product less often than the step before it. A ladder only ever goes up: as-needed, then weekly, then alternate-days, then am or pm (the same strength), then am-pm, then back. The same frequency twice is fine. |
+| `ESCALATION_MISSING` | A reason has no approved escalation. Each of the reasons (pus-or-hot-patch, swelling, near-eyes, worse-after-pause, unchanged-after-checks, harm-while-two-paused, hard-to-ignore-during-step-down) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
+| `ESCALATION_DUPLICATE` | Two rows of the Escalations tab are for the same reason. Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
+| `ESCALATION_WORDING` | An escalation text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say what to do in plain words, without them. |
+| `RESPONSE_MISSING` | An outcome has no approved response. Each of the outcomes (paused, advice-tightness, advice-itching, advice-breakouts, expected-flare, check-calmer, check-same, check-worse, nothing-to-pause) needs exactly one approved row. A draft or retired row does not count. It is reported once, on the header row. |
+| `RESPONSE_DUPLICATE` | Two rows of the Responses tab are for the same outcome. Every such row is reported, whatever its status, since a retired row keeps its place. Keep one row for each. |
+| `RESPONSE_PLACEHOLDER` | A response text holds a brace that is not part of an exact {step}: another placeholder such as {product}, an unfinished {step or step}, or a doubled {step}}. {step} is the only placeholder there is: the app replaces it with the plain name of the routine step. Write anything else as plain words. |
+| `RESPONSE_WORDING` | A response text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. It is checked once for each way {step} is shown (Cleanser, Treatment, Moisturiser, Sunscreen, or "your routine"), and every one must pass. Say it in plain words, without them. |
+| `WEEK_BAND_DATE` | A band cell holds a date. A spreadsheet turned a band such as 3-4 into a day (4 March) when it was typed. Format the band column as text and write the band again. A file made by the export has the column formatted as text already. |
+| `WEEK_BASE_MISSING` | A band has no approved base week card. Each of the bands (1, 2, 3-4, 5-8, 9-12) needs one approved row with the goal column empty and step_down no (or empty): it is the card a person sees when no row is written for their goal. A draft or retired row does not count. It is reported once, on the header row. |
+| `WEEK_DUPLICATE` | Two rows of the Weeks tab are for the same band, goal and step_down (an empty goal, and an empty step_down meaning no, count as values). Every such row is reported, whatever its status. Keep one row for each. |
+| `WEEK_WORDING` | A week card text holds words a routine never uses: the name of a condition, a diagnosis ("you have ..."), a promise of lighter, fairer or whiter skin, or a score. Say it in plain words, without them. |

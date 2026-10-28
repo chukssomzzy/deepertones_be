@@ -1,4 +1,23 @@
-import { CONTRACT, type AvailabilityRow, type ClaimWordRow, type CountryRow, type GuideRow, type IngredientRule, type ProductRow, type RawRow, type RawTab, type RawWorkbook, type ScheduleStep, type TabKey, type TaperRow, type Workbook } from './catalog.workbook.schema'
+import {
+  CONTRACT,
+  type AvailabilityRow,
+  type ClaimWordRow,
+  type CountryRow,
+  type EscalationRow,
+  type GuideRow,
+  type IngredientRule,
+  type ProductRow,
+  type RawRow,
+  type RawTab,
+  type RawWorkbook,
+  type ReintroductionRow,
+  type ResponseRow,
+  type ScheduleStep,
+  type TabKey,
+  type TaperRow,
+  type WeekRow,
+  type Workbook,
+} from './catalog.workbook.schema'
 
 // A workbook as the export serves it and the import takes it back: lists joined with "; ", dates as YYYY-MM-DD, an empty cell null. Pure, so the
 // same rows always give the same text, and an export fed to the import changes nothing.
@@ -72,7 +91,7 @@ const claimWord = (row: ClaimWordRow): RawRow => ({
   audited_on: day(row.auditedOn),
 })
 
-/** The one way a schedule is written: `1-2: alternate-days; 3: weekly; 4: stop`, a single week as `N` and a run as `N-M`. */
+/** The one way a schedule or a ladder is written: `1-2: alternate-days; 3: weekly; 4: stop`, a single week as `N` and a run as `N-M`. */
 const schedule = (steps: readonly ScheduleStep[]): string =>
   steps.map((step) => `${step.fromWeek === step.toWeek ? step.fromWeek : `${step.fromWeek}-${step.toWeek}`}: ${step.frequency}`).join(LIST_SEPARATOR)
 
@@ -103,6 +122,53 @@ const guide = (row: GuideRow): RawRow => ({
   audited_on: day(row.auditedOn),
 })
 
+const reintroduction = (row: ReintroductionRow): RawRow => ({
+  group: row.group,
+  schedule: schedule(row.schedule),
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
+const escalation = (row: EscalationRow): RawRow => ({
+  reason: row.reason,
+  who_to_see: row.whoToSee,
+  how_soon: row.howSoon,
+  what_to_tell_them: row.whatToTellThem,
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
+const response = (row: ResponseRow): RawRow => ({
+  outcome: row.outcome,
+  title: row.title,
+  body: row.body,
+  what_to_do_now: row.whatToDoNow,
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
+const week = (row: WeekRow): RawRow => ({
+  band: row.band,
+  goal: row.goal,
+  step_down: row.stepDown ? 'yes' : 'no',
+  title: row.title,
+  text: row.text,
+  status: row.status,
+  approved_by: row.approvedBy,
+  approved_on: day(row.approvedOn),
+  audited_by: row.auditedBy,
+  audited_on: day(row.auditedOn),
+})
+
 const country = (row: CountryRow): RawRow => ({ code: row.code, currency: row.currency, low_max: row.lowMax, mid_max: row.midMax, status: row.status })
 
 /** The header row of a tab, in the order the contract lists its columns. */
@@ -118,4 +184,8 @@ export const toRawWorkbook = (workbook: Workbook): RawWorkbook => ({
   claimWords: tab('claimWords', workbook.claimWords, claimWord),
   tapers: tab('tapers', workbook.tapers, taper),
   guides: tab('guides', workbook.guides, guide),
+  reintroductions: tab('reintroductions', workbook.reintroductions, reintroduction),
+  escalations: tab('escalations', workbook.escalations, escalation),
+  responses: tab('responses', workbook.responses, response),
+  weeks: tab('weeks', workbook.weeks, week),
 })

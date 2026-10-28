@@ -75,6 +75,7 @@ const holds = (column: ColumnDefinition): string => {
       parts.push('List of column=https-link pairs, separated by semicolons')
       break
     case 'schedule':
+    case 'ladder':
       parts.push(`Steps separated by semicolons, each ${code('<weeks>: <frequency>')}, the frequency one of: ${CONTRACT.vocabularies[column.vocabulary!].map(code).join(', ')}`)
       break
   }
@@ -84,6 +85,7 @@ const holds = (column: ColumnDefinition): string => {
   if (column.itemMaxLength !== undefined) parts.push(`Each item up to ${column.itemMaxLength} characters`)
   if (column.plainText) parts.push('No links or markup')
   if (column.lowerCase) parts.push('Lower case only')
+  if (column.stepPlaceholder) parts.push(`${code('{step}')} is the only placeholder allowed`)
   if (column.routineWording) parts.push('No condition names, diagnoses, or promises of lighter, fairer or whiter skin')
   if (column.unique) parts.push('Unique in the tab')
   if (column.draftable === false) parts.push('Cannot be a draft cell')
@@ -100,7 +102,8 @@ const rulesOf = (column: ColumnDefinition): RuleCode[] => {
       if (column.maxLength !== undefined) rules.push('TOO_LONG')
       if (column.plainText) rules.push('HAS_LINK_OR_MARKUP')
       if (column.lowerCase) rules.push('NOT_LOWER_CASE')
-      if (column.routineWording) rules.push('GUIDE_WORDING')
+      if (column.stepPlaceholder) rules.push('RESPONSE_PLACEHOLDER')
+      if (column.routineWording) rules.push(column.wordingRule ?? 'GUIDE_WORDING')
       break
     case 'list':
       if (column.maxItems !== undefined) rules.push('TOO_MANY_ITEMS')
@@ -140,6 +143,9 @@ const rulesOf = (column: ColumnDefinition): RuleCode[] => {
       break
     case 'schedule':
       rules.push('TOO_LONG', 'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'SCHEDULE_MISSING_STOP', 'SCHEDULE_STOP_NOT_LAST', 'SCHEDULE_FREQUENCY_INCREASES')
+      break
+    case 'ladder':
+      rules.push('TOO_LONG', 'BAD_SCHEDULE', 'SCHEDULE_NOT_CONTIGUOUS', 'REINTRO_MISSING_BACK', 'REINTRO_BACK_ONLY', 'REINTRO_BACK_NOT_LAST', 'REINTRO_FREQUENCY_DECREASES')
       break
   }
   if (column.exclusive !== undefined) rules.push('ALL_MIXED_WITH_OTHERS')
@@ -202,7 +208,7 @@ export const renderContractDoc = async (): Promise<string> =>
     '',
     '## How the workbook is read',
     '',
-    'The workbook has seven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers and Guides. The first row of a tab is its header: one column name for each',
+    'The workbook has eleven tabs: Products, Availability, Ingredients, Countries, Claim words, Tapers, Guides, Reintroductions, Escalations, Responses and Weeks. The first row of a tab is its header: one column name for each',
     'column below, spelled exactly as written here. Every column is needed in the header, even one whose cells may stay empty, and a column that is not',
     'listed here is a problem. A tab with no rows is fine, but it still needs its header row.',
     '',
