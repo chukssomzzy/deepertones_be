@@ -223,5 +223,32 @@ export const skinCareRepositoryContract = (name: string, make: () => SkinCareCon
 
       expect((await repository.recent(profileId, 1))[0]!.overridden).toBe(false)
     })
+
+    describe('setOutcome', () => {
+      // Added in PR 4b: a log stored as a pause is changed to say what it came to when the pause could not be made.
+      it('changes the outcome and reason of that profile\'s log and nothing else', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const target = logFor(profileId, { outcome: 'pause', reason: null, note: 'kept' })
+        await repository.append(target)
+
+        expect(await repository.setOutcome(profileId, target.id, 'professional', 'harm-while-two-paused')).toBe(true)
+
+        expect((await repository.recent(profileId, 1))[0]).toEqual({ ...target, outcome: 'professional', reason: 'harm-while-two-paused', overridden: false })
+      })
+
+      it('changes nothing for another profile\'s log or an id nobody holds, and says so', async () => {
+        const { repository, newAccount } = await make()
+        const owner = (await newAccount()).profileId
+        const stranger = (await newAccount()).profileId
+        const theirs = logFor(owner)
+        await repository.append(theirs)
+
+        expect(await repository.setOutcome(stranger, theirs.id, 'nothing-to-pause', null)).toBe(false)
+        expect(await repository.setOutcome(owner, crypto.randomUUID(), 'nothing-to-pause', null)).toBe(false)
+
+        expect((await repository.recent(owner, 1))[0]).toEqual({ ...theirs, overridden: false })
+      })
+    })
   })
 }

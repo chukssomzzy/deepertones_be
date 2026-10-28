@@ -16,6 +16,7 @@ import type { SafetyService } from '../safety/safety.service'
 import type { ParseState, SafetyMentionRow, SafetyView } from '../safety/safety.types'
 import type { SafetyChoice } from '../safety/safety.vocabulary'
 import type { ShelfActiveEntry, ShelfService } from '../shelf/shelf.service'
+import type { SkinCareService } from '../skin-care/skin-care.service'
 import type { ProfilesService } from '../profiles/profiles.service'
 import type { RemindersService } from '../reminders/reminders.service'
 import type { SavedVerdictView, VerdictService } from '../verdicts/verdicts.service'
@@ -280,6 +281,8 @@ let attempts: number
 let ids: number
 /** The profile ids the service told the live stream about (PR 4b), in order. */
 let announces: string[]
+/** The calls the service made to skin care's reconcile (spec #233, PR 4b): the profile, and the id of the version in force at the moment of the call. */
+let reconciled: { profileId: string; versionId: string | null }[]
 
 const setClock = (offsetMs: number) => {
   clock = at(offsetMs)
@@ -348,6 +351,7 @@ beforeEach(() => {
   attempts = 0
   ids = 0
   announces = []
+  reconciled = []
   world = newWorld()
   // Amara's shelf: a cleanser the rules keep, and a cream with a steroid in it, which the rules stop (with the steroid step-down).
   addProduct('entry-a', CLEAN, { name: 'Calm Cleanser' })
@@ -411,6 +415,9 @@ beforeEach(() => {
     jobs,
     enabled: true,
     announce: async (profileId: string) => void announces.push(profileId),
+    skinCare: {
+      reconcile: async (profileId: string) => void reconciled.push({ profileId, versionId: (await repository.current(profileId))?.id ?? null }),
+    } satisfies Pick<SkinCareService, 'reconcile'>,
     now: () => clock,
     newId: () => `version-${++ids}`,
   }
@@ -1329,6 +1336,95 @@ describe('RoutineService.build: after Start, only what broke changes', () => {
     expect(row.writerCalls).toBe(0)
     expect(row.steps[1]).toMatchObject({ step: 'treat', product: { kind: 'shelf', id: 'entry-s' }, frequency: 'pm', reason: 'Written 1: treat.', gotIt: false })
     expect(row.steps.filter((_, i) => i !== 1).map(({ gotIt, fixedFrom, ...entry }) => entry)).toEqual(gotItVersion.steps.filter((_, i) => i !== 1).map(({ gotIt, fixedFrom, ...entry }) => entry))
+  })
+})
+
+// Spec #233, PR 4b: pauses are kept or ended against every new routine version. After a version is written the service asks skin care to reconcile the profile (a Pick of
+// SkinCareService, `skinCare: Pick<SkinCareService, 'reconcile'>`; skin care never imports routines). It happens after the version is stored, so reconcile reads the new routine,
+// once per version written: the build that completes a pending version, the one that appends a ready version at once (the rules wrote it, or only the cautions changed), and
+// "I got it". A build that appends nothing, or waits, has nothing new to reconcile.
+describe('RoutineService: reconciling skin-care pauses against a new version', () => {
+  it('reconciles the profile once the first build has completed its version, and only then', async () => {
+    expect(await build('first')).toBe('built')
+
+    expect(reconciled).toEqual([{ profileId: AMARA_PROFILE, versionId: (await currentRow()).id }])
+  })
+
+  it('reconciles after the rules alone append a version because the day\'s writer limit is spent', async () => {
+    for (let i = 0; i < 5; i++) {
+      setClock(i * MINUTE)
+      await build('shelf')
+    }
+    reconciled = []
+    setClock(10 * MINUTE)
+
+    await build('shelf')
+
+    expect(await latestRow()).toMatchObject({ source: 'rules', writerCalls: 0 })
+    expect(reconciled).toEqual([{ profileId: AMARA_PROFILE, versionId: (await latestRow()).id }])
+  })
+
+  it('reconciles after a rebuild after Start that only keeps the routine under new cautions and appends it at once', async () => {
+    await started()
+    reconciled = []
+    world.safety = { ...world.safety, view: safetyView(['reaction', 'pregnant']) }
+    setClock(3 * DAY)
+
+    expect(await build('safety')).toBe('built')
+
+    expect(reconciled).toEqual([{ profileId: AMARA_PROFILE, versionId: (await currentRow()).id }])
+    expect(attempts).toBe(1)
+  })
+
+  it('reconciles after a rebuild after Start that refills a broken step', async () => {
+    await started()
+    reconciled = []
+    removeShelfProduct('entry-a')
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('shelf')).toBe('built')
+
+    expect(reconciled).toEqual([{ profileId: AMARA_PROFILE, versionId: (await currentRow()).id }])
+  })
+
+  it('reconciles after "I got it" has appended its version', async () => {
+    await started()
+    reconciled = []
+    setClock(2 * DAY + HOUR)
+
+    await gotIt('treat')
+
+    expect(reconciled).toEqual([{ profileId: AMARA_PROFILE, versionId: (await currentRow()).id }])
+    expect((await currentRow()).reason).toBe('got-it')
+  })
+
+  it('does not reconcile for "I got it" that changes nothing (the step is already marked)', async () => {
+    await started()
+    await gotIt('treat')
+    reconciled = []
+
+    await gotIt('treat')
+
+    expect(reconciled).toEqual([])
+  })
+
+  it('does not reconcile when a build finds nothing to change and appends nothing', async () => {
+    await started()
+    reconciled = []
+    reverdict()
+    setClock(2 * DAY + HOUR)
+
+    expect(await build('verdict')).toBe('unchanged')
+
+    expect(reconciled).toEqual([])
+  })
+
+  it('does not reconcile when the build has to wait for the verdict', async () => {
+    world.saved = null
+
+    expect(await build('first')).toBe('waiting')
+
+    expect(reconciled).toEqual([])
   })
 })
 

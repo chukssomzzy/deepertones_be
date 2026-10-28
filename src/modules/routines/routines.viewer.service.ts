@@ -346,8 +346,8 @@ export class RoutineViewerService {
   }
 
   /**
-   * The input with what the skin-care state does to each step: a pause names a step and the catalog product it is for, so a product that has become the person's own entry of the
-   * same formulation is still the paused one. An open hold marks the steps whose product holds an active group. With no pause and no hold the input is returned as it is.
+   * The input with what the skin-care state does to each step: a pause names a step and the key of its product (the catalog product it is, else the shelf entry's id), so a product
+   * that has become the person's own entry of the same product is still the paused one. An open hold marks the steps whose product holds an active group. With no pause and no hold the input is returned as it is.
    */
   private async overlaid(profileId: string, input: RoutineViewInput, entries: ShelfActiveEntry[]): Promise<RoutineViewInput> {
     const state = await this.skinCare.stateFor(profileId, await this.todayOf(profileId))
@@ -357,8 +357,9 @@ export class RoutineViewerService {
     const groups = state.held ? await this.activeGroupsOf(identities) : null
     const overlay = new Map<StoredRoutineStep, StepOverlay>()
     steps.forEach((step, at) => {
-      const { productId } = identities[at]!
-      const pause = productId === null ? undefined : state.pauses.find((paused) => paused.step === step.step && paused.productId === productId)
+      // A pause is keyed by the catalog product, else by the shelf entry (a product with no label has no catalog product), as skin-care keys it.
+      const key = identities[at]!.productId ?? (step.product.kind === 'shelf' ? step.product.id : null)
+      const pause = key === null ? undefined : state.pauses.find((paused) => paused.step === step.step && paused.productId === key)
       const held = (groups?.[at]?.length ?? 0) > 0
       // An open hold wins over a rung: nothing active comes back while it is open. A paused step stays paused (both are left out of the reminders).
       if (pause && !(held && pause.state === 'bringing-back')) overlay.set(step, { status: pause.state, ...(pause.frequency === undefined ? {} : { frequency: pause.frequency }), ...(pause.anchor === undefined ? {} : { anchor: pause.anchor }) })

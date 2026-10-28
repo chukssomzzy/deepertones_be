@@ -1,10 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { type Actor, runAs } from '../../lib/context'
 import type { CatalogWorkbookService, Escalation, Response } from '../catalog/catalog.workbook.service'
+import type { SkinCareRoutine } from './skin-care.types'
 import type { EscalationReason, ResponseOutcome } from '../catalog/catalog.vocabulary'
 import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { SKIN_OUTCOME_RULES_VERSION } from './skin-care.outcomes'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
+import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
 
 // Logging how the skin feels (spec #233, PR 2): what the routes of PR 4b will call. The service is tested at its own seam with a world fake: one mutable clock, the
@@ -27,6 +29,9 @@ import { SkinCareService } from './skin-care.service'
 //       pause         null          PR 4b fills it
 //       logged        null
 //   recent(): Promise<{ id, day, noticing, where, howBad, outcome }[]>      the session profile's last 20 logs, newest first, without the note
+//   PR 4b (see skin-care.service.pauses.test.ts for the pauses themselves): the constructor also takes `pauses` (StepPausesRepository) and `inbox` ({ write }), `routine` also answers
+//     skinCareRoutineFor(profileId), and every LogResult has `paused` (null unless a step was paused). A `pause` outcome is turned into an action: the paused step, a professional
+//     (cap, or hard to ignore during a step-down with no other active step) or `nothing-to-pause`; so `pause` now has the reviewed `paused` text, and needs a started routine.
 //   Gates, in order: 401 AUTH_REQUIRED (no session), 403 SIGNUP_REQUIRED for a guest (before the input is looked at), then validation. Allowed before Start and with no routine.
 //   Validation (ValidationError, code VALIDATION_FAILED, nothing stored): at least one noticing; nothing-unusual only alone; howBad required unless the log is only nothing-unusual
 //     (given, it is accepted and the log is still `logged`); a note of at most 500 characters. Duplicates in a list collapse.
@@ -55,6 +60,13 @@ const RESPONSES: Partial<Record<ResponseOutcome, Response>> = {
   'advice-itching': { title: 'Itchy skin', body: 'Mild itching is common while your skin gets used to a change.', whatToDoNow: 'Skip anything scented and keep your moisturiser plain.' },
   'advice-breakouts': { title: 'New breakouts', body: 'A few new spots can show up in the first weeks and often settle.', whatToDoNow: 'Keep your routine as it is and do not pick at them.' },
   'expected-flare': { title: 'This is the expected flare', body: 'Redness and stinging are common while you step down a cream, and they pass.', whatToDoNow: null },
+  paused: { title: 'We paused your {step}', body: 'Your skin needs a rest from your {step}. We will ask how it feels in three days.', whatToDoNow: 'Skip anything that stings. Keep sunscreen if it does not sting.' },
+  'nothing-to-pause': { title: 'Nothing to pause yet', body: 'Skip anything that stings and rinse with water.', whatToDoNow: 'Keep sunscreen if it does not sting.' },
+}
+const STARTED_ROUTINE: SkinCareRoutine = {
+  dayOne: '2030-06-10',
+  steps: [{ step: 'treat', title: 'Retinol Serum', productRef: { kind: 'candidate', code: 'TREAT-1' }, productId: 'prod-treat', changedOn: '2030-06-12', activeGroups: ['retinoid'] }],
+  stepDownRunning: false,
 }
 const ESCALATIONS: Partial<Record<EscalationReason, Escalation>> = {
   'pus-or-hot-patch': { whoToSee: 'A doctor or pharmacist about pus or a hot patch.', howSoon: 'Today.', whatToTellThem: 'Where it is, since when, and the products you have used this week.' },
@@ -84,14 +96,19 @@ type World = {
   responses: Partial<Record<ResponseOutcome, Response>>
   escalations: Partial<Record<EscalationReason, Escalation>>
   stepDownAsked: [string, string][]
+  /** The routine in force: by default one started step, a treat step with a retinoid, so a pause has a step to pause. */
+  routine: SkinCareRoutine | null
 }
 let world: World
 let repository: FakeSkinCareRepository
+let pauses: FakeStepPausesRepository
 let service: SkinCareService
 
 const makeService = () =>
   new SkinCareService({
     repository,
+    pauses,
+    inbox: { write: async () => ({ id: 'inbox-row', created: true }) },
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
@@ -108,6 +125,7 @@ const makeService = () =>
         if (world.stepDownFails) throw new Error('step-down read failed')
         return world.stepDown
       },
+      skinCareRoutineFor: async () => (world.routine === null ? null : { ...structuredClone(world.routine), stepDownRunning: world.stepDown }),
     },
     now: () => world.now,
   })
@@ -118,8 +136,9 @@ const recent = (who: Actor) => runAs(who, () => service.recent())
 const stored = (profileId: string) => repository.recent(profileId, 100)
 
 beforeEach(() => {
-  world = { now: T0, zones: new Map(), stepDown: false, stepDownFails: false, zoneFails: false, responses: { ...RESPONSES }, escalations: { ...ESCALATIONS }, stepDownAsked: [] }
+  world = { now: T0, zones: new Map(), stepDown: false, stepDownFails: false, zoneFails: false, responses: { ...RESPONSES }, escalations: { ...ESCALATIONS }, stepDownAsked: [], routine: structuredClone(STARTED_ROUTINE) }
   repository = new FakeSkinCareRepository()
+  pauses = new FakeStepPausesRepository()
   service = makeService()
 })
 
@@ -131,6 +150,7 @@ describe('SkinCareService.log, what the rules decide', () => {
       log: { id: expect.any(String), day: '2030-06-15', noticing: ['tightness-or-dryness'], where: [], howBad: 'mild', outcome: 'advice' },
       outcome: { kind: 'advice', codes: ['advice-tightness'] },
       response: [RESPONSES['advice-tightness']],
+      paused: null,
     })
   })
 
@@ -141,11 +161,13 @@ describe('SkinCareService.log, what the rules decide', () => {
     expect(result.response).toEqual([RESPONSES['advice-tightness'], RESPONSES['advice-itching'], RESPONSES['advice-breakouts']])
   })
 
-  it('pauses for stinging, with no reviewed line yet (the pause text comes with PR 4b), and a routine need not exist', async () => {
+  // PR 4b: a pause outcome is acted on, so the answer is the reviewed `paused` text with {step} filled, for the step the routine's rules chose (the treat step of this world).
+  it('pauses for stinging, and answers the reviewed paused text for the step it paused', async () => {
     const result = await log(AMARA_ACTOR, { noticing: ['stinging-or-burning'], where: ['cheeks'], howBad: 'mild' })
 
     expect(result.outcome).toEqual({ kind: 'pause', duringStepDown: false })
-    expect(result.response).toBeNull()
+    expect(result.response).toMatchObject({ title: 'We paused your Treatment' })
+    expect(result.paused).toMatchObject({ step: 'treat' })
     expect(result.log).toMatchObject({ outcome: 'pause', where: ['cheeks'], howBad: 'mild' })
   })
 
@@ -167,13 +189,13 @@ describe('SkinCareService.log, what the rules decide', () => {
     expect(result.log.outcome).toBe('expected-flare')
   })
 
-  it('keeps a hard-to-ignore pause during a step-down, marked, and with no reviewed line yet', async () => {
+  it('keeps a hard-to-ignore pause during a step-down, marked, when another active step can be paused', async () => {
     world.stepDown = true
 
     const result = await log(AMARA_ACTOR, { noticing: ['new-redness'], howBad: 'hard-to-ignore' })
 
     expect(result.outcome).toEqual({ kind: 'pause', duringStepDown: true })
-    expect(result.response).toBeNull()
+    expect(result.response).toMatchObject({ title: 'We paused your Treatment' })
   })
 
   it('does not take a step-down into account for a profile whose step-down is not running (the answer is per profile)', async () => {
@@ -219,6 +241,7 @@ describe('SkinCareService.log, what the rules decide', () => {
       log: { id: expect.any(String), day: '2030-06-15', noticing: ['nothing-unusual'], where: [], howBad: null, outcome: 'logged' },
       outcome: { kind: 'logged' },
       response: null,
+      paused: null,
     })
   })
 
@@ -246,8 +269,15 @@ describe('SkinCareService.log, what the rules decide', () => {
       { noticing: ['swelling'], howBad: 'mild' },
       { noticing: ['nothing-unusual'] },
     ] as LogInput[]) {
+      // A pause is a state: each log starts with none, so the same input comes to the same outcome.
+      const fresh = () => {
+        pauses = new FakeStepPausesRepository()
+        service = makeService()
+      }
+      fresh()
       const bare = await log(AMARA_ACTOR, input)
       for (const note of notes) {
+        fresh()
         const withNote = await log(AMARA_ACTOR, { ...input, note })
         expect(withNote.outcome).toEqual(bare.outcome)
         expect(withNote.log.outcome).toBe(bare.log.outcome)
@@ -342,7 +372,8 @@ describe('SkinCareService.log, the local day', () => {
 
     expect(result.log.day).toBe(day)
     expect((await stored(AMARA))[0]!.localDay).toBe(day)
-    expect(world.stepDownAsked).toEqual([[AMARA, day]])
+    // Advice does not depend on a step-down, so none is asked about.
+    expect(world.stepDownAsked).toEqual([])
   })
 
   it('uses each profile\'s own zone at the same instant', async () => {
@@ -534,7 +565,7 @@ describe('SkinCareService.log, when a read fails', () => {
     const result = await log(AMARA_ACTOR, { noticing: ['itching'], howBad: 'mild' })
 
     expect(result.log.day).toBe('2030-06-15')
-    expect(world.stepDownAsked).toEqual([[AMARA, '2030-06-15']])
+    expect(world.stepDownAsked).toEqual([])
     expect(await stored(AMARA)).toHaveLength(1)
   })
 })
@@ -595,13 +626,13 @@ describe('SkinCareService.log, reviewed text that is not written yet', () => {
     expect((await stored(AMARA))[0]!.reason).toBe(reason)
   })
 
-  it('does not need any reviewed row for a pause or a good day', async () => {
+  // PR 4b: a pause now has reviewed text (`paused`, and `nothing-to-pause`), so its missing row is 503 like the others; see skin-care.service.pauses.test.ts.
+  it('does not need any reviewed row for a good day', async () => {
     world.responses = {}
     world.escalations = {}
 
-    expect((await log(AMARA_ACTOR, { noticing: ['new-redness'], howBad: 'noticeable' })).outcome).toEqual({ kind: 'pause', duringStepDown: false })
     expect((await log(AMARA_ACTOR, { noticing: ['nothing-unusual'] })).outcome).toEqual({ kind: 'logged' })
-    expect(await stored(AMARA)).toHaveLength(2)
+    expect(await stored(AMARA)).toHaveLength(1)
   })
 
   it('does not ask for an escalation row that another reason needs', async () => {

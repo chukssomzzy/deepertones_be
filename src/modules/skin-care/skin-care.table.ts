@@ -1,8 +1,9 @@
-import { index, integer, sqliteTable, text } from 'drizzle-orm/sqlite-core'
-import type { EscalationReason } from '../catalog/catalog.vocabulary'
+import { sql } from 'drizzle-orm'
+import { index, integer, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core'
+import type { EscalationReason, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
 import { profiles } from '../profiles/profiles.table'
 import type { SkinOutcome } from './skin-care.outcomes'
-import type { HowBad, Noticing, Where } from './skin-care.vocabulary'
+import type { HowBad, Noticing, PauseState, SkinCareProductRef, Where } from './skin-care.vocabulary'
 
 /**
  * A profile's skin logs (spec #233): what they noticed, where, how bad, and an optional note. The note is only stored and shown back on the professional screen; no rule reads it.
@@ -29,4 +30,42 @@ export const skinLogs = sqliteTable(
     createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
   },
   (t) => [index('skin_logs_profile_created_idx').on(t.profileId, t.createdAt)],
+)
+
+/**
+ * A pause on one step of the routine (spec #233). `product_key` is what the pause is for: the catalog product id of the step's product, else the id of the shelf entry (a product
+ * with no label has no catalog product), so a pause outlives the product's move from a recommendation to the person's own shelf. The "nothing to pause" check-in is a row with no
+ * step, `product_key` '' and no product. `ingredient_group` is the active group frozen when the pause was made (the ladder to bring the step back on is chosen by it).
+ * `paused_on` and `check_day` are calendar dates ('YYYY-MM-DD'), fixed when set, so a later change of time zone moves none of them. `source_log_id` is the log that caused
+ * the pause, kept as plain text (not a key). `ladder_*` are filled when the step is brought back, and `version_id` is the routine version the pause was last checked against.
+ * A step has at most one open pause for a product (`paused` or `bringing-back`), and a profile at most one open pause with no step: two partial unique indexes (an index over
+ * COALESCE(step, '') would do both in one, but drizzle-kit cannot write an index expression with a comma). Rows go with their profile (cascade).
+ */
+export const stepPauses = sqliteTable(
+  'step_pauses',
+  {
+    id: text('id').primaryKey(),
+    profileId: text('profile_id')
+      .notNull()
+      .references(() => profiles.id, { onDelete: 'cascade' }),
+    step: text('step').$type<RoutineStep>(),
+    productKey: text('product_key').notNull(),
+    productId: text('product_id'),
+    productRef: text('product_ref', { mode: 'json' }).$type<SkinCareProductRef>().notNull(),
+    ingredientGroup: text('ingredient_group').$type<IngredientGroup>(),
+    state: text('state').$type<PauseState>().notNull(),
+    pausedOn: text('paused_on').notNull(),
+    checkDay: text('check_day').notNull(),
+    sameCount: integer('same_count').notNull(),
+    sourceLogId: text('source_log_id'),
+    ladderCode: text('ladder_code'),
+    ladderStartedOn: text('ladder_started_on'),
+    versionId: text('version_id'),
+    createdAt: integer('created_at', { mode: 'timestamp_ms' }).notNull(),
+  },
+  (t) => [
+    uniqueIndex('step_pauses_open_step_product_unique').on(t.profileId, t.step, t.productKey).where(sql`${t.step} IS NOT NULL AND ${t.state} IN ('paused', 'bringing-back')`),
+    uniqueIndex('step_pauses_open_stepless_unique').on(t.profileId).where(sql`${t.step} IS NULL AND ${t.state} IN ('paused', 'bringing-back')`),
+    index('step_pauses_profile_created_idx').on(t.profileId, t.createdAt),
+  ],
 )

@@ -1736,8 +1736,9 @@ describe('RoutineViewerService.reminderPlanFor: the step-down change days', () =
 //                   formulationId) matched against the approved ingredient rules (rulesMatching over rules that carry their `group`, the mapping heldGroups uses). The rules come from the workbook
 //                   with their group (`verdictReference().rules`; `liveRules()` as typed carries none, so the fake answers both with the same grouped rules). Order is not pinned.
 //     stepDownRunning   true while a dated step-down is still running (stepDownProgressOf, as of today).
-//   The overlay: GET /me/routine entries (and the stream's frames) gain status 'active' | 'paused' | 'held' | 'bringing-back'. A pause names (step, catalog productId); it applies to the entry at that
-//   step whose product has that id. `held: true` marks the entries whose product holds an active group 'held'. reminderPlanFor leaves out paused and held entries, and a bringing-back entry has the
+//   The overlay: GET /me/routine entries (and the stream's frames) gain status 'active' | 'paused' | 'held' | 'bringing-back'. A pause names (step, product key), the key being the catalog productId
+//   and, for an entry that has none (a shelf product with no label), the shelf entry id (PR 4b; `SkinCareState.pauses[].productId` carries the key). It applies to the entry at that
+//   step whose product has that key. `held: true` marks the entries whose product holds an active group 'held'. reminderPlanFor leaves out paused and held entries, and a bringing-back entry has the
 //   pause's frequency (instead of the routine's) and its anchor day (`anchor`, 'YYYY-MM-DD').
 const T0_DAY = new Date(Date.UTC(T0.getUTCFullYear(), T0.getUTCMonth(), T0.getUTCDate()))
 const dayText = (date: Date) => date.toISOString().slice(0, 10)
@@ -2002,6 +2003,52 @@ describe('RoutineViewerService.current: what each entry is doing (the skin-care 
     world.skinCare = { pauses: [pause('cleanse', 'prod-a')], held: false }
 
     expect(statusOf(await read(), 'cleanse')).toEqual(['paused'])
+  })
+
+  describe('a shelf product with no label', () => {
+    // It has no catalog product, so its pause is keyed by its shelf entry id (PR 4b): a pause that names the entry marks it, and nothing else does.
+    const withNoLabelCleanser = () => {
+      world.entries.push({ id: 'entry-n', kind: 'no-label', addedAt: T0, itemId: 'item-n' })
+      return showing(
+        versionRow({
+          startedOn: START_DAY,
+          steps: [stepOf('cleanse', { kind: 'shelf', id: 'entry-n' }, 'am'), stepOf('treat', { kind: 'candidate', code: 'SERUM-1' }, 'pm'), stepOf('moisturise', { kind: 'candidate', code: 'MOIST-GH' }, 'am-pm'), stepOf('protect', { kind: 'none' }, 'am')],
+        }),
+      )
+    }
+
+    it('is marked paused by a pause that names its shelf entry id, and the other entries stay active', async () => {
+      await withNoLabelCleanser()
+      world.skinCare = { pauses: [pause('cleanse', 'entry-n')], held: false }
+
+      const routine = await read()
+
+      expect(statusOf(routine, 'cleanse')).toEqual(['paused'])
+      expect(['treat', 'moisturise', 'protect'].flatMap((step) => statusOf(routine, step as RoutineStep))).toEqual(['active', 'active', 'active', 'active'])
+    })
+
+    it('is not marked by a pause that names another entry, or the same entry at another step', async () => {
+      await withNoLabelCleanser()
+      world.skinCare = { pauses: [pause('cleanse', 'entry-other'), pause('treat', 'entry-n')], held: false }
+
+      const routine = await read()
+
+      expect(statusOf(routine, 'cleanse')).toEqual(['active'])
+      expect(statusOf(routine, 'treat')).toEqual(['active'])
+    })
+
+    it('is left out of the reminder plan while it is paused', async () => {
+      await withNoLabelCleanser()
+      world.skinCare = { pauses: [pause('cleanse', 'entry-n')], held: false }
+
+      expect((await viewer.reminderPlanFor(PROFILE))!.morning.map((entry) => entry.step)).toEqual(['moisturise', 'protect'])
+    })
+  })
+
+  it('keys a shelf product that has a catalog product by that product, not by its entry id: a pause naming the entry does not mark it', async () => {
+    world.skinCare = { pauses: [pause('cleanse', 'entry-a')], held: false }
+
+    expect(statusOf(await read(), 'cleanse')).toEqual(['active'])
   })
 
   it('marks the entries with an active ingredient held while a hold is open, and leaves the others active', async () => {

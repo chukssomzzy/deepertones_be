@@ -1,11 +1,11 @@
 import type { Frequency, IngredientGroup, RoutineStep } from '../catalog/catalog.vocabulary'
-import type { skinLogs } from './skin-care.table'
+import type { skinLogs, stepPauses } from './skin-care.table'
+import type { SkinCareProductRef } from './skin-care.vocabulary'
+
+export type { SkinCareProductRef }
 
 // The narrow shapes the skin-care module reads the routine through, and is given back by. This module owns them so it never imports routines: `RoutineViewerService.skinCareRoutineFor`
 // answers a SkinCareRoutine, and the viewer is handed a SkinCareState by `stateFor`. Routines imports these types, never the other way.
-
-/** The product a stored routine step names, restated here so skin-care does not import routines: a shelf entry, a recommended product by code, or "use what you have". */
-export type SkinCareProductRef = { kind: 'shelf'; id: string } | { kind: 'candidate'; code: string } | { kind: 'none' }
 
 /** One step of the routine in force, with the facts a pause or a reaction call is made from. */
 export type SkinCareRoutineStep = {
@@ -40,3 +40,8 @@ export type SkinLog = typeof skinLogs.$inferSelect
 
 /** A log as the service makes it: the caller makes the id and the time, and a new log is never overridden. */
 export type NewSkinLog = Omit<SkinLog, 'overridden'>
+
+export type StepPause = typeof stepPauses.$inferSelect
+
+/** A pause as the service makes it: the caller makes the id and the time, and every column is given. */
+export type NewStepPause = StepPause

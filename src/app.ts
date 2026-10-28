@@ -25,6 +25,7 @@ import { remindersRoutes } from './modules/reminders/reminders.routes'
 import { routinesRoutes } from './modules/routines/routines.routes'
 import { safetyRoutes } from './modules/safety/safety.routes'
 import { shelfRoutes } from './modules/shelf/shelf.routes'
+import { skinCareRoutes } from './modules/skin-care/skin-care.routes'
 import { verdictsRoutes } from './modules/verdicts/verdicts.routes'
 import { FACE_SCANS_PATH, PRODUCT_SCANS_PATH } from './modules/scans/scans.paths'
 import { scanRoutes } from './modules/scans/scans.routes'
@@ -53,6 +54,7 @@ const v1 = openapiApp()
   .route('/me', routinesRoutes)
   .route('/me', remindersRoutes)
   .route('/me', inboxRoutes)
+  .route('/me', skinCareRoutes)
   .route('/me', faceConsentRoutes)
   .route('/products', productRoutes)
   .route('/onboarding', onboardingRoutes)

@@ -1,3 +1,4 @@
+import type { EscalationReason } from '../catalog/catalog.vocabulary'
 import type { SkinCareRepository } from './skin-care.repository'
 import type { NewSkinLog, SkinLog } from './skin-care.types'
 
@@ -23,6 +24,14 @@ export class FakeSkinCareRepository implements SkinCareRepository {
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime() || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
       .slice(0, limit)
       .map(copyOf)
+  }
+
+  async setOutcome(profileId: string, id: string, outcome: SkinLog['outcome'], reason: EscalationReason | null): Promise<boolean> {
+    const row = this.rows.get(id)
+    if (!row || row.profileId !== profileId) return false
+    row.outcome = outcome
+    row.reason = reason
+    return true
   }
 
   async markOverridden(profileId: string, id: string): Promise<boolean> {
