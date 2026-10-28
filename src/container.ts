@@ -16,6 +16,8 @@ import { D1GoalsRepository } from './modules/goals/goals.repository'
 import { GoalsService } from './modules/goals/goals.service'
 import { D1HealthRepository } from './modules/health/health.repository'
 import { HealthService } from './modules/health/health.service'
+import { D1InboxRepository } from './modules/inbox/inbox.repository'
+import { InboxService } from './modules/inbox/inbox.service'
 import { D1NotificationSettingsRepository, D1PushTokensRepository } from './modules/notifications/notifications.repository'
 import { NotificationsService } from './modules/notifications/notifications.service'
 import { D1OpsAlertsRepository } from './modules/ops-alerts/ops-alerts.repository'
@@ -308,6 +310,8 @@ export const buildContainer = (env: CloudflareBindings) => {
       }),
   )
 
+  const inbox = once(() => new InboxService({ repository: new D1InboxRepository(db()) }))
+
   const reminders = once(
     () =>
       new RemindersService({
@@ -504,6 +508,9 @@ export const buildContainer = (env: CloudflareBindings) => {
     },
     get health() {
       return health()
+    },
+    get inbox() {
+      return inbox()
     },
     get notifications() {
       return notifications()

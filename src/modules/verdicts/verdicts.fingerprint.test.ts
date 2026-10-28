@@ -135,6 +135,13 @@ describe('verdictFingerprint: what stays the same', () => {
     expect(await hashOf(resaved)).toBe(await hashOf(BASE))
   })
 
+  it('is the same when a later safety save carries a skin-log mark onto a new row (new row, new mention id, a later time): carrying it forward must not rebuild the verdict', async () => {
+    const marked = mention({ id: 'mention-3', source: 'skin-log', name: 'Day Cream', productId: 'prod-day', position: 2 })
+    const carried = mention({ id: 'mention-77', safetyId: 'safety-2', source: 'skin-log', name: 'Day Cream', productId: 'prod-day', position: 0, createdAt: LATER })
+
+    expect(await hashOf(withSafety({ mentions: [...BASE.safety.mentions, carried] }))).toBe(await hashOf(withSafety({ mentions: [...BASE.safety.mentions, marked] })))
+  })
+
   it('is not changed by the global catalog version, which is not an input: a Products-only upload leaves a verdict current', async () => {
     const withCatalogVersion = { ...BASE, catalogVersion: 99 } as Input
 
@@ -187,6 +194,8 @@ describe('verdictFingerprint: what changes it', () => {
     ['a mention that resolved to another product', () => withSafety({ mentions: [mention({ productId: 'prod-other' }), BASE.safety.mentions[1]!] })],
     ['a mention added', () => withSafety({ mentions: [...BASE.safety.mentions, mention({ id: 'mention-3', kind: 'ingredient', name: 'fragrance', brand: null, category: null, productId: null, resolution: null, position: 2 })] })],
     ['a mention that names another product', () => withSafety({ mentions: [mention({ name: 'Day Cream' }), BASE.safety.mentions[1]!] })],
+    ['a skin-log mark added (a product the person keeps reacting to)', () => withSafety({ mentions: [...BASE.safety.mentions, mention({ id: 'mention-3', source: 'skin-log', name: 'Day Cream', productId: 'prod-day', position: 2 })] })],
+    ['a mention that moved from reaction to skin-log', () => withSafety({ mentions: [mention({ source: 'skin-log' }), BASE.safety.mentions[1]!] })],
     ['a mention that moved from reaction to prescription', () => withSafety({ mentions: [mention({ source: 'prescription' }), BASE.safety.mentions[1]!] })],
     // the face scan
     ['a concern that reads a different band', () => ({ ...BASE, scan: { ...BASE.scan!, concerns: [{ concern: 'hd_age_spot', band: 'clear' }, BASE.scan!.concerns[1]!] } })],
