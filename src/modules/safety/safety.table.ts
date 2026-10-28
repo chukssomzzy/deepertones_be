@@ -59,6 +59,8 @@ export const safetyReads = sqliteTable(
  * go with their safety row (cascade). `brand`, `variant` and `category` are what the reader gave and are null for an ingredient. `product_id` points
  * into the catalog, which is not this module's, so it carries no foreign key. `resolution` is null for an ingredient, `pending` for a product still
  * to look up, and `resolved` or `unresolved` once it has been (an unresolved product may keep the catalog's id, when research found no ingredients).
+ * `source` is where the mention came from: the two typed texts, or `skin-log`, a product the person marked as one they reacted to (written by the skin-care
+ * module, carried onto each newer safety row). The column has no CHECK, so a new source needs no migration.
  * The words are personal, so they never reach a log.
  */
 export const safetyMentions = sqliteTable(
@@ -68,7 +70,7 @@ export const safetyMentions = sqliteTable(
     safetyId: text('safety_id')
       .notNull()
       .references(() => profileSafety.id, { onDelete: 'cascade' }),
-    source: text('source', { enum: ['reaction', 'prescription'] }).notNull(),
+    source: text('source', { enum: ['reaction', 'prescription', 'skin-log'] }).notNull(),
     kind: text('kind', { enum: ['product', 'ingredient'] }).notNull(),
     brand: text('brand'),
     name: text('name').notNull(),

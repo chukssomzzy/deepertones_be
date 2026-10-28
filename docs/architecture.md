@@ -845,8 +845,8 @@ is built in four pull requests; the goal is the first two (the six chips, and ty
 - **Not part of the goal.** The words typed beside the safety choices (a product that gave a reaction, a prescription) are read in the background by the parse job; see "Safety facts (onboarding)".
 
 ### Safety facts (onboarding)
-`modules/safety` holds `profile_safety` (migration 0024) and `safety_mentions` (migration 0025), `D1SafetyRepository` (`append`, `find`, `current`, `history`,
-`setParseState`, `appendMentions`, `mentions`, `resolveMention`) and `SafetyService` (`set`, `current`, `currentOrNull`, `currentMentions`, `requireAnswered`, and for the
+`modules/safety` holds `profile_safety` (migration 0024) and `safety_mentions` (migration 0025), `D1SafetyRepository` (`append`, `appendCarrying`, `find`, `current`, `history`,
+`setParseState`, `appendMentions`, `mentions`, `resolveMention`) and `SafetyService` (`set`, `current`, `currentOrNull`, `currentMentions`, `markReactionProduct`, `requireAnswered`, and for the
 queue `parse` and `markParseFailed`). It is screen 1.5 of the first run, "Anything that changes what's safe for you?", the third pull request of issue #82; the parse of the
 two texts is the fourth.
 
@@ -909,12 +909,25 @@ two texts is the fourth.
   `done` or `failed` row, or one with nothing to parse, is left alone. The words, the choices and what had been found stay as they were throughout.
 - **Ingredients never come from model memory.** The reader names only what the person wrote, and a product's ingredients come from the catalog's research alone, so
   a mention is a name the person typed and a `product_id` is a catalog product. Nothing about what is in a product is taken from the model.
-- **`safety_mentions`** (migration 0025): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction` or `prescription`),
+- **`safety_mentions`** (migration 0025): `id`, `safety_id` (FK to `profile_safety`, cascade, so guest cleanup needs no cleaner), `source` (`reaction`, `prescription` or `skin-log`; see "Marks from the skin log"),
   `kind` (`product` or `ingredient`), `brand`, `name`, `variant`, `category` (null for an ingredient or when unknown), `product_id` (a catalog id with no foreign key, like
   `scan_items.product_id`), `resolution` (`pending`, `resolved`, `unresolved`; null for an ingredient), `position` and `created_at`; indexed on (`safety_id`, `position`).
   `safety_reads` (same migration; `safety_id` FK with cascade, `source`; primary key on both) records the texts that have been read. `appendMentions` and `storeRead` are each one `db.batch`
   (all or nothing; `appendMentions` of an empty list does nothing, `storeRead` of one still records the read). `currentMentions()` answers the current row's mentions in order for the services that
   will use them; no route exposes them yet, and the `SafetyView` and the API stay exactly as they were.
+- **Marks from the skin log (`skin-log`).** A product the person marks as one they keep reacting to is a `safety_mentions` row with `source` `skin-log`: kind `product`, resolution
+  `resolved`, variant null, and the catalog `product_id` (a product with no catalog id, such as a step with no label or a `none` step, cannot be marked). It is a source value only: the column has no CHECK, so there is no migration.
+  The type is split in two in TypeScript: `MentionSource` (mentions) has `skin-log`, `ReadSource` (`safety_reads`, and what `storeRead` and `reads` take) stays `reaction | prescription`, since a mark is not read from words.
+  `SafetyService.markReactionProduct(profileId, { productId, brand, name, category })` takes no session and appends the mention to the profile's **current** row (it writes no row of its own, so the
+  view and `GET /safety` are unchanged); it answers `{ marked }`, false when that product is already marked or the profile has no safety row. It is called by the skin-care module (the reaction call, PR 6b of #233).
+  **A mark is carried forward.** Mentions hang off one safety row and `set` appends a new row, so `set` copies the current row's `skin-log` mentions onto the new one (fresh ids, `safety_id` the new row, positions from 0)
+  through `D1SafetyRepository.appendCarrying(row, carried)`: the row insert and one insert per carried mention in one `db.batch`, an empty list still adding the row. Reaction and prescription mentions are never carried;
+  they are read again from the new words. **Marks do not count toward the three-product cap:** `mentionRows` skips `skin-log` mentions when it counts the slots, so a carried mark never pushes a typed product to `unresolved`.
+  **Reconcile after the write.** D1 has no transaction across a read and the write after it, so both sides re-check: `markReactionProduct` re-reads the current row after writing and, if a save replaced it, marks that row too (`marked` is true only when the mark is on the current row); `set` re-reads the old row's marks after `appendCarrying` and appends any product the new row lacks. Each row holds a product at most once, so the checks are no-ops when nothing raced, and `carriedMarks` carries one mention for each product even if two concurrent marks left a duplicate.
+  **Marks are never removed:** no unmark exists, by design (cautious). **An empty or blank `productId` marks nothing** (`marked` false): a step with no label, or a `none` step, has no catalog id and cannot be marked.
+  **The routine follows through the verdict fingerprint, not an event.** The verdict floor's `reactedProducts` and the recommendations' `sharedWithReaction` flag accept `skin-log` as well as `reaction` (`reactedIngredients` stays
+  `reaction` only). The fingerprint hashes the mentions, so a new mark changes it, a carry (new ids, later times) does not; skin-care then calls `verdicts.savedFor(profileId)`, which queues a verdict build, and the build fires `onRoutineTrigger('verdict')`.
+  skin-care never calls routines, and no safety-change rebuild (`reason: 'safety'`) is used.
 - **Logs carry ids and outcomes only**, never the words, a brand or a name, and a successful parse logs nothing of its own (the dispatcher logs `{ job, key, attempt, outcome }`).
   Tests spy on the console to keep it so. The words are user input and may be personal.
 - **Routes**, bearer, under `/api/v1/me`, tagged "Onboarding": `PUT /safety` and `GET /safety`, a fourth `.route('/me', ...)` in `src/app.ts`. `PUT /safety` is rate limited like `PUT /goal`, in the same order
