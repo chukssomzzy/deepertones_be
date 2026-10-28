@@ -112,7 +112,8 @@ const makeService = () =>
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
-    } satisfies Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor'>,
+      reintroductionFor: async () => [],
+    } satisfies Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor' | 'reintroductionFor'>,
     reminders: {
       zoneFor: async (profileId: string) => {
         if (world.zoneFails) throw new Error('zone read failed')

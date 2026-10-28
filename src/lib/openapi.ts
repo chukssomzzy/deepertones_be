@@ -164,6 +164,32 @@ export const toValidationError = (target: string, error: z.ZodError) =>
   )
 
 /**
+ * Reads the JSON body of a route served from a copy without its `request.body` (see `documentedOnly`): @hono/zod-openapi reports a malformed or empty JSON body as HTTP_400 rather than
+ * VALIDATION_FAILED, so a route that must answer VALIDATION_FAILED for those reads the text itself.
+ */
+export const readJsonBody = <Schema extends z.ZodType>(text: string, schema: Schema): z.infer<Schema> => {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text)
+  } catch {
+    throw new ValidationError('VALIDATION_FAILED', 'Invalid json', [{ path: '', message: 'Malformed JSON in request body' }])
+  }
+  const parsed = schema.safeParse(raw)
+  if (!parsed.success) throw toValidationError('json', parsed.error)
+  return parsed.data
+}
+
+/**
+ * What a route served from a body-less copy documents (register it by hand with `app.openAPIRegistry.registerPath`). The middleware is the served route's business and is not OpenAPI
+ * (left in, it lands in the spec as an unknown `middleware` key). defineRoute adds 415 to any route with a body, but these read the text, which never refuses a Content-Type: not documented.
+ */
+export const documentedOnly = <Route extends { responses: object; middleware?: unknown }>(route: Route): Omit<Route, 'middleware'> => {
+  const { middleware: _served, ...documented } = route
+  const { 415: _unsupported, ...responses } = route.responses as Record<number, unknown>
+  return { ...documented, responses }
+}
+
+/**
  * A sub-app for one module's routes (and the root app). Invalid input throws ValidationError,
  * so it reaches the client through errorHandler in the same shape as every other error.
  */

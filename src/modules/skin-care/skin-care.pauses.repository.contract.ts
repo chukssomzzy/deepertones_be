@@ -45,6 +45,14 @@ type Account = { userId: string; profileId: string }
  *   update(profileId, id, patch): Promise<boolean>      patch: Partial<Pick<StepPause, 'state' | 'checkDay' | 'sameCount' | 'ladderCode' | 'ladderStartedOn' | 'versionId'>>.
  *       Sets exactly the fields given on that profile's row and resolves true. Another profile's row, or an id nobody holds, changes nothing and resolves false.
  *       Nothing else on the row changes, and no other row is touched. An empty patch resolves true for a row that exists and changes nothing.
+ *
+ * ADDED FOR PR 5 (assumed: the brief names the method `rePause` and its effect, not its arguments):
+ *   (escalated: a check-in sent to a professional. `openFor` answers it with the open ones, but it is not one of the OPEN states below: it holds no slot, so a new paused row for its step and product is allowed.)
+ *   rePause(profileId, id, to: { pausedOn: string; checkDay: string; sourceLogId: string | null }): Promise<boolean>
+ *       A harm signal on a step that is being brought back flips THAT row in place (the partial unique index forbids a second open row): a compare-and-set on state
+ *       'bringing-back', so it resolves true and sets state 'paused', pausedOn, checkDay and sourceLogId as given and sameCount 0, and KEEPS ladderCode and ladderStartedOn
+ *       (and every other column). It resolves false, changing nothing, for a row that is not 'bringing-back' (paused, or closed), another profile's row and an id nobody holds.
+ *       The row keeps holding its (profile, step, product key): it is the same open row.
  */
 export type StepPausesContractSetup = {
   repository: StepPausesRepository
@@ -166,6 +174,17 @@ export const stepPausesRepositoryContract = (name: string, make: () => StepPause
         expect(await repository.find(profileId, idOf(profileId, 'first'))).toMatchObject({ state })
       })
 
+      it('does not let a pause sent to a professional (escalated) block a new paused row for the same step and product: only paused and bringing-back hold the slot', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.insert(labelled(profileId, 'sent', { state: 'escalated' }))
+
+        await repository.insert(labelled(profileId, 'second', { createdAt: at(2 * MINUTE) }))
+
+        expect(labelsOf(await repository.openFor(profileId))).toEqual(['sent', 'second'])
+        expect(await repository.find(profileId, idOf(profileId, 'sent'))).toMatchObject({ state: 'escalated' })
+      })
+
       it('allows a closed pause beside an open one for the same step and product, and several closed ones', async () => {
         const { repository, newAccount } = await make()
         const { profileId } = await newAccount()
@@ -232,6 +251,16 @@ export const stepPausesRepositoryContract = (name: string, make: () => StepPause
         expect(labelsOf(await repository.openFor(profileId))).toEqual(['second'])
       })
 
+      it('does not let an escalated stepless pause block a new open one', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.insert(stepless(profileId, 'sent', { state: 'escalated' }))
+
+        await repository.insert(stepless(profileId, 'second', { createdAt: at(2 * MINUTE) }))
+
+        expect(labelsOf(await repository.openFor(profileId))).toEqual(['sent', 'second'])
+      })
+
       it('allows an open stepless pause beside open pauses that have a step, and another profile\'s own', async () => {
         const { repository, newAccount } = await make()
         const mine = (await newAccount()).profileId
@@ -259,15 +288,16 @@ export const stepPausesRepositoryContract = (name: string, make: () => StepPause
     })
 
     describe('openFor', () => {
-      it('answers only the open pauses, paused and bringing-back, oldest first, by when they were made', async () => {
+      it('answers the pauses that are open or sent to a professional (paused, bringing-back and escalated), never a closed one, oldest first, by when they were made', async () => {
         const { repository, newAccount } = await make()
         const { profileId } = await newAccount()
         await repository.insert(labelled(profileId, 'late', { step: 'moisturise', productKey: 'm', createdAt: at(3 * MINUTE) }))
         await repository.insert(labelled(profileId, 'early', { step: 'cleanse', productKey: 'c', state: 'bringing-back', createdAt: at(MINUTE) }))
         await repository.insert(labelled(profileId, 'middle', { step: 'treat', productKey: 't', createdAt: at(2 * MINUTE) }))
+        await repository.insert(labelled(profileId, 'sent', { step: 'protect', productKey: 's', state: 'escalated', createdAt: at(4 * MINUTE) }))
         for (const [index, state] of CLOSED.entries()) await repository.insert(labelled(profileId, `closed-${state}`, { state, step: 'protect', productKey: `p${index}`, createdAt: at((10 + index) * MINUTE) }))
 
-        expect(labelsOf(await repository.openFor(profileId))).toEqual(['early', 'middle', 'late'])
+        expect(labelsOf(await repository.openFor(profileId))).toEqual(['early', 'middle', 'late', 'sent'])
       })
 
       it('orders pauses made at one instant by id, so the order is the same on every call', async () => {
@@ -408,6 +438,63 @@ export const stepPausesRepositoryContract = (name: string, make: () => StepPause
         expect(await repository.update(profileId, crypto.randomUUID(), { state: 'undone' })).toBe(false)
 
         expect(await repository.find(profileId, held.id)).toEqual(held)
+      })
+    })
+
+    describe('rePause', () => {
+      const LADDER = JSON.stringify([{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 2, frequency: 'back' }])
+      const broughtBack = (profileId: string, label: string, over: Partial<NewStepPause> = {}) =>
+        labelled(profileId, label, { state: 'bringing-back', pausedOn: dayAt(-9), checkDay: dayAt(-6), sameCount: 2, sourceLogId: 'log-first', ladderCode: LADDER, ladderStartedOn: dayAt(-2), ...over })
+      const AGAIN = { pausedOn: dayAt(0), checkDay: dayAt(3), sourceLogId: 'log-second' }
+
+      it('turns a bringing-back pause back into a paused one in place: the new days, the new log, no same answers, and the ladder kept', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const target = broughtBack(profileId, 'target', { ingredientGroup: 'retinoid', versionId: 'v1' })
+        const neighbour = labelled(profileId, 'neighbour', { step: 'cleanse', productKey: 'c', createdAt: at(2 * MINUTE) })
+        await repository.insert(target)
+        await repository.insert(neighbour)
+
+        expect(await repository.rePause(profileId, target.id, AGAIN)).toBe(true)
+
+        expect(await repository.find(profileId, target.id)).toEqual({ ...target, state: 'paused', sameCount: 0, ...AGAIN })
+        expect(await repository.find(profileId, neighbour.id)).toEqual(neighbour)
+        expect(labelsOf(await repository.openFor(profileId))).toEqual(['target', 'neighbour'])
+      })
+
+      it('keeps the row holding its step and product: a second open pause for them is still refused, so no second row can be made', async () => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        await repository.insert(broughtBack(profileId, 'target'))
+        await repository.rePause(profileId, idOf(profileId, 'target'), AGAIN)
+
+        await expect(repository.insert(labelled(profileId, 'second', { createdAt: at(2 * MINUTE) }))).rejects.toThrow()
+
+        expect(labelsOf(await repository.openFor(profileId))).toEqual(['target'])
+      })
+
+      it.each(['paused', ...CLOSED] as const)('changes nothing and says so for a pause that is %s: only a pause being brought back is re-paused', async (state) => {
+        const { repository, newAccount } = await make()
+        const { profileId } = await newAccount()
+        const target = broughtBack(profileId, 'target', { state })
+        await repository.insert(target)
+
+        expect(await repository.rePause(profileId, target.id, AGAIN)).toBe(false)
+
+        expect(await repository.find(profileId, target.id)).toEqual(target)
+      })
+
+      it('changes nothing for another profile\'s pause and for an id nobody holds, and says so', async () => {
+        const { repository, newAccount } = await make()
+        const owner = (await newAccount()).profileId
+        const stranger = (await newAccount()).profileId
+        const theirs = broughtBack(owner, 'theirs')
+        await repository.insert(theirs)
+
+        expect(await repository.rePause(stranger, theirs.id, AGAIN)).toBe(false)
+        expect(await repository.rePause(owner, crypto.randomUUID(), AGAIN)).toBe(false)
+
+        expect(await repository.find(owner, theirs.id)).toEqual(theirs)
       })
     })
   })

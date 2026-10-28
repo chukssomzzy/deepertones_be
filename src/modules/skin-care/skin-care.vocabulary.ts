@@ -13,6 +13,13 @@ export type HowBad = (typeof HOW_BAD)[number]
 /** The product a stored routine step names, restated here so skin-care does not import routines: a shelf entry, a recommended product by code, or "use what you have". */
 export type SkinCareProductRef = { kind: 'shelf'; id: string } | { kind: 'candidate'; code: string } | { kind: 'none' }
 
-/** Where a pause is. `paused` and `bringing-back` are open (they hold their step); `ended`, `replaced` (the step's product changed) and `undone` are closed. */
-export const PAUSE_STATES = ['paused', 'bringing-back', 'ended', 'replaced', 'undone'] as const
+/**
+ * Where a pause is. `paused` and `bringing-back` are open (they hold their step, and the table's unique indexes see them). `escalated` is a check-in that went to a professional: it is
+ * read as open (the step stays out of the routine and is not chosen again) but never due, and the indexes do not see it. `ended`, `replaced` (the step's product changed) and `undone` are closed.
+ */
+export const PAUSE_STATES = ['paused', 'bringing-back', 'escalated', 'ended', 'replaced', 'undone'] as const
 export type PauseState = (typeof PAUSE_STATES)[number]
+
+/** What a person can answer when asked how a paused step feels. */
+export const CHECK_IN_ANSWERS = ['calmer', 'same', 'worse'] as const
+export type CheckInAnswer = (typeof CHECK_IN_ANSWERS)[number]

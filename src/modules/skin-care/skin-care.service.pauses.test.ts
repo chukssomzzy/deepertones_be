@@ -8,6 +8,7 @@ import { FORBIDDEN_WORDING } from '../routines/routines.wording'
 import { FakeSkinCareRepository } from './skin-care.repository.fake'
 import { FakeStepPausesRepository } from './skin-care.pauses.repository.fake'
 import { SkinCareService } from './skin-care.service'
+import type { ScheduleStep } from '../catalog/catalog.workbook.schema'
 import type { SkinCareRoutine, SkinCareRoutineStep, StepPause } from './skin-care.types'
 
 // Pausing a step, choosing it, Undo, reconcile and stateFor (spec #233, PR 4b). The service is tested at its own seam with a world fake: one mutable clock, the stored time
@@ -45,7 +46,7 @@ import type { SkinCareRoutine, SkinCareRoutineStep, StepPause } from './skin-car
 //       401 AUTH_REQUIRED, 403 SIGNUP_REQUIRED (a guest), 404 PAUSE_NOT_FOUND (another profile's pause, none, or one that is no longer 'paused': undone twice, or replaced), 409 UNDO_EXPIRED after the day.
 //       Sets the pause to 'undone' and marks its source log overridden (the log is kept); nothing else, and never a professional log.
 //   reconcile(profileId): Promise<void>   by profile id. For each open pause with a step: kept when the routine still has that step with the same product key; set to 'replaced'
-//       when the step now has another product key. No routine (null) changes nothing. Starts no ladder. Idempotent.
+//       when the step now has another product key. No routine (null) changes nothing. Idempotent. (From PR 5 the new product is brought back on a ladder: skin-care.service.check-ins.test.ts.)
 //   stateFor(profileId, today): Promise<SkinCareState>   { pauses: the profile's open 'paused' rows that have a step, as { step, productId: the row's productKey, state: 'paused' }, held: false }.
 //       productId carries the pause's product KEY, so a no-label own product (productId null in the routine) is paused under its shelf entry id. A storage failure rejects: it
 //       never answers "no pauses".
@@ -69,6 +70,12 @@ const AMARA_ACTOR = actor(AMARA_USER, AMARA)
 const TOLU_ACTOR = actor(TOLU_USER, TOLU)
 const GUEST = actor('user-guest', 'profile-guest', 'anonymous')
 const PUBLIC: Actor = { kind: 'public' }
+
+// The ladder the workbook gives every group here (PR 5: a replaced product is brought back on one).
+const LADDER: ScheduleStep[] = [
+  { fromWeek: 1, toWeek: 1, frequency: 'weekly' },
+  { fromWeek: 2, toWeek: 2, frequency: 'back' },
+]
 
 const PAUSED_TEXT: Response = {
   title: 'We paused your {step}',
@@ -140,7 +147,8 @@ const makeService = () =>
     workbook: {
       responseFor: async (outcome) => world.responses[outcome] ?? null,
       escalationFor: async (reason) => world.escalations[reason] ?? null,
-    } satisfies Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor'>,
+      reintroductionFor: async () => structuredClone(LADDER),
+    } satisfies Pick<CatalogWorkbookService, 'responseFor' | 'escalationFor' | 'reintroductionFor'>,
     reminders: { zoneFor: async (profileId: string) => world.zones.get(profileId) ?? null },
     routine: {
       stepDownRunning: async () => world.stepDown,
@@ -175,7 +183,7 @@ beforeEach(() => {
     zones: new Map(),
     stepDown: false,
     routines: new Map([[AMARA, amarasRoutine()], [TOLU, amarasRoutine()]]),
-    responses: { paused: { ...PAUSED_TEXT }, 'nothing-to-pause': { ...NOTHING_TEXT } },
+    responses: { paused: { ...PAUSED_TEXT }, 'nothing-to-pause': { ...NOTHING_TEXT }, 'check-calmer': { title: 'Good news about {step}', body: 'We will bring {step} back slowly.', whatToDoNow: null } },
     escalations: { ...ESCALATIONS },
     inboxWrites: [],
   }
@@ -583,26 +591,19 @@ describe('SkinCareService.log, the cap of two pauses', () => {
     expect(third.paused).toMatchObject({ step: 'treat' })
   })
 
-  // A bringing-back pause is made by the check-in (PR 5), which does not exist yet: the row is put in place through the repository, as that PR will leave it. The cleanser
-  // changed before the moisturiser, so the moisturiser is the next step by the rule whether or not a step being brought back is also kept out of the choice.
+  // A step being brought back is not a paused one, so it is not one of the two. (PR 5: it is the step a harm signal then pauses again, in place, rather than one the choice goes
+  // around; that is skin-care.service.check-ins.test.ts's. Here it is only that the cap is not reached by it.)
   it('does not count a pause that is being brought back', async () => {
     const first = await harm()
-    await pauses.insert({
-      ...(await pauses.find(AMARA, first.paused!.id))!,
-      id: 'being-brought-back',
-      step: 'cleanse',
-      productKey: 'prod-cleanse',
-      productId: 'prod-cleanse',
-      productRef: { kind: 'shelf', id: 'entry-cleanse' },
-      ingredientGroup: null,
-      state: 'bringing-back',
-      createdAt: at(MINUTE),
-    })
+    await harm()
+    world.now = at(3 * DAY)
+    await runAs(AMARA_ACTOR, () => service.answerCheckIn(first.paused!.id, 'calmer'))
+    expect(await pauses.find(AMARA, first.paused!.id)).toMatchObject({ state: 'bringing-back' })
 
     const result = await harm()
 
     expect(result.outcome).toEqual({ kind: 'pause', duringStepDown: false })
-    expect(result.paused).toMatchObject({ step: 'moisturise' })
+    expect(result.paused).toMatchObject({ id: first.paused!.id, step: 'treat' })
   })
 
   it('applies during a step-down too: the cap is the first rule', async () => {
@@ -986,7 +987,7 @@ describe('SkinCareService.reconcile', () => {
     expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [{ step: 'treat', productId: 'prod-treat', state: 'paused' }], held: false })
   })
 
-  it('sets a pause to replaced when the step now has another product, and starts nothing for the new one', async () => {
+  it('sets a pause to replaced when the step now has another product', async () => {
     const result = await harm()
     treat().productId = 'prod-better-treat'
     treat().productRef = { kind: 'candidate', code: 'TREAT-2' }
@@ -994,8 +995,7 @@ describe('SkinCareService.reconcile', () => {
     await service.reconcile(AMARA)
 
     expect(await pauses.find(AMARA, result.paused!.id)).toMatchObject({ state: 'replaced' })
-    expect(await openPauses(AMARA)).toEqual([])
-    expect(await service.stateFor(AMARA, TODAY)).toEqual({ pauses: [], held: false })
+    expect(await openPauses(AMARA)).not.toContainEqual(expect.objectContaining({ id: result.paused!.id }))
   })
 
   it('replaces only the pause whose product changed', async () => {

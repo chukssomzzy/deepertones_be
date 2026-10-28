@@ -1,7 +1,9 @@
 import type { StepPausesRepository } from './skin-care.pauses.repository'
 import type { NewStepPause, StepPause } from './skin-care.types'
 
+// The states the table's unique indexes see, and the (wider) states `openFor` reads: an escalated row holds no index slot but is still read as open.
 const OPEN: ReadonlySet<StepPause['state']> = new Set(['paused', 'bringing-back'])
+const READ_AS_OPEN: ReadonlySet<StepPause['state']> = new Set(['paused', 'bringing-back', 'escalated'])
 
 const copyOf = (row: StepPause): StepPause => ({ ...row, productRef: structuredClone(row.productRef), createdAt: new Date(row.createdAt) })
 
@@ -45,7 +47,7 @@ export class FakeStepPausesRepository implements StepPausesRepository {
   async openFor(profileId: string): Promise<StepPause[]> {
     this.maybeFail()
     return [...this.rows.values()]
-      .filter((row) => row.profileId === profileId && OPEN.has(row.state))
+      .filter((row) => row.profileId === profileId && READ_AS_OPEN.has(row.state))
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
       .map(copyOf)
   }
@@ -55,6 +57,15 @@ export class FakeStepPausesRepository implements StepPausesRepository {
     const row = this.rows.get(id)
     if (!row || row.profileId !== profileId || (onlyIfState !== undefined && row.state !== onlyIfState)) return false
     Object.assign(row, patch)
+    return true
+  }
+
+  async rePause(profileId: string, id: string, to: { pausedOn: string; checkDay: string; sourceLogId: string | null }): Promise<boolean> {
+    this.maybeFail()
+    const row = this.rows.get(id)
+    if (!row || row.profileId !== profileId || row.state !== 'bringing-back') return false
+    // The same open row, flipped in place: the ladder columns stay.
+    Object.assign(row, { state: 'paused', sameCount: 0, pausedOn: to.pausedOn, checkDay: to.checkDay, sourceLogId: to.sourceLogId })
     return true
   }
 
