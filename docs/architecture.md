@@ -2840,6 +2840,22 @@ The routine reaches the app through seven routes under `/me` (`routines.routes.t
   - **Phone first.** The order per profile is: is a time due, then `hasPhone`, then the routine read, then per push the claim and the enqueue (the nudge reads `missedStreak` and the channel before its claim). A profile with no phone logs `{ job: 'reminder-send', outcome: 'no-phone', profileId }` and costs no routine read. `routineReminder` answers whether it queued, and `sendDue` counts only those. The handler logs `{ outcome: 'done', queued }` on every run, 0 included, as a heartbeat; `profile-failed` carries `describeError(error)` (the class of an unexpected error, never its text).
   - **Deployed behaviour.** A reminder is queued as a `send-push` job (see "Sending push notifications"), so it is sent by the queue consumer, with its retries; the claim is made before the enqueue, so an enqueue that fails (logged and swallowed) is not retried by a later run in the same window.
 
+### Skin care
+
+`modules/skin-care` holds `skin_logs` (migration 0051), `D1SkinCareRepository` and `SkinCareService` (#233, PR 2). A person logs what they are noticing, where and how bad, and fixed rules decide the outcome. There is no AI in it, and **there is no route yet: it arrives with pausing (PR 4b)**. The container registers the service with a stub `routine.stepDownRunning` that answers false; PRs 4a and 4b replace it. skin-care never imports routines.
+
+- **The vocabulary** (`skin-care.vocabulary.ts`). Noticing: stinging or burning, new redness, tightness or dryness, new breakouts, itching, swelling, nothing unusual, pus or a hot painful patch (choose any). Where: cheeks, nose, forehead, neck, chin and jaw, near my eyes, everywhere (choose any). How bad: mild, noticeable, hard to ignore (one choice).
+- **The rules** (`outcomeFor` in `skin-care.outcomes.ts`; pure; `SKIN_OUTCOME_RULES_VERSION` is stored on every log). Precedence: professional, then pause, then expected flare, then advice, then logged.
+  - Professional: pus or a hot patch, swelling, or near my eyes in `where`; the reason named is the first of those in that order.
+  - Pause: stinging or burning or new redness at any level, or any symptom at hard to ignore.
+  - While a step-down is running, a pause that comes only from a harm signal at mild or noticeable is the expected flare instead (the step-down is never stopped). Hard to ignore stays a pause, with `duringStepDown: true`.
+  - Advice: tightness or dryness, itching and new breakouts at mild or noticeable, one code each, always in that order.
+  - Logged: nothing unusual.
+- **Validation** (the service, before the rules, 400 `VALIDATION_FAILED`, nothing stored): at least one symptom; nothing unusual only alone and with no place at all; a level for anything but a good day (one given with nothing unusual is dropped and the log is stored without it); a note of at most 500 characters. A symptom or place named twice counts once. A guest is 403 `SIGNUP_REQUIRED` before the input is looked at. Logging works before Start and with no routine.
+- **The note** is stored and repeated back in a professional response's `facts` (what, where, how bad, note), and nowhere else: `recent()` leaves it out. No rule reads it, it never changes an outcome, and it is written to no log line or error.
+- **Reviewed text.** The log is stored first, then the text is read from the workbook: one Responses row per advice code, the Responses row for the expected flare, or the Escalations row of the professional reason. A missing row is 503 `CONTENT_UNAVAILABLE` and the log stays stored. A pause and a good day have no text in this PR.
+- **The day** is the person's local day in their stored zone (UTC with none), fixed on the log.
+
 ### Admin access
 The `/api/v1/admin` routes change shared data (today the catalog workbook, see below), so they are not a user's to call. A user's token, guest or
 signed-in, never opens them: they have a door of their own.
