@@ -12,6 +12,9 @@ type RoutineBody = z.infer<typeof ReadyRoutineResponse> | z.infer<typeof Updatin
 type PublicEntry = RoutineBody['morning'][number]
 type PublicProduct = PublicEntry['product']
 
+/** What the skin-care state does to a step of the routine: its status on the screen, and for a step being brought back the rung's frequency and the day the rung's count starts. A step with none is active. */
+export type StepOverlay = { status: Exclude<PublicEntry['status'], 'active'>; frequency?: Frequency; anchor?: string }
+
 /** Everything the routine screen is made of, read by the viewer service and handed over: a stored version and the reads around it. */
 export type RoutineViewInput = {
   status: 'ready' | 'updating'
@@ -30,6 +33,8 @@ export type RoutineViewInput = {
   summaries: ReadonlyMap<string, ProductSummary>
   /** The step-down templates the version names, by code. */
   tapers: ReadonlyMap<string, TaperRow>
+  /** What the skin-care state does to each step, by the step as the version stores it. Absent (or a step with no entry): every step is active. */
+  overlay?: ReadonlyMap<RoutineVersionRow['steps'][number], StepOverlay>
 }
 
 /** What a step-down names when its product has left the shelf since the version was built: the plan is still the person's, and the schedule is what matters. */
@@ -107,20 +112,33 @@ const titleOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInp
   return { title: titleFor({ step: step.step, form, keyIngredient }), product }
 }
 
+/** The rung a step is being brought back at, when it is: its frequency and the day its count starts. */
+const rungOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): StepOverlay | undefined => {
+  const over = input.overlay?.get(step)
+  return over?.status === 'bringing-back' ? over : undefined
+}
+
+/** How often a step is used now: the rung's while it is being brought back, else the routine's own. The body's `when`, the list it is in and the reminders all follow it. */
+const frequencyOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): RoutineVersionRow['steps'][number]['frequency'] => rungOf(step, input)?.frequency ?? step.frequency
+
 const entryOf = (step: RoutineVersionRow['steps'][number], previous: RoutineVersionRow | null, input: RoutineViewInput): PublicEntry => {
   const { title, product } = titleOf(step, input)
-  return { step: step.step, title, when: whenFor(step.frequency), reason: step.reason, changed: changedSince(step, previous, input), product }
+  return { step: step.step, title, when: whenFor(frequencyOf(step, input)), reason: step.reason, status: input.overlay?.get(step)?.status ?? 'active', changed: changedSince(step, previous, input), product }
 }
 
 // Morning is am and am-pm; evening is pm, am-pm and anything used less than daily, which the routine places in the evening. The sunscreen is only ever a morning step.
-const inMorning = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step === 'protect' || frequency === 'am' || frequency === 'am-pm'
-const inEvening = ({ step, frequency }: RoutineVersionRow['steps'][number]): boolean => step !== 'protect' && frequency !== 'am'
+type Placed = Pick<RoutineVersionRow['steps'][number], 'step' | 'frequency'>
+const inMorning = ({ step, frequency }: Placed): boolean => step === 'protect' || frequency === 'am' || frequency === 'am-pm'
+const inEvening = ({ step, frequency }: Placed): boolean => step !== 'protect' && frequency !== 'am'
 
-/** An entry of the reminder plan: the routine entry's step and title, with the step's raw frequency (the body shows only the `when` label). */
-export type ReminderPlanEntry = { step: RoutineVersionRow['steps'][number]['step']; title: string; frequency: RoutineVersionRow['steps'][number]['frequency'] }
+/** An entry of the reminder plan: the routine entry's step and title, with the step's raw frequency (the body shows only the `when` label). A step being brought back has its rung's frequency and the `anchor` day that count starts from. */
+export type ReminderPlanEntry = { step: RoutineVersionRow['steps'][number]['step']; title: string; frequency: RoutineVersionRow['steps'][number]['frequency']; anchor?: string }
 
 /** The calendar date a step-down's week begins, counting from the day the step-down began. */
 const fromDateOf = (began: number, week: number): string => dayString(began + (week - 1) * WEEK_DAYS * DAY_MS)
+
+/** The first millisecond after the week ends (the UTC midnight of the day after its last day), counting from the day the step-down began. */
+const afterWeekOf = (began: number, week: number): number => began + week * WEEK_DAYS * DAY_MS
 
 /** One day a step of a step-down begins, for the step-down alert: the product's routine title and the step's fixed line. */
 export type StepDownChange = { day: string; title: string; line: string }
@@ -154,7 +172,7 @@ const tapersOf = (input: RoutineViewInput): RoutineBody['tapers'] =>
           toWeek,
           // A step's frequency is typed as text, but the workbook reader refuses a schedule whose frequency is not a routine frequency or stop.
           frequency: frequency as RoutineBody['tapers'][number]['steps'][number]['frequency'],
-          ...(began === null ? {} : { fromDate: fromDateOf(began, fromWeek), toDate: dayString(began + (toWeek * WEEK_DAYS - 1) * DAY_MS) }),
+          ...(began === null ? {} : { fromDate: fromDateOf(began, fromWeek), toDate: dayString(afterWeekOf(began, toWeek) - DAY_MS) }),
         })),
       },
     ]
@@ -183,14 +201,16 @@ export const toRoutineResponse = (input: RoutineViewInput): RoutineBody => {
     status: input.status,
     startedOn: version.startedOn === null ? null : dayString(utcDay(version.startedOn)),
     expectation: version.expectation ?? '',
-    morning: ordered.filter(inMorning).map((step) => entryOf(step, previous, input)),
-    evening: ordered.filter(inEvening).map((step) => entryOf(step, previous, input)),
+    morning: ordered.filter((step) => inMorning({ step: step.step, frequency: frequencyOf(step, input) })).map((step) => entryOf(step, previous, input)),
+    evening: ordered.filter((step) => inEvening({ step: step.step, frequency: frequencyOf(step, input) })).map((step) => entryOf(step, previous, input)),
     // The stored list as it was built, field by field like everything else here: its titles and reasons were fixed at the build, and a product since gone from the shelf still shows.
     notInRoutine: version.notInRoutine?.map(({ entryId, title, status, reason }) => ({ entryId, title, status, reason })) ?? null,
     tapers,
     summary: summaryOf(input, tapers),
   }
 }
+
+const frozenTitleOf = (input: RoutineViewInput, shelfProductId: string): string => input.version.notInRoutine?.find(({ entryId }) => entryId === shelfProductId)?.title ?? GONE_PRODUCT_NAME
 
 // One change for the first day of each step of each dated step-down's schedule (week one and the stop included), in the version's order of step-downs and then the schedule's. The title
 // is the one frozen in `notInRoutine` when the build left the product out: the maker's brand and name are its own words, and an alert on a lock screen names the routine's plain title.
@@ -203,7 +223,7 @@ const stepDownChangesOf = (input: RoutineViewInput): StepDownChange[] =>
       console.error({ outcome: 'routine-taper-template-missing', profileId: input.version.profileId, templateId: stopped.templateId })
       return []
     }
-    const title = input.version.notInRoutine?.find(({ entryId }) => entryId === stopped.shelfProductId)?.title ?? GONE_PRODUCT_NAME
+    const title = frozenTitleOf(input, stopped.shelfProductId)
     const began = utcDay(stopped.startedOn)
     return template.schedule.map(({ fromWeek, frequency }) => ({ day: fromDateOf(began, fromWeek), title, line: stepDownLineFor(frequency as Frequency | 'stop') }))
   })
@@ -213,6 +233,63 @@ export const toReminderPlan = (input: RoutineViewInput): ReminderPlan | null => 
   const { version } = input
   if (version.startedOn === null) return null
   const ordered = [...version.steps].sort((a, b) => ROUTINE_STEPS.indexOf(a.step) - ROUTINE_STEPS.indexOf(b.step))
-  const entry = (step: RoutineVersionRow['steps'][number]): ReminderPlanEntry => ({ step: step.step, title: titleOf(step, input).title, frequency: step.frequency })
-  return { dayOne: dayString(utcDay(version.startedOn)), morning: ordered.filter(inMorning).map(entry), evening: ordered.filter(inEvening).map(entry), stepDownChanges: stepDownChangesOf(input) }
+  // A paused or held step is not reminded of. A step being brought back is placed, and counted, by its rung instead of the routine's frequency.
+  const entries = ordered.flatMap((step): ReminderPlanEntry[] => {
+    const over = input.overlay?.get(step)
+    if (over?.status === 'paused' || over?.status === 'held') return []
+    const rung = rungOf(step, input)
+    return [{ step: step.step, title: titleOf(step, input).title, frequency: frequencyOf(step, input), ...(rung?.anchor === undefined ? {} : { anchor: rung.anchor }) }]
+  })
+  return { dayOne: dayString(utcDay(version.startedOn)), morning: entries.filter(inMorning), evening: entries.filter(inEvening), stepDownChanges: stepDownChangesOf(input) }
 }
+
+/** The title a step shows on the screen. */
+export const stepTitleOf = (step: RoutineVersionRow['steps'][number], input: RoutineViewInput): string => titleOf(step, input).title
+
+/** Where a dated step-down is today: step `step` of `of`, whether it is still running, and the first day of the next step (null on the last). */
+export type StepDownProgress = { entryId: string; title: string; step: number; of: number; running: boolean; nextChange: string | null }
+
+/**
+ * Where each step-down that has begun is on `today` (a local day, 'YYYY-MM-DD'), in the order given, by the arithmetic the schedule screen counts its dates with. A step-down with no
+ * start date has not begun, and one whose template the workbook no longer holds has no schedule: both are left out, the second logged as the body logs it (with the profile's id, when given). A step-down is running
+ * until its start plus the last week's end (so also before its first day), and after that it is still its last step.
+ */
+export const stepDownProgressOf = (
+  tapers: readonly (Pick<RoutineVersionRow['tapers'][number], 'shelfProductId' | 'templateId' | 'startedOn'> & { title: string })[],
+  templates: ReadonlyMap<string, TaperRow>,
+  today: string,
+  profileId?: string,
+): StepDownProgress[] =>
+  tapers.flatMap((stopped) => {
+    if (stopped.startedOn === null) return []
+    const template = templates.get(stopped.templateId)
+    if (!template) {
+      console.error({ outcome: 'routine-taper-template-missing', profileId, templateId: stopped.templateId })
+      return []
+    }
+    const began = utcDay(stopped.startedOn)
+    const day = Date.parse(`${today}T00:00:00.000Z`)
+    const { schedule } = template
+    const found = schedule.findIndex(({ toWeek }) => day < afterWeekOf(began, toWeek))
+    const at = found === -1 ? schedule.length - 1 : found
+    const next = schedule[at + 1]
+    return [
+      {
+        entryId: stopped.shelfProductId,
+        title: stopped.title,
+        step: at + 1,
+        of: schedule.length,
+        running: day < afterWeekOf(began, schedule[schedule.length - 1]!.toWeek),
+        nextChange: next === undefined ? null : fromDateOf(began, next.fromWeek),
+      },
+    ]
+  })
+
+/** `stepDownProgressOf` over the version's own step-downs, each under the plain title its row of `notInRoutine` froze. */
+export const stepDownsOf = (input: RoutineViewInput, today: string): StepDownProgress[] =>
+  stepDownProgressOf(
+    input.version.tapers.map((stopped) => ({ ...stopped, title: frozenTitleOf(input, stopped.shelfProductId) })),
+    input.tapers,
+    today,
+    input.version.profileId,
+  )

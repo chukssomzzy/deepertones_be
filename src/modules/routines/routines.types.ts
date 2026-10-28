@@ -161,6 +161,8 @@ export type StoredRoutineStep = RoutineEntry & {
   gotIt: boolean
   /** The id of the version this step was carried over from unchanged, or null. */
   fixedFrom: string | null
+  /** The calendar day (the UTC midnight of the local date) this step's product last changed; null means day 1. Read by the skin-care module to tell a new product from an old habit. */
+  changedOn: Date | null
 }
 
 /** A step-down as stored: the rules' choice of template for a stopped product, and the day it began (set when the routine is started), or null before that. */

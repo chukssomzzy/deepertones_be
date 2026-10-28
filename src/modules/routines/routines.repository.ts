@@ -17,9 +17,10 @@ export type CompletedRoutineBuild = Pick<
   'steps' | 'tapers' | 'expectation' | 'cautions' | 'goal' | 'shelfCounts' | 'notInRoutine' | 'model' | 'promptHash' | 'catalogVersion' | 'routineFingerprint' | 'hintsShown' | 'writerRetryDueAt' | 'writerCalls'
 > & { source: NonNullable<RoutineVersionRow['source']>; readyAt: Date }
 
-// A JSON column keeps a step-down's start date as text, so every row read turns it back into a Date.
+// A JSON column keeps a step's change day and a step-down's start date as text, so every row read turns them back into Dates. A step stored before `changedOn` existed has none: null, day 1.
 const revived = (row: RoutineVersionRow): RoutineVersionRow => ({
   ...row,
+  steps: row.steps.map((step) => ({ ...step, changedOn: step.changedOn == null ? null : new Date(step.changedOn) })),
   tapers: row.tapers.map((taper) => ({ ...taper, startedOn: taper.startedOn === null ? null : new Date(taper.startedOn) })),
 })
 

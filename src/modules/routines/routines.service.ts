@@ -31,7 +31,7 @@ import type { CompletedRoutineBuild, RoutineRequestRow, RoutineVersionRow, Routi
 import { rulesOnlyRoutine } from './routines.rules-only'
 import { ROUTINE_RULES_VERSION } from './routines.rules'
 import { assembleSkeleton, candidateOf, cautionsOf, sunscreenKept } from './routines.skeleton'
-import { asRoutine, spliceFixed, stableMerge, type SplicedRoutine, type StableCarry } from './routines.stable'
+import { asRoutine, sameProductBefore, spliceFixed, stableMerge, type SplicedRoutine, type StableCarry } from './routines.stable'
 import type { NotInRoutineItem, ShelfCounts } from './routines.table'
 import type { CautionState, GateFailure, Routine, RoutineSkeleton, SkeletonShelfProduct, StoredRoutineStep, StoredTaper } from './routines.types'
 
@@ -224,8 +224,10 @@ export class RoutineService {
     if (!holdsIt(inForce)) throw new ConflictError('STEP_NOT_RECOMMENDED', 'This step has no recommended product')
     // A tap that raced this one has marked it already: its version stands.
     if (inForce.steps.some((entry) => entry.step === step && entry.gotIt)) return
-    const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true } : entry))
     const now = this.now()
+    // Before Start every step is day 1 (null), so the zone is not read.
+    const changedOn = inForce.startedOn === null ? null : RoutineService.stampedDay(inForce.startedOn, localDate(now, await this.reminders.zoneFor(profileId)))
+    const steps = inForce.steps.map((entry) => (entry.step === step && entry.product.kind === 'candidate' && entry.product.code === code ? { ...entry, gotIt: true, changedOn } : entry))
     await this.repository.append({ ...structuredClone(inForce), id: this.newId(), status: 'ready', createdAt: now, readyAt: now, steps, reason: 'got-it', writerCalls: 0, hintsShown: false, servedAt: null })
     console.log({ outcome: 'routine-got-it', profileId, step })
     await this.tell(profileId)
@@ -433,12 +435,25 @@ export class RoutineService {
 
     const current = await this.repository.current(profileId)
     const previous = current?.startedOn ? current : null
-    const merge = previous ? stableMerge(RoutineService.previousOf(previous, skeleton.goal), skeleton, await this.carryFor(facts, previous.steps, options)) : null
+    const carry = previous ? await this.carryFor(facts, previous.steps, options) : null
+    const merge = previous && carry ? stableMerge(RoutineService.previousOf(previous, skeleton.goal), skeleton, carry) : null
     const checking = merge?.checking ?? skeleton
-    const assemble = (answer: Routine): SplicedRoutine => (merge ? spliceFixed(merge, answer) : { steps: answer.steps.map((e) => ({ ...e, gotIt: false, fixedFrom: null })), tapers: RoutineService.stoppedOf(skeleton), expectation: answer.expectation })
-
     const at = this.now()
     const today = localDate(at, await this.reminders.zoneFor(profileId))
+    // After Start, a step the merge did not keep is stamped with the day of this rebuild only if its product changed (or the step is new): the same product, a candidate the
+    // person has since got included, keeps the day it had, whether the merge kept the step or the writer, or a whole-routine rebuild, wrote it again. Before Start every step is day 1, which is null.
+    const changedOn = RoutineService.stampedDay(previous?.startedOn ?? null, today)
+    const stamped = (built: SplicedRoutine, before: StoredRoutineStep[], onShelf: StableCarry['onShelf']): SplicedRoutine => ({
+      ...built,
+      steps: built.steps.map((e) => {
+        if (e.fixedFrom !== null) return e
+        const same = sameProductBefore(before, e, onShelf)
+        // The day the same product had stands, null (day 1) included.
+        return { ...e, changedOn: same ? same.changedOn : changedOn }
+      }),
+    })
+    const assemble = (answer: Routine): SplicedRoutine =>
+      merge && previous && carry ? stamped(spliceFixed(merge, answer), previous.steps, carry.onShelf) : { steps: answer.steps.map((e) => ({ ...e, gotIt: false, fixedFrom: null, changedOn: null })), tapers: RoutineService.stoppedOf(skeleton), expectation: answer.expectation }
     const catalogVersion = (await this.workbook.verdictReference()).catalogVersion
     const routine = await RoutineService.fingerprintOf(skeleton.goal, skeleton.person.cautions, skeleton.shelf)
     const shelfCounts = RoutineService.countsOf(skeleton.shelf)
@@ -738,6 +753,12 @@ export class RoutineService {
       const { form, reason } = noted.get(p.id)!
       return [{ entryId: p.id, title: titleFor({ step: p.step, form }), status: p.verdict.kind === 'stop' ? 'stepping-down' : 'left-out', reason }]
     })
+  }
+
+  /** The day a step changed, as it is stored: the person's local date, never before day 1 (Start makes tomorrow day 1); null before Start, when every step is day 1. */
+  private static stampedDay(startedOn: Date | null, day: Date): Date | null {
+    if (startedOn === null) return null
+    return startedOn.getTime() > day.getTime() ? startedOn : day
   }
 
   private static stoppedOf(skeleton: RoutineSkeleton): StoredTaper[] {

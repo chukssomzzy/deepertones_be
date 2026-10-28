@@ -7,7 +7,7 @@ import { GOALS } from '../goals/goals.vocabulary'
 import { contentFor } from '../onboarding/onboarding.content'
 import { titleFor } from './routines.copy'
 import type { RoutineVersionRow } from './routines.repository'
-import { toRoutineResponse, type RoutineViewInput } from './routines.view'
+import { stepDownProgressOf, toRoutineResponse, type RoutineViewInput } from './routines.view'
 import { FORBIDDEN_WORDING } from './routines.wording'
 
 // The routine screen's body (spec #189, PR 4b), as a pure mapping from a stored version and the reads around it. Nothing here touches a service: the
@@ -73,6 +73,7 @@ const ownStep = (step: Step['step'], entryId: string, frequency: Step['frequency
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: 'version-0',
+  changedOn: null,
 })
 const candidateStep = (step: Step['step'], code: string, frequency: Step['frequency'] = 'pm', over: Partial<Step> = {}): Step => ({
   step,
@@ -82,9 +83,10 @@ const candidateStep = (step: Step['step'], code: string, frequency: Step['freque
   grounding: ['https://internal.example/grounding'],
   gotIt: false,
   fixedFrom: null,
+  changedOn: null,
   ...over,
 })
-const noneStep = (step: Step['step'], frequency: Step['frequency'] = 'am'): Step => ({ step, product: { kind: 'none' }, frequency, reason: 'Use what you have.', grounding: [], gotIt: false, fixedFrom: null })
+const noneStep = (step: Step['step'], frequency: Step['frequency'] = 'am'): Step => ({ step, product: { kind: 'none' }, frequency, reason: 'Use what you have.', grounding: [], gotIt: false, fixedFrom: null, changedOn: null })
 
 let ids = 0
 const version = (over: Partial<RoutineVersionRow> = {}): RoutineVersionRow => ({
@@ -224,7 +226,7 @@ describe('toRoutineResponse: the product of a step', () => {
   it('shows a product on the shelf as the shelf entry with its brand and name', () => {
     const [cleanse] = stepsOf({})
 
-    expect(cleanse).toEqual({ step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } })
+    expect(cleanse).toEqual({ step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, status: 'active', product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } })
   })
 
   it('shows a shelf product with no brand as brand null', () => {
@@ -466,7 +468,7 @@ describe('toRoutineResponse: the morning and evening lists', () => {
     const body = wire(toRoutineResponse(input({ version: version({ steps: [ownStep('cleanse', 'entry-a', 'am'), candidateStep('treat', 'SERUM-1', 'pm')] }) })))
 
     expect(body.morning).toEqual([
-      { step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } },
+      { step: 'cleanse', title: 'Cleanser', when: 'Every day', reason: 'Keep entry-a.', changed: false, status: 'active', product: { kind: 'own', entryId: 'entry-a', brand: 'Orbis', name: 'Calm Cleanser' } },
     ])
     expect(body.evening[0]).toMatchObject({ step: 'treat', reason: 'Use SERUM-1.', product: { kind: 'recommended', code: 'SERUM-1', notYetGot: true } })
   })
@@ -843,7 +845,7 @@ describe('toRoutineResponse: nothing internal is shown', () => {
 
     expect(Object.keys(body).sort()).toEqual(['evening', 'expectation', 'morning', 'notInRoutine', 'startedOn', 'status', 'summary', 'tapers'])
     const entries = entriesOf(body)
-    for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'step', 'title', 'when'])
+    for (const entry of [...body.morning, ...body.evening]) expect(Object.keys(entry).sort()).toEqual(['changed', 'product', 'reason', 'status', 'step', 'title', 'when'])
     expect(Object.keys(entries[0].product).sort()).toEqual(['brand', 'entryId', 'kind', 'name'])
     expect(Object.keys(entries[1].product).sort()).toEqual(
       ['brand', 'code', 'imageUrl', 'keyIngredient', 'kind', 'name', 'notYetGot', 'origin', 'price', 'soldElsewhere', 'soldInCurrentCountry', 'strength', 'whereSold'].sort(),
@@ -1060,5 +1062,99 @@ describe('toRoutineResponse: the summary of the plan (the "Your plan is ready" s
 
       for (const stored of ['shelfCounts', 'shelf_counts', '"keep"', '"reduce"', '"drop"', '"stop":']) expect(text, stored).not.toContain(stored)
     })
+  })
+})
+
+// ---- stepDownProgressOf (spec #233, PR 4a) ----
+// The date arithmetic of the schedule screen, extracted so the skin-care module and the schedule share it. Pure:
+//   stepDownProgressOf(tapers, templates, today): { entryId, title, step, of, running, nextChange }[]      (exported from routines.view.ts)
+//   tapers     the version's step-downs, each with the plain title its row of `notInRoutine` froze (the template carries none): { shelfProductId, templateId, startedOn, title }
+//   templates  the workbook's step-down templates by code (as `RoutineViewInput.tapers`)
+//   today      the profile's local day, 'YYYY-MM-DD'
+// One entry for each step-down that has a start date (`startedOn` set), in the order given; one with no start has not begun and is left out, and so is one whose template is
+// not held (the schedule screen drops it too). `entryId` is the shelf product's id. `step` is the 1-based step of the template's schedule that `today` falls in, `of` the
+// number of steps: a step runs from the first day of its first week to the last day of its last week, both inclusive, as the schedule screen's fromDate and toDate say.
+// After the last day it is the last step still (`step` = `of`). `running` is true while today is before the start plus lastToWeek x 7 days (the last day is the day before),
+// and also before the start day itself. `nextChange` is the first day of the next step, or null on the last step.
+// Assumed, not in the brief: `title` comes in on each taper (a template has none), and `today` is a day string.
+describe('stepDownProgressOf: where each step-down is today', () => {
+  const stopped = (startedOn: Date | null, shelfProductId = 'entry-b', over: Partial<{ templateId: string; title: string }> = {}) => ({
+    shelfProductId,
+    templateId: over.templateId ?? STEROID_TEMPLATE.code,
+    startedOn,
+    title: over.title ?? `Title of ${shelfProductId}`,
+  })
+  const templates = new Map([[STEROID_TEMPLATE.code, STEROID_TEMPLATE]])
+  const progress = (today: string, tapers = [stopped(at(0))]) => stepDownProgressOf(tapers, templates, today)
+
+  // Weeks 1-2 are days 0 to 13, weeks 3-4 days 14 to 27, week 5 days 28 to 34: both ends of every step, and the day it stops running.
+  it.each([
+    [0, 1, true, dayOf(14)],
+    [1, 1, true, dayOf(14)],
+    [13, 1, true, dayOf(14)],
+    [14, 2, true, dayOf(28)],
+    [27, 2, true, dayOf(28)],
+    [28, 3, true, null],
+    [34, 3, true, null],
+    [35, 3, false, null],
+    [200, 3, false, null],
+  ])('on day %i of the step-down it is step %i of 3, running: %s, next change %s', (day, step, running, nextChange) => {
+    expect(progress(dayOf(day))).toEqual([{ entryId: 'entry-b', title: 'Title of entry-b', step, of: 3, running, nextChange }])
+  })
+
+  it('counts a step-down that began after Start from its own first day, not from day 1', () => {
+    const later = [stopped(at(10), 'entry-c')]
+
+    expect(progress(dayOf(10), later)[0]).toMatchObject({ step: 1, running: true, nextChange: dayOf(24) })
+    expect(progress(dayOf(23), later)[0]).toMatchObject({ step: 1, nextChange: dayOf(24) })
+    expect(progress(dayOf(24), later)[0]).toMatchObject({ step: 2, nextChange: dayOf(38) })
+    expect(progress(dayOf(38), later)[0]).toMatchObject({ step: 3, running: true, nextChange: null })
+    expect(progress(dayOf(44), later)[0]).toMatchObject({ step: 3, running: true })
+    expect(progress(dayOf(45), later)[0]).toMatchObject({ step: 3, running: false })
+  })
+
+  it('is running before its first day: Start was tapped and the step-down begins tomorrow', () => {
+    expect(progress(dayOf(-1))).toMatchObject([{ entryId: 'entry-b', running: true }])
+  })
+
+  it('counts the UTC day of a start date that carries a time of day, as the schedule screen does', () => {
+    const lateEvening = new Date(at(0).getTime() + 23 * 60 * 60 * 1000 + 30 * 60 * 1000)
+
+    expect(progress(dayOf(13), [stopped(lateEvening)])[0]).toMatchObject({ step: 1, nextChange: dayOf(14) })
+    expect(progress(dayOf(14), [stopped(lateEvening)])[0]).toMatchObject({ step: 2 })
+  })
+
+  it('answers one entry for each step-down that has begun, in the order given, and none for one with no start date', () => {
+    const tapers = [stopped(at(0), 'entry-b'), stopped(null, 'entry-x'), stopped(at(10), 'entry-c')]
+
+    expect(progress(dayOf(15), tapers).map((entry) => [entry.entryId, entry.step])).toEqual([
+      ['entry-b', 2],
+      ['entry-c', 1],
+    ])
+  })
+
+  it('answers nothing for a step-down whose template the workbook no longer holds, as the schedule screen shows nothing for it', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    expect(progress(dayOf(3), [stopped(at(0), 'entry-b', { templateId: 'TPR-UNKNOWN' }), stopped(at(0), 'entry-c')]).map((entry) => entry.entryId)).toEqual(['entry-c'])
+    error.mockRestore()
+  })
+
+  it('answers nothing when nothing is being stopped', () => {
+    expect(progress(dayOf(3), [])).toEqual([])
+  })
+
+  it('tells each step-down its own length: a template of two steps is step 2 of 2 on its last week', () => {
+    const SHORT: TaperRow = { ...STEROID_TEMPLATE, code: 'TPR-SHORT', schedule: [{ fromWeek: 1, toWeek: 1, frequency: 'weekly' }, { fromWeek: 2, toWeek: 3, frequency: 'stop' }] }
+    const both = new Map([[STEROID_TEMPLATE.code, STEROID_TEMPLATE], [SHORT.code, SHORT]])
+    const tapers = [stopped(at(0), 'entry-b'), stopped(at(0), 'entry-c', { templateId: SHORT.code })]
+
+    // Day 7 is the first day of the second step of the short one (week 2), and still the first step of the long one. It runs until day 21 (3 weeks).
+    expect(stepDownProgressOf(tapers, both, dayOf(7)).map(({ entryId, step, of, running, nextChange }) => ({ entryId, step, of, running, nextChange }))).toEqual([
+      { entryId: 'entry-b', step: 1, of: 3, running: true, nextChange: dayOf(14) },
+      { entryId: 'entry-c', step: 2, of: 2, running: true, nextChange: null },
+    ])
+    expect(stepDownProgressOf(tapers, both, dayOf(21))[1]).toMatchObject({ step: 2, of: 2, running: false })
+    expect(stepDownProgressOf(tapers, both, dayOf(20))[1]).toMatchObject({ running: true })
   })
 })

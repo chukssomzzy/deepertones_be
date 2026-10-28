@@ -469,6 +469,9 @@ export const buildContainer = (env: CloudflareBindings) => {
         recommendations: recommendations(),
         safety: safety(),
         repository: new D1RoutinesRepository(db()),
+        // The skin-care module is not wired yet: no pause and no hold, so every entry is as the routine wrote it.
+        skinCare: { stateFor: async () => ({ pauses: [], held: false }) },
+        reminders: reminders(),
         events: new DurableObjectScanEvents(env.SCAN_STREAM),
         enabled: env.ROUTINES_ENABLED === 'true',
         now: () => new Date(),
